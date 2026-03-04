@@ -1,0 +1,355 @@
+// ============================================================
+// AI Commander — Shared Types (永不推倒)
+// All game data models live here.
+// ============================================================
+
+// --- Teams & Phases ---
+
+export type Team = "player" | "enemy" | "neutral";
+export type GamePhase = "PEACE" | "CONFLICT" | "WAR" | "ENDGAME";
+
+// --- Position ---
+
+export interface Position {
+  x: number; // tile col
+  y: number; // tile row
+}
+
+// --- Terrain ---
+
+export type TerrainType =
+  | "plains"
+  | "hills"
+  | "forest"
+  | "swamp"
+  | "road"
+  | "shallow_water"
+  | "deep_water"
+  | "bridge"
+  | "urban"
+  | "mountain";
+
+// --- Unit Types ---
+
+export type GroundUnitType = "infantry" | "light_tank" | "main_tank" | "artillery";
+export type NavalUnitType = "patrol_boat" | "destroyer" | "cruiser" | "carrier";
+export type AirUnitType = "fighter" | "bomber" | "recon_plane";
+export type UnitType = GroundUnitType | NavalUnitType | AirUnitType;
+
+export type UnitCategory = "ground" | "naval" | "air";
+
+export function getUnitCategory(type: UnitType): UnitCategory {
+  const ground: UnitType[] = ["infantry", "light_tank", "main_tank", "artillery"];
+  const naval: UnitType[] = ["patrol_boat", "destroyer", "cruiser", "carrier"];
+  if (ground.includes(type)) return "ground";
+  if (naval.includes(type)) return "naval";
+  return "air";
+}
+
+// --- Unit State ---
+
+export type UnitState =
+  | "idle"
+  | "moving"
+  | "attacking"
+  | "defending"
+  | "retreating"
+  | "patrolling"
+  | "dead";
+
+// --- Unit ---
+
+export interface Unit {
+  id: number;
+  type: UnitType;
+  team: Team;
+  hp: number;
+  maxHp: number;
+  position: Position;
+  state: UnitState;
+  target: Position | null;
+  attackTarget: number | null; // target unit id
+  visionRange: number;
+  attackRange: number;
+  attackDamage: number;
+  attackInterval: number; // seconds
+  moveSpeed: number; // tiles per second
+  lastAttackTime: number; // game time of last attack
+  manualOverride: boolean; // player took over
+  waypoints: Position[];
+  patrolPoints: Position[];
+  orders: Order[];
+}
+
+// --- Facility Types ---
+
+export type FacilityType =
+  | "headquarters"
+  | "barracks"
+  | "shipyard"
+  | "airfield"
+  | "radar"
+  | "fuel_depot"
+  | "ammo_depot"
+  | "comm_tower"
+  | "rail_hub"
+  | "repair_station"
+  | "defense_tower";
+
+// --- Facility ---
+
+export interface Facility {
+  id: string;
+  name: string;
+  type: FacilityType;
+  tags: string[];
+  position: Position;
+  team: Team;
+  hp: number;
+  maxHp: number;
+  regionId: string;
+  strategicEffect: string;
+  captureProgress: number; // 0-1, who is capturing
+  capturingTeam: Team | null;
+}
+
+// --- Region (LLM sees this, not tiles) ---
+
+export interface Region {
+  id: string;
+  name: string;
+  bbox: [number, number, number, number]; // [x1, y1, x2, y2]
+  terrainMix: Partial<Record<TerrainType, number>>;
+  passability: {
+    armor: boolean;
+    infantry: boolean;
+    naval: boolean;
+  };
+  chokepoints: string[];
+  adjacent: string[];
+  strategicValue: string[];
+  facilities: string[];
+}
+
+// --- Chokepoint ---
+
+export interface Chokepoint {
+  id: string;
+  name: string;
+  position: Position;
+  type: "bridge" | "pass" | "gate";
+  connects: [string, string]; // region ids
+  passableFor: ("armor" | "infantry" | "naval")[];
+  destructible: boolean;
+  hp: number;
+  maxHp: number;
+}
+
+// --- Resources ---
+
+export interface Resources {
+  money: number;
+  fuel: number;
+  ammo: number;
+  intel: number;
+}
+
+// --- Economy State ---
+
+export interface EconomyState {
+  resources: Resources;
+  readiness: number; // 0-1
+  baseIncome: Resources; // per 30s
+  bonusIncome: Resources; // from captured facilities
+  lastIncomeTime: number;
+}
+
+// --- Orders (the 11 allowed actions) ---
+
+export type OrderAction =
+  | "attack_move"
+  | "defend"
+  | "retreat"
+  | "flank"
+  | "hold"
+  | "patrol"
+  | "escort"
+  | "sabotage"
+  | "recon"
+  | "produce"
+  | "trade";
+
+export interface Order {
+  unitIds: number[];
+  action: OrderAction;
+  target: Position | null;
+  targetUnitId?: number;
+  targetFacilityId?: string;
+  priority: "low" | "medium" | "high";
+  provisional?: boolean; // local engine guess, will be replaced by LLM
+}
+
+// --- Production ---
+
+export interface ProductionOrder {
+  unitType: UnitType;
+  facilityId: string; // which building produces it
+  startTime: number;
+  duration: number;
+  cost: number;
+  fuelCost: number;
+}
+
+// --- Trade ---
+
+export type TradeType = "buy_fuel" | "buy_ammo" | "buy_intel" | "sell_fuel" | "sell_ammo";
+
+export interface TradeAction {
+  type: TradeType;
+  cost: number;
+  gain: number;
+  cooldown: number;
+  lastTradeTime: number;
+}
+
+// --- Conditional Orders ---
+
+export type ConditionalTrigger =
+  | "enemy_reinforcement_detected"
+  | "unit_losses_exceed_threshold"
+  | "target_destroyed"
+  | "timer_elapsed"
+  | "force_ratio_changed"
+  | "supply_critical";
+
+export interface ConditionalOrder {
+  id: string;
+  trigger: ConditionalTrigger;
+  action: OrderAction;
+  targetPosition?: Position;
+  unitIds?: number[];
+  notifyPlayer: boolean;
+  message: string;
+  expiresSec?: number;
+  createdAt: number;
+}
+
+// --- Mission ---
+
+export type MissionType = "sabotage" | "destroy" | "cut_supply" | "capture" | "defend_area";
+export type MissionStatus = "active" | "completed" | "failed" | "cancelled";
+
+export interface Mission {
+  id: string;
+  type: MissionType;
+  name: string;
+  description: string;
+  targetFacilityId?: string;
+  targetRegionId?: string;
+  assignedUnitIds: number[];
+  progress: number; // 0-1
+  status: MissionStatus;
+  etaSec: number;
+  threats: string[];
+  createdAt: number;
+}
+
+// --- Style Params (AI learns your style) ---
+
+export interface StyleParams {
+  riskTolerance: number;    // 0-1 higher = more aggressive
+  focusFireBias: number;    // 0-1 higher = focus fire one target
+  objectiveBias: number;    // 0-1 higher = complete mission at any cost
+  casualtyAversion: number; // 0-1 higher = retreat sooner
+  reconPriority: number;    // 0-1 higher = scout before attacking
+  tempoBias: number;        // 0-1 higher = prefer fast attacks
+}
+
+export const DEFAULT_STYLE: StyleParams = {
+  riskTolerance: 0.5,
+  focusFireBias: 0.5,
+  objectiveBias: 0.5,
+  casualtyAversion: 0.5,
+  reconPriority: 0.5,
+  tempoBias: 0.5,
+};
+
+// --- Front / Battle Line ---
+
+export interface Front {
+  id: string;
+  name: string;
+  regionIds: string[];
+  playerPower: number;  // aggregated force index
+  enemyPower: number;   // visible enemy force (? if unknown)
+  enemyPowerKnown: boolean;
+  engagementIntensity: number; // 0-1
+  supplyStatus: "OK" | "LOW" | "CRITICAL";
+  keyEvents: string[];
+}
+
+// --- Fog State ---
+
+export type Visibility = "unknown" | "explored" | "visible";
+
+// --- Supply Event ---
+
+export interface SupplyOption {
+  label: string;
+  description: string;
+  units?: { type: UnitType; count: number }[];
+  resources?: Partial<Resources>;
+}
+
+// --- Game State (the big one) ---
+
+export interface GameState {
+  tick: number;
+  time: number; // elapsed seconds
+  phase: GamePhase;
+  mapWidth: number;
+  mapHeight: number;
+  terrain: TerrainType[][]; // [row][col]
+  units: Map<number, Unit>;
+  facilities: Map<string, Facility>;
+  regions: Map<string, Region>;
+  chokepoints: Map<string, Chokepoint>;
+  fronts: Front[];
+  economy: { player: EconomyState; enemy: EconomyState };
+  fog: Visibility[][]; // [row][col] for player
+  missions: Mission[];
+  conditionalOrders: ConditionalOrder[];
+  style: StyleParams;
+  productionQueue: { player: ProductionOrder[]; enemy: ProductionOrder[] };
+  nextUnitId: number;
+  supplyTimer: number; // seconds until next supply
+  warDeclared: boolean;
+  gameOver: boolean;
+  winner: Team | null;
+}
+
+// --- LLM Response Types ---
+
+export interface AdvisorOption {
+  label: string;
+  description: string;
+  risk: number;
+  reward: number;
+  intent: import("./intents").Intent;
+}
+
+export interface AdvisorResponse {
+  brief: string;
+  options: AdvisorOption[];
+  recommended: "A" | "B" | "C";
+  urgency: number; // 0-1
+  suggestProduction?: {
+    type: UnitType;
+    reason: string;
+  };
+}
+
+export interface LightAdvisorResponse {
+  brief: string;
+  urgency: number;
+}

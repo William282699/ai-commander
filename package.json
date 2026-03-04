@@ -1,0 +1,16 @@
+{
+  "name": "ai-commander",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "start": "npm run dev --workspace=apps/web",
+    "dev": "npm run dev --workspace=apps/web",
+    "dev:server": "npm run dev --workspace=apps/server",
+    "build": "npm run typecheck --workspaces --if-present && npm run build --workspace=apps/web",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}
