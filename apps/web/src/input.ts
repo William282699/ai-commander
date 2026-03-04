@@ -10,7 +10,7 @@ import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 
 const SCROLL_SPEED = 400; // pixels per second
 const ZOOM_SPEED = 0.1;
-const MIN_ZOOM = 0.5;
+const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 2.0;
 const EDGE_SCROLL_MARGIN = 20; // pixels from screen edge
 const EDGE_SCROLL_SPEED = 300;
