@@ -9,6 +9,7 @@ import type {
   Front,
   Unit,
   Visibility,
+  CombatEffects,
 } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 
@@ -263,6 +264,7 @@ export function renderUnits(
   camera: Camera,
   canvasWidth: number,
   canvasHeight: number,
+  gameTime: number,
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
 
@@ -296,10 +298,18 @@ export function renderUnits(
 
     // --- Team colors ---
     const isPlayer = unit.team === "player";
-    const fillColor = isPlayer
+    let fillColor = isPlayer
       ? "rgba(40,120,255,0.85)"
       : "rgba(220,50,50,0.85)";
     const borderColor = isPlayer ? "#1a5ab8" : "#a02020";
+
+    // --- Attack flash: briefly brighten unit when it fires ---
+    const timeSinceAttack = gameTime - unit.lastAttackTime;
+    if (unit.state === "attacking" && timeSinceAttack < 0.12) {
+      fillColor = isPlayer
+        ? "rgba(120,200,255,1.0)"
+        : "rgba(255,150,100,1.0)";
+    }
 
     // --- Draw unit body ---
     ctx.beginPath();
@@ -542,4 +552,85 @@ export function renderFrontLabels(
 
   ctx.textAlign = "start";
   ctx.textBaseline = "alphabetic";
+}
+
+// ──────────────────────────────────────────────
+// Render: Combat Effects (attack lines + explosions)
+// ──────────────────────────────────────────────
+
+export function renderCombatEffects(
+  ctx: CanvasRenderingContext2D,
+  effects: CombatEffects,
+  camera: Camera,
+  gameTime: number,
+): void {
+  const tileScreenSize = TILE_SIZE * camera.zoom;
+  const halfTile = tileScreenSize / 2;
+
+  // --- Attack lines (tracer/projectile) ---
+  for (const line of effects.attackLines) {
+    const age = gameTime - line.startTime;
+    if (age < 0 || age > line.duration) continue;
+
+    const alpha = 1.0 - age / line.duration; // fade out
+
+    const x1 = (line.fromX * TILE_SIZE - camera.x) * camera.zoom + halfTile;
+    const y1 = (line.fromY * TILE_SIZE - camera.y) * camera.zoom + halfTile;
+    const x2 = (line.toX * TILE_SIZE - camera.x) * camera.zoom + halfTile;
+    const y2 = (line.toY * TILE_SIZE - camera.y) * camera.zoom + halfTile;
+
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.8;
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = Math.max(1, 2 * camera.zoom);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+
+    // Impact dot at target
+    ctx.beginPath();
+    ctx.arc(x2, y2, Math.max(2, 3 * camera.zoom), 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.globalAlpha = alpha;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // --- Explosions ---
+  for (const exp of effects.explosions) {
+    const age = gameTime - exp.startTime;
+    if (age < 0 || age > exp.duration) continue;
+
+    const progress = age / exp.duration; // 0→1
+    const currentRadius = exp.radius * TILE_SIZE * camera.zoom * progress;
+    const alpha = 1.0 - progress;
+
+    const sx = (exp.x * TILE_SIZE - camera.x) * camera.zoom + halfTile;
+    const sy = (exp.y * TILE_SIZE - camera.y) * camera.zoom + halfTile;
+
+    ctx.save();
+
+    // Outer fireball
+    ctx.beginPath();
+    ctx.arc(sx, sy, currentRadius, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,120,20,${alpha * 0.6})`;
+    ctx.fill();
+
+    // Inner core
+    ctx.beginPath();
+    ctx.arc(sx, sy, currentRadius * 0.5, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,100,${alpha * 0.8})`;
+    ctx.fill();
+
+    // Bright center flash (first 30% of animation)
+    if (progress < 0.3) {
+      ctx.beginPath();
+      ctx.arc(sx, sy, currentRadius * 0.2, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
 }

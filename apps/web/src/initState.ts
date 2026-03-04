@@ -190,5 +190,6 @@ export function createInitialGameState(): GameState {
     warDeclared: false,
     gameOver: false,
     winner: null,
+    combatEffects: { attackLines: [], explosions: [] },
   };
 }

@@ -301,6 +301,31 @@ export interface SupplyOption {
   resources?: Partial<Resources>;
 }
 
+// --- Combat Visual Effects ---
+
+export interface AttackLine {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  startTime: number; // game time when created
+  duration: number;   // seconds to display
+  color: string;
+}
+
+export interface Explosion {
+  x: number;
+  y: number;
+  startTime: number;
+  duration: number;   // seconds to display
+  radius: number;     // max radius in tiles
+}
+
+export interface CombatEffects {
+  attackLines: AttackLine[];
+  explosions: Explosion[];
+}
+
 // --- Game State (the big one) ---
 
 export interface GameState {
@@ -326,6 +351,7 @@ export interface GameState {
   warDeclared: boolean;
   gameOver: boolean;
   winner: Team | null;
+  combatEffects: CombatEffects;
 }
 
 // --- LLM Response Types ---

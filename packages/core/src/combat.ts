@@ -1,12 +1,65 @@
 // ============================================================
-// AI Commander — Combat System (stub for Day 4)
+// AI Commander — Combat System (Day 4)
+// Auto-engagement, damage calc, terrain defense, death handling
 // ============================================================
 
-import type { GameState, Unit } from "@ai-commander/shared";
-import { COUNTER_MATRIX, AMMO_PER_ATTACK, AMMO_EMPTY_FIRE_MULT } from "@ai-commander/shared";
+import type { GameState, Unit, UnitCategory, TerrainType } from "@ai-commander/shared";
+import {
+  COUNTER_MATRIX,
+  AMMO_PER_ATTACK,
+  AMMO_EMPTY_FIRE_MULT,
+  TERRAIN_DEFENSE_BONUS,
+  getUnitCategory,
+} from "@ai-commander/shared";
+
+// --- Distance helper ---
+
+function distBetween(a: Unit, b: Unit): number {
+  const dx = a.position.x - b.position.x;
+  const dy = a.position.y - b.position.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// --- Can this attacker type hit this defender type at all? ---
+
+function canAttackType(attackerType: string, defenderType: string): boolean {
+  return (COUNTER_MATRIX[attackerType as keyof typeof COUNTER_MATRIX]?.[defenderType as keyof typeof COUNTER_MATRIX] ?? 0) > 0;
+}
+
+// --- Terrain defense multiplier (returns damage multiplier, e.g. 0.5 = 50% reduction) ---
+
+function getTerrainDefenseMult(
+  defender: Unit,
+  terrain: TerrainType[][],
+  mapWidth: number,
+  mapHeight: number,
+): number {
+  const tx = Math.floor(defender.position.x);
+  const ty = Math.floor(defender.position.y);
+  if (tx < 0 || tx >= mapWidth || ty < 0 || ty >= mapHeight) return 1.0;
+
+  const t = terrain[ty][tx];
+  const cat = getUnitCategory(defender.type);
+  const bonus = TERRAIN_DEFENSE_BONUS[t]?.[cat] ?? 0;
+
+  // Infantry-only: forest/urban bonus applies only to infantry
+  // The constants already define per-category, so just apply directly
+  return 1.0 - bonus; // e.g. 0.5 bonus → take 50% damage
+}
+
+// --- Main tank frontal armor: +25% damage reduction when defender is main_tank ---
+
+function getFrontalArmorMult(defender: Unit): number {
+  if (defender.type === "main_tank") return 0.75;
+  return 1.0;
+}
 
 /**
- * Calculate damage from attacker to defender.
+ * Calculate damage from attacker to defender, including:
+ * - Base damage × counter multiplier
+ * - Terrain defense reduction
+ * - Main tank frontal armor
+ * - Ammo depletion penalty
  */
 export function calculateDamage(attacker: Unit, defender: Unit, state: GameState): number {
   const counter = COUNTER_MATRIX[attacker.type]?.[defender.type] ?? 0;
@@ -14,18 +67,169 @@ export function calculateDamage(attacker: Unit, defender: Unit, state: GameState
 
   let damage = attacker.attackDamage * counter;
 
+  // Terrain defense
+  damage *= getTerrainDefenseMult(
+    defender,
+    state.terrain,
+    state.mapWidth,
+    state.mapHeight,
+  );
+
+  // Frontal armor
+  damage *= getFrontalArmorMult(defender);
+
   // Ammo penalty
-  const ammo = state.economy[attacker.team === "player" ? "player" : "enemy"].resources.ammo;
+  const ecoKey = attacker.team === "player" ? "player" : "enemy" as const;
+  const ammo = state.economy[ecoKey].resources.ammo;
   if (ammo <= 0) {
     damage *= AMMO_EMPTY_FIRE_MULT;
   }
 
-  return Math.round(damage);
+  return Math.max(1, Math.round(damage));
 }
 
 /**
- * Process combat for all units in range. (stub — Day 4 fills this in)
+ * Find the best target for a unit among all enemies in range.
+ * Priority: currently targeted unit (sticky) > closest enemy that we can damage.
  */
-export function processCombat(_state: GameState, _dt: number): void {
-  // TODO: Day 4 — auto-target, fire, apply damage
+function findTarget(unit: Unit, state: GameState): Unit | null {
+  // Units that can't attack (recon_plane, carrier with 0 attack)
+  if (unit.attackDamage <= 0 || unit.attackInterval <= 0) return null;
+
+  // Artillery: "no_move_attack" — only attacks while idle/defending/attacking (not while moving)
+  if (unit.type === "artillery" && (unit.state === "moving" || unit.state === "retreating")) {
+    return null;
+  }
+
+  let bestTarget: Unit | null = null;
+  let bestDist = Infinity;
+
+  // Sticky target: if we already have an attackTarget and it's valid, prefer it
+  if (unit.attackTarget !== null) {
+    const current = state.units.get(unit.attackTarget);
+    if (
+      current &&
+      current.hp > 0 &&
+      current.state !== "dead" &&
+      current.team !== unit.team &&
+      distBetween(unit, current) <= unit.attackRange &&
+      canAttackType(unit.type, current.type)
+    ) {
+      return current;
+    }
+    // Target lost/dead/out of range — clear it
+    unit.attackTarget = null;
+  }
+
+  // Scan all enemy units in range
+  state.units.forEach((other) => {
+    if (other.team === unit.team) return;
+    if (other.hp <= 0 || other.state === "dead") return;
+    if (!canAttackType(unit.type, other.type)) return;
+
+    const d = distBetween(unit, other);
+    if (d > unit.attackRange) return;
+
+    if (d < bestDist) {
+      bestDist = d;
+      bestTarget = other;
+    }
+  });
+
+  return bestTarget;
+}
+
+/**
+ * Process combat for all units: auto-target, fire on cooldown, apply damage.
+ * Also creates visual effects (attack lines and explosions).
+ */
+export function processCombat(state: GameState, dt: number): void {
+  const now = state.time;
+
+  state.units.forEach((unit) => {
+    if (unit.hp <= 0 || unit.state === "dead") return;
+
+    // Find target
+    const target = findTarget(unit, state);
+
+    if (!target) {
+      // No target — if we were attacking, go idle (unless we have a move order)
+      if (unit.state === "attacking") {
+        unit.attackTarget = null;
+        // Resume movement if we have a target position
+        if (unit.target) {
+          unit.state = "moving";
+        } else {
+          unit.state = "idle";
+        }
+      }
+      return;
+    }
+
+    // We have a target — set attacking state
+    unit.attackTarget = target.id;
+
+    // If unit is idle or just found a target, switch to attacking
+    // For attack_move: units stop to fire, then continue — we keep state as "attacking"
+    // but preserve the movement target so they resume after target dies
+    if (unit.state === "idle" || unit.state === "moving" || unit.state === "patrolling" || unit.state === "defending") {
+      unit.state = "attacking";
+    }
+
+    // Check cooldown
+    const timeSinceLastAttack = now - unit.lastAttackTime;
+    if (timeSinceLastAttack < unit.attackInterval) return;
+
+    // Fire!
+    unit.lastAttackTime = now;
+
+    const damage = calculateDamage(unit, target, state);
+    if (damage <= 0) return;
+
+    target.hp -= damage;
+
+    // Consume ammo
+    const ecoKey = unit.team === "player" ? "player" : "enemy" as const;
+    state.economy[ecoKey].resources.ammo = Math.max(
+      0,
+      state.economy[ecoKey].resources.ammo - AMMO_PER_ATTACK,
+    );
+
+    // Attack line visual effect
+    const lineColor = unit.team === "player" ? "#4488ff" : "#ff4444";
+    state.combatEffects.attackLines.push({
+      fromX: unit.position.x,
+      fromY: unit.position.y,
+      toX: target.position.x,
+      toY: target.position.y,
+      startTime: now,
+      duration: 0.15,
+      color: lineColor,
+    });
+
+    // Unit flash (handled by renderer checking lastAttackTime)
+
+    // Death check → explosion
+    if (target.hp <= 0) {
+      target.hp = 0;
+      target.state = "dead";
+      target.attackTarget = null;
+
+      state.combatEffects.explosions.push({
+        x: target.position.x,
+        y: target.position.y,
+        startTime: now,
+        duration: 0.6,
+        radius: getUnitCategory(target.type) === "ground" ? 0.8 : 1.2,
+      });
+    }
+  });
+
+  // Cleanup expired effects
+  state.combatEffects.attackLines = state.combatEffects.attackLines.filter(
+    (l) => now - l.startTime < l.duration,
+  );
+  state.combatEffects.explosions = state.combatEffects.explosions.filter(
+    (e) => now - e.startTime < e.duration,
+  );
 }

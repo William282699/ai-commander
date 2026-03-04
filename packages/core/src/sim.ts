@@ -10,6 +10,7 @@ import {
   INFANTRY_BLOCKED_TERRAIN,
   getUnitCategory,
 } from "@ai-commander/shared";
+import { processCombat } from "./combat";
 
 /**
  * Check if a unit type can enter a specific tile.
@@ -50,6 +51,9 @@ export function canUnitEnterTile(
   return true;
 }
 
+/** Grace period: dead units stay for 1 frame so explosion effects can reference position */
+const DEAD_CLEANUP_DELAY = 0.1; // seconds
+
 /**
  * Advance game state by dt seconds.
  * Called ~60 times/sec from the game loop.
@@ -60,7 +64,7 @@ export function tick(state: GameState, dt: number): void {
   state.time += dt;
   state.tick++;
 
-  // Move units toward their targets
+  // 1. Move units toward their targets (skip units that are attacking in place)
   state.units.forEach((unit) => {
     if (unit.hp <= 0) {
       unit.state = "dead";
@@ -75,10 +79,15 @@ export function tick(state: GameState, dt: number): void {
     }
   });
 
-  // Remove dead units
+  // 2. Combat: auto-target, fire, apply damage, create effects
+  processCombat(state, dt);
+
+  // 3. Remove dead units (after a short grace period for effects)
   const deadIds: number[] = [];
   state.units.forEach((unit) => {
-    if (unit.state === "dead") deadIds.push(unit.id);
+    if (unit.state === "dead" && unit.hp <= 0) {
+      deadIds.push(unit.id);
+    }
   });
   for (const id of deadIds) {
     state.units.delete(id);

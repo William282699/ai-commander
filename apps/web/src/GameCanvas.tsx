@@ -6,6 +6,7 @@ import {
   renderFrontLabels,
   renderUnits,
   renderFog,
+  renderCombatEffects,
   type Camera,
 } from "./rendererCanvas";
 import {
@@ -110,12 +111,16 @@ export function GameCanvas() {
         camera,
         canvas.width,
         canvas.height,
+        state.time,
       );
 
-      // 5. Front labels (when zoomed out)
+      // 5. Combat effects (attack lines + explosions) — drawn above units
+      renderCombatEffects(ctx, state.combatEffects, camera, state.time);
+
+      // 6. Front labels (when zoomed out)
       renderFrontLabels(ctx, state.fronts, FRONT_CAMERA_TARGETS, camera);
 
-      // 6. Minimap (bottom-right, with facility + unit dots)
+      // 7. Minimap (bottom-right, with facility + unit dots)
       renderMinimap(
         ctx,
         state.terrain,
