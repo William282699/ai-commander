@@ -115,7 +115,7 @@ export function GameCanvas() {
       );
 
       // 5. Combat effects (attack lines + explosions) — drawn above units
-      renderCombatEffects(ctx, state.combatEffects, camera, state.time);
+      renderCombatEffects(ctx, state.combatEffects, camera, state.fog, state.time);
 
       // 6. Front labels (when zoomed out)
       renderFrontLabels(ctx, state.fronts, FRONT_CAMERA_TARGETS, camera);

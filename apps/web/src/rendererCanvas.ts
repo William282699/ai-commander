@@ -562,15 +562,26 @@ export function renderCombatEffects(
   ctx: CanvasRenderingContext2D,
   effects: CombatEffects,
   camera: Camera,
+  fog: Visibility[][],
   gameTime: number,
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
   const halfTile = tileScreenSize / 2;
 
+  const isVisibleTile = (x: number, y: number): boolean => {
+    const tx = Math.floor(x);
+    const ty = Math.floor(y);
+    if (tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT) return false;
+    return fog[ty]?.[tx] === "visible";
+  };
+
   // --- Attack lines (tracer/projectile) ---
   for (const line of effects.attackLines) {
     const age = gameTime - line.startTime;
     if (age < 0 || age > line.duration) continue;
+    if (!isVisibleTile(line.fromX, line.fromY) && !isVisibleTile(line.toX, line.toY)) {
+      continue;
+    }
 
     const alpha = 1.0 - age / line.duration; // fade out
 
@@ -601,6 +612,7 @@ export function renderCombatEffects(
   for (const exp of effects.explosions) {
     const age = gameTime - exp.startTime;
     if (age < 0 || age > exp.duration) continue;
+    if (!isVisibleTile(exp.x, exp.y)) continue;
 
     const progress = age / exp.duration; // 0→1
     const currentRadius = exp.radius * TILE_SIZE * camera.zoom * progress;

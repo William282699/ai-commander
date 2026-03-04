@@ -3,7 +3,7 @@
 // Auto-engagement, damage calc, terrain defense, death handling
 // ============================================================
 
-import type { GameState, Unit, UnitCategory, TerrainType } from "@ai-commander/shared";
+import type { GameState, Unit, TerrainType } from "@ai-commander/shared";
 import {
   COUNTER_MATRIX,
   AMMO_PER_ATTACK,
@@ -40,11 +40,27 @@ function getTerrainDefenseMult(
 
   const t = terrain[ty][tx];
   const cat = getUnitCategory(defender.type);
-  const bonus = TERRAIN_DEFENSE_BONUS[t]?.[cat] ?? 0;
 
-  // Infantry-only: forest/urban bonus applies only to infantry
-  // The constants already define per-category, so just apply directly
+  // Infantry-only cover rules for urban/forest.
+  if ((t === "urban" || t === "forest") && defender.type !== "infantry") {
+    return 1.0;
+  }
+
+  const bonus = TERRAIN_DEFENSE_BONUS[t]?.[cat] ?? 0;
   return 1.0 - bonus; // e.g. 0.5 bonus → take 50% damage
+}
+
+function isTileVisibleToPlayer(state: GameState, tileX: number, tileY: number): boolean {
+  if (tileX < 0 || tileX >= state.mapWidth || tileY < 0 || tileY >= state.mapHeight) {
+    return false;
+  }
+  return state.fog[tileY]?.[tileX] === "visible";
+}
+
+function isUnitVisibleToPlayer(state: GameState, unit: Unit): boolean {
+  const tx = Math.floor(unit.position.x);
+  const ty = Math.floor(unit.position.y);
+  return isTileVisibleToPlayer(state, tx, ty);
 }
 
 // --- Main tank frontal armor: +25% damage reduction when defender is main_tank ---
@@ -95,6 +111,7 @@ export function calculateDamage(attacker: Unit, defender: Unit, state: GameState
 function findTarget(unit: Unit, state: GameState): Unit | null {
   // Units that can't attack (recon_plane, carrier with 0 attack)
   if (unit.attackDamage <= 0 || unit.attackInterval <= 0) return null;
+  const requiresVisibleTargets = unit.team === "player";
 
   // Artillery: "no_move_attack" — only attacks while idle/defending/attacking (not while moving)
   if (unit.type === "artillery" && (unit.state === "moving" || unit.state === "retreating")) {
@@ -112,6 +129,7 @@ function findTarget(unit: Unit, state: GameState): Unit | null {
       current.hp > 0 &&
       current.state !== "dead" &&
       current.team !== unit.team &&
+      (!requiresVisibleTargets || isUnitVisibleToPlayer(state, current)) &&
       distBetween(unit, current) <= unit.attackRange &&
       canAttackType(unit.type, current.type)
     ) {
@@ -126,6 +144,7 @@ function findTarget(unit: Unit, state: GameState): Unit | null {
     if (other.team === unit.team) return;
     if (other.hp <= 0 || other.state === "dead") return;
     if (!canAttackType(unit.type, other.type)) return;
+    if (requiresVisibleTargets && !isUnitVisibleToPlayer(state, other)) return;
 
     const d = distBetween(unit, other);
     if (d > unit.attackRange) return;
