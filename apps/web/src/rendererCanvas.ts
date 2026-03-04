@@ -69,8 +69,21 @@ function buildMinimapCache(
   mmWidth: number,
   mmHeight: number,
 ): ImageData {
-  const offscreen = new OffscreenCanvas(mmWidth, mmHeight);
-  const octx = offscreen.getContext("2d")!;
+  // Fallback for browsers without OffscreenCanvas support.
+  const surface: OffscreenCanvas | HTMLCanvasElement =
+    typeof OffscreenCanvas !== "undefined"
+      ? new OffscreenCanvas(mmWidth, mmHeight)
+      : (() => {
+        const canvas = document.createElement("canvas");
+        canvas.width = mmWidth;
+        canvas.height = mmHeight;
+        return canvas;
+      })();
+
+  const octx = surface.getContext("2d");
+  if (!octx) {
+    return new ImageData(mmWidth, mmHeight);
+  }
 
   const pixelW = mmWidth / MAP_WIDTH;
   const pixelH = mmHeight / MAP_HEIGHT;
