@@ -1,5 +1,5 @@
 export { applyOrders, replaceProvisionalOrders } from "./applyOrders";
-export { tick } from "./sim";
+export { tick, canUnitEnterTile } from "./sim";
 export { calculateDamage, processCombat } from "./combat";
 export { createFogState, updateFog } from "./fog";
 export { processEconomy } from "./economy";

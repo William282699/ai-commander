@@ -3,8 +3,52 @@
 // Pure function: tick(state, dt) → mutates state
 // ============================================================
 
-import type { GameState, Unit, Position } from "@ai-commander/shared";
-import { TERRAIN_MOVE_MULT, getUnitCategory } from "@ai-commander/shared";
+import type { GameState, Unit, UnitType } from "@ai-commander/shared";
+import {
+  TERRAIN_MOVE_MULT,
+  TANK_BLOCKED_TERRAIN,
+  INFANTRY_BLOCKED_TERRAIN,
+  getUnitCategory,
+} from "@ai-commander/shared";
+
+/**
+ * Check if a unit type can enter a specific tile.
+ * Considers both category-level passability and type-specific restrictions
+ * (e.g. tanks blocked by forest/swamp).
+ */
+export function canUnitEnterTile(
+  unitType: UnitType,
+  tileX: number,
+  tileY: number,
+  state: GameState,
+): boolean {
+  if (tileX < 0 || tileX >= state.mapWidth || tileY < 0 || tileY >= state.mapHeight) {
+    return false;
+  }
+
+  const terrain = state.terrain[tileY][tileX];
+  const cat = getUnitCategory(unitType);
+
+  // Category-level: check terrain movement multiplier
+  const mult = TERRAIN_MOVE_MULT[terrain]?.[cat] ?? 0;
+  if (mult <= 0) return false;
+
+  // Type-specific: tanks (including artillery) can't enter forest/swamp etc.
+  if (
+    unitType === "light_tank" ||
+    unitType === "main_tank" ||
+    unitType === "artillery"
+  ) {
+    if ((TANK_BLOCKED_TERRAIN as readonly string[]).includes(terrain)) return false;
+  }
+
+  // Infantry restrictions (mostly redundant with mult=0, but explicit)
+  if (unitType === "infantry") {
+    if ((INFANTRY_BLOCKED_TERRAIN as readonly string[]).includes(terrain)) return false;
+  }
+
+  return true;
+}
 
 /**
  * Advance game state by dt seconds.
@@ -17,19 +61,23 @@ export function tick(state: GameState, dt: number): void {
   state.tick++;
 
   // Move units toward their targets
-  state.units.forEach(unit => {
+  state.units.forEach((unit) => {
     if (unit.hp <= 0) {
       unit.state = "dead";
       return;
     }
-    if (unit.state === "moving" || unit.state === "retreating" || unit.state === "patrolling") {
+    if (
+      unit.state === "moving" ||
+      unit.state === "retreating" ||
+      unit.state === "patrolling"
+    ) {
       moveUnit(unit, dt, state);
     }
   });
 
   // Remove dead units
   const deadIds: number[] = [];
-  state.units.forEach(unit => {
+  state.units.forEach((unit) => {
     if (unit.state === "dead") deadIds.push(unit.id);
   });
   for (const id of deadIds) {
@@ -45,10 +93,10 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
   const dist = Math.sqrt(dx * dx + dy * dy);
 
   if (dist < 0.1) {
-    // Arrived
+    // Arrived at current target
     unit.position = { ...unit.target };
+
     if (unit.state === "patrolling" && unit.patrolPoints.length >= 2) {
-      // Swap patrol direction
       unit.patrolPoints.reverse();
       unit.target = unit.patrolPoints[1];
     } else if (unit.waypoints.length > 1) {
@@ -64,19 +112,25 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
     return;
   }
 
-  // Terrain speed modifier
+  // Current tile terrain speed modifier
   const tileX = Math.floor(unit.position.x);
   const tileY = Math.floor(unit.position.y);
   let speedMult = 1.0;
-  if (tileY >= 0 && tileY < state.mapHeight && tileX >= 0 && tileX < state.mapWidth) {
+  if (
+    tileY >= 0 &&
+    tileY < state.mapHeight &&
+    tileX >= 0 &&
+    tileX < state.mapWidth
+  ) {
     const terrain = state.terrain[tileY][tileX];
     const cat = getUnitCategory(unit.type);
     speedMult = TERRAIN_MOVE_MULT[terrain]?.[cat] ?? 0;
   }
 
   if (speedMult <= 0) {
-    // Can't move on this terrain — stop
+    // Stuck on impassable terrain — abort
     unit.target = null;
+    unit.waypoints = [];
     unit.state = "idle";
     return;
   }
@@ -85,6 +139,24 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
   const nx = dx / dist;
   const ny = dy / dist;
 
-  unit.position.x += nx * speed;
-  unit.position.y += ny * speed;
+  const newX = unit.position.x + nx * speed;
+  const newY = unit.position.y + ny * speed;
+
+  // Check if entering a new tile
+  const newTileX = Math.floor(newX);
+  const newTileY = Math.floor(newY);
+
+  if (newTileX !== tileX || newTileY !== tileY) {
+    // About to enter a new tile — check passability
+    if (!canUnitEnterTile(unit.type, newTileX, newTileY, state)) {
+      // Blocked — stop movement
+      unit.target = null;
+      unit.waypoints = [];
+      unit.state = "idle";
+      return;
+    }
+  }
+
+  unit.position.x = newX;
+  unit.position.y = newY;
 }

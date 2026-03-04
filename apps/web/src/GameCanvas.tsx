@@ -4,6 +4,8 @@ import {
   renderMinimap,
   renderFacilities,
   renderFrontLabels,
+  renderUnits,
+  renderFog,
   type Camera,
 } from "./rendererCanvas";
 import {
@@ -12,8 +14,9 @@ import {
   processKeyboardCamera,
   centerCameraOn,
 } from "./input";
-import { generateTerrain } from "./terrainGen";
-import { FACILITIES, FRONTS, FRONT_CAMERA_TARGETS } from "./mapData";
+import { FRONT_CAMERA_TARGETS } from "./mapData";
+import { createInitialGameState } from "./initState";
+import { tick, updateFog } from "@ai-commander/core";
 
 export function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -34,12 +37,11 @@ export function GameCanvas() {
     resize();
     window.addEventListener("resize", resize);
 
-    // Generate terrain
-    const terrain = generateTerrain();
+    // Create game state (terrain + units + fog + facilities + ...)
+    const state = createInitialGameState();
 
-    // Camera: will be centered on player base after first frame
+    // Camera: center on player HQ (tile 100, 7)
     const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
-    // Center on player HQ (tile 100, 7)
     centerCameraOn(camera, 100, 7, canvas.width, canvas.height);
 
     // Input
@@ -47,7 +49,10 @@ export function GameCanvas() {
     const cleanup = setupInputListeners(canvas, camera, input);
 
     // Fronts array (ordered 1-5 for hotkey mapping)
-    const frontIds = FRONTS.map((f) => f.id);
+    const frontIds = state.fronts.map((f) => f.id);
+
+    // Compute initial fog so first frame shows visibility
+    updateFog(state);
 
     // Game loop
     let lastTime = performance.now();
@@ -63,7 +68,13 @@ export function GameCanvas() {
         if (idx >= 0 && idx < frontIds.length) {
           const target = FRONT_CAMERA_TARGETS[frontIds[idx]];
           if (target) {
-            centerCameraOn(camera, target.x, target.y, canvas.width, canvas.height);
+            centerCameraOn(
+              camera,
+              target.x,
+              target.y,
+              canvas.width,
+              canvas.height,
+            );
           }
         }
         input.frontJumpRequest = null;
@@ -72,21 +83,49 @@ export function GameCanvas() {
       // Process keyboard + edge scrolling
       processKeyboardCamera(input, camera, dt, canvas.width, canvas.height);
 
-      // Clear
+      // --- Simulation ---
+      tick(state, dt);
+      updateFog(state);
+
+      // --- Rendering ---
       ctx.fillStyle = "#1a1a2e";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Render terrain
-      renderTerrain(ctx, terrain, camera, canvas.width, canvas.height);
+      // 1. Terrain tiles
+      renderTerrain(ctx, state.terrain, camera, canvas.width, canvas.height);
 
-      // Render facilities on map
-      renderFacilities(ctx, FACILITIES, camera);
+      // 2. Facilities on map
+      const facArray = Array.from(state.facilities.values());
+      renderFacilities(ctx, facArray, camera);
 
-      // Render front labels (when zoomed out)
-      renderFrontLabels(ctx, FRONTS, FRONT_CAMERA_TARGETS, camera);
+      // 3. Fog of war overlay (darkens unseen areas)
+      renderFog(ctx, state.fog, camera, canvas.width, canvas.height);
 
-      // Render minimap (bottom-right)
-      renderMinimap(ctx, terrain, camera, canvas.width, canvas.height, FACILITIES);
+      // 4. Units (enemy only visible in lit fog)
+      const unitArray = Array.from(state.units.values());
+      renderUnits(
+        ctx,
+        unitArray,
+        state.fog,
+        camera,
+        canvas.width,
+        canvas.height,
+      );
+
+      // 5. Front labels (when zoomed out)
+      renderFrontLabels(ctx, state.fronts, FRONT_CAMERA_TARGETS, camera);
+
+      // 6. Minimap (bottom-right, with facility + unit dots)
+      renderMinimap(
+        ctx,
+        state.terrain,
+        camera,
+        canvas.width,
+        canvas.height,
+        facArray,
+        unitArray,
+        state.fog,
+      );
 
       animId = requestAnimationFrame(loop);
     };

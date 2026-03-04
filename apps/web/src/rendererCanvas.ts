@@ -1,54 +1,76 @@
 // ============================================================
 // AI Commander — Canvas Renderer (会丢的，别纠结)
-// Renders terrain tiles, facilities, fog, minimap on 2D canvas.
+// Renders terrain tiles, units, facilities, fog, minimap.
 // ============================================================
 
-import type { TerrainType, Facility, Front } from "@ai-commander/shared";
+import type {
+  TerrainType,
+  Facility,
+  Front,
+  Unit,
+  Visibility,
+} from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 
 // --- Terrain colors ---
 
 const TERRAIN_COLORS: Record<TerrainType, string> = {
-  plains:        "#6b8e23",
-  hills:         "#556b2f",
-  forest:        "#2d5016",
-  swamp:         "#5c6b3a",
-  road:          "#8b8682",
+  plains: "#6b8e23",
+  hills: "#556b2f",
+  forest: "#2d5016",
+  swamp: "#5c6b3a",
+  road: "#8b8682",
   shallow_water: "#4a90c4",
-  deep_water:    "#1e5fa8",
-  bridge:        "#9e9e9e",
-  urban:         "#7a7a7a",
-  mountain:      "#8b7355",
+  deep_water: "#1e5fa8",
+  bridge: "#9e9e9e",
+  urban: "#7a7a7a",
+  mountain: "#8b7355",
 };
 
 // --- Facility icon colors (by type) ---
 
 const FACILITY_COLORS: Record<string, string> = {
-  headquarters:   "#ff4444",
-  barracks:       "#ffaa00",
-  shipyard:       "#00aaff",
-  airfield:       "#aa66ff",
-  radar:          "#00ffaa",
-  fuel_depot:     "#ff8800",
-  ammo_depot:     "#ff4488",
-  comm_tower:     "#44ffff",
-  rail_hub:       "#ccaa00",
+  headquarters: "#ff4444",
+  barracks: "#ffaa00",
+  shipyard: "#00aaff",
+  airfield: "#aa66ff",
+  radar: "#00ffaa",
+  fuel_depot: "#ff8800",
+  ammo_depot: "#ff4488",
+  comm_tower: "#44ffff",
+  rail_hub: "#ccaa00",
   repair_station: "#44ff44",
-  defense_tower:  "#ff6644",
+  defense_tower: "#ff6644",
 };
 
 const FACILITY_SYMBOLS: Record<string, string> = {
-  headquarters:   "HQ",
-  barracks:       "B",
-  shipyard:       "S",
-  airfield:       "A",
-  radar:          "R",
-  fuel_depot:     "\u2388",  // ⎈ (fuel icon)
-  ammo_depot:     "\u25C6",  // ◆
-  comm_tower:     "\u2606",  // ☆
-  rail_hub:       "\u2550",  // ═
+  headquarters: "HQ",
+  barracks: "B",
+  shipyard: "S",
+  airfield: "A",
+  radar: "R",
+  fuel_depot: "\u2388", // ⎈ (fuel icon)
+  ammo_depot: "\u25C6", // ◆
+  comm_tower: "\u2606", // ☆
+  rail_hub: "\u2550", // ═
   repair_station: "+",
-  defense_tower:  "\u25B2",  // ▲
+  defense_tower: "\u25B2", // ▲
+};
+
+// --- Unit symbols (short letter per type) ---
+
+const UNIT_SYMBOLS: Record<string, string> = {
+  infantry: "I",
+  light_tank: "L",
+  main_tank: "T",
+  artillery: "A",
+  patrol_boat: "P",
+  destroyer: "D",
+  cruiser: "C",
+  carrier: "V",
+  fighter: "F",
+  bomber: "B",
+  recon_plane: "R",
 };
 
 // --- Camera ---
@@ -69,16 +91,15 @@ function buildMinimapCache(
   mmWidth: number,
   mmHeight: number,
 ): ImageData {
-  // Fallback for browsers without OffscreenCanvas support.
   const surface: OffscreenCanvas | HTMLCanvasElement =
     typeof OffscreenCanvas !== "undefined"
       ? new OffscreenCanvas(mmWidth, mmHeight)
       : (() => {
-        const canvas = document.createElement("canvas");
-        canvas.width = mmWidth;
-        canvas.height = mmHeight;
-        return canvas;
-      })();
+          const canvas = document.createElement("canvas");
+          canvas.width = mmWidth;
+          canvas.height = mmHeight;
+          return canvas;
+        })();
 
   const octx = surface.getContext("2d");
   if (!octx) {
@@ -120,8 +141,14 @@ export function renderTerrain(
   // Visible tile range
   const startCol = Math.max(0, Math.floor(camera.x / TILE_SIZE));
   const startRow = Math.max(0, Math.floor(camera.y / TILE_SIZE));
-  const endCol = Math.min(MAP_WIDTH, Math.ceil((camera.x + canvasWidth / camera.zoom) / TILE_SIZE));
-  const endRow = Math.min(MAP_HEIGHT, Math.ceil((camera.y + canvasHeight / camera.zoom) / TILE_SIZE));
+  const endCol = Math.min(
+    MAP_WIDTH,
+    Math.ceil((camera.x + canvasWidth / camera.zoom) / TILE_SIZE),
+  );
+  const endRow = Math.min(
+    MAP_HEIGHT,
+    Math.ceil((camera.y + canvasHeight / camera.zoom) / TILE_SIZE),
+  );
 
   for (let row = startRow; row < endRow; row++) {
     for (let col = startCol; col < endCol; col++) {
@@ -226,6 +253,150 @@ export function renderFacilities(
 }
 
 // ──────────────────────────────────────────────
+// Render: Units (circles with team color + HP bar)
+// ──────────────────────────────────────────────
+
+export function renderUnits(
+  ctx: CanvasRenderingContext2D,
+  units: Unit[],
+  fog: Visibility[][],
+  camera: Camera,
+  canvasWidth: number,
+  canvasHeight: number,
+): void {
+  const tileScreenSize = TILE_SIZE * camera.zoom;
+
+  for (const unit of units) {
+    if (unit.state === "dead") continue;
+
+    // Enemy units: only render if tile is "visible"
+    if (unit.team === "enemy") {
+      const tx = Math.floor(unit.position.x);
+      const ty = Math.floor(unit.position.y);
+      if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) continue;
+      if (fog[ty]?.[tx] !== "visible") continue;
+    }
+
+    const screenX = (unit.position.x * TILE_SIZE - camera.x) * camera.zoom;
+    const screenY = (unit.position.y * TILE_SIZE - camera.y) * camera.zoom;
+
+    // Cull off-screen units
+    if (
+      screenX < -40 ||
+      screenY < -40 ||
+      screenX > canvasWidth + 40 ||
+      screenY > canvasHeight + 40
+    ) {
+      continue;
+    }
+
+    const unitSize = Math.max(8, tileScreenSize * 0.7);
+    const cx = screenX + tileScreenSize / 2;
+    const cy = screenY + tileScreenSize / 2;
+
+    // --- Team colors ---
+    const isPlayer = unit.team === "player";
+    const fillColor = isPlayer
+      ? "rgba(40,120,255,0.85)"
+      : "rgba(220,50,50,0.85)";
+    const borderColor = isPlayer ? "#1a5ab8" : "#a02020";
+
+    // --- Draw unit body ---
+    ctx.beginPath();
+    ctx.arc(cx, cy, unitSize / 2, 0, Math.PI * 2);
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+    ctx.strokeStyle = borderColor;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // --- Unit type symbol ---
+    const symbol = UNIT_SYMBOLS[unit.type] || "?";
+    const fontSize = Math.max(7, unitSize * 0.55);
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(symbol, cx, cy);
+
+    // --- Health bar ---
+    const hpRatio = unit.hp / unit.maxHp;
+    if (hpRatio < 1.0) {
+      // Only show HP bar if damaged
+      const barWidth = unitSize * 1.2;
+      const barHeight = Math.max(2, unitSize * 0.14);
+      const barX = cx - barWidth / 2;
+      const barY = cy - unitSize / 2 - barHeight - 2;
+
+      // Background
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillRect(barX, barY, barWidth, barHeight);
+
+      // HP fill (green → yellow → red)
+      let hpColor = "#44ff44";
+      if (hpRatio < 0.3) hpColor = "#ff4444";
+      else if (hpRatio < 0.6) hpColor = "#ffaa00";
+
+      ctx.fillStyle = hpColor;
+      ctx.fillRect(barX, barY, barWidth * hpRatio, barHeight);
+    }
+  }
+
+  ctx.textAlign = "start";
+  ctx.textBaseline = "alphabetic";
+}
+
+// ──────────────────────────────────────────────
+// Render: Fog of War overlay
+// ──────────────────────────────────────────────
+
+export function renderFog(
+  ctx: CanvasRenderingContext2D,
+  fog: Visibility[][],
+  camera: Camera,
+  canvasWidth: number,
+  canvasHeight: number,
+): void {
+  const tileScreenSize = TILE_SIZE * camera.zoom;
+
+  // Visible tile range (same culling as terrain)
+  const startCol = Math.max(0, Math.floor(camera.x / TILE_SIZE));
+  const startRow = Math.max(0, Math.floor(camera.y / TILE_SIZE));
+  const endCol = Math.min(
+    MAP_WIDTH,
+    Math.ceil((camera.x + canvasWidth / camera.zoom) / TILE_SIZE),
+  );
+  const endRow = Math.min(
+    MAP_HEIGHT,
+    Math.ceil((camera.y + canvasHeight / camera.zoom) / TILE_SIZE),
+  );
+
+  // Pass 1: explored (semi-transparent dim)
+  ctx.fillStyle = "rgba(8,8,18,0.5)";
+  for (let row = startRow; row < endRow; row++) {
+    for (let col = startCol; col < endCol; col++) {
+      if (fog[row]?.[col] === "explored") {
+        const sx = (col * TILE_SIZE - camera.x) * camera.zoom;
+        const sy = (row * TILE_SIZE - camera.y) * camera.zoom;
+        ctx.fillRect(sx, sy, tileScreenSize + 0.5, tileScreenSize + 0.5);
+      }
+    }
+  }
+
+  // Pass 2: unknown (nearly opaque black)
+  ctx.fillStyle = "rgba(8,8,18,0.92)";
+  for (let row = startRow; row < endRow; row++) {
+    for (let col = startCol; col < endCol; col++) {
+      if (fog[row]?.[col] === "unknown") {
+        const sx = (col * TILE_SIZE - camera.x) * camera.zoom;
+        const sy = (row * TILE_SIZE - camera.y) * camera.zoom;
+        ctx.fillRect(sx, sy, tileScreenSize + 0.5, tileScreenSize + 0.5);
+      }
+    }
+  }
+}
+
+// ──────────────────────────────────────────────
 // Render: Minimap (bottom-right corner)
 // ──────────────────────────────────────────────
 
@@ -249,6 +420,8 @@ export function renderMinimap(
   canvasWidth: number,
   canvasHeight: number,
   facilities?: Facility[],
+  units?: Unit[],
+  fog?: Visibility[][],
 ): void {
   const mm = getMinimapRect(canvasWidth, canvasHeight);
 
@@ -266,11 +439,11 @@ export function renderMinimap(
   }
   ctx.putImageData(minimapCache, mm.x, mm.y);
 
+  const pixelW = mm.w / MAP_WIDTH;
+  const pixelH = mm.h / MAP_HEIGHT;
+
   // Facility dots on minimap
   if (facilities) {
-    const pixelW = mm.w / MAP_WIDTH;
-    const pixelH = mm.h / MAP_HEIGHT;
-
     for (const fac of facilities) {
       const fx = mm.x + fac.position.x * pixelW;
       const fy = mm.y + fac.position.y * pixelH;
@@ -289,13 +462,34 @@ export function renderMinimap(
     }
   }
 
+  // Unit dots on minimap
+  if (units) {
+    for (const unit of units) {
+      if (unit.state === "dead") continue;
+
+      // Enemy units: only show if in visible fog
+      if (unit.team === "enemy" && fog) {
+        const tx = Math.floor(unit.position.x);
+        const ty = Math.floor(unit.position.y);
+        if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) continue;
+        if (fog[ty]?.[tx] !== "visible") continue;
+      }
+
+      const ux = mm.x + unit.position.x * pixelW;
+      const uy = mm.y + unit.position.y * pixelH;
+
+      ctx.beginPath();
+      ctx.arc(ux, uy, 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = unit.team === "player" ? "#4488ff" : "#ff4444";
+      ctx.fill();
+    }
+  }
+
   // Viewport rectangle
-  const pixelW = mm.w / MAP_WIDTH;
-  const pixelH = mm.h / MAP_HEIGHT;
   const vpX = mm.x + (camera.x / TILE_SIZE) * pixelW;
   const vpY = mm.y + (camera.y / TILE_SIZE) * pixelH;
-  const vpW = (canvasWidth / camera.zoom / TILE_SIZE) * pixelW;
-  const vpH = (canvasHeight / camera.zoom / TILE_SIZE) * pixelH;
+  const vpW = ((canvasWidth / camera.zoom) / TILE_SIZE) * pixelW;
+  const vpH = ((canvasHeight / camera.zoom) / TILE_SIZE) * pixelH;
 
   ctx.strokeStyle = "#ffffff";
   ctx.lineWidth = 1.5;
