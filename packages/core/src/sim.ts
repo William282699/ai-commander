@@ -136,11 +136,12 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
   }
 
   const speed = unit.moveSpeed * speedMult * dt;
+  const step = Math.min(speed, dist);
   const nx = dx / dist;
   const ny = dy / dist;
 
-  const newX = unit.position.x + nx * speed;
-  const newY = unit.position.y + ny * speed;
+  const newX = unit.position.x + nx * step;
+  const newY = unit.position.y + ny * step;
 
   // Check if entering a new tile
   const newTileX = Math.floor(newX);
