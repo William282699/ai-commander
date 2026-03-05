@@ -50,6 +50,7 @@ function createUnit(
     moveSpeed: stats.speed,
     lastAttackTime: 0,
     manualOverride: false,
+    detourCount: 0,
     waypoints: [],
     patrolPoints: [],
     orders: [],

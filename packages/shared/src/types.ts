@@ -76,6 +76,7 @@ export interface Unit {
   moveSpeed: number; // tiles per second
   lastAttackTime: number; // game time of last attack
   manualOverride: boolean; // player took over
+  detourCount: number; // consecutive local detours to avoid waypoint growth loops
   waypoints: Position[];
   patrolPoints: Position[];
   orders: Order[];
@@ -187,6 +188,7 @@ export interface Order {
   targetFacilityId?: string;
   priority: "low" | "medium" | "high";
   provisional?: boolean; // local engine guess, will be replaced by LLM
+  isPlayerCommand?: boolean; // allows player-issued orders on manualOverride units
 }
 
 // --- Production ---

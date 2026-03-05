@@ -15,7 +15,7 @@ export function applyOrders(state: GameState, orders: Order[]): void {
       const unit = state.units.get(unitId);
       if (!unit) continue;
       if (unit.team !== "player") continue;
-      if (unit.manualOverride && !order.provisional) continue;
+      if (unit.manualOverride && !order.provisional && !order.isPlayerCommand) continue;
 
       applyOrderToUnit(unit, order, state);
     }
@@ -42,6 +42,7 @@ export function replaceProvisionalOrders(state: GameState, newOrders: Order[]): 
  * override check so the order always applies.
  */
 export function applyPlayerCommands(state: GameState, orders: Order[]): void {
+  // Mark selected units as manual override first
   for (const order of orders) {
     for (const unitId of order.unitIds) {
       const unit = state.units.get(unitId);
@@ -49,9 +50,12 @@ export function applyPlayerCommands(state: GameState, orders: Order[]): void {
       if (unit.team !== "player") continue;
 
       unit.manualOverride = true;
-      applyOrderToUnit(unit, order, state);
     }
   }
+
+  // Route through the normal entrypoint using a player-command flag.
+  const taggedOrders = orders.map((order) => ({ ...order, isPlayerCommand: true }));
+  applyOrders(state, taggedOrders);
 }
 
 /**
@@ -73,6 +77,7 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
   switch (order.action) {
     case "attack_move":
       unit.state = "moving";
+      unit.attackTarget = order.targetUnitId ?? null;
       if (order.target) {
         unit.target = order.target;
         unit.waypoints = [order.target];

@@ -53,6 +53,7 @@ export function canUnitEnterTile(
 
 /** Grace period: dead units stay for 1 frame so explosion effects can reference position */
 const DEAD_CLEANUP_DELAY = 0.1; // seconds
+const MAX_CONSECUTIVE_DETOURS = 3;
 
 /**
  * Advance game state by dt seconds.
@@ -143,6 +144,21 @@ function tryLocalDetour(
 }
 
 function moveUnit(unit: Unit, dt: number, state: GameState): void {
+  // If we have a locked attack target, keep movement target synced to enemy's live position.
+  if (unit.attackTarget !== null) {
+    const tracked = state.units.get(unit.attackTarget);
+    if (tracked && tracked.hp > 0 && tracked.state !== "dead" && tracked.team !== unit.team) {
+      unit.target = { ...tracked.position };
+      if (unit.waypoints.length > 0) {
+        unit.waypoints[0] = unit.target;
+      } else {
+        unit.waypoints = [unit.target];
+      }
+    } else {
+      unit.attackTarget = null;
+    }
+  }
+
   if (!unit.target) return;
 
   const dx = unit.target.x - unit.position.x;
@@ -152,6 +168,7 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
   if (dist < 0.1) {
     // Arrived at current target
     unit.position = { ...unit.target };
+    unit.detourCount = 0;
 
     if (unit.state === "patrolling" && unit.patrolPoints.length >= 2) {
       unit.patrolPoints.reverse();
@@ -210,16 +227,26 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
       // Blocked — try local detour before stopping
       const detour = tryLocalDetour(unit, newTileX, newTileY, nx, ny, state);
       if (detour) {
-        // Insert detour waypoint: go to detour first, then resume to original target
-        const originalTarget = unit.target;
+        unit.detourCount += 1;
+        if (unit.detourCount > MAX_CONSECUTIVE_DETOURS) {
+          unit.target = null;
+          unit.waypoints = [];
+          unit.state = "idle";
+          unit.detourCount = 0;
+          return;
+        }
+
+        // Insert one short detour first, then the original destination.
+        const originalTarget =
+          unit.waypoints.length > 1 ? unit.waypoints[unit.waypoints.length - 1] : unit.target;
         unit.target = detour;
-        // Prepend detour, keep original target in waypoints
-        unit.waypoints = [detour, originalTarget, ...unit.waypoints.slice(1)];
+        unit.waypoints = [detour, originalTarget];
       } else {
         // No detour found — stop
         unit.target = null;
         unit.waypoints = [];
         unit.state = "idle";
+        unit.detourCount = 0;
       }
       return;
     }
@@ -227,4 +254,5 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
 
   unit.position.x = newX;
   unit.position.y = newY;
+  unit.detourCount = 0;
 }
