@@ -88,6 +88,10 @@ export function setupInputListeners(
   input: InputState,
 ): () => void {
   const onKeyDown = (e: KeyboardEvent) => {
+    // Don't intercept keys when typing in input/textarea fields
+    const tag = (e.target as HTMLElement)?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
+
     const key = e.key.toLowerCase();
     input.keys.add(key);
 

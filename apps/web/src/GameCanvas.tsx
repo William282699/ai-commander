@@ -29,6 +29,7 @@ import {
 } from "@ai-commander/core";
 import type { Unit, Order, GameState } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
+import { CommandPanel } from "./CommandPanel";
 
 /** Distance threshold for single-click unit selection (in tiles) */
 const CLICK_SELECT_RADIUS = 1.5;
@@ -128,6 +129,7 @@ function findEnemyAtPosition(
 
 export function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stateRef = useRef<GameState | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -147,6 +149,7 @@ export function GameCanvas() {
 
     // Create game state (terrain + units + fog + facilities + ...)
     const state = createInitialGameState();
+    stateRef.current = state;
 
     // Camera: center on player HQ (tile 100, 7)
     const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
@@ -377,9 +380,12 @@ export function GameCanvas() {
   }, []);
 
   return (
-    <canvas
-      ref={canvasRef}
-      style={{ display: "block", width: "100%", height: "100%" }}
-    />
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      <canvas
+        ref={canvasRef}
+        style={{ display: "block", width: "100%", height: "100%" }}
+      />
+      <CommandPanel getState={() => stateRef.current} />
+    </div>
   );
 }

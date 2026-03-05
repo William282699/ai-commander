@@ -11,10 +11,13 @@ export type IntentType =
   | "flank"
   | "sabotage"
   | "recon"
+  | "patrol"
   | "escort"
+  | "hold"
   | "air_support"
   | "produce"
-  | "trade";
+  | "trade"
+  | "cover_retreat";
 
 export type UrgencyLevel = "low" | "medium" | "high" | "critical";
 export type QuantityHint = "all" | "most" | "some" | "few" | number;

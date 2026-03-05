@@ -1,20 +1,29 @@
 // ============================================================
 // AI Commander — LLM Output Validation
 // Validates and sanitizes JSON from DeepSeek/Claude/OpenAI
+// Single source of truth for action/intent whitelists
 // ============================================================
 
-import type { AdvisorResponse, LightAdvisorResponse, OrderAction } from "./types";
-import type { IntentType } from "./intents";
+import type { AdvisorResponse, AdvisorOption, LightAdvisorResponse, OrderAction } from "./types";
+import type { IntentType, Intent, UrgencyLevel, UnitCategoryHint } from "./intents";
 
-const VALID_ACTIONS: OrderAction[] = [
+// ── Whitelists (single source of truth — import from here, don't duplicate) ──
+
+export const VALID_ACTIONS: readonly OrderAction[] = [
   "attack_move", "defend", "retreat", "flank", "hold",
   "patrol", "escort", "sabotage", "recon", "produce", "trade",
-];
+] as const;
 
-const VALID_INTENT_TYPES: IntentType[] = [
+export const VALID_INTENT_TYPES: readonly IntentType[] = [
   "reinforce", "attack", "defend", "retreat", "flank",
-  "sabotage", "recon", "escort", "air_support", "produce", "trade",
-];
+  "sabotage", "recon", "patrol", "escort", "hold",
+  "air_support", "produce", "trade", "cover_retreat",
+] as const;
+
+const VALID_URGENCY: readonly UrgencyLevel[] = ["low", "medium", "high", "critical"];
+const VALID_UNIT_CATEGORY: readonly UnitCategoryHint[] = ["armor", "infantry", "air", "naval"];
+
+// ── Parsing ──
 
 /**
  * Try to parse LLM output as JSON. Handles markdown code blocks.
@@ -32,6 +41,59 @@ export function safeParse(raw: string): unknown | null {
   }
 }
 
+// ── Intent Sanitization ──
+
+/**
+ * Sanitize an intent object from LLM output.
+ * Strips invalid fields, ensures type is in whitelist.
+ * Returns null if intent type is invalid.
+ */
+export function sanitizeIntent(raw: unknown): Intent | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+
+  if (!VALID_INTENT_TYPES.includes(obj.type as IntentType)) return null;
+
+  const intent: Intent = { type: obj.type as IntentType };
+
+  // Optional string fields
+  if (typeof obj.fromFront === "string") intent.fromFront = obj.fromFront;
+  if (typeof obj.toFront === "string") intent.toFront = obj.toFront;
+  if (typeof obj.targetFacility === "string") intent.targetFacility = obj.targetFacility;
+  if (typeof obj.targetRegion === "string") intent.targetRegion = obj.targetRegion;
+
+  // unitType
+  if (VALID_UNIT_CATEGORY.includes(obj.unitType as UnitCategoryHint)) {
+    intent.unitType = obj.unitType as UnitCategoryHint;
+  }
+
+  // quantity
+  if (typeof obj.quantity === "number" && obj.quantity > 0) {
+    intent.quantity = obj.quantity;
+  } else if (typeof obj.quantity === "string" && ["all", "most", "some", "few"].includes(obj.quantity)) {
+    intent.quantity = obj.quantity as "all" | "most" | "some" | "few";
+  }
+
+  // urgency
+  if (VALID_URGENCY.includes(obj.urgency as UrgencyLevel)) {
+    intent.urgency = obj.urgency as UrgencyLevel;
+  }
+
+  // Booleans
+  if (typeof obj.minimizeLosses === "boolean") intent.minimizeLosses = obj.minimizeLosses;
+  if (typeof obj.airCover === "boolean") intent.airCover = obj.airCover;
+  if (typeof obj.holdAfter === "boolean") intent.holdAfter = obj.holdAfter;
+  if (typeof obj.stealth === "boolean") intent.stealth = obj.stealth;
+
+  // Production / trade
+  if (typeof obj.produceType === "string") intent.produceType = obj.produceType;
+  if (typeof obj.tradeAction === "string") intent.tradeAction = obj.tradeAction;
+
+  return intent;
+}
+
+// ── Response Validation ──
+
 /**
  * Validate an AdvisorResponse from LLM.
  * Returns sanitized response or null if invalid.
@@ -45,17 +107,17 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
 
   const validOptions = (obj.options as unknown[])
     .filter((o): o is Record<string, unknown> => !!o && typeof o === "object")
-    .filter((o) => {
-      if (typeof o.label !== "string") return false;
-      if (typeof o.description !== "string") return false;
-      if (typeof o.risk !== "number" || o.risk < 0 || o.risk > 1) return false;
-      if (typeof o.reward !== "number" || o.reward < 0 || o.reward > 1) return false;
-      if (!o.intent || typeof o.intent !== "object") return false;
-      const intent = o.intent as Record<string, unknown>;
-      if (!VALID_INTENT_TYPES.includes(intent.type as IntentType)) return false;
-      return true;
+    .map((o) => {
+      if (typeof o.label !== "string") return null;
+      if (typeof o.description !== "string") return null;
+      const risk = typeof o.risk === "number" ? Math.max(0, Math.min(1, o.risk)) : 0.5;
+      const reward = typeof o.reward === "number" ? Math.max(0, Math.min(1, o.reward)) : 0.5;
+      const intent = sanitizeIntent(o.intent);
+      if (!intent) return null;
+      return { label: o.label, description: o.description, risk, reward, intent } as AdvisorOption;
     })
-    .slice(0, 3); // max 3 options
+    .filter((o): o is AdvisorOption => o !== null)
+    .slice(0, 3);
 
   if (validOptions.length === 0) return null;
 
@@ -66,7 +128,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
 
   return {
     brief: obj.brief as string,
-    options: validOptions as unknown as AdvisorResponse["options"],
+    options: validOptions,
     recommended: recommended as "A" | "B" | "C",
     urgency,
     suggestProduction: obj.suggest_production
@@ -93,4 +155,47 @@ export function validateLightResponse(data: unknown): LightAdvisorResponse | nul
  */
 export function isValidAction(action: string): action is OrderAction {
   return VALID_ACTIONS.includes(action as OrderAction);
+}
+
+/**
+ * Check if an intent type is in the allowed set.
+ */
+export function isValidIntentType(type: string): type is IntentType {
+  return VALID_INTENT_TYPES.includes(type as IntentType);
+}
+
+// ── Fallback Response ──
+
+/**
+ * Create a default fallback response when LLM returns non-JSON or invalid data.
+ */
+export function createFallbackResponse(): AdvisorResponse {
+  return {
+    brief: "通讯干扰，无法解析参谋建议。以下为默认方案。",
+    options: [
+      {
+        label: "A: 稳守阵地",
+        description: "全线防御，等待进一步情报",
+        risk: 0.2,
+        reward: 0.3,
+        intent: { type: "defend", urgency: "medium" },
+      },
+      {
+        label: "B: 有限进攻",
+        description: "在最有利战线发动试探性进攻",
+        risk: 0.5,
+        reward: 0.6,
+        intent: { type: "attack", quantity: "some", urgency: "medium" },
+      },
+      {
+        label: "C: 全线侦察",
+        description: "派出侦察力量摸清敌方部署",
+        risk: 0.1,
+        reward: 0.4,
+        intent: { type: "recon", quantity: "few", urgency: "low" },
+      },
+    ],
+    recommended: "A",
+    urgency: 0.3,
+  };
 }

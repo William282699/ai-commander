@@ -1,0 +1,159 @@
+// ============================================================
+// AI Commander — LLM Provider Abstraction
+// Supports DeepSeek (default), OpenAI-compatible, and Claude APIs
+// Switch via LLM_PROVIDER env var: "deepseek" | "openai" | "claude"
+// ============================================================
+
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface ChatOptions {
+  temperature?: number;
+  maxTokens?: number;
+  jsonMode?: boolean;
+}
+
+export interface LLMProvider {
+  name: string;
+  chat(messages: ChatMessage[], options?: ChatOptions): Promise<string>;
+}
+
+// ── OpenAI-compatible provider (works for DeepSeek + OpenAI) ──
+
+class OpenAICompatibleProvider implements LLMProvider {
+  name: string;
+  private apiKey: string;
+  private baseUrl: string;
+  private model: string;
+
+  constructor(name: string, apiKey: string, baseUrl: string, model: string) {
+    this.name = name;
+    this.apiKey = apiKey;
+    this.baseUrl = baseUrl;
+    this.model = model;
+  }
+
+  async chat(messages: ChatMessage[], options?: ChatOptions): Promise<string> {
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages,
+      temperature: options?.temperature ?? 0.7,
+      max_tokens: options?.maxTokens ?? 800,
+    };
+    if (options?.jsonMode) {
+      body.response_format = { type: "json_object" };
+    }
+
+    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`LLM API ${res.status}: ${text.slice(0, 200)}`);
+    }
+
+    const data = await res.json();
+    const content = data.choices?.[0]?.message?.content;
+    if (typeof content !== "string") {
+      throw new Error("LLM returned empty response");
+    }
+    return content;
+  }
+}
+
+// ── Claude provider (Anthropic Messages API) ──
+
+class ClaudeProvider implements LLMProvider {
+  name = "claude";
+  private apiKey: string;
+  private model: string;
+
+  constructor(apiKey: string, model: string) {
+    this.apiKey = apiKey;
+    this.model = model;
+  }
+
+  async chat(messages: ChatMessage[], options?: ChatOptions): Promise<string> {
+    const systemMsg = messages.find((m) => m.role === "system");
+    const nonSystemMsgs = messages.filter((m) => m.role !== "system");
+
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": this.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: this.model,
+        max_tokens: options?.maxTokens ?? 800,
+        system: systemMsg?.content ?? "",
+        messages: nonSystemMsgs.map((m) => ({ role: m.role, content: m.content })),
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Claude API ${res.status}: ${text.slice(0, 200)}`);
+    }
+
+    const data = await res.json();
+    const content = data.content?.[0]?.text;
+    if (typeof content !== "string") {
+      throw new Error("Claude returned empty response");
+    }
+    return content;
+  }
+}
+
+// ── Factory ──
+
+export interface ProviderConfig {
+  provider: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+}
+
+export function getProviderConfig(): ProviderConfig {
+  const provider = (process.env.LLM_PROVIDER || "deepseek").toLowerCase();
+  let apiKey = "";
+  let baseUrl = "";
+  let model = "";
+
+  switch (provider) {
+    case "openai":
+      apiKey = process.env.OPENAI_API_KEY || "";
+      baseUrl = process.env.LLM_BASE_URL || "https://api.openai.com/v1";
+      model = process.env.LLM_MODEL || "gpt-4o-mini";
+      break;
+    case "claude":
+      apiKey = process.env.ANTHROPIC_API_KEY || "";
+      baseUrl = ""; // not used
+      model = process.env.LLM_MODEL || "claude-sonnet-4-20250514";
+      break;
+    default: // deepseek
+      apiKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || "";
+      baseUrl = process.env.LLM_BASE_URL || "https://api.deepseek.com/v1";
+      model = process.env.LLM_MODEL || "deepseek-chat";
+      break;
+  }
+
+  return { provider, apiKey, baseUrl, model };
+}
+
+export function createProvider(config: ProviderConfig): LLMProvider {
+  if (config.provider === "claude") {
+    return new ClaudeProvider(config.apiKey, config.model);
+  }
+  // deepseek, openai, or any OpenAI-compatible
+  return new OpenAICompatibleProvider(config.provider, config.apiKey, config.baseUrl, config.model);
+}
