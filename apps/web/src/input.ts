@@ -19,6 +19,22 @@ const EDGE_SCROLL_SPEED = 300;
 /** Minimum drag distance (screen px) to count as a box selection vs click */
 const SELECTION_DRAG_THRESHOLD = 5;
 
+function isTextEditingElement(target: EventTarget | null): target is HTMLElement {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.isContentEditable
+  );
+}
+
+function blurActiveTextEditor(): void {
+  const active = document.activeElement;
+  if (isTextEditingElement(active)) {
+    active.blur();
+  }
+}
+
 /** Right-click command (consumed by game loop each frame) */
 export interface RightClickCommand {
   worldX: number;
@@ -89,8 +105,7 @@ export function setupInputListeners(
 ): () => void {
   const onKeyDown = (e: KeyboardEvent) => {
     // Don't intercept keys when typing in input/textarea fields
-    const tag = (e.target as HTMLElement)?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA") return;
+    if (isTextEditingElement(e.target)) return;
 
     const key = e.key.toLowerCase();
     input.keys.add(key);
@@ -108,6 +123,18 @@ export function setupInputListeners(
 
   const onKeyUp = (e: KeyboardEvent) => {
     input.keys.delete(e.key.toLowerCase());
+  };
+
+  const onWindowBlur = () => {
+    // Prevent sticky movement keys when app loses focus.
+    input.keys.clear();
+  };
+
+  const onFocusIn = (e: FocusEvent) => {
+    // Entering a text field should always stop camera movement keys.
+    if (isTextEditingElement(e.target)) {
+      input.keys.clear();
+    }
   };
 
   const onWheel = (e: WheelEvent) => {
@@ -131,6 +158,12 @@ export function setupInputListeners(
   let isRightDragging = false;
 
   const onMouseDown = (e: MouseEvent) => {
+    // Clicking the canvas should return keyboard control to the map.
+    if (isTextEditingElement(document.activeElement)) {
+      blurActiveTextEditor();
+      input.keys.clear();
+    }
+
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
@@ -250,6 +283,8 @@ export function setupInputListeners(
 
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
+  window.addEventListener("blur", onWindowBlur);
+  window.addEventListener("focusin", onFocusIn);
   canvas.addEventListener("wheel", onWheel, { passive: false });
   canvas.addEventListener("mousedown", onMouseDown);
   window.addEventListener("mousemove", onMouseMove);
@@ -261,6 +296,8 @@ export function setupInputListeners(
   return () => {
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("keyup", onKeyUp);
+    window.removeEventListener("blur", onWindowBlur);
+    window.removeEventListener("focusin", onFocusIn);
     canvas.removeEventListener("wheel", onWheel);
     canvas.removeEventListener("mousedown", onMouseDown);
     window.removeEventListener("mousemove", onMouseMove);

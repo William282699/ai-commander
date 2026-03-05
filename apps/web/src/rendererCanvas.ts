@@ -623,7 +623,7 @@ export function renderSelectionBox(
 }
 
 // ──────────────────────────────────────────────
-// Render: Selected unit info panel (bottom-left)
+// Render: Selected unit info panel (top-left)
 // ──────────────────────────────────────────────
 
 export function renderInfoPanel(
@@ -669,7 +669,7 @@ export function renderInfoPanel(
   const panelH = visibleLines.length * lineH + padding * 2 + 28; // extra for button
 
   const px = 10;
-  const py = canvasHeight - panelH - 10;
+  const py = 10;
 
   // Background
   ctx.save();
