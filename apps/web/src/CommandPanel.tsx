@@ -1,11 +1,13 @@
 // ============================================================
-// AI Commander — Command Panel (Day 6)
+// AI Commander — Command Panel (Day 7)
 // Input box → call /api/command → display A/B/C options
+// Click "批准" → resolveIntent → applyOrders (clean chain)
 // ============================================================
 
 import { useState } from "react";
-import { buildDigest } from "@ai-commander/core";
-import type { GameState, AdvisorResponse } from "@ai-commander/shared";
+import { buildDigest, resolveIntent, applyOrders } from "@ai-commander/core";
+import type { GameState, AdvisorResponse, AdvisorOption } from "@ai-commander/shared";
+import { addMessage } from "./messageStore";
 
 const API_URL = "http://localhost:3001";
 
@@ -22,13 +24,18 @@ export function CommandPanel({ getState }: Props) {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<DisplayResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [approvedIdx, setApprovedIdx] = useState<number | null>(null);
 
   const sendCommand = async () => {
     const state = getState();
     if (!state || !message.trim()) return;
 
+    const userMsg = message.trim();
     setLoading(true);
     setError(null);
+    setApprovedIdx(null);
+
+    addMessage("info", `发送指令: ${userMsg}`, state.time);
 
     const digest = buildDigest(state, [], [], []);
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
@@ -37,23 +44,58 @@ export function CommandPanel({ getState }: Props) {
       const res = await fetch(`${API_URL}/api/command`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: message.trim(), styleNote }),
+        body: JSON.stringify({ digest, message: userMsg, styleNote }),
       });
 
       const data = await res.json();
       if (data.error) {
         setError(data.error);
         setResponse(null);
+        addMessage("urgent", `后端错误: ${data.error}`, state.time);
       } else {
         setResponse(data as DisplayResponse);
         setError(null);
+        addMessage("info", "收到参谋简报", state.time);
       }
     } catch {
-      setError("无法连接服务器，请确保后端运行在 localhost:3001");
+      const errMsg = "无法连接服务器，请确保后端运行在 localhost:3001";
+      setError(errMsg);
       setResponse(null);
+      addMessage("urgent", "通信中断: 无法连接后端", state.time);
     }
     setLoading(false);
     setMessage("");
+  };
+
+  const handleApprove = (opt: AdvisorOption, idx: number) => {
+    const state = getState();
+    if (!state) return;
+
+    const letter = ["A", "B", "C"][idx] ?? "?";
+    addMessage("info", `批准方案 ${letter}: ${opt.label}`, state.time);
+
+    // Day 7 clean chain: Intent → resolveIntent → Order[] → applyOrders
+    const result = resolveIntent(opt.intent, state, state.style);
+
+    if (result.degraded) {
+      addMessage("warning", result.log, state.time);
+    } else {
+      addMessage("info", `执行: ${result.log}`, state.time);
+    }
+
+    if (result.orders.length > 0) {
+      applyOrders(state, result.orders);
+    } else if (!result.degraded) {
+      addMessage("warning", "无可执行命令", state.time);
+    }
+
+    setApprovedIdx(idx);
+
+    // Auto-dismiss after brief delay so user sees the highlight
+    setTimeout(() => {
+      setResponse(null);
+      setApprovedIdx(null);
+    }, 800);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -68,6 +110,7 @@ export function CommandPanel({ getState }: Props) {
   const dismiss = () => {
     setResponse(null);
     setError(null);
+    setApprovedIdx(null);
   };
 
   return (
@@ -84,12 +127,20 @@ export function CommandPanel({ getState }: Props) {
             {response.options.map((opt, i) => {
               const letter = ["A", "B", "C"][i];
               const isRecommended = response.recommended === letter;
+              const isApproved = approvedIdx === i;
               return (
                 <div
                   key={i}
                   style={{
                     ...optionStyle,
-                    borderColor: isRecommended ? "#4ade80" : "#334155",
+                    borderColor: isApproved
+                      ? "#22c55e"
+                      : isRecommended
+                        ? "#4ade80"
+                        : "#334155",
+                    background: isApproved
+                      ? "rgba(34, 197, 94, 0.15)"
+                      : "rgba(15, 23, 42, 0.8)",
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -112,6 +163,17 @@ export function CommandPanel({ getState }: Props) {
                       [{opt.intent.type}]{opt.intent.unitType ? ` ${opt.intent.unitType}` : ""}{opt.intent.urgency ? ` ${opt.intent.urgency}` : ""}
                     </div>
                   )}
+                  {/* Approve button */}
+                  <button
+                    onClick={() => handleApprove(opt, i)}
+                    disabled={approvedIdx !== null}
+                    style={{
+                      ...approveBtnStyle,
+                      opacity: approvedIdx !== null ? 0.4 : 1,
+                    }}
+                  >
+                    {isApproved ? `已批准 ${letter}` : `批准 ${letter}`}
+                  </button>
                 </div>
               );
             })}
@@ -171,7 +233,7 @@ const panelStyle: React.CSSProperties = {
 
 const responseStyle: React.CSSProperties = {
   marginBottom: 8,
-  maxHeight: 320,
+  maxHeight: 360,
   overflowY: "auto",
 };
 
@@ -275,4 +337,19 @@ const buttonStyle: React.CSSProperties = {
   fontSize: 12,
   fontFamily: "monospace",
   cursor: "pointer",
+};
+
+const approveBtnStyle: React.CSSProperties = {
+  marginTop: 6,
+  width: "100%",
+  background: "#1e3a5f",
+  color: "#60a5fa",
+  border: "1px solid #2563eb",
+  borderRadius: 3,
+  padding: "4px 0",
+  fontSize: 11,
+  fontFamily: "monospace",
+  fontWeight: "bold",
+  cursor: "pointer",
+  letterSpacing: 1,
 };

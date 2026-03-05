@@ -6,5 +6,6 @@ export { processEconomy } from "./economy";
 export { processEnemyAI } from "./enemyAI";
 export { processMissions } from "./missions";
 export { createDefaultStyle, updateStyleParam } from "./styleEngine";
-export { resolveIntent } from "./tacticalPlanner";
+export { resolveIntent, isIntentSupported } from "./tacticalPlanner";
+export type { ResolveResult } from "./tacticalPlanner";
 export { buildDigest } from "./intelDigest";

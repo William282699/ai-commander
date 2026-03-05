@@ -30,6 +30,7 @@ import {
 import type { Unit, Order, GameState } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { CommandPanel } from "./CommandPanel";
+import { MessageFeed } from "./MessageFeed";
 
 /** Distance threshold for single-click unit selection (in tiles) */
 const CLICK_SELECT_RADIUS = 1.5;
@@ -386,6 +387,7 @@ export function GameCanvas() {
         style={{ display: "block", width: "100%", height: "100%" }}
       />
       <CommandPanel getState={() => stateRef.current} />
+      <MessageFeed />
     </div>
   );
 }
