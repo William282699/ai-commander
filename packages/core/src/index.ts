@@ -1,4 +1,4 @@
-export { applyOrders, replaceProvisionalOrders } from "./applyOrders";
+export { applyOrders, replaceProvisionalOrders, applyPlayerCommands, releaseManualOverride } from "./applyOrders";
 export { tick, canUnitEnterTile } from "./sim";
 export { calculateDamage, processCombat } from "./combat";
 export { createFogState, updateFog } from "./fog";

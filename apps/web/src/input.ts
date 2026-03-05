@@ -1,7 +1,8 @@
 // ============================================================
 // AI Commander — Input Handling (会丢的)
 // WASD, scroll zoom, middle-click drag, minimap click,
-// number keys 1-5 front jump, edge scrolling
+// number keys 1-5 front jump, edge scrolling,
+// Day5: left-click selection, right-click commands, ESC
 // ============================================================
 
 import type { Camera } from "./rendererCanvas";
@@ -15,8 +16,18 @@ const MAX_ZOOM = 2.0;
 const EDGE_SCROLL_MARGIN = 20; // pixels from screen edge
 const EDGE_SCROLL_SPEED = 300;
 
+/** Minimum drag distance (screen px) to count as a box selection vs click */
+const SELECTION_DRAG_THRESHOLD = 5;
+
+/** Right-click command (consumed by game loop each frame) */
+export interface RightClickCommand {
+  worldX: number;
+  worldY: number;
+}
+
 export interface InputState {
   keys: Set<string>;
+  // --- Camera drag (middle-click) ---
   isDragging: boolean;
   dragStartX: number;
   dragStartY: number;
@@ -26,6 +37,22 @@ export interface InputState {
   mouseY: number;
   mouseInCanvas: boolean;
   frontJumpRequest: number | null; // 1-5, set on key press
+
+  // --- Day 5: Selection ---
+  isSelecting: boolean; // left-click drag in progress
+  selectionStartScreenX: number;
+  selectionStartScreenY: number;
+  selectionEndScreenX: number;
+  selectionEndScreenY: number;
+  selectedUnitIds: number[];
+  selectionComplete: boolean; // true on mouseup → consumed by game loop
+
+  // --- Day 5: Right-click command ---
+  rightClickCommand: RightClickCommand | null;
+
+  // --- Day 5: ESC & Return to AI ---
+  escPressed: boolean;
+  returnToAIPressed: boolean;
 }
 
 export function createInputState(): InputState {
@@ -40,6 +67,18 @@ export function createInputState(): InputState {
     mouseY: -1,
     mouseInCanvas: false,
     frontJumpRequest: null,
+
+    isSelecting: false,
+    selectionStartScreenX: 0,
+    selectionStartScreenY: 0,
+    selectionEndScreenX: 0,
+    selectionEndScreenY: 0,
+    selectedUnitIds: [],
+    selectionComplete: false,
+
+    rightClickCommand: null,
+    escPressed: false,
+    returnToAIPressed: false,
   };
 }
 
@@ -55,6 +94,11 @@ export function setupInputListeners(
     // Number keys 1-5 for front jumping
     if (key >= "1" && key <= "5") {
       input.frontJumpRequest = parseInt(key);
+    }
+
+    // ESC: release selection / return to AI
+    if (e.key === "Escape") {
+      input.escPressed = true;
     }
   };
 
@@ -77,13 +121,19 @@ export function setupInputListeners(
     clampCamera(camera, canvas.width, canvas.height);
   };
 
+  // Track right-click drag distance for command vs pan detection
+  let rightClickStartX = 0;
+  let rightClickStartY = 0;
+  let isRightDragging = false;
+
   const onMouseDown = (e: MouseEvent) => {
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
 
-    // Left click on minimap → jump
+    // --- Left click ---
     if (e.button === 0) {
+      // Check minimap click first
       const mm = getMinimapRect(canvas.width, canvas.height);
       if (mx >= mm.x && mx <= mm.x + mm.w && my >= mm.y && my <= mm.y + mm.h) {
         const tileX = ((mx - mm.x) / mm.w) * MAP_WIDTH;
@@ -92,10 +142,33 @@ export function setupInputListeners(
         e.preventDefault();
         return;
       }
+
+      // Start selection box
+      input.isSelecting = true;
+      input.selectionStartScreenX = mx;
+      input.selectionStartScreenY = my;
+      input.selectionEndScreenX = mx;
+      input.selectionEndScreenY = my;
+      input.selectionComplete = false;
+      e.preventDefault();
     }
 
-    // Middle or right click drag
-    if (e.button === 1 || e.button === 2) {
+    // --- Middle click: pan camera ---
+    if (e.button === 1) {
+      input.isDragging = true;
+      input.dragStartX = e.clientX;
+      input.dragStartY = e.clientY;
+      input.cameraStartX = camera.x;
+      input.cameraStartY = camera.y;
+      e.preventDefault();
+    }
+
+    // --- Right click: command or pan ---
+    if (e.button === 2) {
+      rightClickStartX = e.clientX;
+      rightClickStartY = e.clientY;
+      isRightDragging = true;
+      // Also start pan tracking in case user drags
       input.isDragging = true;
       input.dragStartX = e.clientX;
       input.dragStartY = e.clientY;
@@ -110,6 +183,13 @@ export function setupInputListeners(
     input.mouseX = e.clientX - rect.left;
     input.mouseY = e.clientY - rect.top;
 
+    // Update selection box end position
+    if (input.isSelecting) {
+      input.selectionEndScreenX = input.mouseX;
+      input.selectionEndScreenY = input.mouseY;
+    }
+
+    // Camera panning (middle or right drag)
     if (input.isDragging) {
       const dx = (e.clientX - input.dragStartX) / camera.zoom;
       const dy = (e.clientY - input.dragStartY) / camera.zoom;
@@ -120,8 +200,42 @@ export function setupInputListeners(
   };
 
   const onMouseUp = (e: MouseEvent) => {
-    if (e.button === 1 || e.button === 2) {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    // Left click release → finalize selection
+    if (e.button === 0 && input.isSelecting) {
+      input.isSelecting = false;
+      input.selectionEndScreenX = mx;
+      input.selectionEndScreenY = my;
+      input.selectionComplete = true; // consumed by game loop
+    }
+
+    // Middle click release → stop pan
+    if (e.button === 1) {
       input.isDragging = false;
+    }
+
+    // Right click release → command if didn't drag far, else just stop pan
+    if (e.button === 2) {
+      input.isDragging = false;
+      if (isRightDragging) {
+        isRightDragging = false;
+        const dragDist = Math.sqrt(
+          (e.clientX - rightClickStartX) ** 2 +
+          (e.clientY - rightClickStartY) ** 2,
+        );
+        if (dragDist < SELECTION_DRAG_THRESHOLD && input.selectedUnitIds.length > 0) {
+          // Right-click command: convert screen coords to world coords
+          const worldX = mx / camera.zoom + camera.x;
+          const worldY = my / camera.zoom + camera.y;
+          input.rightClickCommand = {
+            worldX: worldX / TILE_SIZE,
+            worldY: worldY / TILE_SIZE,
+          };
+        }
+      }
     }
   };
 
@@ -151,6 +265,31 @@ export function setupInputListeners(
     canvas.removeEventListener("mouseleave", onMouseLeave);
     canvas.removeEventListener("contextmenu", onContextMenu);
   };
+}
+
+/**
+ * Convert screen coordinates to world tile coordinates.
+ */
+export function screenToTile(
+  screenX: number,
+  screenY: number,
+  camera: Camera,
+): { tileX: number; tileY: number } {
+  const worldX = screenX / camera.zoom + camera.x;
+  const worldY = screenY / camera.zoom + camera.y;
+  return {
+    tileX: worldX / TILE_SIZE,
+    tileY: worldY / TILE_SIZE,
+  };
+}
+
+/**
+ * Check if a drag was large enough to be a box selection (vs single click).
+ */
+export function isBoxSelection(input: InputState): boolean {
+  const dx = input.selectionEndScreenX - input.selectionStartScreenX;
+  const dy = input.selectionEndScreenY - input.selectionStartScreenY;
+  return Math.sqrt(dx * dx + dy * dy) >= SELECTION_DRAG_THRESHOLD;
 }
 
 /**

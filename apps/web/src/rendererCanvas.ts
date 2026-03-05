@@ -265,6 +265,7 @@ export function renderUnits(
   canvasWidth: number,
   canvasHeight: number,
   gameTime: number,
+  selectedUnitIds?: Set<number>,
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
 
@@ -295,6 +296,17 @@ export function renderUnits(
     const unitSize = Math.max(8, tileScreenSize * 0.7);
     const cx = screenX + tileScreenSize / 2;
     const cy = screenY + tileScreenSize / 2;
+
+    const isSelected = selectedUnitIds?.has(unit.id) ?? false;
+
+    // --- Selection highlight ring (drawn under unit) ---
+    if (isSelected) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, unitSize / 2 + 3, 0, Math.PI * 2);
+      ctx.strokeStyle = "#00ff88";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
 
     // --- Team colors ---
     const isPlayer = unit.team === "player";
@@ -328,6 +340,35 @@ export function renderUnits(
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(symbol, cx, cy);
+
+    // --- Manual override indicator ---
+    if (unit.manualOverride && isPlayer) {
+      const indicatorSize = Math.max(8, unitSize * 0.45);
+      const ix = cx + unitSize / 2 - 1;
+      const iy = cy - unitSize / 2 - 1;
+
+      // Yellow diamond background
+      ctx.save();
+      ctx.fillStyle = "#ffcc00";
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(ix, iy - indicatorSize / 2);
+      ctx.lineTo(ix + indicatorSize / 2, iy);
+      ctx.lineTo(ix, iy + indicatorSize / 2);
+      ctx.lineTo(ix - indicatorSize / 2, iy);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // "M" label
+      ctx.font = `bold ${Math.max(6, indicatorSize * 0.6)}px monospace`;
+      ctx.fillStyle = "#000";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("M", ix, iy);
+      ctx.restore();
+    }
 
     // --- Health bar ---
     const hpRatio = unit.hp / unit.maxHp;
@@ -553,6 +594,142 @@ export function renderFrontLabels(
   ctx.textAlign = "start";
   ctx.textBaseline = "alphabetic";
 }
+
+// ──────────────────────────────────────────────
+// Render: Selection box (green rectangle while dragging)
+// ──────────────────────────────────────────────
+
+export function renderSelectionBox(
+  ctx: CanvasRenderingContext2D,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): void {
+  const left = Math.min(x1, x2);
+  const top = Math.min(y1, y2);
+  const w = Math.abs(x2 - x1);
+  const h = Math.abs(y2 - y1);
+
+  ctx.save();
+  ctx.fillStyle = "rgba(0,255,136,0.12)";
+  ctx.fillRect(left, top, w, h);
+  ctx.strokeStyle = "#00ff88";
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 3]);
+  ctx.strokeRect(left, top, w, h);
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// ──────────────────────────────────────────────
+// Render: Selected unit info panel (bottom-left)
+// ──────────────────────────────────────────────
+
+export function renderInfoPanel(
+  ctx: CanvasRenderingContext2D,
+  selectedUnits: Unit[],
+  canvasWidth: number,
+  canvasHeight: number,
+): { returnToAIBtnRect: { x: number; y: number; w: number; h: number } | null } {
+  if (selectedUnits.length === 0) return { returnToAIBtnRect: null };
+
+  const panelW = 220;
+  const lineH = 16;
+  const padding = 10;
+  const maxLines = 8;
+
+  // Count types
+  const typeCounts = new Map<string, number>();
+  let totalHp = 0;
+  let totalMaxHp = 0;
+  let manualCount = 0;
+
+  for (const u of selectedUnits) {
+    typeCounts.set(u.type, (typeCounts.get(u.type) ?? 0) + 1);
+    totalHp += u.hp;
+    totalMaxHp += u.maxHp;
+    if (u.manualOverride) manualCount++;
+  }
+
+  // Build info lines
+  const lines: string[] = [];
+  lines.push(`Selected: ${selectedUnits.length} unit${selectedUnits.length > 1 ? "s" : ""}`);
+  for (const [type, count] of typeCounts) {
+    const label = (UNIT_LABELS as Record<string, string>)[type] ?? type;
+    lines.push(`  ${label}: ${count}`);
+  }
+  const hpPct = Math.round((totalHp / totalMaxHp) * 100);
+  lines.push(`HP: ${totalHp}/${totalMaxHp} (${hpPct}%)`);
+  if (manualCount > 0) {
+    lines.push(`Manual: ${manualCount} unit${manualCount > 1 ? "s" : ""}`);
+  }
+
+  const visibleLines = lines.slice(0, maxLines);
+  const panelH = visibleLines.length * lineH + padding * 2 + 28; // extra for button
+
+  const px = 10;
+  const py = canvasHeight - panelH - 10;
+
+  // Background
+  ctx.save();
+  ctx.fillStyle = "rgba(10,15,30,0.85)";
+  ctx.fillRect(px, py, panelW, panelH);
+  ctx.strokeStyle = "#3a5a8a";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(px, py, panelW, panelH);
+
+  // Text lines
+  ctx.font = "12px monospace";
+  ctx.fillStyle = "#c0d0e0";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  for (let i = 0; i < visibleLines.length; i++) {
+    ctx.fillText(visibleLines[i], px + padding, py + padding + i * lineH);
+  }
+
+  // "Return to AI" button (always shown when units are selected)
+  const btnW = panelW - padding * 2;
+  const btnH = 20;
+  const btnX = px + padding;
+  const btnY = py + panelH - btnH - padding + 2;
+
+  ctx.fillStyle = manualCount > 0 ? "#cc8800" : "#555555";
+  ctx.fillRect(btnX, btnY, btnW, btnH);
+  ctx.strokeStyle = "#ffcc00";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(btnX, btnY, btnW, btnH);
+
+  ctx.font = "bold 11px monospace";
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(
+    manualCount > 0 ? "[ESC] Return to AI" : "[ESC] Deselect",
+    btnX + btnW / 2,
+    btnY + btnH / 2,
+  );
+
+  ctx.restore();
+  ctx.textAlign = "start";
+  ctx.textBaseline = "alphabetic";
+
+  return { returnToAIBtnRect: { x: btnX, y: btnY, w: btnW, h: btnH } };
+}
+
+const UNIT_LABELS: Record<string, string> = {
+  infantry: "Infantry",
+  light_tank: "Light Tank",
+  main_tank: "Main Tank",
+  artillery: "Artillery",
+  patrol_boat: "Patrol Boat",
+  destroyer: "Destroyer",
+  cruiser: "Cruiser",
+  carrier: "Carrier",
+  fighter: "Fighter",
+  bomber: "Bomber",
+  recon_plane: "Recon",
+};
 
 // ──────────────────────────────────────────────
 // Render: Combat Effects (attack lines + explosions)

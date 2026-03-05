@@ -94,6 +94,54 @@ export function tick(state: GameState, dt: number): void {
   }
 }
 
+/**
+ * MVP local detour: when next step is blocked, probe candidate headings
+ * (+45, -45, +90, -90 degrees) at step distances 1-2 tiles.
+ * Returns a short detour waypoint or null if no passable candidate found.
+ * Deterministic: fixed candidate order, no randomness.
+ */
+function tryLocalDetour(
+  unit: Unit,
+  blockedTileX: number,
+  blockedTileY: number,
+  headingX: number,
+  headingY: number,
+  state: GameState,
+): { x: number; y: number } | null {
+  // Candidate angle offsets in radians (fixed order for determinism)
+  const angleOffsets = [
+    Math.PI / 4,   // +45°
+    -Math.PI / 4,  // -45°
+    Math.PI / 2,   // +90°
+    -Math.PI / 2,  // -90°
+  ];
+  const stepDistances = [1.0, 2.0];
+
+  const baseAngle = Math.atan2(headingY, headingX);
+
+  for (const offset of angleOffsets) {
+    const angle = baseAngle + offset;
+    const dirX = Math.cos(angle);
+    const dirY = Math.sin(angle);
+
+    for (const stepDist of stepDistances) {
+      const candidateX = unit.position.x + dirX * stepDist;
+      const candidateY = unit.position.y + dirY * stepDist;
+      const candTileX = Math.floor(candidateX);
+      const candTileY = Math.floor(candidateY);
+
+      // Skip if same as blocked tile
+      if (candTileX === blockedTileX && candTileY === blockedTileY) continue;
+
+      if (canUnitEnterTile(unit.type, candTileX, candTileY, state)) {
+        return { x: candidateX, y: candidateY };
+      }
+    }
+  }
+
+  return null; // no passable candidate found
+}
+
 function moveUnit(unit: Unit, dt: number, state: GameState): void {
   if (!unit.target) return;
 
@@ -159,10 +207,20 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
   if (newTileX !== tileX || newTileY !== tileY) {
     // About to enter a new tile — check passability
     if (!canUnitEnterTile(unit.type, newTileX, newTileY, state)) {
-      // Blocked — stop movement
-      unit.target = null;
-      unit.waypoints = [];
-      unit.state = "idle";
+      // Blocked — try local detour before stopping
+      const detour = tryLocalDetour(unit, newTileX, newTileY, nx, ny, state);
+      if (detour) {
+        // Insert detour waypoint: go to detour first, then resume to original target
+        const originalTarget = unit.target;
+        unit.target = detour;
+        // Prepend detour, keep original target in waypoints
+        unit.waypoints = [detour, originalTarget, ...unit.waypoints.slice(1)];
+      } else {
+        // No detour found — stop
+        unit.target = null;
+        unit.waypoints = [];
+        unit.state = "idle";
+      }
       return;
     }
   }

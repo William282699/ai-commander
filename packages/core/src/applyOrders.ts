@@ -36,6 +36,36 @@ export function replaceProvisionalOrders(state: GameState, newOrders: Order[]): 
   applyOrders(state, newOrders);
 }
 
+/**
+ * Apply player-issued commands (from mouse interaction).
+ * Sets manualOverride=true on affected units and bypasses the
+ * override check so the order always applies.
+ */
+export function applyPlayerCommands(state: GameState, orders: Order[]): void {
+  for (const order of orders) {
+    for (const unitId of order.unitIds) {
+      const unit = state.units.get(unitId);
+      if (!unit) continue;
+      if (unit.team !== "player") continue;
+
+      unit.manualOverride = true;
+      applyOrderToUnit(unit, order, state);
+    }
+  }
+}
+
+/**
+ * Release manual override on specified units, returning them to AI control.
+ */
+export function releaseManualOverride(state: GameState, unitIds: number[]): void {
+  for (const id of unitIds) {
+    const unit = state.units.get(id);
+    if (unit && unit.team === "player") {
+      unit.manualOverride = false;
+    }
+  }
+}
+
 function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
   // Store order on unit
   unit.orders = [order];
