@@ -28,6 +28,7 @@ import {
   releaseManualOverride,
   processEnemyAI,
   processAutoBehavior,
+  processEconomy,
 } from "@ai-commander/core";
 import type { Unit, Order, GameState } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
@@ -130,7 +131,11 @@ function findEnemyAtPosition(
   return closest;
 }
 
-export function GameCanvas() {
+interface GameCanvasProps {
+  onStateReady?: (getter: () => GameState | null) => void;
+}
+
+export function GameCanvas({ onStateReady }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<GameState | null>(null);
 
@@ -153,6 +158,9 @@ export function GameCanvas() {
     // Create game state (terrain + units + fog + facilities + ...)
     const state = createInitialGameState();
     stateRef.current = state;
+
+    // Expose state getter to parent (for top bar etc)
+    onStateReady?.(() => stateRef.current);
 
     // Camera: center on player HQ (tile 100, 7)
     const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
@@ -293,6 +301,9 @@ export function GameCanvas() {
 
       // --- Simulation ---
       tick(state, dt);
+
+      // --- Economy (Day 9) ---
+      processEconomy(state, dt);         // income, capture, production, readiness
 
       // --- AI & Auto-Behavior (Day 8) ---
       processEnemyAI(state, dt);        // enemy strategic decisions (5s interval)
