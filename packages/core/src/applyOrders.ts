@@ -70,6 +70,22 @@ export function releaseManualOverride(state: GameState, unitIds: number[]): void
   }
 }
 
+/**
+ * Apply a batch of orders to enemy units.
+ * Used by processEnemyAI for strategic decisions.
+ * Mirrors applyOrders but filters for enemy team.
+ */
+export function applyEnemyOrders(state: GameState, orders: Order[]): void {
+  for (const order of orders) {
+    for (const unitId of order.unitIds) {
+      const unit = state.units.get(unitId);
+      if (!unit) continue;
+      if (unit.team !== "enemy") continue;
+      applyOrderToUnit(unit, order, state);
+    }
+  }
+}
+
 function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
   // Store order on unit
   unit.orders = [order];

@@ -1,9 +1,10 @@
-export { applyOrders, replaceProvisionalOrders, applyPlayerCommands, releaseManualOverride } from "./applyOrders";
+export { applyOrders, applyEnemyOrders, replaceProvisionalOrders, applyPlayerCommands, releaseManualOverride } from "./applyOrders";
 export { tick, canUnitEnterTile } from "./sim";
 export { calculateDamage, processCombat } from "./combat";
 export { createFogState, updateFog } from "./fog";
 export { processEconomy } from "./economy";
 export { processEnemyAI } from "./enemyAI";
+export { processAutoBehavior } from "./autoBehavior";
 export { processMissions } from "./missions";
 export { createDefaultStyle, updateStyleParam } from "./styleEngine";
 export { resolveIntent, isIntentSupported } from "./tacticalPlanner";
