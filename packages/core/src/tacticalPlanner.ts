@@ -232,8 +232,8 @@ function resolveRetreat(
     return { orders: [], log: "无可用单位执行撤退", degraded: true };
   }
 
-  // Retreat target: move towards player base (north)
-  const playerBase: Position = { x: 100, y: 10 };
+  // Retreat target: move towards player HQ (dynamic lookup)
+  const playerBase: Position = findPlayerHQPosition(state) ?? { x: 100, y: 10 };
 
   const orders: Order[] = [];
   for (const u of units) {
@@ -635,6 +635,16 @@ function mapUrgency(
     default:
       return "low";
   }
+}
+
+/** Find player HQ position from facilities. Returns null if not found. */
+function findPlayerHQPosition(state: GameState): Position | null {
+  for (const [, f] of state.facilities) {
+    if (f.team === "player" && f.type === "headquarters") {
+      return { ...f.position };
+    }
+  }
+  return null;
 }
 
 // ── Passability helpers ──
