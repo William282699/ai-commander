@@ -26,6 +26,8 @@ import {
   updateFog,
   applyPlayerCommands,
   releaseManualOverride,
+  processEnemyAI,
+  processAutoBehavior,
 } from "@ai-commander/core";
 import type { Unit, Order, GameState } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
@@ -291,6 +293,11 @@ export function GameCanvas() {
 
       // --- Simulation ---
       tick(state, dt);
+
+      // --- AI & Auto-Behavior (Day 8) ---
+      processEnemyAI(state, dt);        // enemy strategic decisions (5s interval)
+      processAutoBehavior(state, dt);    // both teams micro-behavior (2s interval)
+
       updateFog(state);
 
       // --- Rendering ---
