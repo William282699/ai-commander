@@ -2,7 +2,7 @@ export { applyOrders, applyEnemyOrders, replaceProvisionalOrders, applyPlayerCom
 export { tick, canUnitEnterTile } from "./sim";
 export { calculateDamage, processCombat } from "./combat";
 export { createFogState, updateFog } from "./fog";
-export { processEconomy } from "./economy";
+export { processEconomy, enqueueProduction, canUnitMove, isMechanized } from "./economy";
 export { processEnemyAI } from "./enemyAI";
 export { processAutoBehavior } from "./autoBehavior";
 export { processMissions } from "./missions";

@@ -11,6 +11,7 @@ import {
   getUnitCategory,
 } from "@ai-commander/shared";
 import { processCombat } from "./combat";
+import { canUnitMove, consumeMovementFuel } from "./economy";
 
 /**
  * Check if a unit type can enter a specific tile.
@@ -144,6 +145,9 @@ function tryLocalDetour(
 }
 
 function moveUnit(unit: Unit, dt: number, state: GameState): void {
+  // Fuel gate: mechanized units cannot move if team fuel is 0
+  if (!canUnitMove(unit, state)) return;
+
   // If we have a locked attack target, keep movement target synced to enemy's live position.
   if (unit.attackTarget !== null) {
     const tracked = state.units.get(unit.attackTarget);
@@ -251,6 +255,12 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
       return;
     }
   }
+
+  // Consume fuel proportional to tiles moved
+  const moved = Math.sqrt(
+    (newX - unit.position.x) ** 2 + (newY - unit.position.y) ** 2,
+  );
+  consumeMovementFuel(unit, moved, state);
 
   unit.position.x = newX;
   unit.position.y = newY;
