@@ -39,6 +39,34 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   "hold",
 ];
 
+// ── Front alias map (Chinese + English → canonical front id) ──
+
+const FRONT_ALIAS_TO_ID: Readonly<Record<string, string>> = {
+  // 1. North Plains
+  "北线": "front_north", "北路": "front_north", "一线": "front_north", "1": "front_north",
+  north: "front_north", northfront: "front_north", frontnorth: "front_north", northplains: "front_north",
+  // 2. Central City
+  "中线": "front_center", "中路": "front_center", "二线": "front_center", "2": "front_center",
+  center: "front_center", central: "front_center", mid: "front_center", middle: "front_center",
+  frontcenter: "front_center",
+  // 3. Strait Waters
+  "海峡": "front_strait", "海线": "front_strait", "三线": "front_strait", "3": "front_strait",
+  strait: "front_strait", naval: "front_strait", sea: "front_strait", frontstrait: "front_strait",
+  // 4. South Hills
+  "南线": "front_south", "南路": "front_south", "四线": "front_south", "4": "front_south",
+  south: "front_south", southfront: "front_south", frontsouth: "front_south",
+  // 5. Far South
+  "远南": "front_far_south", "远南线": "front_far_south", "五线": "front_far_south", "5": "front_far_south",
+  farsouth: "front_far_south", farsouthfront: "front_far_south", frontfarsouth: "front_far_south",
+};
+
+// ── Source units result (strict mode) ──
+
+interface SourceUnitsResult {
+  units: Unit[];
+  error?: string;
+}
+
 export function isIntentSupported(type: IntentType): boolean {
   return SUPPORTED_INTENTS.includes(type);
 }
@@ -97,7 +125,12 @@ function resolveAttack(
     return { orders: [], log: "无法确定攻击目标位置", degraded: true };
   }
 
-  let units = resolveSourceUnits(intent, state);
+  const source = resolveSourceUnits(intent, state);
+  if (source.error) {
+    return { orders: [], log: source.error, degraded: true };
+  }
+
+  let units = source.units;
   if (intent.unitType) {
     units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
   }
@@ -131,8 +164,12 @@ function resolveDefend(
   style: StyleParams,
 ): ResolveResult {
   const target = resolveTarget(intent, state);
-  let units = resolveSourceUnits(intent, state);
+  const source = resolveSourceUnits(intent, state);
+  if (source.error) {
+    return { orders: [], log: source.error, degraded: true };
+  }
 
+  let units = source.units;
   if (intent.unitType) {
     units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
   }
@@ -170,8 +207,12 @@ function resolveRetreat(
   state: GameState,
   style: StyleParams,
 ): ResolveResult {
-  let units = resolveSourceUnits(intent, state);
+  const source = resolveSourceUnits(intent, state);
+  if (source.error) {
+    return { orders: [], log: source.error, degraded: true };
+  }
 
+  let units = source.units;
   if (intent.unitType) {
     units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
   }
@@ -224,7 +265,12 @@ function resolveRecon(
     return { orders: [], log: "无法确定侦察目标位置", degraded: true };
   }
 
-  let units = resolveSourceUnits(intent, state);
+  const source = resolveSourceUnits(intent, state);
+  if (source.error) {
+    return { orders: [], log: source.error, degraded: true };
+  }
+
+  let units = source.units;
 
   // Prefer fast / scout units
   const scouts = units.filter(
@@ -263,8 +309,12 @@ function resolveHold(
   state: GameState,
   style: StyleParams,
 ): ResolveResult {
-  let units = resolveSourceUnits(intent, state);
+  const source = resolveSourceUnits(intent, state);
+  if (source.error) {
+    return { orders: [], log: source.error, degraded: true };
+  }
 
+  let units = source.units;
   if (intent.unitType) {
     units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
   }
@@ -318,36 +368,88 @@ function resolveTarget(intent: Intent, state: GameState): Position | null {
   return null;
 }
 
-/** Find player units to assign, prioritizing the specified front. */
-function resolveSourceUnits(intent: Intent, state: GameState): Unit[] {
-  // Try fromFront first
-  if (intent.fromFront) {
-    const front = findFront(state, intent.fromFront);
-    if (front) {
-      const units = getUnitsOnFront(state, front);
-      if (units.length > 0) return units;
+/**
+ * Find player units to assign (strict mode).
+ *
+ * Rules:
+ * - fromFront given but not found → error (degraded)
+ * - fromFront found but 0 units   → error (degraded)
+ * - only toFront: prefer local units; local empty → global fallback
+ * - no front hints at all → global fallback
+ * - NO "smart from↔to swap" — never silently reinterpret fromFront
+ */
+function resolveSourceUnits(intent: Intent, state: GameState): SourceUnitsResult {
+  const fromHint =
+    typeof intent.fromFront === "string" && intent.fromFront.trim().length > 0
+      ? intent.fromFront
+      : null;
+  const toHint =
+    typeof intent.toFront === "string" && intent.toFront.trim().length > 0
+      ? intent.toFront
+      : null;
+
+  // ── fromFront: strict ──
+  if (fromHint) {
+    const sourceFront = findFront(state, fromHint);
+    if (!sourceFront) {
+      return { units: [], error: `无法匹配来源战线: ${fromHint}` };
+    }
+    const frontUnits = getUnitsOnFront(state, sourceFront);
+    if (frontUnits.length === 0) {
+      return { units: [], error: `战线 "${sourceFront.name}" 暂无可用单位` };
+    }
+    return { units: frontUnits };
+  }
+
+  // ── toFront only: prefer local, fallback global ──
+  if (toHint) {
+    const targetFront = findFront(state, toHint);
+    if (targetFront) {
+      const localUnits = getUnitsOnFront(state, targetFront);
+      if (localUnits.length > 0) return { units: localUnits };
+      // Local empty — user wants to send units TO this front, use global pool
+    } else {
+      return { units: [], error: `无法匹配目标战线: ${toHint}` };
     }
   }
-  // Try toFront (for defend / hold the "source" is the front itself)
-  if (intent.toFront) {
-    const front = findFront(state, intent.toFront);
-    if (front) {
-      const units = getUnitsOnFront(state, front);
-      if (units.length > 0) return units;
-    }
-  }
-  // Fallback: all non-overridden player units
+
+  // ── No front hints (or toFront with no local units): global fallback ──
   const all: Unit[] = [];
   state.units.forEach((u) => {
     if (u.team === "player" && u.state !== "dead" && !u.manualOverride) {
       all.push(u);
     }
   });
-  return all;
+  return { units: all };
 }
 
-/** Fuzzy-match a front by id or name substring. */
+/** Normalize a front hint for alias lookup: trim, lowercase, strip separators. */
+function normalizeFrontHint(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s_.\-]+/g, "");
+}
+
+/**
+ * Fuzzy-match a front by alias → exact id/name → substring.
+ * Three layers: alias table → normalized exact → lowercase substring.
+ */
 function findFront(state: GameState, hint: string): Front | undefined {
+  // Layer 1: alias table
+  const normalized = normalizeFrontHint(hint);
+  const aliasedId = FRONT_ALIAS_TO_ID[normalized];
+  if (aliasedId) {
+    const aliased = state.fronts.find((f) => f.id === aliasedId);
+    if (aliased) return aliased;
+  }
+
+  // Layer 2: exact match on normalized id/name
+  const exact = state.fronts.find(
+    (f) =>
+      normalizeFrontHint(f.id) === normalized ||
+      normalizeFrontHint(f.name) === normalized,
+  );
+  if (exact) return exact;
+
+  // Layer 3: substring match (original behavior)
   const lower = hint.toLowerCase();
   return state.fronts.find(
     (f) =>
