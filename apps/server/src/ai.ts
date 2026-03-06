@@ -9,9 +9,14 @@ import {
   validateAdvisorResponse,
   validateLightResponse,
   createFallbackResponse,
-  VALID_INTENT_TYPES,
+  DAY7_SUPPORTED_INTENT_TYPES,
 } from "@ai-commander/shared";
-import type { AdvisorResponse, LightAdvisorResponse } from "@ai-commander/shared";
+import type {
+  AdvisorResponse,
+  LightAdvisorResponse,
+  Intent,
+  IntentType,
+} from "@ai-commander/shared";
 import { createProvider, getProviderConfig, type LLMProvider, type ChatMessage } from "./providers.js";
 
 // ── System Prompt ──
@@ -34,7 +39,7 @@ const SYSTEM_PROMPT = `你是一名现代战争军事参谋，代号"铁幕"。�
       "risk": 0.0-1.0,
       "reward": 0.0-1.0,
       "intent": {
-        "type": "${VALID_INTENT_TYPES.join("|")}",
+        "type": "${DAY7_SUPPORTED_INTENT_TYPES.join("|")}",
         "fromFront": "战线名(可选)",
         "toFront": "战线名(可选)",
         "targetFacility": "设施ID(可选)",
@@ -64,6 +69,55 @@ const SYSTEM_PROMPT = `你是一名现代战争军事参谋，代号"铁幕"。�
 
 const LIGHT_SYSTEM_PROMPT =
   '你是军事参谋。根据战场摘要，给出一句话简报和紧急度评分。只返回JSON: {"brief": "...", "urgency": 0.0-1.0}';
+
+// ── Day 7 intent normalization ──
+// Maps unsupported intents to their closest Day7 equivalent.
+// Keeps VALID_INTENT_TYPES in schema.ts intact for Day10+ forward compatibility.
+
+const DAY7_INTENT_MAP: Readonly<Partial<Record<IntentType, IntentType>>> = {
+  reinforce: "defend",
+  flank: "attack",
+  sabotage: "attack",
+  patrol: "recon",
+  escort: "defend",
+  air_support: "attack",
+  cover_retreat: "retreat",
+  produce: "hold",
+  trade: "hold",
+};
+
+function normalizeIntentForDay7(intent: Intent): {
+  intent: Intent;
+  mappedFrom?: IntentType;
+} {
+  if (DAY7_SUPPORTED_INTENT_TYPES.includes(intent.type)) {
+    return { intent };
+  }
+  const mappedType = DAY7_INTENT_MAP[intent.type] ?? "hold";
+  return {
+    intent: { ...intent, type: mappedType },
+    mappedFrom: intent.type,
+  };
+}
+
+function normalizeAdvisorForDay7(data: AdvisorResponse): AdvisorResult {
+  const mapped: string[] = [];
+  const options = data.options.map((opt) => {
+    const normalized = normalizeIntentForDay7(opt.intent);
+    if (normalized.mappedFrom) {
+      mapped.push(`${normalized.mappedFrom}→${normalized.intent.type}`);
+    }
+    return { ...opt, intent: normalized.intent };
+  });
+
+  if (mapped.length === 0) return { data };
+
+  const dedup = Array.from(new Set(mapped));
+  return {
+    data: { ...data, options },
+    warning: `部分意图超出Day7支持范围，已自动转换: ${dedup.join(", ")}`,
+  };
+}
 
 // ── Provider singleton ──
 
@@ -163,7 +217,7 @@ ${styleNote}
     const validated = sanitize(raw);
 
     if (validated) {
-      return { data: validated };
+      return normalizeAdvisorForDay7(validated);
     }
 
     // LLM returned something but not valid JSON → fallback
