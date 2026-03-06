@@ -20,6 +20,7 @@ import type {
   UnitCategoryHint,
 } from "@ai-commander/shared";
 import { getUnitCategory } from "@ai-commander/shared";
+import { canUnitEnterTile } from "./sim";
 
 // ── Result type ──
 
@@ -134,13 +135,14 @@ function resolveAttack(
   if (intent.unitType) {
     units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
   }
+  units = filterByTargetPassability(units, target, state);
+
+  if (units.length === 0) {
+    return { orders: [], log: "目标地形不可达，无可用单位执行进攻", degraded: true };
+  }
 
   const count = resolveQuantity(intent.quantity, units.length, style);
   units = sortByDistance(units, target).slice(0, count);
-
-  if (units.length === 0) {
-    return { orders: [], log: "无可用单位执行进攻", degraded: true };
-  }
 
   const orders: Order[] = [
     {
@@ -172,6 +174,12 @@ function resolveDefend(
   let units = source.units;
   if (intent.unitType) {
     units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+  }
+  if (target) {
+    units = filterByTargetPassability(units, target, state);
+    if (units.length === 0) {
+      return { orders: [], log: "目标地形不可达，无可用单位执行防御", degraded: true };
+    }
   }
 
   const count = resolveQuantity(intent.quantity, units.length, style);
@@ -227,12 +235,13 @@ function resolveRetreat(
   // Retreat target: move towards player base (north)
   const playerBase: Position = { x: 100, y: 10 };
 
-  const orders: Order[] = units.map((u) => {
+  const orders: Order[] = [];
+  for (const u of units) {
     const dx = playerBase.x - u.position.x;
     const dy = playerBase.y - u.position.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     const retreatDist = Math.min(25, dist * 0.6);
-    const retreatTarget: Position =
+    const roughTarget: Position =
       dist < 1
         ? playerBase
         : {
@@ -240,17 +249,27 @@ function resolveRetreat(
             y: Math.round(u.position.y + (dy / dist) * retreatDist),
           };
 
-    return {
+    const safeTarget = ensurePassableTarget(u, roughTarget, state);
+    if (!safeTarget) continue; // skip unit if no passable retreat point
+
+    orders.push({
       unitIds: [u.id],
       action: "retreat" as const,
-      target: retreatTarget,
+      target: safeTarget,
       priority: mapUrgency(intent.urgency),
-    };
-  });
+    });
+  }
+
+  if (orders.length === 0) {
+    return { orders: [], log: "撤退目标地形不可达，无可执行命令", degraded: true };
+  }
+
+  const skipped = units.length - orders.length;
+  const skipNote = skipped > 0 ? `（${skipped} 个单位因地形限制未下达）` : "";
 
   return {
     orders,
-    log: `命令 ${units.length} 个单位撤退至安全区域`,
+    log: `命令 ${orders.length} 个单位撤退至安全区域${skipNote}`,
     degraded: false,
   };
 }
@@ -279,7 +298,11 @@ function resolveRecon(
       u.type === "light_tank" ||
       u.type === "infantry",
   );
-  const available = scouts.length > 0 ? scouts : units;
+  const available = filterByTargetPassability(
+    scouts.length > 0 ? scouts : units,
+    target,
+    state,
+  );
 
   const count = resolveQuantity(intent.quantity ?? "few", available.length, style);
   const selected = sortByDistance(available, target).slice(0, count);
@@ -612,4 +635,44 @@ function mapUrgency(
     default:
       return "low";
   }
+}
+
+// ── Passability helpers ──
+
+/** Filter units that can reach the target tile. */
+function filterByTargetPassability(
+  units: Unit[],
+  target: Position,
+  state: GameState,
+): Unit[] {
+  const tx = Math.floor(target.x);
+  const ty = Math.floor(target.y);
+  return units.filter((u) => canUnitEnterTile(u.type, tx, ty, state));
+}
+
+/** If target tile is impassable for unit, find nearest passable tile (spiral search, max 12 tiles). */
+function ensurePassableTarget(
+  unit: Unit,
+  target: Position,
+  state: GameState,
+): Position | null {
+  const tx = Math.floor(target.x);
+  const ty = Math.floor(target.y);
+  if (canUnitEnterTile(unit.type, tx, ty, state)) return target;
+
+  // Spiral outward looking for passable tile
+  const maxRadius = 12;
+  for (let r = 1; r <= maxRadius; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = tx + dx;
+        const y = ty + dy;
+        if (canUnitEnterTile(unit.type, x, y, state)) {
+          return { x, y };
+        }
+      }
+    }
+  }
+  return null;
 }
