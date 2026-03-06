@@ -291,7 +291,16 @@ function executePatrol(state: GameState, assessment: FrontAssessment): void {
     if (u.state === "patrolling" || u.state === "attacking") continue;
 
     const patrolTarget = randomPointInFront(state, front, u);
-    if (!patrolTarget) continue;
+    if (!patrolTarget) {
+      // C3: no valid patrol point → explicit hold
+      orders.push({
+        unitIds: [u.id],
+        action: "hold",
+        target: null,
+        priority: "low",
+      });
+      continue;
+    }
 
     orders.push({
       unitIds: [u.id],
