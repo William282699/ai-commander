@@ -263,10 +263,48 @@ function processPatrolTasks(state: GameState): void {
 
     if (!anySuccess) {
       task.consecutiveFails++;
+      // Cooldown escalation: 3+ consecutive fails → pause
+      if (task.consecutiveFails >= 3) {
+        task.paused = true;
+        task.pauseUntil = state.time + Math.min(30, 10 * task.consecutiveFails);
+      }
     } else {
       task.consecutiveFails = 0;
     }
   }
+
+  // Emit patrol summary every 30s
+  emitPatrolSummary(state);
+}
+
+// ── Patrol summary (every 30s) ──
+
+const PATROL_SUMMARY_INTERVAL = 30; // seconds
+let lastPatrolSummaryTime = 0;
+
+function emitPatrolSummary(state: GameState): void {
+  if (state.time - lastPatrolSummaryTime < PATROL_SUMMARY_INTERVAL) return;
+  lastPatrolSummaryTime = state.time;
+
+  if (state.patrolTasks.length === 0) return;
+
+  let activeUnits = 0;
+  let pausedTasks = 0;
+  for (const task of state.patrolTasks) {
+    activeUnits += task.unitIds.length;
+    if (task.paused) pausedTasks++;
+  }
+
+  if (activeUnits === 0) return;
+
+  let msg = `巡逻: ${activeUnits}个单位执行中`;
+  if (pausedTasks > 0) {
+    msg += `, ${pausedTasks}个任务暂停`;
+  }
+
+  // Use dedicated dedup — PATROL_SUMMARY only emits every 30s so no extra dedup needed
+  state.diagnostics.push({ time: state.time, code: "PATROL_SUMMARY", message: msg });
+  if (state.diagnostics.length > 50) state.diagnostics.shift();
 }
 
 // ── Fog frontier helpers ──

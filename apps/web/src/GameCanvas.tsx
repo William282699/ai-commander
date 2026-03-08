@@ -51,6 +51,7 @@ const DIAG_LEVEL: Record<string, MessageLevel> = {
   IMPASSABLE_TARGET: "warning",
   UNSUPPORTED_INTENT: "warning",
   DEGRADED_TARGET: "info",
+  PATROL_SUMMARY: "info",
 };
 
 /** Distance threshold for single-click unit selection (in tiles) */
