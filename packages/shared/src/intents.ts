@@ -47,4 +47,7 @@ export interface Intent {
   // Production / trade specifics
   produceType?: string;  // unit type to produce
   tradeAction?: string;  // buy_fuel, sell_ammo, etc.
+
+  // Patrol specifics (Day 9.5)
+  patrolRadius?: number; // 小=5, 中=10, 大=15 (clamped [3,30])
 }

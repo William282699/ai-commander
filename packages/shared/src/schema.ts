@@ -101,6 +101,11 @@ export function sanitizeIntent(raw: unknown): Intent | null {
   if (typeof obj.produceType === "string") intent.produceType = obj.produceType;
   if (typeof obj.tradeAction === "string") intent.tradeAction = obj.tradeAction;
 
+  // Patrol radius (Day 9.5): clamp [3, 30], integer
+  if (typeof obj.patrolRadius === "number") {
+    intent.patrolRadius = Math.round(Math.max(3, Math.min(30, obj.patrolRadius)));
+  }
+
   return intent;
 }
 

@@ -508,6 +508,13 @@ function resolveTrade(
   };
 }
 
+// Day 9.5: patrol radius constant mapping
+const PATROL_RADIUS_MAP: Record<string, number> = {
+  small: 5,  "小": 5,
+  medium: 10, "中": 10,
+  large: 15,  "大": 15,
+};
+
 function resolvePatrol(
   intent: Intent,
   state: GameState,
@@ -537,34 +544,43 @@ function resolvePatrol(
     return { orders: [], log: msg, degraded: true };
   }
 
-  // ④ + ③: passability degradation + light spread for patrol with target
-  if (target) {
-    const spread = createOrdersWithSpread(
-      selected, target, state, "patrol", mapUrgency(intent.urgency), 1.0,
-    );
-    if (spread.orders.length === 0) {
-      const msg = "巡逻目标不可达";
-      pushDiagnostic(state, "IMPASSABLE_TARGET", msg);
-      return { orders: [], log: msg, degraded: true };
-    }
-    let log = `派出 ${spread.orders.length} 个单位巡逻 (${Math.round(target.x)},${Math.round(target.y)})`;
-    if (spread.degradedCount > 0) {
-      log += ` (${spread.degradedCount} 个已调整目标)`;
-    }
-    return { orders: spread.orders, log, degraded: false };
+  // Day 9.5: resolve patrol radius
+  let radius = 10; // default medium
+  if (intent.patrolRadius !== undefined) {
+    // Check if it maps to a named size, otherwise clamp numeric
+    const mapped = PATROL_RADIUS_MAP[String(intent.patrolRadius)];
+    radius = mapped ?? Math.round(Math.max(3, Math.min(30, intent.patrolRadius)));
   }
 
-  // No target: patrol in place (group order)
-  const orders: Order[] = [{
-    unitIds: selected.map((u) => u.id),
-    action: "patrol",
-    target: null,
+  // Compute center (from target or average of selected units)
+  let center: Position;
+  if (target) {
+    center = target;
+  } else {
+    let sumX = 0, sumY = 0;
+    for (const u of selected) {
+      sumX += u.position.x;
+      sumY += u.position.y;
+    }
+    center = { x: sumX / selected.length, y: sumY / selected.length };
+  }
+
+  // Quantize center to integer tile
+  const centerTileX = Math.round(center.x);
+  const centerTileY = Math.round(center.y);
+
+  // Create per-unit orders with patrolTaskParams
+  const orders: Order[] = selected.map((u) => ({
+    unitIds: [u.id],
+    action: "patrol" as OrderAction,
+    target: center,
     priority: mapUrgency(intent.urgency),
-  }];
+    patrolTaskParams: { centerTileX, centerTileY, radius },
+  }));
 
   return {
     orders,
-    log: `命令 ${selected.length} 个单位就地巡逻`,
+    log: `派出 ${selected.length} 个单位巡逻 (${centerTileX},${centerTileY}) 半径${radius}`,
     degraded: false,
   };
 }

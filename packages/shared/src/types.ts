@@ -192,6 +192,11 @@ export interface Order {
   isPlayerCommand?: boolean; // allows player-issued orders on manualOverride units
   produceUnitType?: UnitType; // for "produce" action: which unit type to build
   tradeType?: TradeType;      // for "trade" action: which trade to execute
+  patrolTaskParams?: {        // Day 9.5: patrol task creation params (integer tile coords)
+    centerTileX: number;
+    centerTileY: number;
+    radius: number;
+  };
 }
 
 // --- Production ---

@@ -3,7 +3,7 @@
 // All orders flow through here → mutate GameState
 // ============================================================
 
-import type { GameState, Order, Unit, Position, TradeType } from "@ai-commander/shared";
+import type { GameState, Order, Unit, Position, TradeType, PatrolTask } from "@ai-commander/shared";
 import { TRADE_COSTS } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
 
@@ -149,9 +149,61 @@ function executeTrade(
   }
 }
 
+/** Unbind a unit from its patrol task (if any). */
+function unbindPatrolTask(unit: Unit, state: GameState): void {
+  if (unit.patrolTaskId !== null) {
+    const task = state.patrolTasks.find((t) => t.id === unit.patrolTaskId);
+    if (task) {
+      task.unitIds = task.unitIds.filter((id) => id !== unit.id);
+    }
+    unit.patrolTaskId = null;
+  }
+}
+
+/**
+ * Find or create a PatrolTask matching the given params (exact integer key).
+ * Returns the task id.
+ */
+function findOrCreatePatrolTask(
+  state: GameState,
+  params: { centerTileX: number; centerTileY: number; radius: number },
+): number {
+  // Match existing task by exact integer key
+  for (const task of state.patrolTasks) {
+    if (
+      Math.round(task.center.x) === params.centerTileX &&
+      Math.round(task.center.y) === params.centerTileY &&
+      task.radius === params.radius
+    ) {
+      return task.id;
+    }
+  }
+
+  // Create new task
+  const id = state.nextPatrolTaskId++;
+  const newTask: PatrolTask = {
+    id,
+    center: { x: params.centerTileX, y: params.centerTileY },
+    radius: params.radius,
+    unitIds: [],
+    cooldownSec: 6,
+    lastTargetTime: 0,
+    consecutiveFails: 0,
+    paused: false,
+    pauseUntil: 0,
+  };
+  state.patrolTasks.push(newTask);
+  return id;
+}
+
 function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
   // Store order on unit
   unit.orders = [order];
+
+  // Day 9.5: all non-patrol orders unbind from patrol task
+  if (order.action !== "patrol") {
+    unbindPatrolTask(unit, state);
+  }
 
   switch (order.action) {
     case "attack_move":
@@ -193,10 +245,28 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
       break;
 
     case "patrol":
-      unit.state = "patrolling";
-      if (order.target) {
-        unit.patrolPoints = [{ ...unit.position }, order.target];
-        unit.target = order.target;
+      // Day 9.5: if order has patrolTaskParams, create/join PatrolTask
+      if (order.patrolTaskParams) {
+        // Unbind from any previous task first
+        unbindPatrolTask(unit, state);
+
+        const taskId = findOrCreatePatrolTask(state, order.patrolTaskParams);
+        const task = state.patrolTasks.find((t) => t.id === taskId)!;
+        if (!task.unitIds.includes(unit.id)) {
+          task.unitIds.push(unit.id);
+        }
+        unit.patrolTaskId = taskId;
+        // Set idle — processPatrolTasks will pick the first fog-frontier target
+        unit.state = "idle";
+        unit.target = null;
+        unit.patrolPoints = [];
+      } else {
+        // Legacy patrol (no task params — enemy AI, etc.)
+        unit.state = "patrolling";
+        if (order.target) {
+          unit.patrolPoints = [{ ...unit.position }, order.target];
+          unit.target = order.target;
+        }
       }
       break;
 
