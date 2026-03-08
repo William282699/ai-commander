@@ -8,6 +8,7 @@
 import type {
   GameState,
   Order,
+  OrderAction,
   StyleParams,
   Unit,
   Position,
@@ -201,31 +202,36 @@ function resolveAttack(
   if (intent.unitType) {
     units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
   }
-  units = filterByTargetPassability(units, target, state);
+
+  const count = resolveQuantity(intent.quantity, units.length, style);
+  units = sortByDistance(units, target).slice(0, count);
 
   if (units.length === 0) {
+    return { orders: [], log: "无可用单位执行进攻", degraded: true };
+  }
+
+  // ④ + ③: spread targets + passability degradation (replaces filterByTargetPassability)
+  const spread = createOrdersWithSpread(
+    units, target, state, "attack_move", mapUrgency(intent.urgency), 1.5,
+  );
+
+  if (spread.orders.length === 0) {
     const msg = "目标地形不可达，无可用单位执行进攻";
     pushDiagnostic(state, "IMPASSABLE_TARGET", msg);
     return { orders: [], log: msg, degraded: true };
   }
 
-  const count = resolveQuantity(intent.quantity, units.length, style);
-  units = sortByDistance(units, target).slice(0, count);
+  let log = `调度 ${spread.orders.length} 个单位向 (${Math.round(target.x)},${Math.round(target.y)}) 发起进攻`;
+  if (spread.degradedCount > 0) {
+    log += ` (${spread.degradedCount} 个已调整目标)`;
+    pushDiagnostic(state, "DEGRADED_TARGET",
+      `${spread.degradedCount} 个单位目标已调整为最近可达点`);
+  }
+  if (spread.skippedCount > 0) {
+    log += ` (${spread.skippedCount} 个无法到达已跳过)`;
+  }
 
-  const orders: Order[] = [
-    {
-      unitIds: units.map((u) => u.id),
-      action: "attack_move",
-      target,
-      priority: mapUrgency(intent.urgency),
-    },
-  ];
-
-  return {
-    orders,
-    log: `调度 ${units.length} 个单位向 (${Math.round(target.x)},${Math.round(target.y)}) 发起进攻`,
-    degraded: false,
-  };
+  return { orders: spread.orders, log, degraded: false };
 }
 
 function resolveDefend(
@@ -244,12 +250,6 @@ function resolveDefend(
   if (intent.unitType) {
     units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
   }
-  if (target) {
-    units = filterByTargetPassability(units, target, state);
-    if (units.length === 0) {
-      return { orders: [], log: "目标地形不可达，无可用单位执行防御", degraded: true };
-    }
-  }
 
   const count = resolveQuantity(intent.quantity, units.length, style);
 
@@ -263,20 +263,29 @@ function resolveDefend(
     return { orders: [], log: "无可用单位执行防御", degraded: true };
   }
 
-  const orders: Order[] = [
-    {
-      unitIds: units.map((u) => u.id),
-      action: "defend",
-      target: target ?? null,
-      priority: mapUrgency(intent.urgency),
-    },
-  ];
+  // ④ passability degradation for defend target
+  if (target) {
+    const spread = createOrdersWithSpread(
+      units, target, state, "defend", mapUrgency(intent.urgency), 1.0,
+    );
+    if (spread.orders.length === 0) {
+      return { orders: [], log: "目标地形不可达，无可用单位执行防御", degraded: true };
+    }
+    let log = `${spread.orders.length} 个单位转入防御态势`;
+    if (spread.degradedCount > 0) {
+      log += ` (${spread.degradedCount} 个已调整位置)`;
+    }
+    return { orders: spread.orders, log, degraded: false };
+  }
 
-  return {
-    orders,
-    log: `${units.length} 个单位转入防御态势`,
-    degraded: false,
-  };
+  // No target: defend in place
+  const orders: Order[] = [{
+    unitIds: units.map((u) => u.id),
+    action: "defend",
+    target: null,
+    priority: mapUrgency(intent.urgency),
+  }];
+  return { orders, log: `${units.length} 个单位转入防御态势`, degraded: false };
 }
 
 function resolveRetreat(
@@ -369,33 +378,29 @@ function resolveRecon(
       u.type === "light_tank" ||
       u.type === "infantry",
   );
-  const available = filterByTargetPassability(
-    scouts.length > 0 ? scouts : units,
-    target,
-    state,
-  );
+  units = scouts.length > 0 ? scouts : units;
 
-  const count = resolveQuantity(intent.quantity ?? "few", available.length, style);
-  const selected = sortByDistance(available, target).slice(0, count);
+  const count = resolveQuantity(intent.quantity ?? "few", units.length, style);
+  const selected = sortByDistance(units, target).slice(0, count);
 
   if (selected.length === 0) {
     return { orders: [], log: "无可用单位执行侦察", degraded: true };
   }
 
-  const orders: Order[] = [
-    {
-      unitIds: selected.map((u) => u.id),
-      action: "recon",
-      target,
-      priority: mapUrgency(intent.urgency),
-    },
-  ];
+  // ④ passability degradation (no spread for recon — units scout independently)
+  const spread = createOrdersWithSpread(
+    selected, target, state, "recon", mapUrgency(intent.urgency), 0,
+  );
 
-  return {
-    orders,
-    log: `派出 ${selected.length} 个单位侦察 (${Math.round(target.x)},${Math.round(target.y)})`,
-    degraded: false,
-  };
+  if (spread.orders.length === 0) {
+    return { orders: [], log: "侦察目标不可达", degraded: true };
+  }
+
+  let log = `派出 ${spread.orders.length} 个单位侦察 (${Math.round(target.x)},${Math.round(target.y)})`;
+  if (spread.degradedCount > 0) {
+    log += ` (${spread.degradedCount} 个已调整目标)`;
+  }
+  return { orders: spread.orders, log, degraded: false };
 }
 
 function resolveHold(
@@ -520,9 +525,6 @@ function resolvePatrol(
   if (intent.unitType) {
     units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
   }
-  if (target) {
-    units = filterByTargetPassability(units, target, state);
-  }
 
   const count = resolveQuantity(intent.quantity ?? "few", units.length, style);
   const selected = target
@@ -535,18 +537,34 @@ function resolvePatrol(
     return { orders: [], log: msg, degraded: true };
   }
 
+  // ④ + ③: passability degradation + light spread for patrol with target
+  if (target) {
+    const spread = createOrdersWithSpread(
+      selected, target, state, "patrol", mapUrgency(intent.urgency), 1.0,
+    );
+    if (spread.orders.length === 0) {
+      const msg = "巡逻目标不可达";
+      pushDiagnostic(state, "IMPASSABLE_TARGET", msg);
+      return { orders: [], log: msg, degraded: true };
+    }
+    let log = `派出 ${spread.orders.length} 个单位巡逻 (${Math.round(target.x)},${Math.round(target.y)})`;
+    if (spread.degradedCount > 0) {
+      log += ` (${spread.degradedCount} 个已调整目标)`;
+    }
+    return { orders: spread.orders, log, degraded: false };
+  }
+
+  // No target: patrol in place (group order)
   const orders: Order[] = [{
     unitIds: selected.map((u) => u.id),
     action: "patrol",
-    target: target ?? null,
+    target: null,
     priority: mapUrgency(intent.urgency),
   }];
 
   return {
     orders,
-    log: target
-      ? `派出 ${selected.length} 个单位巡逻 (${Math.round(target.x)},${Math.round(target.y)})`
-      : `命令 ${selected.length} 个单位就地巡逻`,
+    log: `命令 ${selected.length} 个单位就地巡逻`,
     degraded: false,
   };
 }
@@ -910,17 +928,74 @@ function findPlayerHQPosition(state: GameState): Position | null {
   return null;
 }
 
-// ── Passability helpers ──
+// ── ③ Target spread ──
 
-/** Filter units that can reach the target tile. */
-function filterByTargetPassability(
+/** Offset a position around a center in a circle formation. */
+function spreadTarget(
+  center: Position,
+  index: number,
+  total: number,
+  radius: number,
+): Position {
+  if (total <= 1 || radius <= 0) return center;
+  const angle = (2 * Math.PI * index) / total;
+  return {
+    x: center.x + Math.cos(angle) * radius,
+    y: center.y + Math.sin(angle) * radius,
+  };
+}
+
+// ── ④ Level 2 passability degradation + ③ spread ──
+
+/**
+ * Create per-unit orders with:
+ * - ③ Spread: offset units around center in a circle (avoids blob-forming)
+ * - ④ Passability degradation: if spread/center tile is impassable, find nearest passable
+ * Returns combined orders and degradation stats.
+ */
+function createOrdersWithSpread(
   units: Unit[],
-  target: Position,
+  center: Position,
   state: GameState,
-): Unit[] {
-  const tx = Math.floor(target.x);
-  const ty = Math.floor(target.y);
-  return units.filter((u) => canUnitEnterTile(u.type, tx, ty, state));
+  action: OrderAction,
+  priority: Order["priority"],
+  spreadRadius: number = 1.5,
+): { orders: Order[]; degradedCount: number; skippedCount: number } {
+  const orders: Order[] = [];
+  let degradedCount = 0;
+  let skippedCount = 0;
+
+  for (let i = 0; i < units.length; i++) {
+    const unit = units[i];
+    // Step 1: spread position
+    const spread =
+      units.length > 1 ? spreadTarget(center, i, units.length, spreadRadius) : center;
+
+    // Step 2: passability check
+    const sx = Math.floor(spread.x);
+    const sy = Math.floor(spread.y);
+    let finalTarget: Position;
+
+    if (canUnitEnterTile(unit.type, sx, sy, state)) {
+      finalTarget = spread;
+    } else {
+      // ④ degradation: find nearest passable (try spread point, then center)
+      const adj =
+        ensurePassableTarget(unit, spread, state) ??
+        ensurePassableTarget(unit, center, state);
+      if (adj) {
+        finalTarget = adj;
+        degradedCount++;
+      } else {
+        skippedCount++;
+        continue;
+      }
+    }
+
+    orders.push({ unitIds: [unit.id], action, target: finalTarget, priority });
+  }
+
+  return { orders, degradedCount, skippedCount };
 }
 
 /** If target tile is impassable for unit, find nearest passable tile (spiral search, max 12 tiles). */
