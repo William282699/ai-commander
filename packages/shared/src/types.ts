@@ -80,6 +80,7 @@ export interface Unit {
   waypoints: Position[];
   patrolPoints: Position[];
   orders: Order[];
+  patrolTaskId: number | null; // Day 9.5: active PatrolTask id, null if not in a task
 }
 
 // --- Facility Types ---
@@ -330,6 +331,20 @@ export interface CombatEffects {
   explosions: Explosion[];
 }
 
+// --- Patrol Task (Day 9.5) ---
+
+export interface PatrolTask {
+  id: number;
+  center: Position;
+  radius: number;            // patrol area radius in tiles (5=small, 10=medium, 15=large)
+  unitIds: number[];
+  cooldownSec: number;       // seconds between re-targeting attempts (default 6)
+  lastTargetTime: number;    // game time of last target assignment
+  consecutiveFails: number;  // how many consecutive cycles all units failed to find target
+  paused: boolean;           // true when fail-paused
+  pauseUntil: number;        // game time when pause expires
+}
+
 // --- Diagnostics (engine → UI message channel) ---
 
 export interface DiagnosticEntry {
@@ -365,6 +380,8 @@ export interface GameState {
   winner: Team | null;
   combatEffects: CombatEffects;
   diagnostics: DiagnosticEntry[];
+  patrolTasks: PatrolTask[];
+  nextPatrolTaskId: number;
 }
 
 // --- LLM Response Types ---

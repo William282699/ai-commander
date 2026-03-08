@@ -215,8 +215,16 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
     unit.detourCount = 0;
 
     if (unit.state === "patrolling" && unit.patrolPoints.length >= 2) {
-      unit.patrolPoints.reverse();
-      unit.target = unit.patrolPoints[1];
+      if (unit.patrolTaskId !== null) {
+        // Task-managed patrol: go idle, clear stale data, let processPatrolTasks re-target
+        unit.target = null;
+        unit.patrolPoints = [];
+        unit.state = "idle";
+      } else {
+        // Legacy 2-point patrol (enemy AI, etc.)
+        unit.patrolPoints.reverse();
+        unit.target = unit.patrolPoints[1];
+      }
     } else if (unit.waypoints.length > 1) {
       unit.waypoints.shift();
       unit.target = unit.waypoints[0];

@@ -255,6 +255,7 @@ function tickProduction(state: GameState): void {
             waypoints: [],
             patrolPoints: [],
             orders: [],
+            patrolTaskId: null,
           };
           state.units.set(unit.id, unit);
         } else {

@@ -54,6 +54,7 @@ function createUnit(
     waypoints: [],
     patrolPoints: [],
     orders: [],
+    patrolTaskId: null,
   };
 }
 
@@ -193,5 +194,7 @@ export function createInitialGameState(): GameState {
     winner: null,
     combatEffects: { attackLines: [], explosions: [] },
     diagnostics: [],
+    patrolTasks: [],
+    nextPatrolTaskId: 1,
   };
 }
