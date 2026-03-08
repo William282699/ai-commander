@@ -374,7 +374,10 @@ export interface AdvisorOption {
   description: string;
   risk: number;
   reward: number;
+  /** @deprecated Use intents[] instead. Kept for backward compat with single-intent LLM output. */
   intent: import("./intents").Intent;
+  /** Array of intents for this option. Multi-intent allows compound commands. */
+  intents: import("./intents").Intent[];
 }
 
 export interface AdvisorResponse {

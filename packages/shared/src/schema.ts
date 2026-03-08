@@ -124,9 +124,29 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
       if (typeof o.description !== "string") return null;
       const risk = typeof o.risk === "number" ? Math.max(0, Math.min(1, o.risk)) : 0.5;
       const reward = typeof o.reward === "number" ? Math.max(0, Math.min(1, o.reward)) : 0.5;
-      const intent = sanitizeIntent(o.intent);
-      if (!intent) return null;
-      return { label: o.label, description: o.description, risk, reward, intent } as AdvisorOption;
+
+      // Multi-intent: accept "intents" (array) or "intent" (single, wrap to array)
+      let intents: Intent[] = [];
+      if (Array.isArray(o.intents)) {
+        for (const raw of o.intents) {
+          const i = sanitizeIntent(raw);
+          if (i) intents.push(i);
+        }
+      }
+      if (intents.length === 0 && o.intent) {
+        const single = sanitizeIntent(o.intent);
+        if (single) intents = [single];
+      }
+      if (intents.length === 0) return null;
+
+      return {
+        label: o.label,
+        description: o.description,
+        risk,
+        reward,
+        intent: intents[0],     // backward compat: first intent
+        intents,                 // full array
+      } as AdvisorOption;
     })
     .filter((o): o is AdvisorOption => o !== null)
     .slice(0, 3);
@@ -195,6 +215,7 @@ export function createFallbackResponse(): AdvisorResponse {
         risk: 0.2,
         reward: 0.3,
         intent: { type: "defend", urgency: "medium" },
+        intents: [{ type: "defend", urgency: "medium" }],
       },
       {
         label: "B: 有限进攻",
@@ -202,6 +223,7 @@ export function createFallbackResponse(): AdvisorResponse {
         risk: 0.5,
         reward: 0.6,
         intent: { type: "attack", quantity: "some", urgency: "medium" },
+        intents: [{ type: "attack", quantity: "some", urgency: "medium" }],
       },
       {
         label: "C: 全线侦察",
@@ -209,6 +231,7 @@ export function createFallbackResponse(): AdvisorResponse {
         risk: 0.1,
         reward: 0.4,
         intent: { type: "recon", quantity: "few", urgency: "low" },
+        intents: [{ type: "recon", quantity: "few", urgency: "low" }],
       },
     ],
     recommended: "A",

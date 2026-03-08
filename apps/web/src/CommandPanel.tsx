@@ -74,18 +74,31 @@ export function CommandPanel({ getState }: Props) {
     const letter = ["A", "B", "C"][idx] ?? "?";
     addMessage("info", `批准方案 ${letter}: ${opt.label}`, state.time);
 
-    // Day 7 clean chain: Intent → resolveIntent → Order[] → applyOrders
-    const result = resolveIntent(opt.intent, state, state.style);
+    // Multi-intent chain: loop intents with reserved unit set
+    const intents = opt.intents ?? [opt.intent];
+    const allOrders: ReturnType<typeof resolveIntent>["orders"] = [];
+    const reserved = new Set<number>();
 
-    if (result.degraded) {
-      addMessage("warning", result.log, state.time);
-    } else {
-      addMessage("info", `执行: ${result.log}`, state.time);
+    for (const intent of intents) {
+      const result = resolveIntent(intent, state, state.style, reserved);
+
+      if (result.degraded) {
+        addMessage("warning", result.log, state.time);
+      } else {
+        addMessage("info", `执行: ${result.log}`, state.time);
+      }
+
+      // Add assigned units to reserved set for next intent
+      for (const id of result.assignedUnitIds) {
+        reserved.add(id);
+      }
+
+      allOrders.push(...result.orders);
     }
 
-    if (result.orders.length > 0) {
-      applyOrders(state, result.orders);
-    } else if (!result.degraded) {
+    if (allOrders.length > 0) {
+      applyOrders(state, allOrders);
+    } else {
       addMessage("warning", "无可执行命令", state.time);
     }
 
@@ -158,11 +171,11 @@ export function CommandPanel({ getState }: Props) {
                       <span style={{ ...barBg }}><span style={{ ...barFill, width: `${opt.reward * 100}%`, background: "#22c55e" }} /></span>
                     </span>
                   </div>
-                  {opt.intent && (
-                    <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>
-                      [{opt.intent.type}]{opt.intent.unitType ? ` ${opt.intent.unitType}` : ""}{opt.intent.urgency ? ` ${opt.intent.urgency}` : ""}
+                  {(opt.intents ?? [opt.intent]).map((it, j) => (
+                    <div key={j} style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>
+                      [{it.type}]{it.unitType ? ` ${it.unitType}` : ""}{it.urgency ? ` ${it.urgency}` : ""}
                     </div>
-                  )}
+                  ))}
                   {/* Approve button */}
                   <button
                     onClick={() => handleApprove(opt, i)}

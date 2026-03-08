@@ -30,6 +30,8 @@ export interface ResolveResult {
   orders: Order[];
   log: string;
   degraded: boolean;
+  /** Unit IDs assigned by this resolve (for reserved-set tracking in multi-intent). */
+  assignedUnitIds: number[];
 }
 
 // ── Supported intents (Day 7 base + Day 9 economy) ──
@@ -121,7 +123,25 @@ export function resolveIntent(
   intent: Intent,
   state: GameState,
   style: StyleParams,
+  excludeUnitIds?: ReadonlySet<number>,
 ): ResolveResult {
+  const inner = resolveIntentInner(intent, state, style, excludeUnitIds);
+
+  // Compute assignedUnitIds from orders (for multi-intent reserved-set tracking)
+  const ids = new Set<number>();
+  for (const o of inner.orders) {
+    for (const id of o.unitIds) ids.add(id);
+  }
+  return { ...inner, assignedUnitIds: Array.from(ids) };
+}
+
+/** Inner dispatch — returns result without assignedUnitIds (computed by wrapper). */
+function resolveIntentInner(
+  intent: Intent,
+  state: GameState,
+  style: StyleParams,
+  exclude?: ReadonlySet<number>,
+): Omit<ResolveResult, "assignedUnitIds"> {
   if (!isIntentSupported(intent.type)) {
     const msg = `意图类型 "${intent.type}" 尚未实现，已跳过`;
     pushDiagnostic(state, "UNSUPPORTED_INTENT", msg);
@@ -130,21 +150,21 @@ export function resolveIntent(
 
   switch (intent.type) {
     case "attack":
-      return resolveAttack(intent, state, style);
+      return resolveAttack(intent, state, style, exclude);
     case "defend":
-      return resolveDefend(intent, state, style);
+      return resolveDefend(intent, state, style, exclude);
     case "retreat":
-      return resolveRetreat(intent, state, style);
+      return resolveRetreat(intent, state, style, exclude);
     case "recon":
-      return resolveRecon(intent, state, style);
+      return resolveRecon(intent, state, style, exclude);
     case "hold":
-      return resolveHold(intent, state, style);
+      return resolveHold(intent, state, style, exclude);
     case "produce":
       return resolveProduce(intent, state);
     case "trade":
       return resolveTrade(intent, state);
     case "patrol":
-      return resolvePatrol(intent, state, style);
+      return resolvePatrol(intent, state, style, exclude);
     default:
       return {
         orders: [],
@@ -162,7 +182,8 @@ function resolveAttack(
   intent: Intent,
   state: GameState,
   style: StyleParams,
-): ResolveResult {
+  exclude?: ReadonlySet<number>,
+): Omit<ResolveResult, "assignedUnitIds"> {
   const target = resolveTarget(intent, state);
   if (!target) {
     const msg = "无法确定攻击目标位置";
@@ -170,7 +191,7 @@ function resolveAttack(
     return { orders: [], log: msg, degraded: true };
   }
 
-  const source = resolveSourceUnits(intent, state);
+  const source = resolveSourceUnits(intent, state, exclude);
   if (source.error) {
     pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
     return { orders: [], log: source.error, degraded: true };
@@ -211,9 +232,10 @@ function resolveDefend(
   intent: Intent,
   state: GameState,
   style: StyleParams,
-): ResolveResult {
+  exclude?: ReadonlySet<number>,
+): Omit<ResolveResult, "assignedUnitIds"> {
   const target = resolveTarget(intent, state);
-  const source = resolveSourceUnits(intent, state);
+  const source = resolveSourceUnits(intent, state, exclude);
   if (source.error) {
     return { orders: [], log: source.error, degraded: true };
   }
@@ -261,8 +283,9 @@ function resolveRetreat(
   intent: Intent,
   state: GameState,
   style: StyleParams,
-): ResolveResult {
-  const source = resolveSourceUnits(intent, state);
+  exclude?: ReadonlySet<number>,
+): Omit<ResolveResult, "assignedUnitIds"> {
+  const source = resolveSourceUnits(intent, state, exclude);
   if (source.error) {
     return { orders: [], log: source.error, degraded: true };
   }
@@ -325,13 +348,14 @@ function resolveRecon(
   intent: Intent,
   state: GameState,
   style: StyleParams,
-): ResolveResult {
+  exclude?: ReadonlySet<number>,
+): Omit<ResolveResult, "assignedUnitIds"> {
   const target = resolveTarget(intent, state);
   if (!target) {
     return { orders: [], log: "无法确定侦察目标位置", degraded: true };
   }
 
-  const source = resolveSourceUnits(intent, state);
+  const source = resolveSourceUnits(intent, state, exclude);
   if (source.error) {
     return { orders: [], log: source.error, degraded: true };
   }
@@ -378,8 +402,9 @@ function resolveHold(
   intent: Intent,
   state: GameState,
   style: StyleParams,
-): ResolveResult {
-  const source = resolveSourceUnits(intent, state);
+  exclude?: ReadonlySet<number>,
+): Omit<ResolveResult, "assignedUnitIds"> {
+  const source = resolveSourceUnits(intent, state, exclude);
   if (source.error) {
     return { orders: [], log: source.error, degraded: true };
   }
@@ -417,7 +442,7 @@ function resolveHold(
 function resolveProduce(
   intent: Intent,
   state: GameState,
-): ResolveResult {
+): Omit<ResolveResult, "assignedUnitIds"> {
   const unitType = intent.produceType as UnitType | undefined;
   if (!unitType || !UNIT_STATS[unitType]) {
     const msg = unitType
@@ -453,7 +478,7 @@ function resolveProduce(
 function resolveTrade(
   intent: Intent,
   state: GameState,
-): ResolveResult {
+): Omit<ResolveResult, "assignedUnitIds"> {
   const tradeAction = intent.tradeAction as string | undefined;
   if (!tradeAction || !TRADE_COSTS[tradeAction as keyof typeof TRADE_COSTS]) {
     const msg = tradeAction
@@ -482,9 +507,10 @@ function resolvePatrol(
   intent: Intent,
   state: GameState,
   style: StyleParams,
-): ResolveResult {
+  exclude?: ReadonlySet<number>,
+): Omit<ResolveResult, "assignedUnitIds"> {
   const target = resolveTarget(intent, state);
-  const source = resolveSourceUnits(intent, state);
+  const source = resolveSourceUnits(intent, state, exclude);
   if (source.error) {
     pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
     return { orders: [], log: source.error, degraded: true };
@@ -561,7 +587,27 @@ function resolveTarget(intent: Intent, state: GameState): Position | null {
  * - no front hints at all → global fallback
  * - NO "smart from↔to swap" — never silently reinterpret fromFront
  */
-function resolveSourceUnits(intent: Intent, state: GameState): SourceUnitsResult {
+function resolveSourceUnits(
+  intent: Intent,
+  state: GameState,
+  exclude?: ReadonlySet<number>,
+): SourceUnitsResult {
+  const raw = resolveSourceUnitsRaw(intent, state);
+  // Apply multi-intent exclusion filter
+  if (exclude && exclude.size > 0 && raw.units.length > 0) {
+    const filtered = raw.units.filter((u) => !exclude.has(u.id));
+    if (filtered.length === 0 && raw.units.length > 0) {
+      return { units: [], error: "所有可用单位已被前序意图占用" };
+    }
+    return { units: filtered };
+  }
+  return raw;
+}
+
+function resolveSourceUnitsRaw(
+  intent: Intent,
+  state: GameState,
+): SourceUnitsResult {
   const fromHint =
     typeof intent.fromFront === "string" && intent.fromFront.trim().length > 0
       ? intent.fromFront
