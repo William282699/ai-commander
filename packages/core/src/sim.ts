@@ -21,12 +21,16 @@ const ONE_SHOT_ACTIONS: readonly OrderAction[] = [
 /** Diagnostic dedup: minimum seconds between identical code pushes. */
 const DIAG_DEDUP_SEC = 5;
 
+/** Low-value diagnostics use a longer dedup window to avoid array pollution. */
+const DIAG_LOW_VALUE_DEDUP_SEC = 30;
+const LOW_VALUE_DIAG_CODES = new Set(["PATH_BLOCKED", "IMPASSABLE_TERRAIN"]);
+
 function pushDiagnostic(state: GameState, code: string, message: string): void {
-  // Dedup: skip if same code within DIAG_DEDUP_SEC
+  const dedupSec = LOW_VALUE_DIAG_CODES.has(code) ? DIAG_LOW_VALUE_DEDUP_SEC : DIAG_DEDUP_SEC;
   const recent = state.diagnostics;
   for (let i = recent.length - 1; i >= 0; i--) {
-    if (recent[i].code === code && state.time - recent[i].time < DIAG_DEDUP_SEC) return;
-    if (state.time - recent[i].time >= DIAG_DEDUP_SEC) break; // older entries won't match
+    if (recent[i].code === code && state.time - recent[i].time < dedupSec) return;
+    if (state.time - recent[i].time >= dedupSec) break;
   }
   state.diagnostics.push({ time: state.time, code, message });
   if (state.diagnostics.length > 50) state.diagnostics.shift();

@@ -38,10 +38,11 @@ import { addMessage, type MessageLevel } from "./messageStore";
 
 // ── Diagnostic → Staff Feed bridge ──
 
+/** Diagnostic codes suppressed from Staff Feed (still logged to state.diagnostics). */
+const SUPPRESSED_DIAG_CODES = new Set(["PATH_BLOCKED", "IMPASSABLE_TERRAIN"]);
+
 /** Map diagnostic code → feed message level */
 const DIAG_LEVEL: Record<string, MessageLevel> = {
-  PATH_BLOCKED: "info",
-  IMPASSABLE_TERRAIN: "info",
   NO_FUEL: "warning",
   PRODUCE_FAIL: "warning",
   TRADE_FAIL: "warning",
@@ -49,6 +50,7 @@ const DIAG_LEVEL: Record<string, MessageLevel> = {
   NO_AVAILABLE_UNITS: "warning",
   IMPASSABLE_TARGET: "warning",
   UNSUPPORTED_INTENT: "warning",
+  DEGRADED_TARGET: "info",
 };
 
 /** Distance threshold for single-click unit selection (in tiles) */
@@ -334,6 +336,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
       if (state.tick % 60 === 0 && state.diagnostics.length > 0) {
         for (const d of state.diagnostics) {
           if (d.time > lastDrainedDiagTime) {
+            if (SUPPRESSED_DIAG_CODES.has(d.code)) continue; // Day 9.5: suppress spam
             const lvl = DIAG_LEVEL[d.code] ?? "warning";
             addMessage(lvl, d.message, d.time);
           }

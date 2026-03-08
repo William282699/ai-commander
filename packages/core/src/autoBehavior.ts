@@ -23,7 +23,7 @@ let autoBehaviorTimer = 0;
 
 const LOW_HP_THRESHOLD = 0.25;   // 25% maxHP
 const ENGAGE_RANGE = 8;          // tiles
-const PATROL_RANGE = 5;          // tiles
+// PATROL_RANGE removed (Day 9.5 Batch A: idle auto-patrol disabled)
 
 // ── Main entry ──
 
@@ -104,20 +104,9 @@ function runAutoBehavior(state: GameState): void {
       }
     }
 
-    // 4b: Idle patrol — idle unit with no enemy in vision range
-    if (unit.state === "idle") {
-      const hasEnemyInVision = findNearestEnemy(unit, state, unit.visionRange) !== null;
-      if (!hasEnemyInVision) {
-        const patrolTarget = randomPatrolPoint(unit, state, PATROL_RANGE);
-        if (patrolTarget) {
-          unit.state = "patrolling";
-          unit.patrolPoints = [{ ...unit.position }, patrolTarget];
-          unit.target = patrolTarget;
-          unit.waypoints = [patrolTarget];
-        }
-        // C3: if no valid patrol point found, stay idle (hold) — no illegal target
-      }
-    }
+    // 4b: Idle patrol — DISABLED (Day 9.5 Batch A)
+    // Idle units stay idle until player issues a patrol command.
+    // PatrolTask system (Batch B) will replace this.
   });
 }
 
@@ -173,31 +162,6 @@ function findTeamHQ(state: GameState, team: Team): Position {
     return { x: 5, y: 5 };
   }
   return { x: state.mapWidth - 5, y: state.mapHeight - 5 };
-}
-
-/**
- * Generate random patrol point within range tiles.
- * C3: clamp to map bounds + canUnitEnterTile validation.
- * Returns null if no valid point found after 6 attempts → caller keeps unit idle.
- */
-function randomPatrolPoint(unit: Unit, state: GameState, range: number): Position | null {
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const dx = Math.round((Math.random() * 2 - 1) * range);
-    const dy = Math.round((Math.random() * 2 - 1) * range);
-
-    // C3: clamp to map bounds
-    const x = Math.max(0, Math.min(state.mapWidth - 1, Math.round(unit.position.x + dx)));
-    const y = Math.max(0, Math.min(state.mapHeight - 1, Math.round(unit.position.y + dy)));
-
-    // Skip trivial moves
-    if (x === Math.round(unit.position.x) && y === Math.round(unit.position.y)) continue;
-
-    if (canUnitEnterTile(unit.type, x, y, state)) {
-      return { x, y };
-    }
-  }
-
-  return null; // No valid point → stay idle (hold)
 }
 
 /**
