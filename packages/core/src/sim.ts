@@ -81,7 +81,7 @@ export function canUnitEnterTile(
 
 /** Grace period: dead units stay for 1 frame so explosion effects can reference position */
 const DEAD_CLEANUP_DELAY = 0.1; // seconds
-const MAX_CONSECUTIVE_DETOURS = 3;
+const MAX_CONSECUTIVE_DETOURS = 8;
 
 /**
  * Advance game state by dt seconds.
@@ -124,10 +124,10 @@ export function tick(state: GameState, dt: number): void {
 }
 
 /**
- * MVP local detour: when next step is blocked, probe candidate headings
- * (+45, -45, +90, -90 degrees) at step distances 1-2 tiles.
+ * Local detour: when next step is blocked, probe candidate headings
+ * at 8 angle offsets × 3 step distances = 24 probes.
  * Returns a short detour waypoint or null if no passable candidate found.
- * Deterministic: fixed candidate order, no randomness.
+ * Deterministic: fixed candidate order (smallest offset first), no randomness.
  */
 function tryLocalDetour(
   unit: Unit,
@@ -137,14 +137,18 @@ function tryLocalDetour(
   headingY: number,
   state: GameState,
 ): { x: number; y: number } | null {
-  // Candidate angle offsets in radians (fixed order for determinism)
+  // 8 angle offsets: ±22.5°, ±45°, ±90°, ±135° (ordered by preference)
   const angleOffsets = [
-    Math.PI / 4,   // +45°
-    -Math.PI / 4,  // -45°
-    Math.PI / 2,   // +90°
-    -Math.PI / 2,  // -90°
+    Math.PI / 8,     // +22.5°
+    -Math.PI / 8,    // -22.5°
+    Math.PI / 4,     // +45°
+    -Math.PI / 4,    // -45°
+    Math.PI / 2,     // +90°
+    -Math.PI / 2,    // -90°
+    (3 * Math.PI) / 4,   // +135°
+    -(3 * Math.PI) / 4,  // -135°
   ];
-  const stepDistances = [1.0, 2.0];
+  const stepDistances = [1.0, 2.0, 3.0];
 
   const baseAngle = Math.atan2(headingY, headingX);
 
