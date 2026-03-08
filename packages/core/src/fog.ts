@@ -55,21 +55,47 @@ export function updateFog(state: GameState): void {
       }
     }
 
-    // Reveal tiles in circular radius
-    const rSq = r * r;
-    const yMin = Math.max(0, cy - r);
-    const yMax = Math.min(mapHeight - 1, cy + r);
-    const xMin = Math.max(0, cx - r);
-    const xMax = Math.min(mapWidth - 1, cx + r);
+    revealCircle(fog, cx, cy, r, mapWidth, mapHeight);
+  });
 
-    for (let ty = yMin; ty <= yMax; ty++) {
-      for (let tx = xMin; tx <= xMax; tx++) {
-        const ddx = tx - cx;
-        const ddy = ty - cy;
-        if (ddx * ddx + ddy * ddy <= rSq) {
-          fog[ty][tx] = "visible";
-        }
+  // Pass 3: mark player facility vision (base area shouldn't be dark)
+  state.facilities.forEach((fac) => {
+    if (fac.team !== "player") return;
+    if (fac.hp <= 0) return;
+
+    const cx = Math.floor(fac.position.x);
+    const cy = Math.floor(fac.position.y);
+
+    // Radar gives large vision; other owned buildings provide local vision.
+    let r = 6;
+    if (fac.type === "headquarters") r = 10;
+    if (fac.type === "radar") r = 20;
+
+    revealCircle(fog, cx, cy, r, mapWidth, mapHeight);
+  });
+}
+
+function revealCircle(
+  fog: Visibility[][],
+  cx: number,
+  cy: number,
+  r: number,
+  mapWidth: number,
+  mapHeight: number,
+): void {
+  const rSq = r * r;
+  const yMin = Math.max(0, cy - r);
+  const yMax = Math.min(mapHeight - 1, cy + r);
+  const xMin = Math.max(0, cx - r);
+  const xMax = Math.min(mapWidth - 1, cx + r);
+
+  for (let ty = yMin; ty <= yMax; ty++) {
+    for (let tx = xMin; tx <= xMax; tx++) {
+      const ddx = tx - cx;
+      const ddy = ty - cy;
+      if (ddx * ddx + ddy * ddy <= rSq) {
+        fog[ty][tx] = "visible";
       }
     }
-  });
+  }
 }

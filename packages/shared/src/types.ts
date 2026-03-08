@@ -189,6 +189,8 @@ export interface Order {
   priority: "low" | "medium" | "high";
   provisional?: boolean; // local engine guess, will be replaced by LLM
   isPlayerCommand?: boolean; // allows player-issued orders on manualOverride units
+  produceUnitType?: UnitType; // for "produce" action: which unit type to build
+  tradeType?: TradeType;      // for "trade" action: which trade to execute
 }
 
 // --- Production ---
@@ -328,6 +330,14 @@ export interface CombatEffects {
   explosions: Explosion[];
 }
 
+// --- Diagnostics (engine → UI message channel) ---
+
+export interface DiagnosticEntry {
+  time: number;
+  code: string;
+  message: string;
+}
+
 // --- Game State (the big one) ---
 
 export interface GameState {
@@ -354,6 +364,7 @@ export interface GameState {
   gameOver: boolean;
   winner: Team | null;
   combatEffects: CombatEffects;
+  diagnostics: DiagnosticEntry[];
 }
 
 // --- LLM Response Types ---

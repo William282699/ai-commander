@@ -34,6 +34,22 @@ import type { Unit, Order, GameState } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { CommandPanel } from "./CommandPanel";
 import { MessageFeed } from "./MessageFeed";
+import { addMessage, type MessageLevel } from "./messageStore";
+
+// ── Diagnostic → Staff Feed bridge ──
+
+/** Map diagnostic code → feed message level */
+const DIAG_LEVEL: Record<string, MessageLevel> = {
+  PATH_BLOCKED: "info",
+  IMPASSABLE_TERRAIN: "info",
+  NO_FUEL: "warning",
+  PRODUCE_FAIL: "warning",
+  TRADE_FAIL: "warning",
+  NO_VISIBLE_TARGET: "warning",
+  NO_AVAILABLE_UNITS: "warning",
+  IMPASSABLE_TARGET: "warning",
+  UNSUPPORTED_INTENT: "warning",
+};
 
 /** Distance threshold for single-click unit selection (in tiles) */
 const CLICK_SELECT_RADIUS = 1.5;
@@ -179,6 +195,9 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     // Track "Return to AI" button rect for click detection
     let returnToAIBtnRect: { x: number; y: number; w: number; h: number } | null = null;
 
+    // Diagnostic drain cursor (time-based to survive array shifts)
+    let lastDrainedDiagTime = -Infinity;
+
     // Game loop
     let lastTime = performance.now();
     let animId = 0;
@@ -310,6 +329,18 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
       processAutoBehavior(state, dt);    // both teams micro-behavior (2s interval)
 
       updateFog(state);
+
+      // --- Drain diagnostics → Staff Feed (≈1/sec) ---
+      if (state.tick % 60 === 0 && state.diagnostics.length > 0) {
+        for (const d of state.diagnostics) {
+          if (d.time > lastDrainedDiagTime) {
+            const lvl = DIAG_LEVEL[d.code] ?? "warning";
+            addMessage(lvl, d.message, d.time);
+          }
+        }
+        lastDrainedDiagTime =
+          state.diagnostics[state.diagnostics.length - 1].time;
+      }
 
       // --- Rendering ---
       ctx.fillStyle = "#1a1a2e";

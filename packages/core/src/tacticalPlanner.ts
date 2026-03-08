@@ -12,6 +12,8 @@ import type {
   Unit,
   Position,
   Front,
+  UnitType,
+  TradeType,
 } from "@ai-commander/shared";
 import type {
   Intent,
@@ -19,7 +21,7 @@ import type {
   QuantityHint,
   UnitCategoryHint,
 } from "@ai-commander/shared";
-import { getUnitCategory } from "@ai-commander/shared";
+import { getUnitCategory, UNIT_STATS, TRADE_COSTS } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 
 // ── Result type ──
@@ -30,7 +32,7 @@ export interface ResolveResult {
   degraded: boolean;
 }
 
-// ── Supported intents for Day 7 MVP ──
+// ── Supported intents (Day 7 base + Day 9 economy) ──
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
   "attack",
@@ -38,7 +40,24 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   "retreat",
   "recon",
   "hold",
+  "produce",
+  "trade",
+  "patrol",
 ];
+
+// ── Diagnostics helper ──
+
+const DIAG_DEDUP_SEC = 5;
+
+function pushDiagnostic(state: GameState, code: string, message: string): void {
+  const recent = state.diagnostics;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    if (recent[i].code === code && state.time - recent[i].time < DIAG_DEDUP_SEC) return;
+    if (state.time - recent[i].time >= DIAG_DEDUP_SEC) break;
+  }
+  state.diagnostics.push({ time: state.time, code, message });
+  if (state.diagnostics.length > 50) state.diagnostics.shift();
+}
 
 // ── Front alias map (Chinese + English → canonical front id) ──
 
@@ -68,6 +87,25 @@ interface SourceUnitsResult {
   error?: string;
 }
 
+function splitFrontHints(value: string): string[] {
+  return value
+    .split(/[，,;；|/]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+function isAllFrontHint(value: string): boolean {
+  const n = normalizeFrontHint(value);
+  return (
+    n === "all" ||
+    n === "allunits" ||
+    n === "allfronts" ||
+    n === "全部" ||
+    n === "全军" ||
+    n === "所有"
+  );
+}
+
 export function isIntentSupported(type: IntentType): boolean {
   return SUPPORTED_INTENTS.includes(type);
 }
@@ -85,11 +123,9 @@ export function resolveIntent(
   style: StyleParams,
 ): ResolveResult {
   if (!isIntentSupported(intent.type)) {
-    return {
-      orders: [],
-      log: `意图类型 "${intent.type}" 尚未实现，已跳过`,
-      degraded: true,
-    };
+    const msg = `意图类型 "${intent.type}" 尚未实现，已跳过`;
+    pushDiagnostic(state, "UNSUPPORTED_INTENT", msg);
+    return { orders: [], log: msg, degraded: true };
   }
 
   switch (intent.type) {
@@ -103,6 +139,12 @@ export function resolveIntent(
       return resolveRecon(intent, state, style);
     case "hold":
       return resolveHold(intent, state, style);
+    case "produce":
+      return resolveProduce(intent, state);
+    case "trade":
+      return resolveTrade(intent, state);
+    case "patrol":
+      return resolvePatrol(intent, state, style);
     default:
       return {
         orders: [],
@@ -123,11 +165,14 @@ function resolveAttack(
 ): ResolveResult {
   const target = resolveTarget(intent, state);
   if (!target) {
-    return { orders: [], log: "无法确定攻击目标位置", degraded: true };
+    const msg = "无法确定攻击目标位置";
+    pushDiagnostic(state, "NO_VISIBLE_TARGET", msg);
+    return { orders: [], log: msg, degraded: true };
   }
 
   const source = resolveSourceUnits(intent, state);
   if (source.error) {
+    pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
     return { orders: [], log: source.error, degraded: true };
   }
 
@@ -138,7 +183,9 @@ function resolveAttack(
   units = filterByTargetPassability(units, target, state);
 
   if (units.length === 0) {
-    return { orders: [], log: "目标地形不可达，无可用单位执行进攻", degraded: true };
+    const msg = "目标地形不可达，无可用单位执行进攻";
+    pushDiagnostic(state, "IMPASSABLE_TARGET", msg);
+    return { orders: [], log: msg, degraded: true };
   }
 
   const count = resolveQuantity(intent.quantity, units.length, style);
@@ -365,6 +412,119 @@ function resolveHold(
   };
 }
 
+// ── Day 9: produce / trade / patrol resolvers ──
+
+function resolveProduce(
+  intent: Intent,
+  state: GameState,
+): ResolveResult {
+  const unitType = intent.produceType as UnitType | undefined;
+  if (!unitType || !UNIT_STATS[unitType]) {
+    const msg = unitType
+      ? `未知单位类型: ${unitType}`
+      : "生产命令未指定单位类型";
+    pushDiagnostic(state, "PRODUCE_FAIL", msg);
+    return { orders: [], log: msg, degraded: true };
+  }
+
+  // Support quantity: number → loop, default 1
+  const count = typeof intent.quantity === "number"
+    ? Math.max(1, Math.min(intent.quantity, 10)) // cap 10
+    : 1;
+
+  const orders: Order[] = [];
+  for (let i = 0; i < count; i++) {
+    orders.push({
+      unitIds: [],
+      action: "produce",
+      target: null,
+      produceUnitType: unitType,
+      priority: mapUrgency(intent.urgency),
+    });
+  }
+
+  return {
+    orders,
+    log: `下达生产命令: ${unitType} ×${count}`,
+    degraded: false,
+  };
+}
+
+function resolveTrade(
+  intent: Intent,
+  state: GameState,
+): ResolveResult {
+  const tradeAction = intent.tradeAction as string | undefined;
+  if (!tradeAction || !TRADE_COSTS[tradeAction as keyof typeof TRADE_COSTS]) {
+    const msg = tradeAction
+      ? `未知交易类型: ${tradeAction}`
+      : "交易命令未指定交易类型";
+    pushDiagnostic(state, "TRADE_FAIL", msg);
+    return { orders: [], log: msg, degraded: true };
+  }
+
+  const orders: Order[] = [{
+    unitIds: [],
+    action: "trade",
+    target: null,
+    tradeType: tradeAction as import("@ai-commander/shared").TradeType,
+    priority: mapUrgency(intent.urgency),
+  }];
+
+  return {
+    orders,
+    log: `下达交易命令: ${tradeAction}`,
+    degraded: false,
+  };
+}
+
+function resolvePatrol(
+  intent: Intent,
+  state: GameState,
+  style: StyleParams,
+): ResolveResult {
+  const target = resolveTarget(intent, state);
+  const source = resolveSourceUnits(intent, state);
+  if (source.error) {
+    pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
+    return { orders: [], log: source.error, degraded: true };
+  }
+
+  let units = source.units;
+  if (intent.unitType) {
+    units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+  }
+  if (target) {
+    units = filterByTargetPassability(units, target, state);
+  }
+
+  const count = resolveQuantity(intent.quantity ?? "few", units.length, style);
+  const selected = target
+    ? sortByDistance(units, target).slice(0, count)
+    : units.slice(0, count);
+
+  if (selected.length === 0) {
+    const msg = "无可用单位执行巡逻";
+    pushDiagnostic(state, "NO_AVAILABLE_UNITS", msg);
+    return { orders: [], log: msg, degraded: true };
+  }
+
+  const orders: Order[] = [{
+    unitIds: selected.map((u) => u.id),
+    action: "patrol",
+    target: target ?? null,
+    priority: mapUrgency(intent.urgency),
+  }];
+
+  return {
+    orders,
+    log: target
+      ? `派出 ${selected.length} 个单位巡逻 (${Math.round(target.x)},${Math.round(target.y)})`
+      : `命令 ${selected.length} 个单位就地巡逻`,
+    degraded: false,
+  };
+}
+
 // ============================================================
 // Helpers
 // ============================================================
@@ -413,6 +573,47 @@ function resolveSourceUnits(intent: Intent, state: GameState): SourceUnitsResult
 
   // ── fromFront: strict ──
   if (fromHint) {
+    // Common LLM output: "all", "全军", etc. Treat as global pool.
+    if (isAllFrontHint(fromHint)) {
+      const all: Unit[] = [];
+      state.units.forEach((u) => {
+        if (u.team === "player" && u.state !== "dead" && !u.manualOverride) {
+          all.push(u);
+        }
+      });
+      return { units: all };
+    }
+
+    // Common LLM output: comma-separated multiple fronts.
+    const parts = splitFrontHints(fromHint);
+    if (parts.length > 1) {
+      const byId = new Map<number, Unit>();
+      let matchedFrontCount = 0;
+      for (const part of parts) {
+        if (isAllFrontHint(part)) {
+          const all: Unit[] = [];
+          state.units.forEach((u) => {
+            if (u.team === "player" && u.state !== "dead" && !u.manualOverride) {
+              all.push(u);
+            }
+          });
+          return { units: all };
+        }
+        const front = findFront(state, part);
+        if (!front) continue;
+        matchedFrontCount += 1;
+        const frontUnits = getUnitsOnFront(state, front);
+        for (const u of frontUnits) byId.set(u.id, u);
+      }
+      if (byId.size > 0) {
+        return { units: Array.from(byId.values()) };
+      }
+      if (matchedFrontCount > 0) {
+        return { units: [], error: "指定来源战线暂无可用单位" };
+      }
+      return { units: [], error: `无法匹配来源战线: ${fromHint}` };
+    }
+
     const sourceFront = findFront(state, fromHint);
     if (!sourceFront) {
       return { units: [], error: `无法匹配来源战线: ${fromHint}` };
@@ -429,6 +630,18 @@ function resolveSourceUnits(intent: Intent, state: GameState): SourceUnitsResult
     const targetFront = findFront(state, toHint);
     if (targetFront) {
       const localUnits = getUnitsOnFront(state, targetFront);
+
+      // For offensive "move-to-front" intents, broaden source pool when
+      // command likely means large-scale redeploy (e.g. all/most) or when
+      // target-front local force is too small to be meaningful.
+      const wantsBroadDispatch =
+        intent.type === "attack" &&
+        (intent.quantity === "all" || intent.quantity === "most" || localUnits.length <= 1);
+      if (wantsBroadDispatch) {
+        const all = getAllAvailablePlayerUnits(state);
+        if (all.length > 0) return { units: all };
+      }
+
       if (localUnits.length > 0) return { units: localUnits };
       // Local empty — user wants to send units TO this front, use global pool
     } else {
@@ -437,13 +650,17 @@ function resolveSourceUnits(intent: Intent, state: GameState): SourceUnitsResult
   }
 
   // ── No front hints (or toFront with no local units): global fallback ──
+  return { units: getAllAvailablePlayerUnits(state) };
+}
+
+function getAllAvailablePlayerUnits(state: GameState): Unit[] {
   const all: Unit[] = [];
   state.units.forEach((u) => {
     if (u.team === "player" && u.state !== "dead" && !u.manualOverride) {
       all.push(u);
     }
   });
-  return { units: all };
+  return all;
 }
 
 /** Normalize a front hint for alias lookup: trim, lowercase, strip separators. */

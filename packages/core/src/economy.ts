@@ -8,6 +8,7 @@ import type {
   GameState,
   Unit,
   Facility,
+  FacilityType,
   Resources,
   UnitType,
   ProductionOrder,
@@ -22,8 +23,19 @@ import {
   CAPTURE_TIME_SEC,
   UNIT_STATS,
   PRODUCTION_FACILITY,
+  TERRAIN_MOVE_MULT,
   getUnitCategory,
 } from "@ai-commander/shared";
+
+// ── Non-capturable facility types (blacklist) ──
+// Everything NOT on this list can be captured by infantry.
+const NON_CAPTURABLE: readonly FacilityType[] = [
+  "headquarters",
+  "barracks",
+  "shipyard",
+  "airfield",
+  "defense_tower",
+];
 
 // ── Helper: is a unit "mechanized" (consumes fuel to move)? ──
 
@@ -80,12 +92,12 @@ function tickIncome(state: GameState): void {
   }
 }
 
-// ── 2. Facility capture ──
+// ── 2. Facility capture (P3 fix: blacklist instead of whitelist) ──
 
 function tickFacilityCapture(state: GameState, dt: number): void {
   state.facilities.forEach((fac) => {
-    // Only capturable facility types
-    if (!FACILITY_BONUSES[fac.type] && fac.type !== "repair_station") return;
+    // Skip non-capturable types (HQ, barracks, shipyard, airfield, defense_tower)
+    if ((NON_CAPTURABLE as readonly string[]).includes(fac.type)) return;
     // Skip destroyed facilities
     if (fac.hp <= 0) return;
 
@@ -158,7 +170,54 @@ function recalcBonusIncome(state: GameState): void {
   state.economy.enemy.bonusIncome = enemyBonus;
 }
 
-// ── 4. Production queue ──
+// ── 4. Production queue (P1 fix: find passable spawn tile) ──
+
+/**
+ * BFS-spiral search for the nearest tile passable by the given unit category.
+ * Searches outward from (cx, cy) up to maxRadius tiles.
+ * Returns null if nothing found.
+ */
+function findPassableSpawn(
+  state: GameState,
+  cx: number,
+  cy: number,
+  unitType: UnitType,
+  maxRadius: number,
+): { x: number; y: number } | null {
+  const cat = getUnitCategory(unitType);
+  // Check origin first
+  const ox = Math.floor(cx);
+  const oy = Math.floor(cy);
+  if (isPassableTile(state, ox, oy, cat)) return { x: cx, y: cy };
+
+  // Expanding square rings
+  for (let r = 1; r <= maxRadius; r++) {
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dy = -r; dy <= r; dy++) {
+        // Only ring perimeter (skip interior, already checked)
+        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+        const tx = ox + dx;
+        const ty = oy + dy;
+        if (isPassableTile(state, tx, ty, cat)) {
+          return { x: tx + 0.5, y: ty + 0.5 };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function isPassableTile(
+  state: GameState,
+  tx: number,
+  ty: number,
+  cat: "ground" | "naval" | "air",
+): boolean {
+  if (tx < 0 || tx >= state.mapWidth || ty < 0 || ty >= state.mapHeight) return false;
+  const terrain = state.terrain[ty][tx];
+  const mult = TERRAIN_MOVE_MULT[terrain]?.[cat] ?? 0;
+  return mult > 0;
+}
 
 function tickProduction(state: GameState): void {
   for (const teamKey of ["player", "enemy"] as const) {
@@ -168,33 +227,42 @@ function tickProduction(state: GameState): void {
     // Process first item in queue
     const order = queue[0];
     if (state.time >= order.startTime + order.duration) {
-      // Complete: spawn unit at facility position
+      // Complete: spawn unit near facility on a passable tile
       const fac = state.facilities.get(order.facilityId);
       if (fac) {
-        const stats = UNIT_STATS[order.unitType];
-        const unit: Unit = {
-          id: state.nextUnitId++,
-          type: order.unitType,
-          team: teamKey,
-          hp: stats.hp,
-          maxHp: stats.hp,
-          position: { x: fac.position.x + 1, y: fac.position.y + 1 },
-          state: "idle",
-          target: null,
-          attackTarget: null,
-          visionRange: stats.vision,
-          attackRange: stats.range,
-          attackDamage: stats.attack,
-          attackInterval: stats.attackInterval,
-          moveSpeed: stats.speed,
-          lastAttackTime: 0,
-          manualOverride: false,
-          detourCount: 0,
-          waypoints: [],
-          patrolPoints: [],
-          orders: [],
-        };
-        state.units.set(unit.id, unit);
+        // P1 fix: search large radius for passable spawn point
+        const spawn = findPassableSpawn(state, fac.position.x, fac.position.y, order.unitType, 80);
+        if (spawn) {
+          const stats = UNIT_STATS[order.unitType];
+          const unit: Unit = {
+            id: state.nextUnitId++,
+            type: order.unitType,
+            team: teamKey,
+            hp: stats.hp,
+            maxHp: stats.hp,
+            position: spawn,
+            state: "idle",
+            target: null,
+            attackTarget: null,
+            visionRange: stats.vision,
+            attackRange: stats.range,
+            attackDamage: stats.attack,
+            attackInterval: stats.attackInterval,
+            moveSpeed: stats.speed,
+            lastAttackTime: 0,
+            manualOverride: false,
+            detourCount: 0,
+            waypoints: [],
+            patrolPoints: [],
+            orders: [],
+          };
+          state.units.set(unit.id, unit);
+        } else {
+          // No passable tile found — refund resources
+          const eco = state.economy[teamKey];
+          eco.resources.money += order.cost;
+          eco.resources.fuel += order.fuelCost;
+        }
       }
       queue.shift();
     }
@@ -252,15 +320,24 @@ export function enqueueProduction(
   eco.resources.money -= stats.cost;
   eco.resources.fuel -= stats.fuelCost;
 
+  // P2-1 fix: serialize startTime — queue sequentially after last item
+  const queue = state.productionQueue[teamKey];
+  let startTime = state.time;
+  if (queue.length > 0) {
+    const last = queue[queue.length - 1];
+    const lastEnd = last.startTime + last.duration;
+    if (lastEnd > startTime) startTime = lastEnd;
+  }
+
   const order: ProductionOrder = {
     unitType,
     facilityId: (prodFac as Facility).id,
-    startTime: state.time,
+    startTime,
     duration: stats.buildTime,
     cost: stats.cost,
     fuelCost: stats.fuelCost,
   };
-  state.productionQueue[teamKey].push(order);
+  queue.push(order);
   return { ok: true };
 }
 

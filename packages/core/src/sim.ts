@@ -3,7 +3,7 @@
 // Pure function: tick(state, dt) → mutates state
 // ============================================================
 
-import type { GameState, Unit, UnitType } from "@ai-commander/shared";
+import type { GameState, Unit, UnitType, OrderAction } from "@ai-commander/shared";
 import {
   TERRAIN_MOVE_MULT,
   TANK_BLOCKED_TERRAIN,
@@ -12,6 +12,33 @@ import {
 } from "@ai-commander/shared";
 import { processCombat } from "./combat";
 import { canUnitMove, consumeMovementFuel } from "./economy";
+
+// Actions that complete when the unit reaches its target (vs defend/hold/patrol which persist)
+const ONE_SHOT_ACTIONS: readonly OrderAction[] = [
+  "attack_move", "retreat", "recon", "escort", "sabotage", "flank",
+];
+
+/** Diagnostic dedup: minimum seconds between identical code pushes. */
+const DIAG_DEDUP_SEC = 5;
+
+function pushDiagnostic(state: GameState, code: string, message: string): void {
+  // Dedup: skip if same code within DIAG_DEDUP_SEC
+  const recent = state.diagnostics;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    if (recent[i].code === code && state.time - recent[i].time < DIAG_DEDUP_SEC) return;
+    if (state.time - recent[i].time >= DIAG_DEDUP_SEC) break; // older entries won't match
+  }
+  state.diagnostics.push({ time: state.time, code, message });
+  if (state.diagnostics.length > 50) state.diagnostics.shift();
+}
+
+/** Clear unit.orders if the current action is a one-shot (completed or failed). */
+function clearOneShotOrders(unit: Unit): void {
+  const action = unit.orders[0]?.action;
+  if (action && (ONE_SHOT_ACTIONS as readonly string[]).includes(action)) {
+    unit.orders = [];
+  }
+}
 
 /**
  * Check if a unit type can enter a specific tile.
@@ -146,7 +173,12 @@ function tryLocalDetour(
 
 function moveUnit(unit: Unit, dt: number, state: GameState): void {
   // Fuel gate: mechanized units cannot move if team fuel is 0
-  if (!canUnitMove(unit, state)) return;
+  if (!canUnitMove(unit, state)) {
+    clearOneShotOrders(unit); // ⑦ release autoBehavior on fuel exhaustion
+    pushDiagnostic(state, "NO_FUEL",
+      `${unit.type}#${unit.id} 燃油耗尽，无法移动`);
+    return;
+  }
 
   // If we have a locked attack target, keep movement target synced to enemy's live position.
   if (unit.attackTarget !== null) {
@@ -185,6 +217,7 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
       unit.waypoints = [];
       if (unit.state !== "patrolling") {
         unit.state = "idle";
+        clearOneShotOrders(unit); // ⑦ release autoBehavior
       }
     }
     return;
@@ -210,6 +243,9 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
     unit.target = null;
     unit.waypoints = [];
     unit.state = "idle";
+    clearOneShotOrders(unit); // ⑦
+    pushDiagnostic(state, "IMPASSABLE_TERRAIN",
+      `${unit.type}#${unit.id} 当前地块不可通行，已停止`);
     return;
   }
 
@@ -237,6 +273,9 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
           unit.waypoints = [];
           unit.state = "idle";
           unit.detourCount = 0;
+          clearOneShotOrders(unit); // ⑦
+          pushDiagnostic(state, "PATH_BLOCKED",
+            `${unit.type}#${unit.id} 连续绕路失败，已停止`);
           return;
         }
 
@@ -251,6 +290,9 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
         unit.waypoints = [];
         unit.state = "idle";
         unit.detourCount = 0;
+        clearOneShotOrders(unit); // ⑦
+        pushDiagnostic(state, "PATH_BLOCKED",
+          `${unit.type}#${unit.id} 寻路失败，无可绕行路径`);
       }
       return;
     }

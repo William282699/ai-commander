@@ -20,13 +20,16 @@ export const VALID_INTENT_TYPES: readonly IntentType[] = [
   "air_support", "produce", "trade", "cover_retreat",
 ] as const;
 
-// Day 7 tactical planner currently supports only these intent types.
+// Tactical planner supported intent types (Day 7 base + Day 9 economy).
 export const DAY7_SUPPORTED_INTENT_TYPES: readonly IntentType[] = [
   "attack",
   "defend",
   "retreat",
   "recon",
   "hold",
+  "produce",
+  "trade",
+  "patrol",
 ] as const;
 
 const VALID_URGENCY: readonly UrgencyLevel[] = ["low", "medium", "high", "critical"];
