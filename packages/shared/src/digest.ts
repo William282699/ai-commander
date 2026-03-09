@@ -60,6 +60,23 @@ export function generateDigestV1(
     }
   }
 
+  // Facilities — so LLM knows available buildings and can fill targetFacility
+  const facilityLines: string[] = [];
+  state.facilities.forEach((f) => {
+    // Show player + neutral + enemy HQ (always visible as strategic objective)
+    if (f.team === "player" || f.team === "neutral" || f.type === "headquarters") {
+      facilityLines.push(
+        `${f.id}:${f.type} "${f.name}" team=${f.team} hp=${f.hp}/${f.maxHp} @(${f.position.x},${f.position.y})`,
+      );
+    }
+  });
+  if (facilityLines.length > 0) {
+    digest += `---FACILITIES---\n`;
+    for (const line of facilityLines) {
+      digest += `${line}\n`;
+    }
+  }
+
   // Style
   digest += `---STYLE---\n`;
   digest += `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas_aversion=${state.style.casualtyAversion.toFixed(2)}\n`;
