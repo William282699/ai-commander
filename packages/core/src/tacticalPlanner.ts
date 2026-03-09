@@ -689,6 +689,9 @@ function resolveSourceUnitsRaw(
         return { units: Array.from(byId.values()) };
       }
       if (matchedFrontCount > 0) {
+        // Soft fallback: front(s) found but 0 units → try global pool
+        const all = getAllAvailablePlayerUnits(state);
+        if (all.length > 0) return { units: all };
         return { units: [], error: "指定来源战线暂无可用单位" };
       }
       return { units: [], error: `无法匹配来源战线: ${fromHint}` };
@@ -700,6 +703,9 @@ function resolveSourceUnitsRaw(
     }
     const frontUnits = getUnitsOnFront(state, sourceFront);
     if (frontUnits.length === 0) {
+      // Soft fallback: front found but 0 units → try global pool
+      const all = getAllAvailablePlayerUnits(state);
+      if (all.length > 0) return { units: all };
       return { units: [], error: `战线 "${sourceFront.name}" 暂无可用单位` };
     }
     return { units: frontUnits };
