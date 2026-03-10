@@ -4,7 +4,7 @@
 // This is the structured data LLM uses to understand the map.
 // ============================================================
 
-import type { Region, Chokepoint, Facility, Front } from "@ai-commander/shared";
+import type { Region, Chokepoint, Facility, Front } from "../types";
 
 // ──────────────────────────────────────────────
 // Regions (~35 regions covering the 200x150 map)
@@ -572,7 +572,7 @@ export const FRONTS: Front[] = [
   {
     id: "front_north",
     name: "1. North Plains",
-    regionIds: ["north_plains_west", "north_plains_east", "north_hills", "west_bridge_approach_n"],
+    regionIds: ["north_plains_west", "north_plains_east", "north_hills", "west_bridge_approach_n", "player_base", "north_forest", "east_bridge_approach_n"],
     playerPower: 0,
     enemyPower: 0,
     enemyPowerKnown: false,
@@ -594,7 +594,7 @@ export const FRONTS: Front[] = [
   {
     id: "front_strait",
     name: "3. Strait Waters",
-    regionIds: ["strait_west", "strait_center", "strait_east"],
+    regionIds: ["strait_west", "strait_center", "strait_east", "west_bridge_zone", "east_bridge_zone"],
     playerPower: 0,
     enemyPower: 0,
     enemyPowerKnown: false,

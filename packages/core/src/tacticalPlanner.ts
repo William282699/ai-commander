@@ -125,8 +125,9 @@ export function resolveIntent(
   state: GameState,
   style: StyleParams,
   excludeUnitIds?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],  // Day 10.5: hard constraint from player box-select
 ): ResolveResult {
-  const inner = resolveIntentInner(intent, state, style, excludeUnitIds);
+  const inner = resolveIntentInner(intent, state, style, excludeUnitIds, selectedUnitIds);
 
   // Compute assignedUnitIds from orders (for multi-intent reserved-set tracking)
   const ids = new Set<number>();
@@ -142,6 +143,7 @@ function resolveIntentInner(
   state: GameState,
   style: StyleParams,
   exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
 ): Omit<ResolveResult, "assignedUnitIds"> {
   if (!isIntentSupported(intent.type)) {
     const msg = `意图类型 "${intent.type}" 尚未实现，已跳过`;
@@ -151,21 +153,21 @@ function resolveIntentInner(
 
   switch (intent.type) {
     case "attack":
-      return resolveAttack(intent, state, style, exclude);
+      return resolveAttack(intent, state, style, exclude, selectedUnitIds);
     case "defend":
-      return resolveDefend(intent, state, style, exclude);
+      return resolveDefend(intent, state, style, exclude, selectedUnitIds);
     case "retreat":
-      return resolveRetreat(intent, state, style, exclude);
+      return resolveRetreat(intent, state, style, exclude, selectedUnitIds);
     case "recon":
-      return resolveRecon(intent, state, style, exclude);
+      return resolveRecon(intent, state, style, exclude, selectedUnitIds);
     case "hold":
-      return resolveHold(intent, state, style, exclude);
+      return resolveHold(intent, state, style, exclude, selectedUnitIds);
     case "produce":
       return resolveProduce(intent, state);
     case "trade":
       return resolveTrade(intent, state);
     case "patrol":
-      return resolvePatrol(intent, state, style, exclude);
+      return resolvePatrol(intent, state, style, exclude, selectedUnitIds);
     default:
       return {
         orders: [],
@@ -184,6 +186,7 @@ function resolveAttack(
   state: GameState,
   style: StyleParams,
   exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
 ): Omit<ResolveResult, "assignedUnitIds"> {
   const target = resolveTarget(intent, state);
   if (!target) {
@@ -192,7 +195,7 @@ function resolveAttack(
     return { orders: [], log: msg, degraded: true };
   }
 
-  const source = resolveSourceUnits(intent, state, exclude);
+  const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
     pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
     return { orders: [], log: source.error, degraded: true };
@@ -239,9 +242,10 @@ function resolveDefend(
   state: GameState,
   style: StyleParams,
   exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
 ): Omit<ResolveResult, "assignedUnitIds"> {
   const target = resolveTarget(intent, state);
-  const source = resolveSourceUnits(intent, state, exclude);
+  const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
     return { orders: [], log: source.error, degraded: true };
   }
@@ -293,8 +297,9 @@ function resolveRetreat(
   state: GameState,
   style: StyleParams,
   exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
 ): Omit<ResolveResult, "assignedUnitIds"> {
-  const source = resolveSourceUnits(intent, state, exclude);
+  const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
     return { orders: [], log: source.error, degraded: true };
   }
@@ -358,13 +363,14 @@ function resolveRecon(
   state: GameState,
   style: StyleParams,
   exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
 ): Omit<ResolveResult, "assignedUnitIds"> {
   const target = resolveTarget(intent, state);
   if (!target) {
     return { orders: [], log: "无法确定侦察目标位置", degraded: true };
   }
 
-  const source = resolveSourceUnits(intent, state, exclude);
+  const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
     return { orders: [], log: source.error, degraded: true };
   }
@@ -408,8 +414,9 @@ function resolveHold(
   state: GameState,
   style: StyleParams,
   exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
 ): Omit<ResolveResult, "assignedUnitIds"> {
-  const source = resolveSourceUnits(intent, state, exclude);
+  const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
     return { orders: [], log: source.error, degraded: true };
   }
@@ -520,9 +527,10 @@ function resolvePatrol(
   state: GameState,
   style: StyleParams,
   exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
 ): Omit<ResolveResult, "assignedUnitIds"> {
   const target = resolveTarget(intent, state);
-  const source = resolveSourceUnits(intent, state, exclude);
+  const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
     pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
     return { orders: [], log: source.error, degraded: true };
@@ -625,23 +633,58 @@ function resolveSourceUnits(
   intent: Intent,
   state: GameState,
   exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],  // Day 10.5: hard constraint from player box-select
 ): SourceUnitsResult {
   const raw = resolveSourceUnitsRaw(intent, state);
+
+  let units = raw.units;
+  if (raw.error) return raw;
+
+  // Day 10.5 (P1-1 new): selectedUnitIds is a HARD constraint.
+  // When the player has box-selected specific units, intersect with candidates
+  // so only those units are dispatched, regardless of what LLM outputs.
+  if (selectedUnitIds && selectedUnitIds.length > 0) {
+    const selectedSet = new Set(selectedUnitIds);
+    units = units.filter((u) => selectedSet.has(u.id));
+    if (units.length === 0) {
+      return { units: [], error: "框选的单位不在可调度范围内" };
+    }
+  }
+
   // Apply multi-intent exclusion filter
-  if (exclude && exclude.size > 0 && raw.units.length > 0) {
-    const filtered = raw.units.filter((u) => !exclude.has(u.id));
-    if (filtered.length === 0 && raw.units.length > 0) {
+  if (exclude && exclude.size > 0 && units.length > 0) {
+    const filtered = units.filter((u) => !exclude.has(u.id));
+    if (filtered.length === 0 && units.length > 0) {
       return { units: [], error: "所有可用单位已被前序意图占用" };
     }
     return { units: filtered };
   }
-  return raw;
+  return { units };
 }
 
 function resolveSourceUnitsRaw(
   intent: Intent,
   state: GameState,
 ): SourceUnitsResult {
+  // ── Day 10.5 Fix 6: fromSquad — highest priority ──
+  if (intent.fromSquad && typeof intent.fromSquad === "string") {
+    const squad = state.squads.find((s) => s.id === intent.fromSquad);
+    if (squad) {
+      const units = squad.unitIds
+        .map((id) => state.units.get(id))
+        .filter(
+          (u): u is Unit =>
+            u !== undefined &&
+            u.team === "player" &&
+            u.state !== "dead" &&
+            !u.manualOverride, // P1-3: exclude manually overridden units
+        );
+      if (units.length > 0) return { units };
+      return { units: [], error: `分队 ${intent.fromSquad} 无可用单位（已阵亡或被手动接管）` };
+    }
+    return { units: [], error: `无法找到分队: ${intent.fromSquad}` };
+  }
+
   const fromHint =
     typeof intent.fromFront === "string" && intent.fromFront.trim().length > 0
       ? intent.fromFront
@@ -662,6 +705,12 @@ function resolveSourceUnitsRaw(
         }
       });
       return { units: all };
+    }
+
+    // Day 10.5 Fix 3: quantity=all/most with fromFront → global pool
+    // fromFront is a hint only; user intent is "all units", not "only those in this bbox"
+    if (intent.quantity === "all" || intent.quantity === "most") {
+      return { units: getAllAvailablePlayerUnits(state) };
     }
 
     // Common LLM output: comma-separated multiple fronts.
@@ -717,12 +766,14 @@ function resolveSourceUnitsRaw(
     if (targetFront) {
       const localUnits = getUnitsOnFront(state, targetFront);
 
-      // For offensive "move-to-front" intents, broaden source pool when
-      // command likely means large-scale redeploy (e.g. all/most) or when
-      // target-front local force is too small to be meaningful.
+      // Day 10.5 Fix 2: broaden source pool for large-scale redeploy.
+      // attack: quantity=all/most OR tiny local force (<=1)
+      // retreat/defend: only quantity=all/most (P3-7: conservative, no localUnits<=1)
       const wantsBroadDispatch =
-        intent.type === "attack" &&
-        (intent.quantity === "all" || intent.quantity === "most" || localUnits.length <= 1);
+        (intent.type === "attack" &&
+          (intent.quantity === "all" || intent.quantity === "most" || localUnits.length <= 1)) ||
+        ((intent.type === "retreat" || intent.type === "defend") &&
+          (intent.quantity === "all" || intent.quantity === "most"));
       if (wantsBroadDispatch) {
         const all = getAllAvailablePlayerUnits(state);
         if (all.length > 0) return { units: all };

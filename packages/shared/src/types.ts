@@ -350,6 +350,27 @@ export interface PatrolTask {
   pauseUntil: number;        // game time when pause expires
 }
 
+// --- Squad / Formation System (Day 10.5) ---
+
+export type SquadRank = "squad_leader" | "platoon_leader" | "company_commander" | "battalion_commander";
+
+export interface SquadLeader {
+  name: string;                    // auto-generated captain name
+  rank: SquadRank;                 // determined by squad size
+  personality: "cautious" | "balanced" | "aggressive";
+}
+
+export interface Squad {
+  id: string;                      // "T5", "I3", etc.
+  name: string;                    // "坦克5分队"
+  unitIds: number[];               // unit roster
+  leader: SquadLeader;
+  currentMission: string | null;   // "advance", "defend", etc.
+  missionTarget: Position | null;
+  morale: number;                  // 0-1, affected by casualties
+  formationStyle: "line" | "wedge" | "column";
+}
+
 // --- Diagnostics (engine → UI message channel) ---
 
 export interface DiagnosticEntry {
@@ -387,6 +408,8 @@ export interface GameState {
   diagnostics: DiagnosticEntry[];
   patrolTasks: PatrolTask[];
   nextPatrolTaskId: number;
+  squads: Squad[];
+  nextSquadNum: { [prefix: string]: number };
 }
 
 // --- LLM Response Types ---

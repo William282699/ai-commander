@@ -1,4 +1,4 @@
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useCallback } from "react";
 import {
   renderTerrain,
   renderMinimap,
@@ -19,8 +19,8 @@ import {
   screenToTile,
   isBoxSelection,
 } from "./input";
-import { FRONT_CAMERA_TARGETS } from "./mapData";
-import { createInitialGameState } from "./initState";
+import { FRONT_CAMERA_TARGETS } from "@ai-commander/shared";
+import { createInitialGameState } from "@ai-commander/core";
 import {
   tick,
   updateFog,
@@ -32,6 +32,7 @@ import {
 } from "@ai-commander/core";
 import type { Unit, Order, GameState } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
+import { createSquad } from "@ai-commander/shared";
 import { CommandPanel } from "./CommandPanel";
 import { MessageFeed } from "./MessageFeed";
 import { addMessage, type MessageLevel } from "./messageStore";
@@ -157,6 +158,53 @@ interface GameCanvasProps {
 export function GameCanvas({ onStateReady }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<GameState | null>(null);
+  const inputRef = useRef(createInputState());
+
+  // Stable callback: returns current box-selected unit IDs
+  const getSelectedUnitIds = useCallback((): number[] => {
+    return inputRef.current.selectedUnitIds;
+  }, []);
+
+  // Stable callback: check if selected units can form a squad
+  const canCreateSquad = useCallback((): boolean => {
+    const state = stateRef.current;
+    if (!state) return false;
+    const ids = inputRef.current.selectedUnitIds;
+    if (ids.length === 0) return false;
+    const inSquad = new Set(state.squads.flatMap((s) => s.unitIds));
+    return ids.some((id) => {
+      const u = state.units.get(id);
+      return u && u.team === "player" && u.state !== "dead" && !inSquad.has(id);
+    });
+  }, []);
+
+  // Stable callback: create a squad from selected units
+  const handleCreateSquad = useCallback(() => {
+    const state = stateRef.current;
+    if (!state) return;
+    const ids = inputRef.current.selectedUnitIds;
+    if (ids.length === 0) return;
+
+    // Filter: player + alive + not already in a squad
+    const existingSquadUnitIds = new Set(
+      state.squads.flatMap((s) => s.unitIds),
+    );
+    const validIds = ids.filter((id) => {
+      const u = state.units.get(id);
+      return u && u.team === "player" && u.state !== "dead" && !existingSquadUnitIds.has(id);
+    });
+    if (validIds.length === 0) {
+      addMessage("warning", "选中的单位已编入分队或不可用", state.time);
+      return;
+    }
+
+    const unitTypes = validIds
+      .map((id) => state.units.get(id)!)
+      .map((u) => u.type);
+    const squad = createSquad(validIds, unitTypes, state.nextSquadNum);
+    state.squads.push(squad);
+    addMessage("info", `新建分队 ${squad.id}:${squad.name} (${validIds.length}人)`, state.time);
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -185,8 +233,8 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
     centerCameraOn(camera, 100, 7, canvas.width, canvas.height);
 
-    // Input
-    const input = createInputState();
+    // Input — use ref so it's accessible outside useEffect
+    const input = inputRef.current;
     const cleanup = setupInputListeners(canvas, camera, input);
 
     // Fronts array (ordered 1-5 for hotkey mapping)
@@ -439,7 +487,12 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         ref={canvasRef}
         style={{ display: "block", width: "100%", height: "100%" }}
       />
-      <CommandPanel getState={() => stateRef.current} />
+      <CommandPanel
+        getState={() => stateRef.current}
+        getSelectedUnitIds={getSelectedUnitIds}
+        onCreateSquad={handleCreateSquad}
+        canCreateSquad={canCreateSquad}
+      />
       <MessageFeed />
     </div>
   );

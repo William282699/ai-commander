@@ -4,7 +4,7 @@
 // Click "批准" → resolveIntent → applyOrders (clean chain)
 // ============================================================
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { buildDigest, resolveIntent, applyOrders } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption } from "@ai-commander/shared";
 import { addMessage } from "./messageStore";
@@ -13,18 +13,32 @@ const API_URL = "http://localhost:3001";
 
 interface Props {
   getState: () => GameState | null;
+  getSelectedUnitIds?: () => number[];
+  onCreateSquad?: () => void;
+  canCreateSquad?: () => boolean;
 }
 
 interface DisplayResponse extends AdvisorResponse {
   warning?: string;
 }
 
-export function CommandPanel({ getState }: Props) {
+export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad }: Props) {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<DisplayResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [approvedIdx, setApprovedIdx] = useState<number | null>(null);
+
+  // P1: snapshot selected unit IDs at sendCommand time, use in handleApprove
+  const selectedIdsSnapshotRef = useRef<number[] | undefined>(undefined);
+
+  // P2: poll canCreateSquad every 200ms for button state
+  const [squadBtnEnabled, setSquadBtnEnabled] = useState(false);
+  useEffect(() => {
+    if (!canCreateSquad) return;
+    const id = setInterval(() => setSquadBtnEnabled(canCreateSquad()), 200);
+    return () => clearInterval(id);
+  }, [canCreateSquad]);
 
   const sendCommand = async () => {
     const state = getState();
@@ -37,7 +51,10 @@ export function CommandPanel({ getState }: Props) {
 
     addMessage("info", `发送指令: ${userMsg}`, state.time);
 
-    const digest = buildDigest(state, [], [], []);
+    // P1: lock selected unit IDs at send time
+    const selectedIds = getSelectedUnitIds ? [...getSelectedUnitIds()] : [];
+    selectedIdsSnapshotRef.current = selectedIds.length > 0 ? selectedIds : undefined;
+    const digest = buildDigest(state, selectedIds, [], []);
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
     try {
@@ -51,6 +68,7 @@ export function CommandPanel({ getState }: Props) {
       if (data.error) {
         setError(data.error);
         setResponse(null);
+        selectedIdsSnapshotRef.current = undefined;
         addMessage("urgent", `后端错误: ${data.error}`, state.time);
       } else {
         setResponse(data as DisplayResponse);
@@ -61,6 +79,7 @@ export function CommandPanel({ getState }: Props) {
       const errMsg = "无法连接服务器，请确保后端运行在 localhost:3001";
       setError(errMsg);
       setResponse(null);
+      selectedIdsSnapshotRef.current = undefined;
       addMessage("urgent", "通信中断: 无法连接后端", state.time);
     }
     setLoading(false);
@@ -80,7 +99,7 @@ export function CommandPanel({ getState }: Props) {
     const reserved = new Set<number>();
 
     for (const intent of intents) {
-      const result = resolveIntent(intent, state, state.style, reserved);
+      const result = resolveIntent(intent, state, state.style, reserved, selectedIdsSnapshotRef.current);
 
       if (result.degraded) {
         addMessage("warning", result.log, state.time);
@@ -108,6 +127,7 @@ export function CommandPanel({ getState }: Props) {
     setTimeout(() => {
       setResponse(null);
       setApprovedIdx(null);
+      selectedIdsSnapshotRef.current = undefined;
     }, 800);
   };
 
@@ -124,6 +144,7 @@ export function CommandPanel({ getState }: Props) {
     setResponse(null);
     setError(null);
     setApprovedIdx(null);
+    selectedIdsSnapshotRef.current = undefined;
   };
 
   return (
@@ -211,6 +232,20 @@ export function CommandPanel({ getState }: Props) {
           disabled={loading}
           style={inputStyle}
         />
+        {onCreateSquad && (
+          <button
+            onClick={onCreateSquad}
+            disabled={!squadBtnEnabled}
+            style={{
+              ...squadBtnStyle,
+              opacity: squadBtnEnabled ? 1 : 0.35,
+              cursor: squadBtnEnabled ? "pointer" : "default",
+            }}
+            title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}
+          >
+            编队
+          </button>
+        )}
         <button
           onClick={sendCommand}
           disabled={loading || !message.trim()}
@@ -350,6 +385,18 @@ const buttonStyle: React.CSSProperties = {
   fontSize: 12,
   fontFamily: "monospace",
   cursor: "pointer",
+};
+
+const squadBtnStyle: React.CSSProperties = {
+  background: "#1e3a5f",
+  color: "#60a5fa",
+  border: "1px solid #2563eb",
+  borderRadius: 4,
+  padding: "6px 8px",
+  fontSize: 11,
+  fontFamily: "monospace",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
 };
 
 const approveBtnStyle: React.CSSProperties = {

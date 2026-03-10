@@ -68,6 +68,11 @@ export function sanitizeIntent(raw: unknown): Intent | null {
 
   const intent: Intent = { type: obj.type as IntentType };
 
+  // Squad-level dispatch (Day 10.5) — sanitize with trim
+  if (typeof obj.fromSquad === "string" && obj.fromSquad.trim().length > 0) {
+    intent.fromSquad = obj.fromSquad.trim();
+  }
+
   // Optional string fields
   if (typeof obj.fromFront === "string") intent.fromFront = obj.fromFront;
   if (typeof obj.toFront === "string") intent.toFront = obj.toFront;

@@ -3,7 +3,7 @@
 // Compressed battlefield summary fed to LLM (200-400 tokens)
 // ============================================================
 
-import type { GameState, Front, Resources, StyleParams, Unit, Mission } from "./types";
+import type { GameState, Front, Resources, StyleParams, Unit, Mission, Squad, Position } from "./types";
 
 /**
  * Generate a DigestV1 text summary from GameState.
@@ -81,10 +81,33 @@ export function generateDigestV1(
   digest += `---STYLE---\n`;
   digest += `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas_aversion=${state.style.casualtyAversion.toFixed(2)}\n`;
 
-  // Player selected units
+  // Day 10.5: Squad summary (max 8 lines, P2-5)
+  if (state.squads && state.squads.length > 0) {
+    digest += `---SQUADS---\n`;
+    let squadCount = 0;
+    for (const sq of state.squads) {
+      if (squadCount >= 8) break;
+      const alive = sq.unitIds.filter((id) => {
+        const u = state.units.get(id);
+        return u && u.state !== "dead";
+      });
+      if (alive.length === 0) continue;
+      const types = summarizeSquadTypes(alive, state);
+      const pos = squadAvgPos(alive, state);
+      digest += `${sq.id}:"${sq.name}" ${types} @(${pos.x},${pos.y}) morale=${sq.morale.toFixed(1)} mission=${sq.currentMission || "idle"}\n`;
+      squadCount++;
+    }
+  }
+
+  // Day 10.5: Player selected units — detailed info (max 8 lines, P2-5)
   if (playerSelectedUnitIds.length > 0) {
     digest += `---PLAYER_SELECTED---\n`;
-    digest += `units=[${playerSelectedUnitIds.join(",")}]\n`;
+    for (const id of playerSelectedUnitIds.slice(0, 8)) {
+      const u = state.units.get(id);
+      if (!u || u.state === "dead") continue;
+      const sqId = state.squads?.find((s) => s.unitIds.includes(id))?.id || "none";
+      digest += `#${u.id} ${u.type} hp=${u.hp}/${u.maxHp} @(${u.position.x},${u.position.y}) sq=${sqId}\n`;
+    }
   }
 
   // Marked targets
@@ -130,4 +153,33 @@ function getPlayerAir(state: GameState): string[] {
 
 function describePosition(unit: Unit): string {
   return `(${unit.position.x},${unit.position.y})`;
+}
+
+// Day 10.5: Squad digest helpers
+
+function summarizeSquadTypes(unitIds: number[], state: GameState): string {
+  const counts = new Map<string, number>();
+  for (const id of unitIds) {
+    const u = state.units.get(id);
+    if (!u) continue;
+    counts.set(u.type, (counts.get(u.type) || 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([t, c]) => `${c}×${t}`)
+    .join(",");
+}
+
+function squadAvgPos(unitIds: number[], state: GameState): { x: number; y: number } {
+  let sx = 0;
+  let sy = 0;
+  let n = 0;
+  for (const id of unitIds) {
+    const u = state.units.get(id);
+    if (!u) continue;
+    sx += u.position.x;
+    sy += u.position.y;
+    n++;
+  }
+  if (n === 0) return { x: 0, y: 0 };
+  return { x: Math.round(sx / n), y: Math.round(sy / n) };
 }

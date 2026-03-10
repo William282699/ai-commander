@@ -26,6 +26,9 @@ export type UnitCategoryHint = "armor" | "infantry" | "air" | "naval";
 export interface Intent {
   type: IntentType;
 
+  // Squad-level dispatch (Day 10.5) — takes priority over fromFront
+  fromSquad?: string;  // squad ID like "T5", "I3"
+
   // Source & destination (region/front names, NOT coordinates)
   fromFront?: string;
   toFront?: string;

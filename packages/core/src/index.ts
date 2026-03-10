@@ -10,3 +10,4 @@ export { createDefaultStyle, updateStyleParam } from "./styleEngine";
 export { resolveIntent, isIntentSupported } from "./tacticalPlanner";
 export type { ResolveResult } from "./tacticalPlanner";
 export { buildDigest } from "./intelDigest";
+export { createInitialGameState } from "./scenario";

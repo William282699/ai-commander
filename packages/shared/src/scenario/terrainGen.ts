@@ -4,8 +4,8 @@
 // 5 fronts: North Plains / Central City / Strait / South Hills / Far South
 // ============================================================
 
-import type { TerrainType } from "@ai-commander/shared";
-import { MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
+import type { TerrainType } from "../types";
+import { MAP_WIDTH, MAP_HEIGHT } from "../constants";
 
 export function generateTerrain(): TerrainType[][] {
   const map: TerrainType[][] = Array.from({ length: MAP_HEIGHT }, () =>

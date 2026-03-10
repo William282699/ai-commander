@@ -20,9 +20,8 @@ import {
   MAP_WIDTH,
   MAP_HEIGHT,
 } from "@ai-commander/shared";
-import { createFogState } from "@ai-commander/core";
-import { generateTerrain } from "./terrainGen";
-import { FACILITIES, REGIONS, CHOKEPOINTS, FRONTS } from "./mapData";
+import { createFogState } from "../fog";
+import { generateTerrain, FACILITIES, REGIONS, CHOKEPOINTS, FRONTS } from "@ai-commander/shared";
 
 // --- Unit factory ---
 
@@ -196,5 +195,7 @@ export function createInitialGameState(): GameState {
     diagnostics: [],
     patrolTasks: [],
     nextPatrolTaskId: 1,
+    squads: [],
+    nextSquadNum: {},
   };
 }
