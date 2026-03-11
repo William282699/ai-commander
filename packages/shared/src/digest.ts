@@ -32,16 +32,21 @@ export function generateDigestV1(
     digest += `\n`;
   }
 
-  // Active missions
+  // Active missions (max 8 lines, consistent with SQUADS/PLAYER_SELECTED)
   const activeMissions = state.missions.filter(m => m.status === "active");
   if (activeMissions.length > 0) {
     digest += `---MISSIONS---\n`;
-    for (const m of activeMissions) {
+    const maxMissions = 8;
+    for (let i = 0; i < Math.min(activeMissions.length, maxMissions); i++) {
+      const m = activeMissions[i];
       digest += `${m.id}:${m.type}`;
       if (m.targetFacilityId) digest += `@${m.targetFacilityId}`;
       digest += ` prog=${(m.progress * 100).toFixed(0)}% eta=${m.etaSec}s`;
       if (m.threats.length > 0) digest += ` th=[${m.threats.join(",")}]`;
       digest += `\n`;
+    }
+    if (activeMissions.length > maxMissions) {
+      digest += `...+${activeMissions.length - maxMissions} more\n`;
     }
   }
 

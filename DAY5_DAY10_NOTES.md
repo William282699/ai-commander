@@ -168,6 +168,78 @@ The following non-blocking issues are tracked for follow-up:
 - Suggested fix: tighten patrol/retreat target resolution and add clearer target feedback in brief/log.
 - Target day: **Day13** (behavior feel + feedback polish).
 
+## Day11 Implementation Record: Missions System + Sabotage Resolver (Completed)
+
+Baseline: `main@19a207f` (Day10.5 merged). Typecheck + build pass.
+
+### What was done
+
+**Part A: Missions Core (`packages/core/src/missions.ts`)**
+- Full rewrite from stub → 220+ lines
+- `createMission()` — creates tracked mission, links squad, writes diagnostics
+- `processMissions(state, dt)` — per-tick lifecycle: prune dead units, check squad viability, tick progress, update threats/ETA
+- 5 mission type tickers:
+  - `sabotage` — facility damage ratio, complete at 80%+
+  - `destroy` — enemy count in region bbox, complete at 0
+  - `capture` — mirrors facility.captureProgress
+  - `defend_area` — cumulative hold time vs required time
+  - `cut_supply` — reuses sabotage logic
+
+**Part B: Squad ↔ Mission Linkage**
+- `createMission()` accepts `squadId` opt → sets `squad.currentMission = mission.id`
+- `checkSquadFail()` — auto-fails mission when linked squad morale ≤ 0.1 or fully wiped
+- `unlinkSquad()` — clears squad.currentMission on mission complete/fail
+
+**Part C: TacticalPlanner Sabotage Resolver**
+- Native `resolveSabotage()` in `tacticalPlanner.ts` (no longer falls back to attack)
+- Prefers infantry + light_tank, `attack_move` to facility, creates tracking mission
+- Added `"sabotage"` to `SUPPORTED_INTENTS` and `DAY7_SUPPORTED_INTENT_TYPES`
+- Removed sabotage→attack mapping from `DAY7_INTENT_MAP` in `ai.ts`
+
+**Part D: Digest + Prompt**
+- Digest `---MISSIONS---` section already existed (Day 10.5) — no changes needed
+- SYSTEM_PROMPT updated:
+  - Mission system rules (sabotage needs targetFacility, progress auto-tracked)
+  - fromSquad omission guidance ("省略该字段，不要填none")
+  - Squad-with-active-mission caution
+
+**Codex Note Fixes**
+- `sanitizeIntent()` now filters fromSquad sentinel values: "none", "unassigned", "null", "n/a", "undefined"
+
+**Game Loop**
+- `processMissions(state, dt)` wired into GameCanvas.tsx after processEconomy, before AI/autoBehavior
+
+**Exports**
+- `core/index.ts` exports: `processMissions`, `createMission`, `resetMissionCounter`, `CreateMissionOpts`
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `packages/core/src/missions.ts` | Full rewrite: mission lifecycle + 5 type tickers |
+| `packages/core/src/tacticalPlanner.ts` | +sabotage resolver, +SUPPORTED_INTENTS entry |
+| `packages/core/src/index.ts` | +createMission, resetMissionCounter exports |
+| `packages/shared/src/schema.ts` | +sentinel filter in sanitizeIntent, +sabotage in DAY7_SUPPORTED |
+| `apps/server/src/ai.ts` | SYSTEM_PROMPT mission rules, remove sabotage mapping |
+| `apps/web/src/GameCanvas.tsx` | +processMissions in game loop |
+| `DAY5_DAY10_NOTES.md` | This record |
+
+### Architecture Invariants Preserved
+
+- LLM → sanitizeIntent → resolveIntent → applyOrders chain intact
+- resolveSourceUnits priority: fromSquad → fromFront+all → fromFront → broadDispatch → global
+- selectedUnitIds hard constraint (intersection filter) unchanged
+- SQUADS and PLAYER_SELECTED digest max 8 lines unchanged
+- CommandPanel selectedIdsSnapshotRef unchanged
+- PatrolTask unbind logic (Day 9.5) not touched
+
+### Not Done (Deferred to Day 13)
+
+- **[Day 13 开工第一件事]** 补 1 条自动化用例：`processFacilitySabotage` 对 `attackDamage=0 / attackInterval=0` 单位必须无效（防回归护栏）
+- escort resolver
+- Mission UI panel (progress bars in web)
+- destroy/capture/defend_area mission creation from tactical planner (currently only sabotage creates missions; others can be created via future LLM intents)
+
 ## Suggested Ticket Names
 
 - Day5: `feat(core): local obstacle detour for blocked movement`

@@ -20,7 +20,7 @@ export const VALID_INTENT_TYPES: readonly IntentType[] = [
   "air_support", "produce", "trade", "cover_retreat",
 ] as const;
 
-// Tactical planner supported intent types (Day 7 base + Day 9 economy).
+// Tactical planner supported intent types (Day 7 base + Day 9 economy + Day 11 sabotage).
 export const DAY7_SUPPORTED_INTENT_TYPES: readonly IntentType[] = [
   "attack",
   "defend",
@@ -30,6 +30,7 @@ export const DAY7_SUPPORTED_INTENT_TYPES: readonly IntentType[] = [
   "produce",
   "trade",
   "patrol",
+  "sabotage",
 ] as const;
 
 const VALID_URGENCY: readonly UrgencyLevel[] = ["low", "medium", "high", "critical"];
@@ -68,9 +69,14 @@ export function sanitizeIntent(raw: unknown): Intent | null {
 
   const intent: Intent = { type: obj.type as IntentType };
 
-  // Squad-level dispatch (Day 10.5) — sanitize with trim
+  // Squad-level dispatch (Day 10.5) — sanitize with trim + sentinel filter
   if (typeof obj.fromSquad === "string" && obj.fromSquad.trim().length > 0) {
-    intent.fromSquad = obj.fromSquad.trim();
+    const sq = obj.fromSquad.trim();
+    // Day 11: filter sentinel values LLM sometimes emits
+    const SQUAD_SENTINELS = ["none", "unassigned", "null", "n/a", "undefined", ""];
+    if (!SQUAD_SENTINELS.includes(sq.toLowerCase())) {
+      intent.fromSquad = sq;
+    }
   }
 
   // Optional string fields

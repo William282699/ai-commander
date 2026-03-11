@@ -29,6 +29,7 @@ import {
   processEnemyAI,
   processAutoBehavior,
   processEconomy,
+  processMissions,
 } from "@ai-commander/core";
 import type { Unit, Order, GameState } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
@@ -374,6 +375,9 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
 
       // --- Economy (Day 9) ---
       processEconomy(state, dt);         // income, capture, production, readiness
+
+      // --- Missions (Day 11) ---
+      processMissions(state, dt);        // mission progress, success/fail, squad linkage
 
       // --- AI & Auto-Behavior (Day 8) ---
       processEnemyAI(state, dt);        // enemy strategic decisions (5s interval)

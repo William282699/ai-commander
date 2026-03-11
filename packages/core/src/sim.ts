@@ -14,8 +14,9 @@ import { processCombat } from "./combat";
 import { canUnitMove, consumeMovementFuel } from "./economy";
 
 // Actions that complete when the unit reaches its target (vs defend/hold/patrol which persist)
+// NOTE: "sabotage" removed in Day 11 — sabotage orders persist so combat can damage facilities
 const ONE_SHOT_ACTIONS: readonly OrderAction[] = [
-  "attack_move", "retreat", "recon", "escort", "sabotage", "flank",
+  "attack_move", "retreat", "recon", "escort", "flank",
 ];
 
 /** Diagnostic dedup: minimum seconds between identical code pushes. */

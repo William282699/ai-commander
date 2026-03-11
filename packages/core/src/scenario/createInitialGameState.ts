@@ -21,6 +21,7 @@ import {
   MAP_HEIGHT,
 } from "@ai-commander/shared";
 import { createFogState } from "../fog";
+import { resetMissionCounter } from "../missions";
 import { generateTerrain, FACILITIES, REGIONS, CHOKEPOINTS, FRONTS } from "@ai-commander/shared";
 
 // --- Unit factory ---
@@ -70,6 +71,7 @@ function makeEconomy(): EconomyState {
 // --- Initial deployment ---
 
 export function createInitialGameState(): GameState {
+  resetMissionCounter(); // Day 11: reset mission ID counter for new game session
   const terrain = generateTerrain();
   const units = new Map<number, Unit>();
   let uid = 1;

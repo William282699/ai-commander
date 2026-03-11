@@ -24,6 +24,7 @@ import type {
 } from "@ai-commander/shared";
 import { getUnitCategory, UNIT_STATS, TRADE_COSTS } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
+import { createMission } from "./missions";
 
 // ── Result type ──
 
@@ -46,6 +47,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   "produce",
   "trade",
   "patrol",
+  "sabotage",
 ];
 
 // ── Diagnostics helper ──
@@ -168,6 +170,8 @@ function resolveIntentInner(
       return resolveTrade(intent, state);
     case "patrol":
       return resolvePatrol(intent, state, style, exclude, selectedUnitIds);
+    case "sabotage":
+      return resolveSabotage(intent, state, style, exclude, selectedUnitIds);
     default:
       return {
         orders: [],
@@ -591,6 +595,110 @@ function resolvePatrol(
     log: `派出 ${selected.length} 个单位巡逻 (${centerTileX},${centerTileY}) 半径${radius}`,
     degraded: false,
   };
+}
+
+// ── Day 11: sabotage resolver ──
+
+function resolveSabotage(
+  intent: Intent,
+  state: GameState,
+  style: StyleParams,
+  exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
+): Omit<ResolveResult, "assignedUnitIds"> {
+  // Target must be a facility
+  const facilityHint = intent.targetFacility;
+  if (!facilityHint) {
+    const msg = "破坏命令未指定目标设施";
+    pushDiagnostic(state, "SABOTAGE_NO_TARGET", msg);
+    return { orders: [], log: msg, degraded: true };
+  }
+
+  const target = findFacilityPosition(state, facilityHint);
+  if (!target) {
+    const msg = `无法定位目标设施: ${facilityHint}`;
+    pushDiagnostic(state, "SABOTAGE_NO_TARGET", msg);
+    return { orders: [], log: msg, degraded: true };
+  }
+
+  // Resolve facility for mission creation
+  const fac = findFacilityById(state, facilityHint);
+
+  const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
+  if (source.error) {
+    pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
+    return { orders: [], log: source.error, degraded: true };
+  }
+
+  let units = source.units;
+
+  // Prefer infantry + light_tank (sabotage operatives)
+  const saboteurs = units.filter(
+    (u) => u.type === "infantry" || u.type === "light_tank",
+  );
+  units = saboteurs.length > 0 ? saboteurs : units;
+
+  const count = resolveQuantity(intent.quantity ?? "some", units.length, style);
+  units = sortByDistance(units, target).slice(0, count);
+
+  if (units.length === 0) {
+    return { orders: [], log: "无可用单位执行破坏任务", degraded: true };
+  }
+
+  // Squad ID for mission linkage (if fromSquad was provided)
+  const squadId = intent.fromSquad || undefined;
+
+  // Issue sabotage orders to the facility (action: "sabotage" — NOT attack_move)
+  const spread = createOrdersWithSpread(
+    units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
+  );
+
+  if (spread.orders.length === 0) {
+    return { orders: [], log: "目标地形不可达，无法执行破坏", degraded: true };
+  }
+
+  // Mark orders with targetFacilityId for combat layer facility damage
+  for (const order of spread.orders) {
+    order.targetFacilityId = fac?.id ?? facilityHint;
+  }
+
+  // P1-2 fix: create mission AFTER confirming orders can be dispatched
+  const actualUnitIds = spread.orders.flatMap((o) => o.unitIds);
+  createMission(state, "sabotage", {
+    name: `破坏${fac ? fac.name : facilityHint}`,
+    description: `派遣 ${actualUnitIds.length} 个单位破坏目标设施`,
+    targetFacilityId: fac?.id ?? facilityHint,
+    assignedUnitIds: actualUnitIds,
+    etaSec: 120,
+    squadId,
+  });
+
+  let log = `派出 ${spread.orders.length} 个单位执行破坏任务: ${fac?.name ?? facilityHint}`;
+  if (spread.degradedCount > 0) {
+    log += ` (${spread.degradedCount} 个已调整目标)`;
+  }
+  return { orders: spread.orders, log, degraded: false };
+}
+
+/** Find a facility by id, type, name, or tag (returns full Facility or undefined). */
+function findFacilityById(
+  state: GameState,
+  facilityHint: string,
+): import("@ai-commander/shared").Facility | undefined {
+  const fac = state.facilities.get(facilityHint);
+  if (fac) return fac;
+
+  const lower = facilityHint.toLowerCase();
+  for (const [, f] of state.facilities) {
+    if (
+      f.type.toLowerCase().includes(lower) ||
+      f.name.toLowerCase().includes(lower) ||
+      f.tags.some((t) => t.toLowerCase().includes(lower))
+    ) {
+      return f;
+    }
+  }
+  return undefined;
 }
 
 // ============================================================

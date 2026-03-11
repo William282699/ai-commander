@@ -3,7 +3,7 @@
 // Auto-engagement, damage calc, terrain defense, death handling
 // ============================================================
 
-import type { GameState, Unit, TerrainType } from "@ai-commander/shared";
+import type { GameState, Unit, Facility, TerrainType } from "@ai-commander/shared";
 import {
   COUNTER_MATRIX,
   AMMO_PER_ATTACK,
@@ -244,6 +244,9 @@ export function processCombat(state: GameState, dt: number): void {
     }
   });
 
+  // --- Day 11: Facility sabotage damage ---
+  processFacilitySabotage(state, now);
+
   // Cleanup expired effects
   state.combatEffects.attackLines = state.combatEffects.attackLines.filter(
     (l) => now - l.startTime < l.duration,
@@ -251,4 +254,92 @@ export function processCombat(state: GameState, dt: number): void {
   state.combatEffects.explosions = state.combatEffects.explosions.filter(
     (e) => now - e.startTime < e.duration,
   );
+}
+
+// ── Day 11: Facility Sabotage Damage ──
+
+/**
+ * Units with active sabotage orders + targetFacilityId deal damage to facilities
+ * when in attack range. Uses same cooldown as normal attacks.
+ * When facility HP reaches 0, clear sabotage orders and go idle.
+ */
+function processFacilitySabotage(state: GameState, now: number): void {
+  state.units.forEach((unit) => {
+    if (unit.hp <= 0 || unit.state === "dead") return;
+
+    // Check for sabotage order with facility target
+    const order = unit.orders[0];
+    if (!order || order.action !== "sabotage" || !order.targetFacilityId) return;
+
+    // P1 fix: skip non-combat units (recon_plane, carrier, etc.)
+    if (unit.attackDamage <= 0 || unit.attackInterval <= 0) return;
+
+    const facility = state.facilities.get(order.targetFacilityId);
+    if (!facility || facility.hp <= 0) {
+      // P2 fix: fully clean unit state when facility gone/destroyed
+      unit.orders = [];
+      unit.target = null;
+      unit.waypoints = [];
+      unit.state = "idle"; // safe: dead units already filtered at function entry
+      return;
+    }
+
+    // Distance check: unit must be within attack range of facility
+    const dx = unit.position.x - facility.position.x;
+    const dy = unit.position.y - facility.position.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > unit.attackRange) return;
+
+    // Cooldown check
+    const timeSinceLastAttack = now - unit.lastAttackTime;
+    if (timeSinceLastAttack < unit.attackInterval) return;
+
+    // Deal damage to facility (no Math.max(1) — 0-attack units already filtered above)
+    unit.lastAttackTime = now;
+    const damage = Math.round(unit.attackDamage * 0.8);
+    facility.hp = Math.max(0, facility.hp - damage);
+
+    // Consume ammo
+    const ecoKey = unit.team === "player" ? "player" : ("enemy" as const);
+    state.economy[ecoKey].resources.ammo = Math.max(
+      0,
+      state.economy[ecoKey].resources.ammo - AMMO_PER_ATTACK,
+    );
+
+    // Visual: attack line to facility
+    const lineColor = unit.team === "player" ? "#ff8800" : "#ff4444"; // orange for sabotage
+    state.combatEffects.attackLines.push({
+      fromX: unit.position.x,
+      fromY: unit.position.y,
+      toX: facility.position.x,
+      toY: facility.position.y,
+      startTime: now,
+      duration: 0.2,
+      color: lineColor,
+    });
+
+    // Facility destroyed
+    if (facility.hp <= 0) {
+      state.combatEffects.explosions.push({
+        x: facility.position.x,
+        y: facility.position.y,
+        startTime: now,
+        duration: 1.0,
+        radius: 1.5,
+      });
+
+      // Clear sabotage orders on all units targeting this facility
+      state.units.forEach((u) => {
+        if (
+          u.orders[0]?.action === "sabotage" &&
+          u.orders[0]?.targetFacilityId === order.targetFacilityId
+        ) {
+          u.orders = [];
+          u.target = null;
+          u.waypoints = [];
+          if (u.state !== "dead") u.state = "idle";
+        }
+      });
+    }
+  });
 }
