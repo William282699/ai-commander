@@ -239,6 +239,8 @@ Baseline: `main@19a207f` (Day10.5 merged). Typecheck + build pass.
 - escort resolver
 - Mission UI panel (progress bars in web)
 - destroy/capture/defend_area mission creation from tactical planner (currently only sabotage creates missions; others can be created via future LLM intents)
+- Facility manual interaction UX: right-click facility context menu as primary entry (`占领` / `破坏`), keep `A/C + right-click` as advanced shortcut, add first-time hint text; LLM-issued commands execute directly without popup
+- Clarification guard (minimal UX): when intent is degraded due to ambiguous/invalid target (e.g., sabotage target missing/unresolvable), cancel execution and show a lightweight "re-enter command" prompt instead of forcing fallback execution; keep main chain unchanged (`LLM -> sanitizeIntent -> resolveIntent -> applyOrders`)
 
 ## Suggested Ticket Names
 
