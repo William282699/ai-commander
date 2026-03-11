@@ -233,6 +233,13 @@ Baseline: `main@19a207f` (Day10.5 merged). Typecheck + build pass.
 - CommandPanel selectedIdsSnapshotRef unchanged
 - PatrolTask unbind logic (Day 9.5) not touched
 
+### Day11 Acceptance Closure (2026-03-11)
+
+- Manual checkpoints core path passed: cp6/cp7/cp8/cp9/cp13.
+- cp10 verified by local script: `---MISSIONS---` section capped at 8 lines with overflow marker (`...+N more`).
+- cp11 verified by local script: selected-unit hard constraint remains effective; broadDispatch still dispatches multi-unit pool when applicable; squad button enable/disable logic unchanged.
+- Observed movement jitter/stuck near bridge/water edges is non-blocking and remains deferred to Day13 polish scope.
+
 ### Not Done (Deferred to Day 13)
 
 - **[Day 13 开工第一件事]** 补 1 条自动化用例：`processFacilitySabotage` 对 `attackDamage=0 / attackInterval=0` 单位必须无效（防回归护栏）
