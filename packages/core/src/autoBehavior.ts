@@ -21,6 +21,11 @@ import { canUnitEnterTile } from "./sim";
 const AUTO_BEHAVIOR_INTERVAL = 2.0; // seconds
 let autoBehaviorTimer = 0;
 
+/** Reset module-level timer — call on new game session. */
+export function resetAutoBehaviorTimer(): void {
+  autoBehaviorTimer = 0;
+}
+
 const LOW_HP_THRESHOLD = 0.25;   // 25% maxHP
 const ENGAGE_RANGE = 8;          // tiles
 // PATROL_RANGE removed (Day 9.5 Batch A: idle auto-patrol disabled)
@@ -28,6 +33,7 @@ const ENGAGE_RANGE = 8;          // tiles
 // ── Main entry ──
 
 export function processAutoBehavior(state: GameState, dt: number): void {
+  if (state.gameOver) return;
   autoBehaviorTimer += dt;
 
   // C2: while-loop prevents timer drift on frame drops

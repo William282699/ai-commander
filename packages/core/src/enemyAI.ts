@@ -15,6 +15,11 @@ import { canUnitEnterTile } from "./sim";
 const ENEMY_AI_INTERVAL = 5.0; // seconds
 let enemyAITimer = 0;
 
+/** Reset module-level timer — call on new game session. */
+export function resetEnemyAITimer(): void {
+  enemyAITimer = 0;
+}
+
 // ── Front assessment ──
 
 interface FrontAssessment {
@@ -29,6 +34,7 @@ interface FrontAssessment {
 // ── Main entry ──
 
 export function processEnemyAI(state: GameState, dt: number): void {
+  if (state.gameOver) return;
   enemyAITimer += dt;
 
   // C2: while-loop prevents timer drift on frame drops

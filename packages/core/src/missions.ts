@@ -77,6 +77,7 @@ export function createMission(
 // ── Process Missions (called every tick from game loop) ──
 
 export function processMissions(state: GameState, dt: number): void {
+  if (state.gameOver) return;
   for (const mission of state.missions) {
     if (mission.status !== "active") continue;
 

@@ -82,6 +82,15 @@ export function generateDigestV1(
     }
   }
 
+  // Day 12: ENDGAME / GAMEOVER compact lines
+  if (state.phase === "ENDGAME" && state.endgameStartTime !== null) {
+    const eta = Math.max(0, 300 - (state.time - state.endgameStartTime));
+    digest += `ENDGAME: eta=${Math.round(eta)}s\n`;
+  }
+  if (state.gameOver) {
+    digest += `GAMEOVER: winner=${state.winner} reason=${state.gameOverReason ?? "unknown"}\n`;
+  }
+
   // Style
   digest += `---STYLE---\n`;
   digest += `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas_aversion=${state.style.casualtyAversion.toFixed(2)}\n`;

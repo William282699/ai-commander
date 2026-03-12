@@ -217,6 +217,41 @@ function resolveAttack(
     return { orders: [], log: "无可用单位执行进攻", degraded: true };
   }
 
+  // ── If targeting a facility, emit sabotage orders so damage is actually applied ──
+  if (intent.targetFacility) {
+    const fac = findFacilityById(state, intent.targetFacility);
+    if (fac && fac.team !== "player") {
+      const spread = createOrdersWithSpread(
+        units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
+      );
+      if (spread.orders.length === 0) {
+        const msg = "目标地形不可达，无可用单位执行进攻";
+        pushDiagnostic(state, "IMPASSABLE_TARGET", msg);
+        return { orders: [], log: msg, degraded: true };
+      }
+      // Mark orders with targetFacilityId for combat layer facility damage
+      for (const order of spread.orders) {
+        order.targetFacilityId = fac.id;
+      }
+      // Create sabotage mission for tracking
+      const actualUnitIds = spread.orders.flatMap((o) => o.unitIds);
+      const squadId = intent.fromSquad || undefined;
+      createMission(state, "sabotage", {
+        name: `摧毁${fac.name}`,
+        description: `派遣 ${actualUnitIds.length} 个单位摧毁目标设施`,
+        targetFacilityId: fac.id,
+        assignedUnitIds: actualUnitIds,
+        etaSec: 120,
+        squadId,
+      });
+      let log = `调度 ${spread.orders.length} 个单位摧毁 ${fac.name}`;
+      if (spread.degradedCount > 0) {
+        log += ` (${spread.degradedCount} 个已调整目标)`;
+      }
+      return { orders: spread.orders, log, degraded: false };
+    }
+  }
+
   // ④ + ③: spread targets + passability degradation (replaces filterByTargetPassability)
   const spread = createOrdersWithSpread(
     units, target, state, "attack_move", mapUrgency(intent.urgency), 1.5,

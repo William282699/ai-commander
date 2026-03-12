@@ -249,8 +249,124 @@ Baseline: `main@19a207f` (Day10.5 merged). Typecheck + build pass.
 - Facility manual interaction UX: right-click facility context menu as primary entry (`占领` / `破坏`), keep `A/C + right-click` as advanced shortcut, add first-time hint text; LLM-issued commands execute directly without popup
 - Clarification guard (minimal UX): when intent is degraded due to ambiguous/invalid target (e.g., sabotage target missing/unresolvable), cancel execution and show a lightweight "re-enter command" prompt instead of forcing fallback execution; keep main chain unchanged (`LLM -> sanitizeIntent -> resolveIntent -> applyOrders`)
 
+## Day12 Implementation Record: War Phase + Game-Over Loop (Completed)
+
+Baseline: Day11 merged. Typecheck + build pass.
+
+### What was done
+
+**Part A: War Phase Module (`packages/core/src/warPhase.ts` — NEW)**
+- Phase transitions: PEACE → CONFLICT → WAR → ENDGAME
+- PEACE → CONFLICT: time ≥ 120s + (readiness ≥ 0.3 OR any front engagement > 0)
+- CONFLICT → WAR: manual declaration (warDeclared) OR per-front sustained engagement ≥ 0.6 for 30s
+- Any → ENDGAME: time ≥ 900s (ENDGAME_TIME_SEC)
+- Per-front engagement timers via module-level Map<string, number>
+- Exports: updateGamePhase, checkGameOver, applyEndgamePressure, resetWarPhaseTimers
+
+**Part B: Game-Over Conditions (symmetric)**
+1. Player HQ hp ≤ 0 → enemy wins
+2. Enemy HQ hp ≤ 0 → player wins
+3. Player fuel + ammo == 0 for 60s → enemy wins (logistics collapse)
+4. Enemy fuel + ammo == 0 for 60s → player wins (logistics collapse)
+5. ENDGAME timeout 300s → score evaluation (Σhp + HQ hp)
+
+**Part C: ENDGAME Pressure**
+- 30% income drain on both sides
+- 0.5 hp/s attrition on all living units
+
+**Part D: State Model Updates (`packages/shared/src/types.ts`)**
+- Added: warDeclared, gameOver, winner, phaseStartTime, endgameStartTime, logisticsZeroSec, warEngageSec, gameOverReason
+
+**Part E: Game Loop Integration (`apps/web/src/GameCanvas.tsx`)**
+- Order: tick → economy → updateGamePhase → checkGameOver → missions → AI → autoBehavior → endgamePressure → fog → render
+- P1 fix: loop reads stateRef.current each frame (not captured local) for restart safety
+- Game-over overlay with restart button, timer resets
+
+**Part F: War Declaration UI (`apps/web/src/CommandPanel.tsx`)**
+- "宣战" button: red, only visible in CONFLICT phase, polls every 200ms
+
+**Part G: Digest Updates (`packages/shared/src/digest.ts`)**
+- ENDGAME: eta=Ns line when in ENDGAME phase
+- GAMEOVER: winner=X reason=Y line when game ends
+
+**Part H: gameOver Guards**
+- processMissions, processEnemyAI, processAutoBehavior: early return if state.gameOver
+
+### Hotfix: resolveAttack facility targeting
+
+- When `resolveAttack` targets a facility via `intent.targetFacility`, it now emits `sabotage` orders (with `targetFacilityId`) instead of plain `attack_move`
+- Root cause: units with `attack_move` go idle on arrival; only `sabotage` orders trigger `processFacilitySabotage` damage
+- Creates sabotage mission for progress tracking
+
+### Hotfix: LLM prompt — fromSquad + unitType conflict
+
+- Added prompt rule: when fromSquad is set, do NOT auto-fill unitType (squad defines the unit set)
+- Only fill unitType when commander explicitly differentiates types within a squad (e.g., "T1步兵突击，坦克掩护")
+- Root cause: LLM inferred unitType from squad name prefix ("I1" → infantry), filtering out tanks in mixed squads
+
+### Codex Review Bugs Fixed
+
+| # | Sev | Issue | Fix |
+|---|-----|-------|-----|
+| 1 | P2 | Stale closure: setGameOverInfo every frame | useRef guard (gameOverDetectedRef) |
+| 2 | P2 | Engagement timer: global max not per-front | Per-front Map<string, number> |
+| 3 | P3 | AI/autoBehavior timers not reset on restart | resetEnemyAITimer + resetAutoBehaviorTimer + resetWarPhaseTimers |
+| 4 | P1 | handleRestart state split: loop captures old state | Loop reads stateRef.current each frame + identity check |
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `packages/shared/src/types.ts` | +8 GameState fields for war phase |
+| `packages/core/src/warPhase.ts` | NEW: phase transitions + game-over + endgame pressure |
+| `packages/core/src/scenario/createInitialGameState.ts` | Init new fields |
+| `packages/core/src/index.ts` | +warPhase exports, +reset timer exports |
+| `packages/core/src/missions.ts` | +gameOver guard |
+| `packages/core/src/enemyAI.ts` | +gameOver guard, +resetEnemyAITimer |
+| `packages/core/src/autoBehavior.ts` | +gameOver guard, +resetAutoBehaviorTimer |
+| `packages/core/src/tacticalPlanner.ts` | resolveAttack facility → sabotage conversion |
+| `apps/web/src/GameCanvas.tsx` | Loop integration, game-over overlay, restart |
+| `apps/web/src/CommandPanel.tsx` | War declaration button |
+| `packages/shared/src/digest.ts` | ENDGAME/GAMEOVER digest lines |
+| `apps/server/src/ai.ts` | fromSquad + unitType prompt rule |
+
+### Architecture Invariants Preserved
+
+- LLM → sanitizeIntent → resolveIntent → applyOrders chain intact
+- resolveSourceUnits priority unchanged
+- selectedUnitIds hard constraint unchanged
+- Digest max limits unchanged
+- No Day10.5/11 regressions
+
+---
+
+## Day13 TODO (Tracked)
+
+### P1: Clarification Guard UX
+- When intent is degraded due to ambiguous/invalid command (e.g., "集合" → patrol instead of defend/move), cancel execution and show a lightweight "请重新输入" prompt
+- Root cause: LLM sometimes maps rally/gather commands to patrol intent, which is semantically wrong
+- Scope: intent validation + user-facing feedback, NOT changing the main chain (LLM → sanitizeIntent → resolveIntent → applyOrders)
+- This was explicitly listed as Day12 non-goal: "No clarification-guard UX / No full intent-only schema migration"
+
+### P2: fromSquad + unitType LLM Reliability Hardening
+- Current fix is prompt-level only (telling LLM not to auto-fill unitType when fromSquad is set)
+- If LLM doesn't follow prompt (still infers unitType from squad name prefix), mixed squads will still lose non-matching units
+- Potential Day14 refinement: add resolver-level fallback — if fromSquad is set AND unitType filter reduces units to 0, retry without unitType filter
+- Related: multi-intent squad splitting ("T1步兵突击，坦克掩护") works correctly as-is since unitType filter is intentional there
+
+### P3: Deferred Items from Day11 Notes
+- `processFacilitySabotage` regression test for attackDamage=0 / attackInterval=0 units
+- escort resolver
+- Mission UI panel (progress bars in web)
+- destroy/capture/defend_area mission creation from tactical planner
+- Facility right-click context menu (占领/破坏)
+- Camera drift on zoom/click (edge-scroll stale coords)
+- Patrol end-position target granularity
+
 ## Suggested Ticket Names
 
 - Day5: `feat(core): local obstacle detour for blocked movement`
 - Day10: `refactor(core/shared): move scenario bootstrap out of web`
 - Day11: `feat(core): missions system + tacticalPlanner phase 2`
+- Day12: `feat(core): war phase + game-over loop + endgame pressure`
+- Day13: `feat(ux): clarification guard + intent validation feedback`

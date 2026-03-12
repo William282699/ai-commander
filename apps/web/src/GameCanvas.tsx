@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useState } from "react";
 import {
   renderTerrain,
   renderMinimap,
@@ -30,6 +30,12 @@ import {
   processAutoBehavior,
   processEconomy,
   processMissions,
+  updateGamePhase,
+  checkGameOver,
+  applyEndgamePressure,
+  resetEnemyAITimer,
+  resetAutoBehaviorTimer,
+  resetWarPhaseTimers,
 } from "@ai-commander/core";
 import type { Unit, Order, GameState } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
@@ -161,6 +167,14 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
   const stateRef = useRef<GameState | null>(null);
   const inputRef = useRef(createInputState());
 
+  // Day 12: game-over overlay state
+  const [gameOverInfo, setGameOverInfo] = useState<{
+    winner: string;
+    reason: string;
+    time: number;
+  } | null>(null);
+  const gameOverDetectedRef = useRef(false); // loop-safe flag (avoids stale closure on gameOverInfo)
+
   // Stable callback: returns current box-selected unit IDs
   const getSelectedUnitIds = useCallback((): number[] => {
     return inputRef.current.selectedUnitIds;
@@ -207,6 +221,27 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     addMessage("info", `新建分队 ${squad.id}:${squad.name} (${validIds.length}人)`, state.time);
   }, []);
 
+  // Day 12: war declaration callback
+  const handleDeclareWar = useCallback(() => {
+    const state = stateRef.current;
+    if (!state || state.phase !== "CONFLICT" || state.warDeclared) return;
+    state.warDeclared = true;
+    addMessage("urgent", "宣战！进入全面战争状态", state.time);
+  }, []);
+
+  // Day 12: restart callback
+  const handleRestart = useCallback(() => {
+    const newState = createInitialGameState();
+    stateRef.current = newState;
+    gameOverDetectedRef.current = false;
+    setGameOverInfo(null);
+    // Reset module-level timers so new session starts clean
+    resetEnemyAITimer();
+    resetAutoBehaviorTimer();
+    resetWarPhaseTimers();
+    onStateReady?.(() => stateRef.current);
+  }, [onStateReady]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -224,8 +259,13 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     window.addEventListener("resize", resize);
 
     // Create game state (terrain + units + fog + facilities + ...)
-    const state = createInitialGameState();
-    stateRef.current = state;
+    const initialState = createInitialGameState();
+    stateRef.current = initialState;
+
+    // P3: reset module-level timers for clean start (handles StrictMode / HMR)
+    resetEnemyAITimer();
+    resetAutoBehaviorTimer();
+    resetWarPhaseTimers();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
@@ -238,11 +278,11 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     const input = inputRef.current;
     const cleanup = setupInputListeners(canvas, camera, input);
 
-    // Fronts array (ordered 1-5 for hotkey mapping)
-    const frontIds = state.fronts.map((f) => f.id);
+    // Fronts array (ordered 1-5 for hotkey mapping) — `let` so restart can refresh
+    let frontIds = initialState.fronts.map((f) => f.id);
 
     // Compute initial fog so first frame shows visibility
-    updateFog(state);
+    updateFog(initialState);
 
     // Track "Return to AI" button rect for click detection
     let returnToAIBtnRect: { x: number; y: number; w: number; h: number } | null = null;
@@ -250,11 +290,27 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     // Diagnostic drain cursor (time-based to survive array shifts)
     let lastDrainedDiagTime = -Infinity;
 
+    // Track current state object so the loop can detect restart (ref swap)
+    let currentLoopState: GameState = initialState;
+
     // Game loop
     let lastTime = performance.now();
     let animId = 0;
 
     const loop = (now: number) => {
+      // P1 fix: read state from ref each frame so handleRestart takes effect
+      const state = stateRef.current;
+      if (!state) { animId = requestAnimationFrame(loop); return; }
+
+      // Detect state swap (restart) — reset loop-local bookkeeping
+      if (state !== currentLoopState) {
+        currentLoopState = state;
+        lastDrainedDiagTime = -Infinity;
+        frontIds = state.fronts.map((f) => f.id);
+        input.selectedUnitIds = [];
+        updateFog(state);
+      }
+
       const dt = Math.min((now - lastTime) / 1000, 0.05); // cap dt
       lastTime = now;
 
@@ -376,12 +432,30 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
       // --- Economy (Day 9) ---
       processEconomy(state, dt);         // income, capture, production, readiness
 
-      // --- Missions (Day 11) ---
+      // --- War Phase & Game-Over (Day 12) ---
+      updateGamePhase(state, dt);        // PEACE→CONFLICT→WAR→ENDGAME transitions
+      checkGameOver(state, dt);          // HQ destroyed / logistics collapse / timeout
+
+      // --- Missions (Day 11) --- (guards: if gameOver return)
       processMissions(state, dt);        // mission progress, success/fail, squad linkage
 
-      // --- AI & Auto-Behavior (Day 8) ---
+      // --- AI & Auto-Behavior (Day 8) --- (guards: if gameOver return)
       processEnemyAI(state, dt);        // enemy strategic decisions (5s interval)
       processAutoBehavior(state, dt);    // both teams micro-behavior (2s interval)
+
+      // --- ENDGAME Pressure (Day 12) ---
+      applyEndgamePressure(state, dt);   // resource drain + attrition in ENDGAME
+
+      // Day 12: detect game-over and set React state for overlay
+      // Uses ref instead of closure-captured gameOverInfo to avoid stale-closure re-render storm
+      if (state.gameOver && !gameOverDetectedRef.current) {
+        gameOverDetectedRef.current = true;
+        setGameOverInfo({
+          winner: state.winner === "player" ? "我方胜利" : "敌方胜利",
+          reason: state.gameOverReason ?? "未知原因",
+          time: state.time,
+        });
+      }
 
       updateFog(state);
 
@@ -496,8 +570,62 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         getSelectedUnitIds={getSelectedUnitIds}
         onCreateSquad={handleCreateSquad}
         canCreateSquad={canCreateSquad}
+        onDeclareWar={handleDeclareWar}
       />
       <MessageFeed />
+      {gameOverInfo && (
+        <div style={gameOverOverlayStyle}>
+          <div style={gameOverBoxStyle}>
+            <div style={{ fontSize: 28, fontWeight: "bold", color: gameOverInfo.winner === "我方胜利" ? "#4ade80" : "#ef4444" }}>
+              {gameOverInfo.winner}
+            </div>
+            <div style={{ fontSize: 14, color: "#94a3b8", marginTop: 8 }}>
+              {gameOverInfo.reason}
+            </div>
+            <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>
+              用时 {Math.floor(gameOverInfo.time / 60)}分{Math.floor(gameOverInfo.time % 60)}秒
+            </div>
+            <button onClick={handleRestart} style={restartBtnStyle}>
+              再来一局
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+// ── Day 12: Game-over overlay styles ──
+
+const gameOverOverlayStyle: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  background: "rgba(0, 0, 0, 0.7)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  zIndex: 200,
+};
+
+const gameOverBoxStyle: React.CSSProperties = {
+  background: "rgba(15, 23, 42, 0.95)",
+  border: "1px solid #334155",
+  borderRadius: 12,
+  padding: "32px 48px",
+  textAlign: "center",
+  fontFamily: "monospace",
+};
+
+const restartBtnStyle: React.CSSProperties = {
+  marginTop: 20,
+  padding: "10px 32px",
+  fontSize: 16,
+  fontWeight: "bold",
+  fontFamily: "monospace",
+  background: "#1e40af",
+  color: "#e2e8f0",
+  border: "none",
+  borderRadius: 6,
+  cursor: "pointer",
+  letterSpacing: 2,
+};

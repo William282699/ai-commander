@@ -16,13 +16,14 @@ interface Props {
   getSelectedUnitIds?: () => number[];
   onCreateSquad?: () => void;
   canCreateSquad?: () => boolean;
+  onDeclareWar?: () => void;
 }
 
 interface DisplayResponse extends AdvisorResponse {
   warning?: string;
 }
 
-export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad }: Props) {
+export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad, onDeclareWar }: Props) {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<DisplayResponse | null>(null);
@@ -39,6 +40,16 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     const id = setInterval(() => setSquadBtnEnabled(canCreateSquad()), 200);
     return () => clearInterval(id);
   }, [canCreateSquad]);
+
+  // Day 12: poll war declaration eligibility
+  const [canDeclareWar, setCanDeclareWar] = useState(false);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const s = getState();
+      setCanDeclareWar(!!s && s.phase === "CONFLICT" && !s.warDeclared && !s.gameOver);
+    }, 200);
+    return () => clearInterval(id);
+  }, [getState]);
 
   const sendCommand = async () => {
     const state = getState();
@@ -246,6 +257,15 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
             编队
           </button>
         )}
+        {onDeclareWar && canDeclareWar && (
+          <button
+            onClick={onDeclareWar}
+            style={warBtnStyle}
+            title="向敌方宣战，进入全面战争阶段"
+          >
+            宣战
+          </button>
+        )}
         <button
           onClick={sendCommand}
           disabled={loading || !message.trim()}
@@ -412,4 +432,17 @@ const approveBtnStyle: React.CSSProperties = {
   fontWeight: "bold",
   cursor: "pointer",
   letterSpacing: 1,
+};
+
+const warBtnStyle: React.CSSProperties = {
+  background: "#7f1d1d",
+  color: "#fca5a5",
+  border: "1px solid #dc2626",
+  borderRadius: 4,
+  padding: "6px 8px",
+  fontSize: 11,
+  fontFamily: "monospace",
+  fontWeight: "bold",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
 };

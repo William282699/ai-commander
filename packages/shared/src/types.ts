@@ -404,6 +404,11 @@ export interface GameState {
   warDeclared: boolean;
   gameOver: boolean;
   winner: Team | null;
+  phaseStartTime: number;
+  endgameStartTime: number | null;
+  logisticsZeroSec: { player: number; enemy: number };
+  warEngageSec: number;
+  gameOverReason?: string;
   combatEffects: CombatEffects;
   diagnostics: DiagnosticEntry[];
   patrolTasks: PatrolTask[];
