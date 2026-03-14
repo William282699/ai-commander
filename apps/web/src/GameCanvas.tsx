@@ -9,6 +9,7 @@ import {
   renderCombatEffects,
   renderSelectionBox,
   renderInfoPanel,
+  renderTags,
   type Camera,
 } from "./rendererCanvas";
 import {
@@ -37,7 +38,7 @@ import {
   resetAutoBehaviorTimer,
   resetWarPhaseTimers,
 } from "@ai-commander/core";
-import type { Unit, Order, GameState, Facility } from "@ai-commander/shared";
+import type { Unit, Order, GameState, Facility, Tag } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { createSquad } from "@ai-commander/shared";
 import { CommandPanel } from "./CommandPanel";
@@ -221,6 +222,26 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     screenY: number;
     canCapture: boolean;
   } | null>(null);
+
+  // Day 15: poll tag mode from input ref for React-driven banner
+  const [isTagMode, setIsTagMode] = useState(false);
+  useEffect(() => {
+    const id = setInterval(() => setIsTagMode(inputRef.current.tagMode), 100);
+    return () => clearInterval(id);
+  }, []);
+
+  // Day 15: Tag naming dialog state
+  const [tagNaming, setTagNaming] = useState<{ worldX: number; worldY: number } | null>(null);
+  const [tagNameInput, setTagNameInput] = useState("");
+
+  // Day 15: Tag right-click context menu
+  const [tagMenu, setTagMenu] = useState<{
+    tag: Tag;
+    screenX: number;
+    screenY: number;
+  } | null>(null);
+  const [tagRenaming, setTagRenaming] = useState<{ tag: Tag } | null>(null);
+  const [tagRenameInput, setTagRenameInput] = useState("");
 
   // Stable callback: returns current box-selected unit IDs
   const getSelectedUnitIds = useCallback((): number[] => {
@@ -479,15 +500,38 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         input.selectedUnitIds = [];
       }
 
+      // ── Day 15: Pending tag → open naming dialog ──
+      if (input.pendingTag) {
+        setTagNaming({ worldX: input.pendingTag.worldX, worldY: input.pendingTag.worldY });
+        setTagNameInput("");
+        input.pendingTag = null;
+      }
+
       // ── Day 5: Right-click command ──
       if (input.rightClickCommand) {
         const cmd = input.rightClickCommand;
         input.rightClickCommand = null;
 
-        // Close any open facility menu on new right-click
+        // Close any open menus on new right-click
         setFacilityMenu(null);
+        setTagMenu(null);
 
-        if (input.selectedUnitIds.length > 0) {
+        // Day 15: Check if right-clicking on a tag → show tag context menu
+        const TAG_HIT_RADIUS = 1.5;
+        let tagHit: Tag | null = null;
+        for (const t of state.tags) {
+          const dx = t.position.x - cmd.worldX;
+          const dy = t.position.y - cmd.worldY;
+          if (Math.sqrt(dx * dx + dy * dy) < TAG_HIT_RADIUS) {
+            tagHit = t;
+            break;
+          }
+        }
+        if (tagHit) {
+          const screenX = (tagHit.position.x * TILE_SIZE - camera.x) * camera.zoom;
+          const screenY = (tagHit.position.y * TILE_SIZE - camera.y) * camera.zoom;
+          setTagMenu({ tag: tagHit, screenX: Math.round(screenX), screenY: Math.round(screenY) });
+        } else if (input.selectedUnitIds.length > 0) {
           // Check if clicking on an enemy unit (highest priority)
           const enemyTarget = findEnemyAtPosition(state, cmd.worldX, cmd.worldY);
 
@@ -590,6 +634,9 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
 
       // 3. Fog of war overlay (darkens unseen areas)
       renderFog(ctx, state.fog, camera, canvas.width, canvas.height);
+
+      // 3.5 Day 15: Tags (player map markers) — rendered AFTER fog so tags are visible on fogged areas
+      renderTags(ctx, state.tags, camera, input.tagMode, input.mouseX, input.mouseY);
 
       // 4. Units (enemy only visible in lit fog)
       const unitArray = Array.from(state.units.values());
@@ -713,6 +760,212 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
           >
             取消
           </button>
+        </div>
+      )}
+      {/* Day 15: Tag naming dialog */}
+      {tagNaming && (
+        <div
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "40%",
+            transform: "translate(-50%, -50%)",
+            background: "rgba(15, 23, 42, 0.95)",
+            border: "1px solid #f59e0b",
+            borderRadius: 8,
+            padding: 16,
+            fontFamily: "monospace",
+            fontSize: 12,
+            zIndex: 200,
+            pointerEvents: "auto",
+            minWidth: 200,
+          }}
+        >
+          <div style={{ color: "#f59e0b", fontWeight: "bold", marginBottom: 8 }}>标记地点</div>
+          <input
+            type="text"
+            value={tagNameInput}
+            onChange={(e) => setTagNameInput(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter" && tagNameInput.trim()) {
+                const state = stateRef.current;
+                if (state) {
+                  const trimmed = tagNameInput.trim();
+                  const dup = state.tags.find(t => t.name === trimmed);
+                  if (dup) {
+                    addMessage("warning", `标记名「${trimmed}」已存在 (${dup.id})，请换一个名字`, state.time);
+                    return; // keep dialog open, let user change name
+                  }
+                  state.tags.push({
+                    id: `tag_${state.nextTagNum}`,
+                    name: trimmed,
+                    position: { x: tagNaming.worldX, y: tagNaming.worldY },
+                    createdAt: state.time,
+                  });
+                  state.nextTagNum++;
+                  addMessage("info", `标记: ${trimmed}`, state.time);
+                }
+                setTagNaming(null);
+                setTagNameInput("");
+              }
+              if (e.key === "Escape") {
+                setTagNaming(null);
+                setTagNameInput("");
+              }
+            }}
+            placeholder="输入名称..."
+            autoFocus
+            style={{
+              width: "100%",
+              background: "#0f172a",
+              border: "1px solid #334155",
+              borderRadius: 4,
+              padding: "6px 8px",
+              color: "#e2e8f0",
+              fontSize: 12,
+              fontFamily: "monospace",
+              outline: "none",
+              boxSizing: "border-box",
+            }}
+          />
+          <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+            Enter 确认 / Escape 取消
+          </div>
+        </div>
+      )}
+      {/* Day 15: Tag right-click context menu */}
+      {tagMenu && (
+        <div
+          style={{
+            position: "absolute",
+            left: tagMenu.screenX + 10,
+            top: tagMenu.screenY - 10,
+            background: "rgba(15, 23, 42, 0.95)",
+            border: "1px solid #f59e0b",
+            borderRadius: 6,
+            padding: 6,
+            fontFamily: "monospace",
+            fontSize: 12,
+            zIndex: 150,
+            pointerEvents: "auto",
+            minWidth: 100,
+          }}
+        >
+          <div style={{ color: "#f59e0b", fontWeight: "bold", fontSize: 11, marginBottom: 4, padding: "0 4px" }}>
+            {tagMenu.tag.name}
+          </div>
+          <button
+            onClick={() => {
+              setTagRenaming({ tag: tagMenu.tag });
+              setTagRenameInput(tagMenu.tag.name);
+              setTagMenu(null);
+            }}
+            style={facilityMenuBtnStyle}
+          >
+            重命名
+          </button>
+          <button
+            onClick={() => {
+              const state = stateRef.current;
+              if (state) {
+                state.tags = state.tags.filter(t => t.id !== tagMenu.tag.id);
+                addMessage("info", `删除标记: ${tagMenu.tag.name}`, state.time);
+              }
+              setTagMenu(null);
+            }}
+            style={{ ...facilityMenuBtnStyle, color: "#ef4444" }}
+          >
+            删除
+          </button>
+          <button
+            onClick={() => setTagMenu(null)}
+            style={{ ...facilityMenuBtnStyle, color: "#64748b" }}
+          >
+            取消
+          </button>
+        </div>
+      )}
+      {/* Day 15: Tag rename dialog */}
+      {tagRenaming && (
+        <div
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "40%",
+            transform: "translate(-50%, -50%)",
+            background: "rgba(15, 23, 42, 0.95)",
+            border: "1px solid #f59e0b",
+            borderRadius: 8,
+            padding: 16,
+            fontFamily: "monospace",
+            fontSize: 12,
+            zIndex: 200,
+            pointerEvents: "auto",
+            minWidth: 200,
+          }}
+        >
+          <div style={{ color: "#f59e0b", fontWeight: "bold", marginBottom: 8 }}>重命名标记</div>
+          <input
+            type="text"
+            value={tagRenameInput}
+            onChange={(e) => setTagRenameInput(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter" && tagRenameInput.trim()) {
+                const state = stateRef.current;
+                if (state) {
+                  const t = state.tags.find(t => t.id === tagRenaming.tag.id);
+                  if (t) {
+                    t.name = tagRenameInput.trim();
+                    addMessage("info", `标记重命名: ${t.name}`, state.time);
+                  }
+                }
+                setTagRenaming(null);
+              }
+              if (e.key === "Escape") {
+                setTagRenaming(null);
+              }
+            }}
+            autoFocus
+            style={{
+              width: "100%",
+              background: "#0f172a",
+              border: "1px solid #334155",
+              borderRadius: 4,
+              padding: "6px 8px",
+              color: "#e2e8f0",
+              fontSize: 12,
+              fontFamily: "monospace",
+              outline: "none",
+              boxSizing: "border-box",
+            }}
+          />
+          <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+            Enter 确认 / Escape 取消
+          </div>
+        </div>
+      )}
+      {/* Day 15: Tag mode indicator */}
+      {isTagMode && (
+        <div
+          style={{
+            position: "absolute",
+            top: 12,
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "rgba(245, 158, 11, 0.9)",
+            color: "#000",
+            padding: "6px 16px",
+            borderRadius: 6,
+            fontFamily: "monospace",
+            fontSize: 13,
+            fontWeight: "bold",
+            zIndex: 150,
+            pointerEvents: "none",
+          }}
+        >
+          标记模式 — 点击地图放置标记 (ESC 退出)
         </div>
       )}
       {gameOverInfo && (

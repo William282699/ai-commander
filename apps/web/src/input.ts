@@ -69,6 +69,10 @@ export interface InputState {
   // --- Day 5: ESC & Return to AI ---
   escPressed: boolean;
   returnToAIPressed: boolean;
+
+  // --- Day 15: Tag mode ---
+  tagMode: boolean;
+  pendingTag: { worldX: number; worldY: number } | null;
 }
 
 export function createInputState(): InputState {
@@ -95,6 +99,9 @@ export function createInputState(): InputState {
     rightClickCommand: null,
     escPressed: false,
     returnToAIPressed: false,
+
+    tagMode: false,
+    pendingTag: null,
   };
 }
 
@@ -115,9 +122,19 @@ export function setupInputListeners(
       input.frontJumpRequest = parseInt(key);
     }
 
-    // ESC: release selection / return to AI
+    // T: toggle tag mode
+    if (key === "t") {
+      input.tagMode = !input.tagMode;
+    }
+
+    // ESC: release selection / return to AI / exit tag mode
     if (e.key === "Escape") {
-      input.escPressed = true;
+      if (input.tagMode) {
+        input.tagMode = false;
+        input.pendingTag = null;
+      } else {
+        input.escPressed = true;
+      }
     }
   };
 
@@ -180,6 +197,16 @@ export function setupInputListeners(
         const tileX = ((mx - mm.x) / mm.w) * MAP_WIDTH;
         const tileY = ((my - mm.y) / mm.h) * MAP_HEIGHT;
         centerCameraOn(camera, tileX, tileY, canvas.width, canvas.height);
+        e.preventDefault();
+        return;
+      }
+
+      // Day 15: Tag mode — click to place tag
+      if (input.tagMode) {
+        const worldX = mx / camera.zoom + camera.x;
+        const worldY = my / camera.zoom + camera.y;
+        input.pendingTag = { worldX: worldX / TILE_SIZE, worldY: worldY / TILE_SIZE };
+        input.tagMode = false;
         e.preventDefault();
         return;
       }
@@ -267,8 +294,8 @@ export function setupInputListeners(
           (e.clientX - rightClickStartX) ** 2 +
           (e.clientY - rightClickStartY) ** 2,
         );
-        if (dragDist < SELECTION_DRAG_THRESHOLD && input.selectedUnitIds.length > 0) {
-          // Right-click command: convert screen coords to world coords
+        if (dragDist < SELECTION_DRAG_THRESHOLD) {
+          // Right-click command: convert screen coords to world coords (Day 15: always emit for tag menu)
           const worldX = mx / camera.zoom + camera.x;
           const worldY = my / camera.zoom + camera.y;
           input.rightClickCommand = {

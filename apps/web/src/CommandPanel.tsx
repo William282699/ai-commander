@@ -5,7 +5,7 @@
 // ============================================================
 
 import { useState, useRef, useEffect } from "react";
-import { buildDigest, resolveIntent, applyOrders, updateStyleParam } from "@ai-commander/core";
+import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption } from "@ai-commander/shared";
 import { addMessage } from "./messageStore";
 
@@ -60,15 +60,21 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     return () => clearInterval(id);
   }, [getState]);
 
-  // Day 12: poll war declaration eligibility
+  // Day 12: poll war declaration eligibility + clear panel on game over
   const [canDeclareWar, setCanDeclareWar] = useState(false);
   useEffect(() => {
     const id = setInterval(() => {
       const s = getState();
       setCanDeclareWar(!!s && s.phase === "CONFLICT" && !s.warDeclared && !s.gameOver);
+      // Clear stale advisor response when game ends
+      if (s?.gameOver && response) {
+        setResponse(null);
+        setApprovedIdx(null);
+        setClarification(null);
+      }
     }, 200);
     return () => clearInterval(id);
-  }, [getState]);
+  }, [getState, response]);
 
   const sendCommand = async () => {
     const state = getState();
@@ -132,10 +138,56 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     if (!state) return;
 
     const letter = ["A", "B", "C"][idx] ?? "?";
-    addMessage("info", `批准方案 ${letter}: ${opt.label}`, state.time);
 
     // Multi-intent chain: loop intents with reserved unit set
     const intents = opt.intents ?? [opt.intent];
+
+    // Day 14 Layer B Gate: pre-validate structured fields before resolveIntent
+    // Uses findFront from tacticalPlanner directly (alias table + normalize + substring)
+    for (const intent of intents) {
+      if (intent.fromSquad && !state.squads?.find(s => s.id === intent.fromSquad)) {
+        addMessage("warning", `分队 ${intent.fromSquad} 不存在`, state.time);
+        setClarification("命令引用了不存在的分队，请重新描述");
+        return;
+      }
+      if (intent.targetFacility && !state.facilities.has(intent.targetFacility)) {
+        addMessage("warning", `设施 ${intent.targetFacility} 不存在`, state.time);
+        setClarification("命令引用了不存在的设施，请重新描述");
+        return;
+      }
+      if (intent.toFront && !findFront(state, intent.toFront)) {
+        addMessage("warning", `战线 ${intent.toFront} 不存在`, state.time);
+        setClarification("命令引用了不存在的战线，请重新描述");
+        return;
+      }
+      if (intent.fromFront && !findFront(state, intent.fromFront)) {
+        addMessage("warning", `战线 ${intent.fromFront} 不存在`, state.time);
+        setClarification("命令引用了不存在的战线，请重新描述");
+        return;
+      }
+      // Stage C: targetRegion validation (tags, fronts, regions)
+      if (intent.targetRegion) {
+        const isTag = state.tags?.some(t => t.id === intent.targetRegion);
+        const isFront = !!findFront(state, intent.targetRegion);
+        const isRegion = state.regions.has(intent.targetRegion);
+        // Also check fuzzy region name match (mirrors tacticalPlanner.getRegionCenter)
+        const isRegionFuzzy = !isRegion && (() => {
+          const lower = intent.targetRegion!.toLowerCase();
+          for (const [, r] of state.regions) {
+            if (r.id.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower)) return true;
+          }
+          return false;
+        })();
+        if (!isTag && !isFront && !isRegion && !isRegionFuzzy) {
+          addMessage("warning", `目标区域 ${intent.targetRegion} 不存在`, state.time);
+          setClarification("命令引用了不存在的目标区域，请重新描述");
+          return;
+        }
+      }
+    }
+
+    // Gate passed — log approval
+    addMessage("info", `批准方案 ${letter}: ${opt.label}`, state.time);
     const allOrders: ReturnType<typeof resolveIntent>["orders"] = [];
     const reserved = new Set<number>();
     let degradedCount = 0;

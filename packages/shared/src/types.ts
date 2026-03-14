@@ -371,6 +371,15 @@ export interface Squad {
   formationStyle: "line" | "wedge" | "column";
 }
 
+// --- Tag (player map markers, Day 15) ---
+
+export interface Tag {
+  id: string;        // "tag_1", "tag_2", ...
+  name: string;      // player-chosen label, e.g. "制高点"
+  position: { x: number; y: number };
+  createdAt: number; // game time
+}
+
 // --- Diagnostics (engine → UI message channel) ---
 
 export interface DiagnosticEntry {
@@ -415,6 +424,8 @@ export interface GameState {
   nextPatrolTaskId: number;
   squads: Squad[];
   nextSquadNum: { [prefix: string]: number };
+  tags: Tag[];
+  nextTagNum: number;
 }
 
 // --- LLM Response Types ---

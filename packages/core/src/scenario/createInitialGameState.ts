@@ -204,5 +204,7 @@ export function createInitialGameState(): GameState {
     nextPatrolTaskId: 1,
     squads: [],
     nextSquadNum: {},
+    tags: [],
+    nextTagNum: 1,
   };
 }

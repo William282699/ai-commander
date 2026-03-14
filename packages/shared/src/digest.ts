@@ -91,6 +91,19 @@ export function generateDigestV1(
     digest += `GAMEOVER: winner=${state.winner} reason=${state.gameOverReason ?? "unknown"}\n`;
   }
 
+  // Day 15: Tags (player map markers)
+  if (state.tags && state.tags.length > 0) {
+    digest += `---TAGS---\n`;
+    const maxTags = 12;
+    for (let i = 0; i < Math.min(state.tags.length, maxTags); i++) {
+      const t = state.tags[i];
+      digest += `${t.id}:"${t.name}" @(${Math.round(t.position.x)},${Math.round(t.position.y)})\n`;
+    }
+    if (state.tags.length > maxTags) {
+      digest += `...+${state.tags.length - maxTags} more\n`;
+    }
+  }
+
   // Style
   digest += `---STYLE---\n`;
   digest += `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas_aversion=${state.style.casualtyAversion.toFixed(2)}\n`;

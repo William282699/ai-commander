@@ -9,7 +9,7 @@ export { processMissions, createMission, resetMissionCounter } from "./missions"
 export type { CreateMissionOpts } from "./missions";
 export { createDefaultStyle, updateStyleParam } from "./styleEngine";
 export { updateGamePhase, checkGameOver, applyEndgamePressure, resetWarPhaseTimers } from "./warPhase";
-export { resolveIntent, isIntentSupported } from "./tacticalPlanner";
+export { resolveIntent, isIntentSupported, findFront } from "./tacticalPlanner";
 export type { ResolveResult } from "./tacticalPlanner";
 export { buildDigest } from "./intelDigest";
 export { createInitialGameState } from "./scenario";

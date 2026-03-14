@@ -10,6 +10,7 @@ import type {
   Unit,
   Visibility,
   CombatEffects,
+  Tag,
 } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 
@@ -660,7 +661,7 @@ export function renderInfoPanel(
     lines.push(`  ${label}: ${count}`);
   }
   const hpPct = Math.round((totalHp / totalMaxHp) * 100);
-  lines.push(`HP: ${totalHp}/${totalMaxHp} (${hpPct}%)`);
+  lines.push(`HP: ${Math.round(totalHp)}/${Math.round(totalMaxHp)} (${hpPct}%)`);
   if (manualCount > 0) {
     lines.push(`Manual: ${manualCount} unit${manualCount > 1 ? "s" : ""}`);
   }
@@ -822,4 +823,77 @@ export function renderCombatEffects(
 
     ctx.restore();
   }
+}
+
+// ──────────────────────────────────────────────
+// Render: Tags (player map markers, Day 15)
+// ──────────────────────────────────────────────
+
+export function renderTags(
+  ctx: CanvasRenderingContext2D,
+  tags: Tag[],
+  camera: Camera,
+  tagMode: boolean,
+  mouseX: number,
+  mouseY: number,
+): void {
+  for (const tag of tags) {
+    const screenX = (tag.position.x * TILE_SIZE - camera.x) * camera.zoom;
+    const screenY = (tag.position.y * TILE_SIZE - camera.y) * camera.zoom;
+
+    drawFlag(ctx, screenX, screenY, camera.zoom, tag.name, 1.0);
+  }
+
+  // Tag mode preview: semi-transparent flag at cursor
+  if (tagMode && mouseX >= 0 && mouseY >= 0) {
+    drawFlag(ctx, mouseX, mouseY, camera.zoom, "?", 0.4);
+  }
+}
+
+function drawFlag(
+  ctx: CanvasRenderingContext2D,
+  screenX: number,
+  screenY: number,
+  zoom: number,
+  label: string,
+  alpha: number,
+): void {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  const poleH = Math.max(16, 24 * zoom);
+  const flagW = Math.max(10, 14 * zoom);
+  const flagH = Math.max(8, 10 * zoom);
+
+  // Pole
+  ctx.strokeStyle = "#f59e0b";
+  ctx.lineWidth = Math.max(1.5, 2 * zoom);
+  ctx.beginPath();
+  ctx.moveTo(screenX, screenY);
+  ctx.lineTo(screenX, screenY - poleH);
+  ctx.stroke();
+
+  // Triangular flag
+  ctx.fillStyle = "#f59e0b";
+  ctx.beginPath();
+  ctx.moveTo(screenX, screenY - poleH);
+  ctx.lineTo(screenX + flagW, screenY - poleH + flagH / 2);
+  ctx.lineTo(screenX, screenY - poleH + flagH);
+  ctx.closePath();
+  ctx.fill();
+
+  // Label text
+  const fontSize = Math.max(9, 11 * zoom);
+  ctx.font = `bold ${fontSize}px monospace`;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.strokeStyle = "#000";
+  ctx.lineWidth = 2.5;
+  ctx.strokeText(label, screenX + flagW + 3, screenY - poleH + flagH / 2);
+  ctx.fillStyle = "#fff";
+  ctx.fillText(label, screenX + flagW + 3, screenY - poleH + flagH / 2);
+
+  ctx.restore();
+  ctx.textAlign = "start";
+  ctx.textBaseline = "alphabetic";
 }

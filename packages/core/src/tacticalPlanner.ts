@@ -778,8 +778,14 @@ function resolveTarget(intent: Intent, state: GameState): Position | null {
     if (pos) return pos;
   }
   if (intent.targetRegion) {
+    // Day 15: check tags first, then regions, then fronts
+    const tag = state.tags?.find(t => t.id === intent.targetRegion);
+    if (tag) return { x: Math.round(tag.position.x), y: Math.round(tag.position.y) };
     const pos = getRegionCenter(state, intent.targetRegion);
     if (pos) return pos;
+    // Also try front match (LLM might put front id in targetRegion)
+    const front = findFront(state, intent.targetRegion);
+    if (front) return getFrontCenterPos(state, front);
   }
   if (intent.toFront) {
     const front = findFront(state, intent.toFront);
@@ -983,7 +989,7 @@ function normalizeFrontHint(value: string): string {
  * Fuzzy-match a front by alias → exact id/name → substring.
  * Three layers: alias table → normalized exact → lowercase substring.
  */
-function findFront(state: GameState, hint: string): Front | undefined {
+export function findFront(state: GameState, hint: string): Front | undefined {
   // Layer 1: alias table
   const normalized = normalizeFrontHint(hint);
   const aliasedId = FRONT_ALIAS_TO_ID[normalized];
