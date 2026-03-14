@@ -7,9 +7,48 @@
 import { useState, useRef, useEffect } from "react";
 import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption } from "@ai-commander/shared";
-import { addMessage } from "./messageStore";
+import type { Channel } from "@ai-commander/shared";
+import { addMessage, getActiveChannel } from "./messageStore";
 
 const API_URL = "http://localhost:3001";
+
+// ── Day 16B: Context Memory ──
+// Keeps recent command/response pairs per channel so the LLM sees conversation history.
+
+const MAX_CONTEXT_ENTRIES = 3;
+const MAX_CONTEXT_CHARS = 600;
+
+interface ContextEntry {
+  role: "user" | "assistant";
+  text: string;
+  time: number; // game time
+}
+
+type ChannelContext = Record<Channel, ContextEntry[]>;
+
+function createEmptyChannelContext(): ChannelContext {
+  return { ops: [], logistics: [], combat: [] };
+}
+
+function pushContext(ctx: ChannelContext, channel: Channel, entry: ContextEntry): void {
+  const arr = ctx[channel];
+  arr.push(entry);
+  // Trim to MAX_CONTEXT_ENTRIES
+  while (arr.length > MAX_CONTEXT_ENTRIES * 2) arr.shift(); // *2 for user+assistant pairs
+  // Trim to MAX_CONTEXT_CHARS total
+  let total = arr.reduce((s, e) => s + e.text.length, 0);
+  while (total > MAX_CONTEXT_CHARS && arr.length > 0) {
+    total -= arr[0].text.length;
+    arr.shift();
+  }
+}
+
+function formatContext(ctx: ChannelContext, channel: Channel): string {
+  const arr = ctx[channel];
+  if (arr.length === 0) return "";
+  const lines = arr.map((e) => `[${e.role === "user" ? "指挥官" : "参谋"}] ${e.text}`);
+  return "\n---CONTEXT---\n" + lines.join("\n");
+}
 
 interface Props {
   getState: () => GameState | null;
@@ -32,6 +71,9 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
 
   // P1: snapshot selected unit IDs at sendCommand time, use in handleApprove
   const selectedIdsSnapshotRef = useRef<number[] | undefined>(undefined);
+
+  // Day 16B: per-channel context memory
+  const channelContextRef = useRef<ChannelContext>(createEmptyChannelContext());
 
   // P2: poll canCreateSquad every 200ms for button state
   const [squadBtnEnabled, setSquadBtnEnabled] = useState(false);
@@ -61,6 +103,8 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
   }, [getState]);
 
   // Day 12: poll war declaration eligibility + clear panel on game over
+  // Day 16B: also detect restart (time resets) → clear context memory
+  const lastSeenTimeRef = useRef(0);
   const [canDeclareWar, setCanDeclareWar] = useState(false);
   useEffect(() => {
     const id = setInterval(() => {
@@ -72,6 +116,11 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
         setApprovedIdx(null);
         setClarification(null);
       }
+      // Day 16B: detect restart (time went backward) → clear context
+      if (s && s.time < lastSeenTimeRef.current - 5) {
+        channelContextRef.current = createEmptyChannelContext();
+      }
+      if (s) lastSeenTimeRef.current = s.time;
     }, 200);
     return () => clearInterval(id);
   }, [getState, response]);
@@ -91,8 +140,15 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     // P1: lock selected unit IDs at send time
     const selectedIds = getSelectedUnitIds ? [...getSelectedUnitIds()] : [];
     selectedIdsSnapshotRef.current = selectedIds.length > 0 ? selectedIds : undefined;
-    const digest = buildDigest(state, selectedIds, [], []);
+    // Day 16B fix: snapshot active channel at send time (avoid mid-request tab switch)
+    const ch = getActiveChannel();
+    const baseDigest = buildDigest(state, selectedIds, [], []);
+    const contextSuffix = formatContext(channelContextRef.current, ch);
+    const digest = baseDigest + contextSuffix;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
+
+    // Push user message to context memory (bound to snapshotted channel)
+    pushContext(channelContextRef.current, ch, { role: "user", text: userMsg, time: state.time });
 
     try {
       const res = await fetch(`${API_URL}/api/command`, {
@@ -118,6 +174,10 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
         setResponse(data as DisplayResponse);
         setError(null);
         addMessage("info", "收到参谋简报", state.time);
+        // Day 16B: push assistant brief to context memory (use snapshotted ch)
+        if (data.brief) {
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief, time: state.time });
+        }
       }
     } catch {
       const errMsg = "无法连接服务器，请确保后端运行在 localhost:3001";

@@ -8,6 +8,16 @@
 export type Team = "player" | "enemy" | "neutral";
 export type GamePhase = "PEACE" | "CONFLICT" | "WAR" | "ENDGAME";
 
+// --- Channels (Day 16B: multi-channel Staff Feed) ---
+
+export type Channel = "ops" | "logistics" | "combat";
+
+export const CHANNEL_LABELS: Record<Channel, string> = {
+  ops: "作战",
+  logistics: "后勤",
+  combat: "战斗",
+};
+
 // --- Position ---
 
 export interface Position {

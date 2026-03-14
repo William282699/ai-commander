@@ -40,15 +40,48 @@ import {
   processReportSignals,
   drainReportEvents,
   resetReportSignals,
+  buildDigest,
 } from "@ai-commander/core";
-import type { Unit, Order, GameState, Facility, Tag } from "@ai-commander/shared";
+import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { createSquad } from "@ai-commander/shared";
 import { CommandPanel } from "./CommandPanel";
 import { MessageFeed } from "./MessageFeed";
 import { addMessage, clearMessages, type MessageLevel } from "./messageStore";
 
+// ── Day 16B: event → channel routing ──
+
+const EVENT_CHANNEL_MAP: Record<ReportEventType, Channel> = {
+  UNDER_ATTACK: "combat",
+  SUPPLY_LOW: "logistics",
+  FACILITY_CAPTURED: "ops",
+  FACILITY_LOST: "ops",
+  MISSION_DONE: "ops",
+  MISSION_FAILED: "ops",
+  HQ_DAMAGED: "combat",
+  SQUAD_HEAVY_LOSS: "combat",
+};
+
 // ── Diagnostic → Staff Feed bridge ──
+
+// ── Day 16B: Heartbeat state ──
+
+const HEARTBEAT_INTERVAL_SEC = 50;
+const API_URL = "http://localhost:3001";
+
+const heartbeatState = {
+  lastTime: { ops: 0, logistics: 0, combat: 0 } as Record<Channel, number>,
+  inFlight: { ops: false, logistics: false, combat: false } as Record<Channel, boolean>,
+  session: 0, // incremented on restart; stale async responses compare against this
+};
+
+function resetHeartbeatState(): void {
+  for (const ch of ["ops", "logistics", "combat"] as Channel[]) {
+    heartbeatState.lastTime[ch] = 0;
+    heartbeatState.inFlight[ch] = false;
+  }
+  heartbeatState.session++;
+}
 
 /** Diagnostic codes suppressed from Staff Feed (still logged to state.diagnostics). */
 const SUPPRESSED_DIAG_CODES = new Set(["PATH_BLOCKED", "IMPASSABLE_TERRAIN"]);
@@ -349,6 +382,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
     resetReportSignals();
+    resetHeartbeatState();
     clearMessages();
     addMessage("info", "等待指令...", 0);
     onStateReady?.(() => stateRef.current);
@@ -379,6 +413,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
     resetReportSignals();
+    resetHeartbeatState();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
@@ -631,14 +666,49 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
           state.diagnostics[state.diagnostics.length - 1].time;
       }
 
-      // --- Drain report events → Staff Feed (Day 16A) ---
+      // --- Drain report events → Staff Feed (Day 16A+B) ---
       const reportEvts = drainReportEvents(state, 5);
       for (const evt of reportEvts) {
+        const channel = EVENT_CHANNEL_MAP[evt.type] || "ops";
         addMessage(
           evt.severity === "critical" ? "urgent" : evt.severity === "warning" ? "warning" : "info",
           evt.message,
           state.time,
+          channel,
         );
+      }
+
+      // --- Day 16B: Heartbeat LLM brief (async, non-blocking) ---
+      if (!state.gameOver) {
+        for (const ch of ["ops", "logistics", "combat"] as Channel[]) {
+          if (
+            state.time - heartbeatState.lastTime[ch] > HEARTBEAT_INTERVAL_SEC &&
+            !heartbeatState.inFlight[ch]
+          ) {
+            heartbeatState.lastTime[ch] = state.time;
+            heartbeatState.inFlight[ch] = true;
+            const digest = buildDigest(state, [], [], []);
+            const capturedTime = state.time;
+            const reqSession = heartbeatState.session; // capture session for stale-guard
+            fetch(`${API_URL}/api/brief`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ digest, channel: ch }),
+            })
+              .then((r) => r.json())
+              .then((data) => {
+                if (reqSession !== heartbeatState.session) return; // stale: game restarted
+                if (data?.brief) {
+                  addMessage("info", data.brief, capturedTime, ch);
+                }
+              })
+              .catch(() => {}) // heartbeat failure is silent
+              .finally(() => {
+                if (reqSession !== heartbeatState.session) return; // stale: don't unlock new session
+                heartbeatState.inFlight[ch] = false;
+              });
+          }
+        }
       }
 
       // --- Rendering ---

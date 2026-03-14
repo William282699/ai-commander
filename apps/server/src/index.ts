@@ -50,15 +50,15 @@ app.post("/api/command", async (req, res) => {
   }
 });
 
-// Light brief call (periodic update)
+// Light brief call (periodic update, Day 16B: channel-aware)
 app.post("/api/brief", async (req, res) => {
-  const { digest } = req.body;
+  const { digest, channel } = req.body;
   if (!digest || typeof digest !== "string") {
     res.status(400).json({ error: "digest (string) 必填" });
     return;
   }
 
-  const result = await callLightBrief(digest);
+  const result = await callLightBrief(digest, channel);
   if (!result) {
     res.status(502).json({ error: "简报生成失败" });
     return;
