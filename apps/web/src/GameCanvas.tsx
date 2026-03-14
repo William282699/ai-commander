@@ -37,7 +37,7 @@ import {
   resetAutoBehaviorTimer,
   resetWarPhaseTimers,
 } from "@ai-commander/core";
-import type { Unit, Order, GameState } from "@ai-commander/shared";
+import type { Unit, Order, GameState, Facility } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { createSquad } from "@ai-commander/shared";
 import { CommandPanel } from "./CommandPanel";
@@ -158,6 +158,45 @@ function findEnemyAtPosition(
   return closest;
 }
 
+/** Day 13: Find a non-player facility near the clicked tile position. */
+function findFacilityAtPosition(
+  state: GameState,
+  worldTileX: number,
+  worldTileY: number,
+): Facility | null {
+  let closest: Facility | null = null;
+  let closestDist = Infinity;
+  const clickRadius = 2.0; // tiles
+
+  state.facilities.forEach((fac) => {
+    // Only show menu for non-player facilities (enemy or neutral)
+    if (fac.team === "player") return;
+    if (fac.hp <= 0) return;
+
+    // Must be visible on the fog
+    const tx = Math.floor(fac.position.x);
+    const ty = Math.floor(fac.position.y);
+    if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) return;
+    if (state.fog[ty]?.[tx] !== "visible") return;
+
+    const dx = fac.position.x - worldTileX;
+    const dy = fac.position.y - worldTileY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < clickRadius && dist < closestDist) {
+      closestDist = dist;
+      closest = fac;
+    }
+  });
+
+  return closest;
+}
+
+/** Non-capturable facility types (same as economy.ts) */
+const NON_CAPTURABLE_TYPES = new Set([
+  "headquarters", "barracks", "shipyard", "airfield", "defense_tower",
+]);
+
 interface GameCanvasProps {
   onStateReady?: (getter: () => GameState | null) => void;
 }
@@ -174,6 +213,14 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     time: number;
   } | null>(null);
   const gameOverDetectedRef = useRef(false); // loop-safe flag (avoids stale closure on gameOverInfo)
+
+  // Day 13: facility context menu state
+  const [facilityMenu, setFacilityMenu] = useState<{
+    facility: Facility;
+    screenX: number;
+    screenY: number;
+    canCapture: boolean;
+  } | null>(null);
 
   // Stable callback: returns current box-selected unit IDs
   const getSelectedUnitIds = useCallback((): number[] => {
@@ -230,6 +277,44 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
   }, []);
 
   // Day 12: restart callback
+  // Day 13: Facility context menu action handlers
+  const handleFacilityCapture = useCallback(() => {
+    const state = stateRef.current;
+    const input = inputRef.current;
+    const menu = facilityMenu;
+    if (!state || !menu || input.selectedUnitIds.length === 0) return;
+
+    // Move selected units to the facility position (proximity capture is automatic)
+    const order: Order = {
+      unitIds: [...input.selectedUnitIds],
+      action: "attack_move",
+      target: { x: menu.facility.position.x, y: menu.facility.position.y },
+      priority: "high",
+    };
+    applyPlayerCommands(state, [order]);
+    addMessage("info", `派遣单位占领 ${menu.facility.name}`, state.time);
+    setFacilityMenu(null);
+  }, [facilityMenu]);
+
+  const handleFacilitySabotage = useCallback(() => {
+    const state = stateRef.current;
+    const input = inputRef.current;
+    const menu = facilityMenu;
+    if (!state || !menu || input.selectedUnitIds.length === 0) return;
+
+    // Issue sabotage order with targetFacilityId
+    const order: Order = {
+      unitIds: [...input.selectedUnitIds],
+      action: "sabotage",
+      target: { x: menu.facility.position.x, y: menu.facility.position.y },
+      targetFacilityId: menu.facility.id,
+      priority: "high",
+    };
+    applyPlayerCommands(state, [order]);
+    addMessage("info", `派遣单位破坏 ${menu.facility.name}`, state.time);
+    setFacilityMenu(null);
+  }, [facilityMenu]);
+
   const handleRestart = useCallback(() => {
     const newState = createInitialGameState();
     stateRef.current = newState;
@@ -399,8 +484,11 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         const cmd = input.rightClickCommand;
         input.rightClickCommand = null;
 
+        // Close any open facility menu on new right-click
+        setFacilityMenu(null);
+
         if (input.selectedUnitIds.length > 0) {
-          // Check if clicking on an enemy unit
+          // Check if clicking on an enemy unit (highest priority)
           const enemyTarget = findEnemyAtPosition(state, cmd.worldX, cmd.worldY);
 
           if (enemyTarget) {
@@ -414,14 +502,31 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
             };
             applyPlayerCommands(state, [order]);
           } else {
-            // Move order
-            const order: Order = {
-              unitIds: [...input.selectedUnitIds],
-              action: "attack_move",
-              target: { x: cmd.worldX, y: cmd.worldY },
-              priority: "medium",
-            };
-            applyPlayerCommands(state, [order]);
+            // Day 13: Check if clicking on a facility → show context menu
+            const facTarget = findFacilityAtPosition(state, cmd.worldX, cmd.worldY);
+            if (facTarget) {
+              // Compute screen position for the menu
+              // Fix: camera.x/y already in pixels, don't multiply by TILE_SIZE again
+              const screenX = (facTarget.position.x * TILE_SIZE - camera.x) * camera.zoom;
+              const screenY = (facTarget.position.y * TILE_SIZE - camera.y) * camera.zoom;
+              const canCapture = !NON_CAPTURABLE_TYPES.has(facTarget.type);
+              setFacilityMenu({
+                facility: facTarget,
+                screenX: Math.round(screenX),
+                screenY: Math.round(screenY),
+                canCapture,
+              });
+              // Don't issue move order — menu will handle the action
+            } else {
+              // Move order (no enemy unit, no facility)
+              const order: Order = {
+                unitIds: [...input.selectedUnitIds],
+                action: "attack_move",
+                target: { x: cmd.worldX, y: cmd.worldY },
+                priority: "medium",
+              };
+              applyPlayerCommands(state, [order]);
+            }
           }
         }
       }
@@ -573,6 +678,43 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         onDeclareWar={handleDeclareWar}
       />
       <MessageFeed />
+      {/* Day 13: Facility context menu */}
+      {facilityMenu && (
+        <div
+          style={{
+            position: "absolute",
+            left: facilityMenu.screenX + 10,
+            top: facilityMenu.screenY - 10,
+            background: "rgba(15, 23, 42, 0.95)",
+            border: "1px solid #475569",
+            borderRadius: 6,
+            padding: 6,
+            fontFamily: "monospace",
+            fontSize: 12,
+            zIndex: 150,
+            pointerEvents: "auto",
+            minWidth: 100,
+          }}
+        >
+          <div style={{ color: "#fbbf24", fontWeight: "bold", fontSize: 11, marginBottom: 4, padding: "0 4px" }}>
+            {facilityMenu.facility.name}
+          </div>
+          {facilityMenu.canCapture && (
+            <button onClick={handleFacilityCapture} style={facilityMenuBtnStyle}>
+              占领
+            </button>
+          )}
+          <button onClick={handleFacilitySabotage} style={facilityMenuBtnStyle}>
+            破坏
+          </button>
+          <button
+            onClick={() => setFacilityMenu(null)}
+            style={{ ...facilityMenuBtnStyle, color: "#64748b" }}
+          >
+            取消
+          </button>
+        </div>
+      )}
       {gameOverInfo && (
         <div style={gameOverOverlayStyle}>
           <div style={gameOverBoxStyle}>
@@ -614,6 +756,20 @@ const gameOverBoxStyle: React.CSSProperties = {
   padding: "32px 48px",
   textAlign: "center",
   fontFamily: "monospace",
+};
+
+const facilityMenuBtnStyle: React.CSSProperties = {
+  display: "block",
+  width: "100%",
+  padding: "4px 8px",
+  fontSize: 12,
+  fontFamily: "monospace",
+  background: "transparent",
+  color: "#e2e8f0",
+  border: "none",
+  borderRadius: 3,
+  cursor: "pointer",
+  textAlign: "left",
 };
 
 const restartBtnStyle: React.CSSProperties = {

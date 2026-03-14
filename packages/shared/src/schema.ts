@@ -131,7 +131,21 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
   const obj = data as Record<string, unknown>;
 
   if (typeof obj.brief !== "string") return null;
-  if (!Array.isArray(obj.options) || obj.options.length === 0) return null;
+  if (!Array.isArray(obj.options)) return null;
+
+  // Day 13 Layer B: LLM may return empty options[] to reject invalid commands.
+  // Allow this through — frontend will show clarification prompt.
+  if (obj.options.length === 0) {
+    const urgency = typeof obj.urgency === "number"
+      ? Math.max(0, Math.min(1, obj.urgency))
+      : 0;
+    return {
+      brief: obj.brief as string,
+      options: [],
+      recommended: "A" as const,
+      urgency,
+    };
+  }
 
   const validOptions = (obj.options as unknown[])
     .filter((o): o is Record<string, unknown> => !!o && typeof o === "object")

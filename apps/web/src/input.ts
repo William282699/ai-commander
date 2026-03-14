@@ -168,6 +168,10 @@ export function setupInputListeners(
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
 
+    // Day 13 P2-5: Refresh mouse coords on click to prevent stale edge-scroll drift
+    input.mouseX = mx;
+    input.mouseY = my;
+
     // --- Left click ---
     if (e.button === 0) {
       // Check minimap click first
@@ -276,7 +280,13 @@ export function setupInputListeners(
     }
   };
 
-  const onMouseEnter = () => { input.mouseInCanvas = true; };
+  // Day 13 P2-5: Accept MouseEvent to refresh coords on enter (prevents stale edge-scroll)
+  const onMouseEnter = (e: MouseEvent) => {
+    input.mouseInCanvas = true;
+    const rect = canvas.getBoundingClientRect();
+    input.mouseX = e.clientX - rect.left;
+    input.mouseY = e.clientY - rect.top;
+  };
   const onMouseLeave = () => { input.mouseInCanvas = false; };
 
   const onContextMenu = (e: Event) => e.preventDefault();

@@ -207,7 +207,14 @@ function resolveAttack(
 
   let units = source.units;
   if (intent.unitType) {
-    units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    const filtered = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    if (filtered.length === 0 && intent.fromSquad && units.length > 0) {
+      // fromSquad set but unitType filter wiped all units → bypass filter
+      pushDiagnostic(state, "UNITTYPE_FILTER_BYPASSED",
+        `分队 ${intent.fromSquad} 无 ${intent.unitType} 类型单位，已忽略类型筛选`);
+    } else {
+      units = filtered;
+    }
   }
 
   const count = resolveQuantity(intent.quantity, units.length, style);
@@ -291,7 +298,13 @@ function resolveDefend(
 
   let units = source.units;
   if (intent.unitType) {
-    units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    const filtered = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    if (filtered.length === 0 && intent.fromSquad && units.length > 0) {
+      pushDiagnostic(state, "UNITTYPE_FILTER_BYPASSED",
+        `分队 ${intent.fromSquad} 无 ${intent.unitType} 类型单位，已忽略类型筛选`);
+    } else {
+      units = filtered;
+    }
   }
 
   const count = resolveQuantity(intent.quantity, units.length, style);
@@ -345,7 +358,13 @@ function resolveRetreat(
 
   let units = source.units;
   if (intent.unitType) {
-    units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    const filtered = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    if (filtered.length === 0 && intent.fromSquad && units.length > 0) {
+      pushDiagnostic(state, "UNITTYPE_FILTER_BYPASSED",
+        `分队 ${intent.fromSquad} 无 ${intent.unitType} 类型单位，已忽略类型筛选`);
+    } else {
+      units = filtered;
+    }
   }
 
   const count = resolveQuantity(intent.quantity, units.length, style);
@@ -462,7 +481,13 @@ function resolveHold(
 
   let units = source.units;
   if (intent.unitType) {
-    units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    const filtered = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    if (filtered.length === 0 && intent.fromSquad && units.length > 0) {
+      pushDiagnostic(state, "UNITTYPE_FILTER_BYPASSED",
+        `分队 ${intent.fromSquad} 无 ${intent.unitType} 类型单位，已忽略类型筛选`);
+    } else {
+      units = filtered;
+    }
   }
 
   const count = resolveQuantity(intent.quantity, units.length, style);
@@ -577,7 +602,13 @@ function resolvePatrol(
 
   let units = source.units;
   if (intent.unitType) {
-    units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    const filtered = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    if (filtered.length === 0 && intent.fromSquad && units.length > 0) {
+      pushDiagnostic(state, "UNITTYPE_FILTER_BYPASSED",
+        `分队 ${intent.fromSquad} 无 ${intent.unitType} 类型单位，已忽略类型筛选`);
+    } else {
+      units = filtered;
+    }
   }
 
   const count = resolveQuantity(intent.quantity ?? "few", units.length, style);
@@ -627,7 +658,7 @@ function resolvePatrol(
 
   return {
     orders,
-    log: `派出 ${selected.length} 个单位巡逻 (${centerTileX},${centerTileY}) 半径${radius}`,
+    log: `巡逻任务已下达: ${selected.length} 个单位在 (${centerTileX},${centerTileY}) 半径${radius} 范围巡逻`,
     degraded: false,
   };
 }

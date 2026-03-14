@@ -363,6 +363,29 @@ Baseline: Day11 merged. Typecheck + build pass.
 - Camera drift on zoom/click (edge-scroll stale coords)
 - Patrol end-position target granularity
 
+## Day14 TODO (Tracked)
+
+### P1: Layer B Hardening — valid_targets + Backend Validation
+- Day13 Layer B is soft-only (LLM prompt rule: invalid target → empty options)
+- LLM may not always comply → need hard backend validation as fallback
+- **Dynamic valid_targets injection**: each advisor call passes `valid_targets[]` extracted from current GameState (fronts, facilities, squads, regions)
+  - Format: `[{id, kind, name, tags}]`
+  - Scale control: only pass Top-K candidates (e.g. 20) when target count grows large, not full list
+- **Backend targetId validation**: after LLM returns, verify every intent's targetFacility / targetRegion / toFront / fromSquad exists in current state
+  - If invalid → strip the intent or convert entire response to clarification (empty options + brief explaining the issue)
+- **Relationship to Day13**: Day13 prompt rule = soft constraint (LLM decides), Day14 backend validation = hard constraint (code decides). Layered defense.
+
+### P2: Escort Resolver
+- Deferred from Day11. Type=escort currently maps to defend via Day7 normalization.
+
+### P3: Mission UI Panel
+- Progress bars for active missions in web UI
+- Deferred from Day11
+
+### P4: Destroy/Capture/Defend_area Mission Types
+- Creating these mission types from tactical planner intents
+- Deferred from Day11
+
 ## Suggested Ticket Names
 
 - Day5: `feat(core): local obstacle detour for blocked movement`
@@ -370,3 +393,4 @@ Baseline: Day11 merged. Typecheck + build pass.
 - Day11: `feat(core): missions system + tacticalPlanner phase 2`
 - Day12: `feat(core): war phase + game-over loop + endgame pressure`
 - Day13: `feat(ux): clarification guard + intent validation feedback`
+- Day14: `feat(core): valid_targets injection + backend intent validation`

@@ -5,7 +5,7 @@
 // ============================================================
 
 import { useState, useRef, useEffect } from "react";
-import { buildDigest, resolveIntent, applyOrders } from "@ai-commander/core";
+import { buildDigest, resolveIntent, applyOrders, updateStyleParam } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption } from "@ai-commander/shared";
 import { addMessage } from "./messageStore";
 
@@ -41,6 +41,25 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     return () => clearInterval(id);
   }, [canCreateSquad]);
 
+  // Day 13 P3-6: style visibility — poll style params at low frequency
+  const [showStyle, setShowStyle] = useState(false);
+  const [styleSnapshot, setStyleSnapshot] = useState<{ r: number; f: number; o: number; c: number; s: number } | null>(null);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const s = getState();
+      if (s) {
+        setStyleSnapshot({
+          r: s.style.riskTolerance,
+          f: s.style.focusFireBias,
+          o: s.style.objectiveBias,
+          c: s.style.casualtyAversion,
+          s: s.style.reconPriority,
+        });
+      }
+    }, 1000); // 1Hz — low overhead
+    return () => clearInterval(id);
+  }, [getState]);
+
   // Day 12: poll war declaration eligibility
   const [canDeclareWar, setCanDeclareWar] = useState(false);
   useEffect(() => {
@@ -59,6 +78,7 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     setLoading(true);
     setError(null);
     setApprovedIdx(null);
+    setClarification(null);
 
     addMessage("info", `发送指令: ${userMsg}`, state.time);
 
@@ -81,6 +101,13 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
         setResponse(null);
         selectedIdsSnapshotRef.current = undefined;
         addMessage("urgent", `后端错误: ${data.error}`, state.time);
+      } else if (Array.isArray(data.options) && data.options.length === 0) {
+        // Day 13 Layer B: LLM rejected command (invalid target / nonsensical)
+        setResponse(null);
+        setError(null);
+        const reason = data.brief || "命令目标不存在或不明确";
+        setClarification(reason + " — 请重新描述指令");
+        addMessage("warning", reason, state.time);
       } else {
         setResponse(data as DisplayResponse);
         setError(null);
@@ -97,6 +124,9 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     setMessage("");
   };
 
+  // Day 13: clarification guard state
+  const [clarification, setClarification] = useState<string | null>(null);
+
   const handleApprove = (opt: AdvisorOption, idx: number) => {
     const state = getState();
     if (!state) return;
@@ -108,11 +138,13 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     const intents = opt.intents ?? [opt.intent];
     const allOrders: ReturnType<typeof resolveIntent>["orders"] = [];
     const reserved = new Set<number>();
+    let degradedCount = 0;
 
     for (const intent of intents) {
       const result = resolveIntent(intent, state, state.style, reserved, selectedIdsSnapshotRef.current);
 
       if (result.degraded) {
+        degradedCount++;
         addMessage("warning", result.log, state.time);
       } else {
         addMessage("info", `执行: ${result.log}`, state.time);
@@ -126,12 +158,38 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
       allOrders.push(...result.orders);
     }
 
-    if (allOrders.length > 0) {
-      applyOrders(state, allOrders);
-    } else {
-      addMessage("warning", "无可执行命令", state.time);
+    // Day 13 Clarification Guard: if ALL intents degraded → don't execute, show prompt
+    if (allOrders.length === 0 && degradedCount > 0) {
+      addMessage("warning", "命令无法执行，请重新描述", state.time);
+      setClarification("命令不明确，请重述（示例：'北线全部坦克进攻桥头'）");
+      setApprovedIdx(idx);
+      // Don't auto-dismiss — let user see clarification and re-type
+      setTimeout(() => {
+        setApprovedIdx(null);
+      }, 400);
+      return;
     }
 
+    if (allOrders.length > 0) {
+      applyOrders(state, allOrders);
+    }
+
+    // Day 13 P3-6: Style learning — nudge params based on approved option
+    if (allOrders.length > 0) {
+      // High risk chosen → increase riskTolerance
+      if (opt.risk > 0.6) updateStyleParam(state.style, "riskTolerance", 1);
+      else if (opt.risk < 0.3) updateStyleParam(state.style, "riskTolerance", -1);
+      // High reward chosen → increase objectiveBias
+      if (opt.reward > 0.6) updateStyleParam(state.style, "objectiveBias", 1);
+      else if (opt.reward < 0.3) updateStyleParam(state.style, "objectiveBias", -1);
+      // If user picks non-recommended → slight casualtyAversion signal
+      const letter = ["A", "B", "C"][idx];
+      if (response && letter !== response.recommended) {
+        updateStyleParam(state.style, "casualtyAversion", 1);
+      }
+    }
+
+    setClarification(null);
     setApprovedIdx(idx);
 
     // Auto-dismiss after brief delay so user sees the highlight
@@ -231,6 +289,39 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
       )}
 
       {error && <div style={errorStyle}>{error}</div>}
+
+      {/* Day 13: Clarification prompt */}
+      {clarification && (
+        <div style={clarificationStyle}>{clarification}</div>
+      )}
+
+      {/* Day 13 P3-6: Compact style indicator */}
+      {styleSnapshot && (
+        <div style={styleRowStyle}>
+          <button onClick={() => setShowStyle(!showStyle)} style={styleToggleBtn} title="指挥风格参数">
+            {showStyle ? "▾ 风格" : "▸ 风格"}
+          </button>
+          {showStyle && (
+            <div style={styleBarContainer}>
+              {([
+                ["冒险", styleSnapshot.r],
+                ["集火", styleSnapshot.f],
+                ["目标", styleSnapshot.o],
+                ["惜兵", styleSnapshot.c],
+                ["侦察", styleSnapshot.s],
+              ] as [string, number][]).map(([label, val]) => (
+                <div key={label} style={styleBarItem}>
+                  <span style={styleLabel}>{label}</span>
+                  <span style={barBg}>
+                    <span style={{ ...barFill, width: `${val * 100}%`, background: "#60a5fa" }} />
+                  </span>
+                  <span style={styleVal}>{(val * 100).toFixed(0)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Input area */}
       <div style={inputContainerStyle}>
@@ -379,6 +470,16 @@ const errorStyle: React.CSSProperties = {
   borderRadius: 3,
 };
 
+const clarificationStyle: React.CSSProperties = {
+  color: "#fbbf24",
+  fontSize: 11,
+  marginBottom: 6,
+  padding: "6px 8px",
+  background: "rgba(251, 191, 36, 0.12)",
+  border: "1px solid rgba(251, 191, 36, 0.3)",
+  borderRadius: 4,
+};
+
 const inputContainerStyle: React.CSSProperties = {
   display: "flex",
   gap: 6,
@@ -445,4 +546,49 @@ const warBtnStyle: React.CSSProperties = {
   fontWeight: "bold",
   cursor: "pointer",
   whiteSpace: "nowrap",
+};
+
+// Day 13 P3-6: Style visibility styles
+const styleRowStyle: React.CSSProperties = {
+  marginBottom: 6,
+  fontSize: 10,
+};
+
+const styleToggleBtn: React.CSSProperties = {
+  background: "none",
+  border: "none",
+  color: "#64748b",
+  cursor: "pointer",
+  fontSize: 10,
+  fontFamily: "monospace",
+  padding: "2px 0",
+};
+
+const styleBarContainer: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+  marginTop: 3,
+  padding: "4px 6px",
+  background: "rgba(15, 23, 42, 0.6)",
+  borderRadius: 3,
+};
+
+const styleBarItem: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 4,
+};
+
+const styleLabel: React.CSSProperties = {
+  width: 24,
+  color: "#94a3b8",
+  fontSize: 9,
+};
+
+const styleVal: React.CSSProperties = {
+  width: 20,
+  color: "#64748b",
+  fontSize: 9,
+  textAlign: "right",
 };
