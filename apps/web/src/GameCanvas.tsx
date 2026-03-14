@@ -37,13 +37,16 @@ import {
   resetEnemyAITimer,
   resetAutoBehaviorTimer,
   resetWarPhaseTimers,
+  processReportSignals,
+  drainReportEvents,
+  resetReportSignals,
 } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { createSquad } from "@ai-commander/shared";
 import { CommandPanel } from "./CommandPanel";
 import { MessageFeed } from "./MessageFeed";
-import { addMessage, type MessageLevel } from "./messageStore";
+import { addMessage, clearMessages, type MessageLevel } from "./messageStore";
 
 // ── Diagnostic → Staff Feed bridge ──
 
@@ -345,6 +348,9 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     resetEnemyAITimer();
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
+    resetReportSignals();
+    clearMessages();
+    addMessage("info", "等待指令...", 0);
     onStateReady?.(() => stateRef.current);
   }, [onStateReady]);
 
@@ -372,6 +378,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     resetEnemyAITimer();
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
+    resetReportSignals();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
@@ -581,6 +588,9 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
       // --- Economy (Day 9) ---
       processEconomy(state, dt);         // income, capture, production, readiness
 
+      // --- Event Detection (Day 16A) ---
+      processReportSignals(state, dt);
+
       // --- War Phase & Game-Over (Day 12) ---
       updateGamePhase(state, dt);        // PEACE→CONFLICT→WAR→ENDGAME transitions
       checkGameOver(state, dt);          // HQ destroyed / logistics collapse / timeout
@@ -619,6 +629,16 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         }
         lastDrainedDiagTime =
           state.diagnostics[state.diagnostics.length - 1].time;
+      }
+
+      // --- Drain report events → Staff Feed (Day 16A) ---
+      const reportEvts = drainReportEvents(state, 5);
+      for (const evt of reportEvts) {
+        addMessage(
+          evt.severity === "critical" ? "urgent" : evt.severity === "warning" ? "warning" : "info",
+          evt.message,
+          state.time,
+        );
       }
 
       // --- Rendering ---

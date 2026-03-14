@@ -33,6 +33,12 @@ export function addMessage(
   listeners.forEach((fn) => fn());
 }
 
+export function clearMessages(): void {
+  messages.length = 0;
+  nextId = 1;
+  listeners.forEach((fn) => fn());
+}
+
 export function getMessages(): readonly FeedMessage[] {
   return messages;
 }

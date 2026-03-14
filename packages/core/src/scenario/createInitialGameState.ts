@@ -200,6 +200,7 @@ export function createInitialGameState(): GameState {
     gameOverReason: undefined,
     combatEffects: { attackLines: [], explosions: [] },
     diagnostics: [],
+    reportEvents: [],
     patrolTasks: [],
     nextPatrolTaskId: 1,
     squads: [],

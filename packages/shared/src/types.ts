@@ -380,6 +380,26 @@ export interface Tag {
   createdAt: number; // game time
 }
 
+// --- Report Events (Day 16A: auto-report system) ---
+
+export type ReportEventType =
+  | "UNDER_ATTACK"
+  | "SUPPLY_LOW"
+  | "FACILITY_CAPTURED"
+  | "FACILITY_LOST"
+  | "MISSION_DONE"
+  | "MISSION_FAILED"
+  | "HQ_DAMAGED"
+  | "SQUAD_HEAVY_LOSS";
+
+export interface ReportEvent {
+  type: ReportEventType;
+  time: number;
+  message: string;
+  severity: "info" | "warning" | "critical";
+  entityId?: string;
+}
+
 // --- Diagnostics (engine → UI message channel) ---
 
 export interface DiagnosticEntry {
@@ -420,6 +440,7 @@ export interface GameState {
   gameOverReason?: string;
   combatEffects: CombatEffects;
   diagnostics: DiagnosticEntry[];
+  reportEvents: ReportEvent[];
   patrolTasks: PatrolTask[];
   nextPatrolTaskId: number;
   squads: Squad[];

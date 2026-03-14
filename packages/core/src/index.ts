@@ -12,4 +12,5 @@ export { updateGamePhase, checkGameOver, applyEndgamePressure, resetWarPhaseTime
 export { resolveIntent, isIntentSupported, findFront } from "./tacticalPlanner";
 export type { ResolveResult } from "./tacticalPlanner";
 export { buildDigest } from "./intelDigest";
+export { processReportSignals, drainReportEvents, resetReportSignals } from "./reportSignals";
 export { createInitialGameState } from "./scenario";

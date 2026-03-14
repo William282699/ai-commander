@@ -66,14 +66,12 @@ export function generateDigestV1(
   }
 
   // Facilities — so LLM knows available buildings and can fill targetFacility
+  // MVP: include all facilities (map is small). TODO: fog-filter when fog is polished.
   const facilityLines: string[] = [];
   state.facilities.forEach((f) => {
-    // Show player + neutral + enemy HQ (always visible as strategic objective)
-    if (f.team === "player" || f.team === "neutral" || f.type === "headquarters") {
-      facilityLines.push(
-        `${f.id}:${f.type} "${f.name}" team=${f.team} hp=${f.hp}/${f.maxHp} @(${f.position.x},${f.position.y})`,
-      );
-    }
+    facilityLines.push(
+      `${f.id}:${f.type} "${f.name}" team=${f.team} hp=${f.hp}/${f.maxHp} @(${f.position.x},${f.position.y})`,
+    );
   });
   if (facilityLines.length > 0) {
     digest += `---FACILITIES---\n`;
