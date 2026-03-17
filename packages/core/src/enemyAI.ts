@@ -9,6 +9,7 @@ import type { GameState, Unit, Front, Position, Order } from "@ai-commander/shar
 import { getUnitCategory } from "@ai-commander/shared";
 import { applyEnemyOrders } from "./applyOrders";
 import { canUnitEnterTile } from "./sim";
+import { enqueueProduction } from "./economy";
 
 // ── Timer (C2: while-loop, no setInterval) ──
 
@@ -49,6 +50,57 @@ function runEnemyAI(state: GameState): void {
 
   for (const assessment of assessments) {
     executeEnemyDecision(state, assessment, assessments);
+  }
+
+  enemyProductionAI(state);
+}
+
+// ── Enemy auto-production ──
+
+let enemyProdToggle = false; // flips each successful enqueue for true alternation
+
+/** Reset production toggle on new game session. */
+export function resetEnemyProdToggle(): void {
+  enemyProdToggle = false;
+}
+
+function enemyProductionAI(state: GameState): void {
+  // Don't queue more than 2 items
+  if (state.productionQueue.enemy.length >= 2) return;
+
+  const money = state.economy.enemy.resources.money;
+
+  // Count alive enemy units
+  let aliveCount = 0;
+  state.units.forEach((u) => {
+    if (u.team === "enemy" && u.state !== "dead") aliveCount++;
+  });
+
+  let result: { ok: boolean };
+  if (aliveCount < 15) {
+    // Low troop count — prioritize infantry ($100)
+    if (money >= 100) {
+      result = enqueueProduction(state, "enemy", "infantry");
+      if (result.ok) enemyProdToggle = !enemyProdToggle;
+    }
+  } else if (aliveCount <= 25) {
+    // Mid range — alternate infantry / light_tank via toggle
+    if (enemyProdToggle && money >= 250) {
+      result = enqueueProduction(state, "enemy", "light_tank");
+      if (result.ok) enemyProdToggle = !enemyProdToggle;
+    } else if (money >= 100) {
+      result = enqueueProduction(state, "enemy", "infantry");
+      if (result.ok) enemyProdToggle = !enemyProdToggle;
+    }
+  } else {
+    // Large army — occasionally build main_tank
+    if (Math.random() < 0.4 && money >= 500) {
+      result = enqueueProduction(state, "enemy", "main_tank");
+      if (result.ok) enemyProdToggle = !enemyProdToggle;
+    } else if (money >= 100) {
+      result = enqueueProduction(state, "enemy", "infantry");
+      if (result.ok) enemyProdToggle = !enemyProdToggle;
+    }
   }
 }
 

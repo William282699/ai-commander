@@ -35,6 +35,7 @@ import {
   checkGameOver,
   applyEndgamePressure,
   resetEnemyAITimer,
+  resetEnemyProdToggle,
   resetAutoBehaviorTimer,
   resetWarPhaseTimers,
   processReportSignals,
@@ -52,6 +53,7 @@ import {
   clearThreads,
   createThread,
   expireStaleThreads,
+  getLastMessageTimeBySource,
   type MessageLevel,
 } from "./messageStore";
 
@@ -69,6 +71,7 @@ const EVENT_CHANNEL_MAP: Record<ReportEventType, Channel> = {
   POSITION_CRITICAL: "combat",
   MISSION_STALLED: "ops",
   ECONOMY_SURPLUS: "logistics",
+  ECONOMY_REPORT: "logistics",
 };
 
 // ── Phase 3: Feature flags ──
@@ -417,6 +420,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     setGameOverInfo(null);
     // Reset module-level timers so new session starts clean
     resetEnemyAITimer();
+    resetEnemyProdToggle();
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
     resetReportSignals();
@@ -450,6 +454,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
 
     // P3: reset module-level timers for clean start (handles StrictMode / HMR)
     resetEnemyAITimer();
+    resetEnemyProdToggle();
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
     resetReportSignals();
@@ -773,6 +778,12 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         const level: MessageLevel =
           evt.severity === "critical" ? "urgent" : evt.severity === "warning" ? "warning" : "info";
 
+        // Throttle: suppress ECONOMY_REPORT if logistics heartbeat message arrived < 30s ago
+        if (evt.type === "ECONOMY_REPORT") {
+          const lastHb = getLastMessageTimeBySource("logistics", "heartbeat");
+          if (lastHb !== null && state.time - lastHb < 30) continue;
+        }
+
         // Phase 3: actionRequired events should always surface and eventually produce a decision thread.
         if (ENABLE_STAFF_ASK && evt.actionRequired) {
           const topicKey = `${evt.type}:${evt.entityId ?? "global"}`;
@@ -833,7 +844,6 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
             heartbeatState.lastTime[ch] = state.time;
             heartbeatState.inFlight[ch] = true;
             const digest = buildDigest(state, [], [], []);
-            const capturedTime = state.time;
             const reqSession = heartbeatState.session; // capture session for stale-guard
             fetch(`${API_URL}/api/brief`, {
               method: "POST",
@@ -844,7 +854,8 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
               .then((data) => {
                 if (reqSession !== heartbeatState.session) return; // stale: game restarted
                 if (data?.brief) {
-                  addMessage("info", data.brief, capturedTime, ch, undefined, "heartbeat");
+                  // Use arrival-time snapshot so downstream throttling keys off real message ingress time.
+                  addMessage("info", data.brief, state.time, ch, undefined, "heartbeat");
                 }
               })
               .catch(() => {}) // heartbeat failure is silent

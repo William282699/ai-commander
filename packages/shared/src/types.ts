@@ -403,7 +403,8 @@ export type ReportEventType =
   | "SQUAD_HEAVY_LOSS"
   | "POSITION_CRITICAL"
   | "MISSION_STALLED"
-  | "ECONOMY_SURPLUS";
+  | "ECONOMY_SURPLUS"
+  | "ECONOMY_REPORT";
 
 export interface ReportEvent {
   type: ReportEventType;
