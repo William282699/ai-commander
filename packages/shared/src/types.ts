@@ -400,7 +400,10 @@ export type ReportEventType =
   | "MISSION_DONE"
   | "MISSION_FAILED"
   | "HQ_DAMAGED"
-  | "SQUAD_HEAVY_LOSS";
+  | "SQUAD_HEAVY_LOSS"
+  | "POSITION_CRITICAL"
+  | "MISSION_STALLED"
+  | "ECONOMY_SURPLUS";
 
 export interface ReportEvent {
   type: ReportEventType;
@@ -408,6 +411,7 @@ export interface ReportEvent {
   message: string;
   severity: "info" | "warning" | "critical";
   entityId?: string;
+  actionRequired?: boolean; // true = ASK_DECISION (staff-ask), false/undefined = REPORT_ONLY
 }
 
 // --- Diagnostics (engine → UI message channel) ---
@@ -472,11 +476,14 @@ export interface AdvisorOption {
   intents: import("./intents").Intent[];
 }
 
+export type ResponseType = "EXECUTE" | "CONFIRM" | "ASK" | "NOOP";
+
 export interface AdvisorResponse {
   brief: string;
   options: AdvisorOption[];
   recommended: "A" | "B" | "C";
   urgency: number; // 0-1
+  responseType?: ResponseType;
   suggestProduction?: {
     type: UnitType;
     reason: string;

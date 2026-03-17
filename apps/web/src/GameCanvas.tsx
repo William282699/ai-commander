@@ -47,7 +47,14 @@ import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { createSquad } from "@ai-commander/shared";
 import { CommandPanel } from "./CommandPanel";
 import { MessageFeed } from "./MessageFeed";
-import { addMessage, clearMessages, type MessageLevel } from "./messageStore";
+import {
+  addMessage,
+  clearMessages,
+  clearThreads,
+  createThread,
+  expireStaleThreads,
+  type MessageLevel,
+} from "./messageStore";
 
 // ── Day 16B: event → channel routing ──
 
@@ -60,7 +67,39 @@ const EVENT_CHANNEL_MAP: Record<ReportEventType, Channel> = {
   MISSION_FAILED: "ops",
   HQ_DAMAGED: "combat",
   SQUAD_HEAVY_LOSS: "combat",
+  POSITION_CRITICAL: "combat",
+  MISSION_STALLED: "ops",
+  ECONOMY_SURPLUS: "logistics",
 };
+
+// ── Phase 3: Feature flags ──
+const ENABLE_STAFF_ASK = true;
+const ENABLE_STAFF_THREADS = true;
+
+// ── Phase 3: Staff-ask concurrency control ──
+interface PendingStaffAsk {
+  topicKey: string;
+  eventType: ReportEventType;
+  eventMessage: string;
+}
+
+const staffAskState = {
+  inFlight: { ops: false, logistics: false, combat: false } as Record<Channel, boolean>,
+  topicCooldown: new Map<string, number>(), // topicKey → game time of last trigger
+  // Keep only the latest actionRequired event per channel; dispatch when channel is free and cooldown allows.
+  pendingByChannel: { ops: null, logistics: null, combat: null } as Record<Channel, PendingStaffAsk | null>,
+  session: 0, // incremented on restart to discard stale responses
+};
+const STAFF_ASK_TOPIC_COOLDOWN_SEC = 30;
+
+function resetStaffAskState(): void {
+  for (const ch of ["ops", "logistics", "combat"] as Channel[]) {
+    staffAskState.inFlight[ch] = false;
+    staffAskState.pendingByChannel[ch] = null;
+  }
+  staffAskState.topicCooldown.clear();
+  staffAskState.session++;
+}
 
 // ── Diagnostic → Staff Feed bridge ──
 
@@ -383,7 +422,9 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     resetWarPhaseTimers();
     resetReportSignals();
     resetHeartbeatState();
+    resetStaffAskState();
     clearMessages();
+    clearThreads();
     addMessage("info", "等待指令...", 0);
     onStateReady?.(() => stateRef.current);
   }, [onStateReady]);
@@ -414,6 +455,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     resetWarPhaseTimers();
     resetReportSignals();
     resetHeartbeatState();
+    resetStaffAskState();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
@@ -666,16 +708,120 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
           state.diagnostics[state.diagnostics.length - 1].time;
       }
 
-      // --- Drain report events → Staff Feed (Day 16A+B) ---
+      // --- Drain report events → Staff Feed (Day 16A+B) + Phase 3 staff-ask ---
+      const tryStartStaffAsk = (
+        evt: { type: ReportEventType; message: string; entityId?: string },
+        channel: Channel,
+        nowSec: number,
+        topicKey?: string,
+      ): boolean => {
+        if (!ENABLE_STAFF_ASK) return false;
+        if (staffAskState.inFlight[channel]) return false;
+
+        const key = topicKey ?? `${evt.type}:${evt.entityId ?? "global"}`;
+        const lastTrigger = staffAskState.topicCooldown.get(key) ?? -Infinity;
+        if (nowSec - lastTrigger < STAFF_ASK_TOPIC_COOLDOWN_SEC) return false;
+
+        staffAskState.topicCooldown.set(key, nowSec);
+        staffAskState.inFlight[channel] = true;
+
+        const digest = buildDigest(state, [], [], []);
+        const capturedTime = nowSec;
+        const reqSession = staffAskState.session;
+        fetch(`${API_URL}/api/staff-ask`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            digest,
+            eventType: evt.type,
+            eventMessage: evt.message,
+            channel,
+          }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (reqSession !== staffAskState.session) return; // stale
+            if (!ENABLE_STAFF_THREADS) return;
+            if (data?.brief) {
+              addMessage("info", data.brief, capturedTime, channel);
+            }
+            if (data?.options && Array.isArray(data.options) && data.options.length > 0) {
+              createThread(
+                key,
+                evt.type,
+                channel,
+                data.brief || evt.message,
+                evt.message,
+                data.options,
+                capturedTime,
+              );
+            }
+          })
+          .catch(() => {
+            // staff-ask failure is silent (event message already shown)
+          })
+          .finally(() => {
+            if (reqSession !== staffAskState.session) return;
+            staffAskState.inFlight[channel] = false;
+          });
+
+        return true;
+      };
+
       const reportEvts = drainReportEvents(state, 5);
       for (const evt of reportEvts) {
         const channel = EVENT_CHANNEL_MAP[evt.type] || "ops";
-        addMessage(
-          evt.severity === "critical" ? "urgent" : evt.severity === "warning" ? "warning" : "info",
-          evt.message,
-          state.time,
-          channel,
-        );
+        const level: MessageLevel =
+          evt.severity === "critical" ? "urgent" : evt.severity === "warning" ? "warning" : "info";
+
+        // Phase 3: actionRequired events should always surface and eventually produce a decision thread.
+        if (ENABLE_STAFF_ASK && evt.actionRequired) {
+          const topicKey = `${evt.type}:${evt.entityId ?? "global"}`;
+          addMessage(level, evt.message, state.time, channel);
+
+          const started = tryStartStaffAsk(
+            { type: evt.type, message: evt.message, entityId: evt.entityId },
+            channel,
+            state.time,
+            topicKey,
+          );
+          if (started) {
+            // New ask started for this channel; stale pending payload is no longer useful.
+            staffAskState.pendingByChannel[channel] = null;
+          } else {
+            // Channel busy or topic in cooldown → queue latest actionRequired event for retry.
+            staffAskState.pendingByChannel[channel] = {
+              topicKey,
+              eventType: evt.type,
+              eventMessage: evt.message,
+            };
+          }
+        } else {
+          // Regular report-only message
+          addMessage(level, evt.message, state.time, channel);
+        }
+      }
+
+      // Phase 3: retry one pending actionRequired event per channel once inFlight/cooldown constraints clear.
+      if (ENABLE_STAFF_ASK) {
+        for (const ch of ["ops", "logistics", "combat"] as Channel[]) {
+          const pending = staffAskState.pendingByChannel[ch];
+          if (!pending) continue;
+          const started = tryStartStaffAsk(
+            { type: pending.eventType, message: pending.eventMessage },
+            ch,
+            state.time,
+            pending.topicKey,
+          );
+          if (started) {
+            staffAskState.pendingByChannel[ch] = null;
+          }
+        }
+      }
+
+      // Phase 3: expire stale threads
+      if (ENABLE_STAFF_THREADS) {
+        expireStaleThreads(state.time);
       }
 
       // --- Day 16B: Heartbeat LLM brief (async, non-blocking) ---

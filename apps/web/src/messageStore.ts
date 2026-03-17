@@ -4,7 +4,7 @@
 // Lives in the web app (rendering concern, not core logic).
 // ============================================================
 
-import type { Channel } from "@ai-commander/shared";
+import type { Channel, ReportEventType, AdvisorOption } from "@ai-commander/shared";
 
 export type MessageLevel = "info" | "warning" | "urgent";
 
@@ -69,4 +69,96 @@ export function subscribe(listener: () => void): () => void {
   return () => {
     listeners.delete(listener);
   };
+}
+
+// ── Phase 3: Staff Thread System ──
+
+export interface StaffThread {
+  id: string;
+  topicKey: string;          // "POSITION_CRITICAL:front_north"
+  eventType: ReportEventType;
+  channel: Channel;
+  brief: string;             // LLM in-character brief
+  eventMessage: string;      // original event message
+  status: "open" | "resolved" | "expired";
+  options?: AdvisorOption[];
+  createdAt: number;         // game time
+  expiresAt: number;         // game time + 120s
+}
+
+const THREAD_EXPIRY_SEC = 120;
+let _threads: StaffThread[] = [];
+let _nextThreadId = 1;
+
+export function createThread(
+  topicKey: string,
+  eventType: ReportEventType,
+  channel: Channel,
+  brief: string,
+  eventMessage: string,
+  options: AdvisorOption[] | undefined,
+  gameTime: number,
+): StaffThread {
+  // OQ2: deduplicate — only 1 open thread per channel allowed.
+  // If an open thread already exists on this channel, expire it before creating a new one.
+  for (const existing of _threads) {
+    if (existing.channel === channel && existing.status === "open") {
+      existing.status = "expired";
+    }
+  }
+
+  const thread: StaffThread = {
+    id: `thread_${_nextThreadId++}`,
+    topicKey,
+    eventType,
+    channel,
+    brief,
+    eventMessage,
+    status: "open",
+    options,
+    createdAt: gameTime,
+    expiresAt: gameTime + THREAD_EXPIRY_SEC,
+  };
+  _threads.push(thread);
+  listeners.forEach((fn) => fn());
+  return thread;
+}
+
+export function resolveThread(threadId: string): void {
+  const t = _threads.find((th) => th.id === threadId);
+  if (t && t.status === "open") {
+    t.status = "resolved";
+    listeners.forEach((fn) => fn());
+  }
+}
+
+export function getActiveThread(): StaffThread | undefined {
+  return _threads.find((t) => t.status === "open");
+}
+
+export function getActiveThreads(): StaffThread[] {
+  return _threads.filter((t) => t.status === "open");
+}
+
+export function expireStaleThreads(gameTime: number): void {
+  let changed = false;
+  for (const t of _threads) {
+    if (t.status === "open" && gameTime >= t.expiresAt) {
+      t.status = "expired";
+      changed = true;
+    }
+  }
+  // Prune old resolved/expired threads (keep last 10)
+  if (_threads.length > 10) {
+    _threads = _threads.filter((t) => t.status === "open").concat(
+      _threads.filter((t) => t.status !== "open").slice(-5),
+    );
+    changed = true;
+  }
+  if (changed) listeners.forEach((fn) => fn());
+}
+
+export function clearThreads(): void {
+  _threads = [];
+  _nextThreadId = 1;
 }

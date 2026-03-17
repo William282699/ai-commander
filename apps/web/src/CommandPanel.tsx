@@ -8,9 +8,96 @@ import { useState, useRef, useEffect } from "react";
 import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption } from "@ai-commander/shared";
 import type { Channel } from "@ai-commander/shared";
-import { addMessage, getActiveChannel } from "./messageStore";
+import { addMessage, getActiveChannel, getActiveThreads, resolveThread, subscribe, type StaffThread } from "./messageStore";
 
 const API_URL = "http://localhost:3001";
+
+// ── Phase 1: Shared intent target validator ──
+// Used by both canAutoExecute gate and handleApprove pre-validation.
+// Uses findFront (alias + normalize + substring) and fuzzy region match
+// so gate and execution layer agree on what's valid.
+
+import type { Intent } from "@ai-commander/shared";
+
+function isValidTarget(intent: Intent, state: GameState): boolean {
+  // targetRegion: tags → findFront → exact region → fuzzy region
+  if (intent.targetRegion) {
+    const isTag = state.tags?.some(t => t.id === intent.targetRegion);
+    const isFront = !!findFront(state, intent.targetRegion);
+    const isRegion = state.regions.has(intent.targetRegion);
+    const isRegionFuzzy = !isRegion && (() => {
+      const lower = intent.targetRegion!.toLowerCase();
+      for (const [, r] of state.regions) {
+        if (r.id.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower)) return true;
+      }
+      return false;
+    })();
+    if (!isTag && !isFront && !isRegion && !isRegionFuzzy) return false;
+  }
+  // targetFacility
+  if (intent.targetFacility && !state.facilities.has(intent.targetFacility)) return false;
+  // toFront / fromFront — use findFront (alias table + normalize + substring)
+  if (intent.toFront && !findFront(state, intent.toFront)) return false;
+  if (intent.fromFront && !findFront(state, intent.fromFront)) return false;
+  // fromSquad
+  if (intent.fromSquad && !state.squads?.find(s => s.id === intent.fromSquad)) return false;
+  return true;
+}
+
+// ── Phase 1: Deterministic auto-execute gate ──
+// Replaces LLM-dependent "CLEAR/AMBIGUOUS" with hard rules.
+
+function canAutoExecute(
+  option: AdvisorOption,
+  userMessage: string,
+  state: GameState,
+  selectedIds?: readonly number[],
+): { auto: boolean; reason?: string } {
+  const intents = option.intents ?? [option.intent];
+
+  // 1. Single intent only
+  if (intents.length !== 1) return { auto: false, reason: "multi_intent" };
+  const intent = intents[0];
+
+  // 2. Explicit actor anchor: squad ID (T1/I3/A2) or "selected" / 中文选中词
+  //    AND the intent must actually reference the same actor.
+  const squadIdsInText = (userMessage.match(/\b[TIA]\d+\b/gi) ?? []).map(s => s.toUpperCase());
+  const hasSelectedAnchor = /\bselected\b/i.test(userMessage) || /选中|圈起来|这队|这支/.test(userMessage);
+  const hasSquadAnchor = squadIdsInText.length > 0;
+
+  if (!hasSquadAnchor && !hasSelectedAnchor) return { auto: false, reason: "no_anchor" };
+
+  // Cross-check: if user named squads, intent.fromSquad must match one of them
+  if (hasSquadAnchor) {
+    if (!intent.fromSquad || !squadIdsInText.includes(intent.fromSquad.toUpperCase())) {
+      return { auto: false, reason: "anchor_mismatch" };
+    }
+  }
+  // Cross-check: if user said "selected" (no squad ID), intent shouldn't name a specific squad
+  //   (selected-unit dispatch uses selectedIdsSnapshot, not fromSquad)
+  if (hasSelectedAnchor && !hasSquadAnchor) {
+    // Must actually have selected units in this command snapshot.
+    if (!selectedIds || selectedIds.length === 0) return { auto: false, reason: "no_selected_units" };
+    if (intent.fromSquad) return { auto: false, reason: "anchor_mismatch" };
+  }
+
+  // 3. Validate ALL structured fields (actor + target), not just target-bearing intents
+  if (!isValidTarget(intent, state)) return { auto: false, reason: "invalid_intent_fields" };
+
+  // 4. Not high-impact action (quantity=all/most + attack/sabotage)
+  const qty = intent.quantity;
+  const isHighImpact = (qty === "all" || qty === "most") &&
+    (intent.type === "attack" || intent.type === "sabotage");
+  if (isHighImpact) return { auto: false, reason: "high_impact" };
+
+  // 5. No mission conflict: fromSquad with active mission → no auto
+  if (intent.fromSquad) {
+    const squad = state.squads?.find(s => s.id === intent.fromSquad);
+    if (squad?.currentMission !== null) return { auto: false, reason: "mission_conflict" };
+  }
+
+  return { auto: true };
+}
 
 // ── Day 16B: Context Memory ──
 // Keeps recent command/response pairs per channel so the LLM sees conversation history.
@@ -72,8 +159,37 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
   // P1: snapshot selected unit IDs at sendCommand time, use in handleApprove
   const selectedIdsSnapshotRef = useRef<number[] | undefined>(undefined);
 
+  // Fix #2: execution context bound to each response (replaces channelSnapshotRef)
+  type ExecContext = { channel: Channel; threadId?: string };
+  const responseExecCtxRef = useRef<ExecContext | null>(null);
+
   // Day 16B: per-channel context memory
   const channelContextRef = useRef<ChannelContext>(createEmptyChannelContext());
+
+  // Phase 3: active staff threads (subscribe to messageStore changes)
+  const [activeThreads, setActiveThreads] = useState<StaffThread[]>([]);
+
+  // Fix #1 + #3: atomic thread execution lock (ref = sync guard, state = UI only)
+  const executingThreadRef = useRef<string | null>(null);
+  const [executingThreadId, setExecutingThreadId] = useState<string | null>(null);
+
+  function tryLockThread(id: string): boolean {
+    if (executingThreadRef.current) return false;
+    executingThreadRef.current = id;
+    setExecutingThreadId(id);
+    return true;
+  }
+  function unlockThread(id: string): void {
+    if (executingThreadRef.current === id) {
+      executingThreadRef.current = null;
+      setExecutingThreadId(null);
+    }
+  }
+  useEffect(() => {
+    const update = () => setActiveThreads(getActiveThreads());
+    update();
+    return subscribe(update);
+  }, []);
 
   // P2: poll canCreateSquad every 200ms for button state
   const [squadBtnEnabled, setSquadBtnEnabled] = useState(false);
@@ -125,6 +241,55 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     return () => clearInterval(id);
   }, [getState, response]);
 
+  // Phase 3: handle approving a staff thread option (same flow as handleApprove but resolves thread)
+  // Fix #1: try/finally guarantees unlock on every code path (including invalid target early return)
+  // Fix #3: tryLockThread uses ref (sync), not state (async), so double-click can't slip through
+  const handleThreadApprove = (thread: StaffThread, opt: AdvisorOption, idx: number) => {
+    if (thread.status !== "open") return;
+    if (!tryLockThread(thread.id)) return;
+
+    try {
+      const state = getState();
+      if (!state) return;
+
+      const letter = ["A", "B", "C"][idx] ?? "?";
+      const cleanLabel = opt.label.replace(/^[ABC]:\s*/, '');
+      const intents = opt.intents ?? [opt.intent];
+
+      // Pre-validate structured fields
+      for (const intent of intents) {
+        if (!isValidTarget(intent, state)) {
+          const field = intent.fromSquad || intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
+          addMessage("warning", `目标 ${field} 不存在`, state.time, thread.channel);
+          return; // finally will unlock
+        }
+      }
+
+      // Resolve intents to orders
+      const allOrders: ReturnType<typeof resolveIntent>["orders"] = [];
+      const reserved = new Set<number>();
+
+      for (const intent of intents) {
+        const result = resolveIntent(intent, state, state.style, reserved);
+        if (result.degraded) {
+          addMessage("warning", result.log, state.time, thread.channel);
+        } else {
+          addMessage("info", `执行: ${result.log}`, state.time, thread.channel);
+        }
+        for (const id of result.assignedUnitIds) reserved.add(id);
+        allOrders.push(...result.orders);
+      }
+
+      if (allOrders.length > 0) {
+        addMessage("info", `Roger. Executing ${letter}: ${cleanLabel}`, state.time, thread.channel);
+        applyOrders(state, allOrders);
+        resolveThread(thread.id);
+      }
+    } finally {
+      unlockThread(thread.id);
+    }
+  };
+
   const sendCommand = async () => {
     const state = getState();
     if (!state || !message.trim()) return;
@@ -134,17 +299,28 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     setError(null);
     setApprovedIdx(null);
     setClarification(null);
+    // Fix #2: clear stale response context so old buttons can't act on wrong channel
+    setResponse(null);
+    responseExecCtxRef.current = null;
 
-    addMessage("info", `发送指令: ${userMsg}`, state.time);
+    // Day 16B fix: snapshot active channel at send time (avoid mid-request tab switch)
+    const ch = getActiveChannel();
+
+    addMessage("info", `发送指令: ${userMsg}`, state.time, ch);
 
     // P1: lock selected unit IDs at send time
     const selectedIds = getSelectedUnitIds ? [...getSelectedUnitIds()] : [];
     selectedIdsSnapshotRef.current = selectedIds.length > 0 ? selectedIds : undefined;
-    // Day 16B fix: snapshot active channel at send time (avoid mid-request tab switch)
-    const ch = getActiveChannel();
+
+    // Phase 3: if there's an active thread on this channel, include thread context in digest
+    const activeThreadOnChannel = activeThreads.find(t => t.channel === ch);
+    const threadContext = activeThreadOnChannel
+      ? `\n---ACTIVE_THREAD---\n[${activeThreadOnChannel.eventType}] ${activeThreadOnChannel.eventMessage}\nStaff brief: ${activeThreadOnChannel.brief}`
+      : "";
+
     const baseDigest = buildDigest(state, selectedIds, [], []);
     const contextSuffix = formatContext(channelContextRef.current, ch);
-    const digest = baseDigest + contextSuffix;
+    const digest = baseDigest + contextSuffix + threadContext;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
     // Push user message to context memory (bound to snapshotted channel)
@@ -154,7 +330,7 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
       const res = await fetch(`${API_URL}/api/command`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: userMsg, styleNote }),
+        body: JSON.stringify({ digest, message: userMsg, styleNote, channel: ch }),
       });
 
       const data = await res.json();
@@ -162,21 +338,51 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
         setError(data.error);
         setResponse(null);
         selectedIdsSnapshotRef.current = undefined;
-        addMessage("urgent", `后端错误: ${data.error}`, state.time);
+        addMessage("urgent", `后端错误: ${data.error}`, state.time, ch);
+      } else if (typeof data.responseType === "string" && data.responseType.toUpperCase() === "NOOP") {
+        // Phase 2: NOOP — conversational response, no execution.
+        // Must come BEFORE options.length===0 clarification branch.
+        setResponse(null);
+        setError(null);
+        setClarification(null);
+        const msg = data.brief || "Copy, standing by.";
+        addMessage("info", msg, state.time, ch);
+        if (data.brief) {
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief, time: state.time });
+        }
       } else if (Array.isArray(data.options) && data.options.length === 0) {
         // Day 13 Layer B: LLM rejected command (invalid target / nonsensical)
+        // (responseType is NOT "NOOP" here — that case is handled above)
         setResponse(null);
         setError(null);
         const reason = data.brief || "命令目标不存在或不明确";
         setClarification(reason + " — 请重新描述指令");
-        addMessage("warning", reason, state.time);
+        addMessage("warning", reason, state.time, ch);
       } else {
-        setResponse(data as DisplayResponse);
-        setError(null);
-        addMessage("info", "收到参谋简报", state.time);
         // Day 16B: push assistant brief to context memory (use snapshotted ch)
         if (data.brief) {
           pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief, time: state.time });
+        }
+
+        // Phase 1: deterministic auto-execute gate
+        const gate = (Array.isArray(data.options) && data.options.length >= 1)
+          ? canAutoExecute(data.options[0], userMsg, state, selectedIds)
+          : { auto: false };
+
+        // Fix #2: build execution context bound to this specific response
+        const execCtx: ExecContext = { channel: ch, threadId: activeThreadOnChannel?.id };
+
+        if (gate.auto && data.options.length >= 1) {
+          const autoData = data as DisplayResponse;
+          setTimeout(() => handleApprove(autoData.options[0], 0, "auto", execCtx), 0);
+        } else {
+          if (!gate.auto && gate.reason) {
+            console.debug(`[P1 gate] no-auto: ${gate.reason}`);
+          }
+          responseExecCtxRef.current = execCtx;
+          setResponse(data as DisplayResponse);
+          setError(null);
+          addMessage("info", "Advisor briefing received", state.time, ch);
         }
       }
     } catch {
@@ -184,7 +390,7 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
       setError(errMsg);
       setResponse(null);
       selectedIdsSnapshotRef.current = undefined;
-      addMessage("urgent", "通信中断: 无法连接后端", state.time);
+      addMessage("urgent", "通信中断: 无法连接后端", state.time, ch);
     }
     setLoading(false);
     setMessage("");
@@ -193,61 +399,31 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
   // Day 13: clarification guard state
   const [clarification, setClarification] = useState<string | null>(null);
 
-  const handleApprove = (opt: AdvisorOption, idx: number) => {
+  const handleApprove = (opt: AdvisorOption, idx: number, mode: "auto" | "manual" = "manual", ctx?: ExecContext) => {
     const state = getState();
     if (!state) return;
 
+    // Fix #2: use bound execution context (from sendCommand), not current tab
+    const execCtx = ctx ?? responseExecCtxRef.current;
+    const ch = execCtx?.channel ?? getActiveChannel();
+
     const letter = ["A", "B", "C"][idx] ?? "?";
+    const cleanLabel = opt.label.replace(/^[ABC]:\s*/, '');
 
     // Multi-intent chain: loop intents with reserved unit set
     const intents = opt.intents ?? [opt.intent];
 
-    // Day 14 Layer B Gate: pre-validate structured fields before resolveIntent
-    // Uses findFront from tacticalPlanner directly (alias table + normalize + substring)
+    // Pre-validate structured fields via shared isValidTarget
     for (const intent of intents) {
-      if (intent.fromSquad && !state.squads?.find(s => s.id === intent.fromSquad)) {
-        addMessage("warning", `分队 ${intent.fromSquad} 不存在`, state.time);
-        setClarification("命令引用了不存在的分队，请重新描述");
+      if (!isValidTarget(intent, state)) {
+        const field = intent.fromSquad || intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
+        addMessage("warning", `目标 ${field} 不存在`, state.time, ch);
+        setClarification("命令引用了不存在的目标，请重新描述");
         return;
-      }
-      if (intent.targetFacility && !state.facilities.has(intent.targetFacility)) {
-        addMessage("warning", `设施 ${intent.targetFacility} 不存在`, state.time);
-        setClarification("命令引用了不存在的设施，请重新描述");
-        return;
-      }
-      if (intent.toFront && !findFront(state, intent.toFront)) {
-        addMessage("warning", `战线 ${intent.toFront} 不存在`, state.time);
-        setClarification("命令引用了不存在的战线，请重新描述");
-        return;
-      }
-      if (intent.fromFront && !findFront(state, intent.fromFront)) {
-        addMessage("warning", `战线 ${intent.fromFront} 不存在`, state.time);
-        setClarification("命令引用了不存在的战线，请重新描述");
-        return;
-      }
-      // Stage C: targetRegion validation (tags, fronts, regions)
-      if (intent.targetRegion) {
-        const isTag = state.tags?.some(t => t.id === intent.targetRegion);
-        const isFront = !!findFront(state, intent.targetRegion);
-        const isRegion = state.regions.has(intent.targetRegion);
-        // Also check fuzzy region name match (mirrors tacticalPlanner.getRegionCenter)
-        const isRegionFuzzy = !isRegion && (() => {
-          const lower = intent.targetRegion!.toLowerCase();
-          for (const [, r] of state.regions) {
-            if (r.id.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower)) return true;
-          }
-          return false;
-        })();
-        if (!isTag && !isFront && !isRegion && !isRegionFuzzy) {
-          addMessage("warning", `目标区域 ${intent.targetRegion} 不存在`, state.time);
-          setClarification("命令引用了不存在的目标区域，请重新描述");
-          return;
-        }
       }
     }
 
-    // Gate passed — log approval
-    addMessage("info", `批准方案 ${letter}: ${opt.label}`, state.time);
+    // Resolve intents to orders
     const allOrders: ReturnType<typeof resolveIntent>["orders"] = [];
     const reserved = new Set<number>();
     let degradedCount = 0;
@@ -257,9 +433,9 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
 
       if (result.degraded) {
         degradedCount++;
-        addMessage("warning", result.log, state.time);
+        addMessage("warning", result.log, state.time, ch);
       } else {
-        addMessage("info", `执行: ${result.log}`, state.time);
+        addMessage("info", `执行: ${result.log}`, state.time, ch);
       }
 
       // Add assigned units to reserved set for next intent
@@ -272,18 +448,28 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
 
     // Day 13 Clarification Guard: if ALL intents degraded → don't execute, show prompt
     if (allOrders.length === 0 && degradedCount > 0) {
-      addMessage("warning", "命令无法执行，请重新描述", state.time);
+      addMessage("warning", "命令无法执行，请重新描述", state.time, ch);
       setClarification("命令不明确，请重述（示例：'北线全部坦克进攻桥头'）");
       setApprovedIdx(idx);
-      // Don't auto-dismiss — let user see clarification and re-type
       setTimeout(() => {
         setApprovedIdx(null);
       }, 400);
       return;
     }
 
+    // Confirmation message — only after we know orders succeeded
     if (allOrders.length > 0) {
+      if (mode === "auto") {
+        addMessage("info", `Copy that sir. ${cleanLabel}`, state.time, ch);
+      } else {
+        addMessage("info", `Roger. Executing ${letter}: ${cleanLabel}`, state.time, ch);
+      }
       applyOrders(state, allOrders);
+
+      // Phase 3: resolve bound thread after successful execution
+      if (execCtx?.threadId) {
+        resolveThread(execCtx.threadId);
+      }
     }
 
     // Day 13 P3-6: Style learning — nudge params based on approved option
@@ -309,6 +495,7 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
       setResponse(null);
       setApprovedIdx(null);
       selectedIdsSnapshotRef.current = undefined;
+      responseExecCtxRef.current = null;
     }, 800);
   };
 
@@ -326,6 +513,7 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
     setError(null);
     setApprovedIdx(null);
     selectedIdsSnapshotRef.current = undefined;
+    responseExecCtxRef.current = null;
   };
 
   return (
@@ -406,6 +594,43 @@ export function CommandPanel({ getState, getSelectedUnitIds, onCreateSquad, canC
       {clarification && (
         <div style={clarificationStyle}>{clarification}</div>
       )}
+
+      {/* Phase 3: Active staff threads with decision options */}
+      {activeThreads.length > 0 && !response && activeThreads.map((thread) => (
+        <div key={thread.id} style={threadStyle}>
+          <div style={{ fontSize: 10, color: "#f59e0b", marginBottom: 4 }}>
+            ⚠ {thread.eventType} — {thread.brief}
+          </div>
+          {thread.options && thread.options.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {thread.options.map((opt, i) => {
+                const letter = ["A", "B", "C"][i];
+                return (
+                  <div key={i} style={threadOptionStyle}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontWeight: "bold", color: "#e2e8f0", fontSize: 11 }}>{opt.label}</span>
+                      <button
+                        onClick={() => handleThreadApprove(thread, opt, i)}
+                        disabled={executingThreadId === thread.id}
+                        style={{
+                          ...threadApproveBtnStyle,
+                          opacity: executingThreadId === thread.id ? 0.4 : 1,
+                        }}
+                      >
+                        {letter}
+                      </button>
+                    </div>
+                    <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2 }}>{opt.description}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div style={{ fontSize: 9, color: "#475569", marginTop: 4 }}>
+            Expires in {Math.max(0, Math.floor(thread.expiresAt - (getState()?.time ?? 0)))}s
+          </div>
+        </div>
+      ))}
 
       {/* Day 13 P3-6: Compact style indicator */}
       {styleSnapshot && (
@@ -703,4 +928,33 @@ const styleVal: React.CSSProperties = {
   color: "#64748b",
   fontSize: 9,
   textAlign: "right",
+};
+
+// Phase 3: Staff thread styles
+
+const threadStyle: React.CSSProperties = {
+  marginBottom: 8,
+  padding: "8px 10px",
+  background: "rgba(245, 158, 11, 0.08)",
+  border: "1px solid rgba(245, 158, 11, 0.3)",
+  borderRadius: 4,
+};
+
+const threadOptionStyle: React.CSSProperties = {
+  background: "rgba(15, 23, 42, 0.6)",
+  border: "1px solid #334155",
+  borderRadius: 3,
+  padding: "4px 6px",
+};
+
+const threadApproveBtnStyle: React.CSSProperties = {
+  background: "#1e3a5f",
+  color: "#60a5fa",
+  border: "1px solid #2563eb",
+  borderRadius: 3,
+  padding: "2px 8px",
+  fontSize: 10,
+  fontFamily: "monospace",
+  fontWeight: "bold",
+  cursor: "pointer",
 };

@@ -21,11 +21,11 @@ export function generateDigestV1(
   const res = state.economy.player.resources;
 
   let digest = `T=${t} Ph=${ph} Rd=${rd} $=${res.money} Fu=${res.fuel} Am=${res.ammo} In=${res.intel}\n`;
-  digest += `---FRONTS---\n`;
+  digest += `---FRONTS--- (CombatPwr=DPS-based strength, NOT headcount)\n`;
 
   for (const front of state.fronts) {
     const ep = front.enemyPowerKnown ? Math.round(front.enemyPower) : "?";
-    digest += `${front.id}:${front.name} P=${Math.round(front.playerPower)} E=${ep} X=${front.engagementIntensity.toFixed(1)} S=${front.supplyStatus}`;
+    digest += `${front.id}:${front.name} OurPwr=${Math.round(front.playerPower)} EnemyPwr=${ep} Engagement=${front.engagementIntensity.toFixed(1)} Supply=${front.supplyStatus}`;
     if (front.keyEvents.length > 0) {
       digest += ` key=[${front.keyEvents.join(", ")}]`;
     }
@@ -119,7 +119,7 @@ export function generateDigestV1(
       if (alive.length === 0) continue;
       const types = summarizeSquadTypes(alive, state);
       const pos = squadAvgPos(alive, state);
-      digest += `${sq.id}:"${sq.name}" ${types} @(${pos.x},${pos.y}) morale=${sq.morale.toFixed(1)} mission=${sq.currentMission || "idle"}\n`;
+      digest += `${sq.id}:"${sq.name}" ${alive.length}units(${types}) @(${pos.x},${pos.y}) morale=${sq.morale.toFixed(1)} mission=${sq.currentMission || "idle"}\n`;
       squadCount++;
     }
   }
