@@ -1,10 +1,12 @@
 // ============================================================
-// AI Commander — Squad Hierarchy Operations (Phase 2)
+// AI Commander — Squad Hierarchy Operations (Phase 2 + 2.5)
 // The ONLY module that writes squad hierarchy relationships.
 // Other files read squad hierarchy fields only.
 // ============================================================
 
-import type { GameState, Squad } from "./types";
+import type { GameState, Squad, UnitType } from "./types";
+import { autoSquadId, autoSquadName, createSquadLeader } from "./squad";
+import { pickLeaderName, getUsedLeaderNames } from "./namePool";
 
 // ── Invariant ──
 
@@ -95,15 +97,85 @@ export function getMaxSubtreeDepth(state: GameState, squadId: string): number {
 // ── Write Operations ──
 
 /**
+ * Phase 2.5: Promote a leader to commander.
+ * Creates a new leader to take over the original leader's units.
+ * Returns the newly created child leader.
+ */
+function promoteToCommander(state: GameState, leader: Squad): Squad {
+  // Collect unit types for auto squad ID
+  const unitTypes: UnitType[] = leader.unitIds
+    .map((id) => state.units.get(id))
+    .filter((u) => u !== undefined)
+    .map((u) => u!.type);
+
+  // Generate new child leader
+  const usedNames = getUsedLeaderNames(state.squads);
+  const childLeaderName = pickLeaderName(usedNames);
+  const childId = autoSquadId(unitTypes.length > 0 ? unitTypes : ["infantry"], state.nextSquadNum);
+  const childSquad: Squad = {
+    id: childId,
+    name: autoSquadName(childId),
+    unitIds: [...leader.unitIds],
+    leader: createSquadLeader(leader.unitIds.length),
+    currentMission: leader.currentMission,
+    missionTarget: leader.missionTarget ? { ...leader.missionTarget } : null,
+    morale: leader.morale,
+    formationStyle: leader.formationStyle,
+    ownerCommander: leader.ownerCommander,
+    leaderName: childLeaderName,
+    role: "leader",
+    parentSquadId: leader.id,
+  };
+
+  // Promote original to commander
+  leader.unitIds = [];
+  leader.role = "commander";
+  leader.currentMission = null;
+  leader.missionTarget = null;
+
+  // Add child to state
+  state.squads.push(childSquad);
+
+  return childSquad;
+}
+
+/**
+ * Phase 2.5: Try to demote a commander back to leader if it has exactly 1 child.
+ * Merges the sole child's units into the commander and removes the child.
+ */
+function tryDemoteCommander(state: GameState, commander: Squad): void {
+  if (commander.role !== "commander") return;
+  const children = getChildren(state, commander.id);
+  if (children.length !== 1) return;
+
+  const child = children[0];
+  // Only demote if child is a leader (not a nested commander)
+  if (child.role !== "leader") return;
+
+  // Absorb child's units
+  commander.unitIds = [...child.unitIds];
+  commander.role = "leader";
+  commander.morale = child.morale;
+  commander.currentMission = child.currentMission;
+  commander.missionTarget = child.missionTarget ? { ...child.missionTarget } : null;
+
+  // Remove the child squad
+  const idx = state.squads.findIndex((s) => s.id === child.id);
+  if (idx !== -1) {
+    state.squads.splice(idx, 1);
+  }
+}
+
+/**
  * Move a squad under a new parent.
- * Phase 2: source must be leader, target must already be a commander. No auto-promotion.
+ * Phase 2.5: if target is a leader, auto-promote it to commander first.
  * Validates: source=leader, no self-move, no cycle, depth ≤ 3, same ownerCommander.
  */
 export function moveSquadUnder(
   state: GameState,
   squadId: string,
   newParentId: string,
-): { ok: boolean; error?: string } {
+): { ok: boolean; error?: string; promoted?: boolean } {
   // Invariant: all commanders must have empty unitIds
   assertAllCommandersEmpty(state);
 
@@ -113,9 +185,9 @@ export function moveSquadUnder(
   if (!squad) return { ok: false, error: `Squad ${squadId} not found` };
   if (!parent) return { ok: false, error: `Parent ${newParentId} not found` };
 
-  // Phase 2: only leaders can be moved
+  // Only leaders can be moved
   if (squad.role !== "leader") {
-    return { ok: false, error: "Only leader squads can be moved in Phase 2" };
+    return { ok: false, error: "Only leader squads can be moved" };
   }
 
   // Self-move
@@ -133,12 +205,20 @@ export function moveSquadUnder(
     return { ok: false, error: "Cannot move squad across commanders" };
   }
 
-  // Phase 2: target must be commander
-  if (parent.role !== "commander") {
-    return { ok: false, error: "Target must be a commander (Phase 2)" };
+  // Phase 2.5: auto-promote leader target to commander
+  let promoted = false;
+  if (parent.role === "leader") {
+    // Check depth: after promotion, parent stays at same depth,
+    // new child leader + moved squad will be at parentDepth+1
+    const parentDepth = getSquadDepth(state, newParentId);
+    if (parentDepth + 1 > 3) {
+      return { ok: false, error: "Max depth 3 exceeded (promotion would exceed)" };
+    }
+    promoteToCommander(state, parent);
+    promoted = true;
   }
 
-  // Depth check: parent depth + 1 for the moved squad must be ≤ 3
+  // Depth check after potential promotion
   const parentDepth = getSquadDepth(state, newParentId);
   const movedSubtreeDepth = getMaxSubtreeDepth(state, squadId);
   if (parentDepth + movedSubtreeDepth > 3) {
@@ -147,11 +227,12 @@ export function moveSquadUnder(
 
   // Perform the move
   squad.parentSquadId = newParentId;
-  return { ok: true };
+  return { ok: true, promoted };
 }
 
 /**
  * Remove a squad from its parent, making it a direct report of root commander.
+ * Phase 2.5: if parent commander has only 1 child left after removal, auto-demote.
  */
 export function removeSquadFromParent(
   state: GameState,
@@ -162,7 +243,16 @@ export function removeSquadFromParent(
 
   const squad = state.squads.find((s) => s.id === squadId);
   if (!squad || !squad.parentSquadId) return { ok: false };
+
+  const oldParentId = squad.parentSquadId;
   squad.parentSquadId = undefined;
+
+  // Phase 2.5: try auto-demote the old parent if it now has only 1 child
+  const oldParent = state.squads.find((s) => s.id === oldParentId);
+  if (oldParent) {
+    tryDemoteCommander(state, oldParent);
+  }
+
   return { ok: true };
 }
 

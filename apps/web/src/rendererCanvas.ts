@@ -627,11 +627,27 @@ export function renderSelectionBox(
 // Render: Selected unit info panel (top-left)
 // ──────────────────────────────────────────────
 
+// Squad color hash — stable color per squadId
+function squadColor(squadId: string): string {
+  let h = 0;
+  for (let i = 0; i < squadId.length; i++) {
+    h = (h * 31 + squadId.charCodeAt(i)) | 0;
+  }
+  const hue = ((h & 0x7fffffff) % 360);
+  return `hsl(${hue}, 65%, 55%)`;
+}
+
+export interface SelectedSquadInfo {
+  squadId: string;
+  count: number;
+}
+
 export function renderInfoPanel(
   ctx: CanvasRenderingContext2D,
   selectedUnits: Unit[],
   canvasWidth: number,
   canvasHeight: number,
+  selectedSquads?: SelectedSquadInfo[],
 ): { returnToAIBtnRect: { x: number; y: number; w: number; h: number } | null } {
   if (selectedUnits.length === 0) return { returnToAIBtnRect: null };
 
@@ -666,8 +682,21 @@ export function renderInfoPanel(
     lines.push(`Manual: ${manualCount} unit${manualCount > 1 ? "s" : ""}`);
   }
 
-  const visibleLines = lines.slice(0, maxLines);
-  const panelH = visibleLines.length * lineH + padding * 2 + 28; // extra for button
+  // Squad lines (max 4, then +N more)
+  const squadLines: { text: string; color: string }[] = [];
+  if (selectedSquads && selectedSquads.length > 0) {
+    const maxSquadLines = 4;
+    const shown = selectedSquads.slice(0, maxSquadLines);
+    for (const sq of shown) {
+      squadLines.push({ text: `  ${sq.squadId} ×${sq.count}`, color: squadColor(sq.squadId) });
+    }
+    if (selectedSquads.length > maxSquadLines) {
+      squadLines.push({ text: `  +${selectedSquads.length - maxSquadLines} more`, color: "#64748b" });
+    }
+  }
+
+  const totalTextLines = Math.min(lines.length, maxLines) + (squadLines.length > 0 ? 1 + squadLines.length : 0);
+  const panelH = totalTextLines * lineH + padding * 2 + 28; // extra for button
 
   const px = 10;
   const py = 10;
@@ -685,8 +714,28 @@ export function renderInfoPanel(
   ctx.fillStyle = "#c0d0e0";
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
+
+  const visibleLines = lines.slice(0, maxLines);
+  let lineIdx = 0;
   for (let i = 0; i < visibleLines.length; i++) {
-    ctx.fillText(visibleLines[i], px + padding, py + padding + i * lineH);
+    ctx.fillText(visibleLines[i], px + padding, py + padding + lineIdx * lineH);
+    lineIdx++;
+  }
+
+  // Squad section
+  if (squadLines.length > 0) {
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillText("Squads:", px + padding, py + padding + lineIdx * lineH);
+    lineIdx++;
+    for (const sq of squadLines) {
+      // Color swatch
+      ctx.fillStyle = sq.color;
+      ctx.fillRect(px + padding, py + padding + lineIdx * lineH + 3, 8, 10);
+      // Text
+      ctx.fillStyle = "#c0d0e0";
+      ctx.fillText(sq.text, px + padding + 12, py + padding + lineIdx * lineH);
+      lineIdx++;
+    }
   }
 
   // "Return to AI" button (always shown when units are selected)

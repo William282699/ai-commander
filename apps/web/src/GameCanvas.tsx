@@ -11,6 +11,7 @@ import {
   renderInfoPanel,
   renderTags,
   type Camera,
+  type SelectedSquadInfo,
 } from "./rendererCanvas";
 import {
   createInputState,
@@ -45,7 +46,7 @@ import {
 } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
-import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent } from "@ai-commander/shared";
+import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad } from "@ai-commander/shared";
 import { ChatPanel } from "./ChatPanel";
 import {
   addMessage,
@@ -326,36 +327,53 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
   }, []);
 
   // Stable callback: check if selected units can form a squad
+  // Phase 2.5: allow already-squadded units (they will be extracted)
   const canCreateSquad = useCallback((): boolean => {
     const state = stateRef.current;
     if (!state) return false;
     const ids = inputRef.current.selectedUnitIds;
     if (ids.length === 0) return false;
-    const inSquad = new Set(state.squads.flatMap((s) => s.unitIds));
     return ids.some((id) => {
       const u = state.units.get(id);
-      return u && u.team === "player" && u.state !== "dead" && !inSquad.has(id);
+      return u && u.team === "player" && u.state !== "dead";
     });
   }, []);
 
   // Stable callback: create a squad from selected units
+  // Phase 2.5: allows extracting units from existing squads (dissolves empty squads)
   const handleCreateSquad = useCallback((owner: "chen" | "marcus" | "emily") => {
     const state = stateRef.current;
     if (!state) return;
     const ids = inputRef.current.selectedUnitIds;
     if (ids.length === 0) return;
 
-    // Filter: player + alive + not already in a squad
-    const existingSquadUnitIds = new Set(
-      state.squads.flatMap((s) => s.unitIds),
-    );
+    // Filter: player + alive
     const validIds = ids.filter((id) => {
       const u = state.units.get(id);
-      return u && u.team === "player" && u.state !== "dead" && !existingSquadUnitIds.has(id);
+      return u && u.team === "player" && u.state !== "dead";
     });
     if (validIds.length === 0) {
-      addMessage("warning", "选中的单位已编入分队或不可用", state.time, "ops", "player", "player");
+      addMessage("warning", "选中的单位不可用", state.time, "ops", "player", "player");
       return;
+    }
+
+    // Phase 2.5: Remove these units from any existing squads
+    const validIdSet = new Set(validIds);
+    const affectedSquads = new Set<string>();
+    for (const sq of state.squads) {
+      const before = sq.unitIds.length;
+      sq.unitIds = sq.unitIds.filter((id) => !validIdSet.has(id));
+      if (sq.unitIds.length !== before) {
+        affectedSquads.add(sq.id);
+      }
+    }
+
+    // Dissolve squads that became empty (leader role with 0 units)
+    for (const sqId of affectedSquads) {
+      const sq = state.squads.find((s) => s.id === sqId);
+      if (sq && sq.role === "leader" && sq.unitIds.length === 0) {
+        dissolveSquad(state, sqId);
+      }
     }
 
     const unitTypes = validIds
@@ -380,6 +398,8 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     const result = moveSquadUnder(state, squadId, newParentId);
     if (!result.ok) {
       addMessage("warning", `编制移动失败: ${result.error}`, state.time, "ops", "player", "player");
+    } else if (result.promoted) {
+      addMessage("info", `${newParentId} 已晋升为指挥官`, state.time, "ops", "player", "player");
     }
   }, []);
 
@@ -967,11 +987,26 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         input.selectedUnitIds = selectedUnits.map((u) => u.id);
       }
 
+      // Build unitId → squadId mapping for selected units
+      const unitToSquad = new Map<number, string>();
+      for (const sq of state.squads) {
+        for (const uid of sq.unitIds) unitToSquad.set(uid, sq.id);
+      }
+      const squadCounts = new Map<string, number>();
+      for (const u of selectedUnits) {
+        const sqId = unitToSquad.get(u.id);
+        if (sqId) squadCounts.set(sqId, (squadCounts.get(sqId) ?? 0) + 1);
+      }
+      const selectedSquads: SelectedSquadInfo[] = Array.from(squadCounts.entries())
+        .map(([squadId, count]) => ({ squadId, count }))
+        .sort((a, b) => b.count - a.count);
+
       const panelResult = renderInfoPanel(
         ctx,
         selectedUnits,
         canvas.width,
         canvas.height,
+        selectedSquads,
       );
       returnToAIBtnRect = panelResult.returnToAIBtnRect;
 

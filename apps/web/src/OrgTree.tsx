@@ -3,7 +3,7 @@
 // Tree view of squad hierarchy with drag & drop.
 // ============================================================
 
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import type { Squad, Unit, CommanderKey } from "@ai-commander/shared";
 import { collectUnitsUnder, getChildren, getSquadDepth, isDescendantOrSelf, getMaxSubtreeDepth } from "@ai-commander/shared";
 import type { GameState } from "@ai-commander/shared";
@@ -182,24 +182,68 @@ function SquadNode({
   const isDropTarget = dropTargetId === squad.id;
   const isDragging = dragSquadId === squad.id;
 
+  // Whether drop would trigger auto-promotion of target leader→commander
+  const willPromote = (() => {
+    if (!dragSquadId || dragSquadId === squad.id) return false;
+    const draggedSquad = squads.find((s) => s.id === dragSquadId);
+    if (!draggedSquad) return false;
+    if (draggedSquad.role !== "leader") return false;
+    if (squad.role !== "leader") return false;
+    if (draggedSquad.ownerCommander !== squad.ownerCommander) return false;
+    if (isDescendantOrSelf(state, dragSquadId, squad.id)) return false;
+    // After promotion, target stays at same depth; new child + moved squad at depth+1
+    const targetDepth = getSquadDepth(state, squad.id);
+    if (targetDepth + 1 > 3) return false;
+    return true;
+  })();
+
   const canDrop = (() => {
     if (!dragSquadId || dragSquadId === squad.id) return false;
     const draggedSquad = squads.find((s) => s.id === dragSquadId);
     if (!draggedSquad) return false;
     // Source must be leader
     if (draggedSquad.role !== "leader") return false;
-    // Target must be commander
-    if (squad.role !== "commander") return false;
+    // Target can be commander OR leader (leader will auto-promote)
+    if (squad.role !== "commander" && squad.role !== "leader") return false;
     // Same ownerCommander
     if (draggedSquad.ownerCommander !== squad.ownerCommander) return false;
     // Prevent cycle: can't drop under own descendant
     if (isDescendantOrSelf(state, dragSquadId, squad.id)) return false;
-    // Depth check: target depth + dragged subtree depth ≤ 3
+    // Depth check
     const targetDepth = getSquadDepth(state, squad.id);
-    const draggedSubtreeDepth = getMaxSubtreeDepth(state, dragSquadId);
-    if (targetDepth + draggedSubtreeDepth > 3) return false;
+    if (squad.role === "leader") {
+      // After promotion: target depth stays same, child at depth+1
+      if (targetDepth + 1 > 3) return false;
+    } else {
+      const draggedSubtreeDepth = getMaxSubtreeDepth(state, dragSquadId);
+      if (targetDepth + draggedSubtreeDepth > 3) return false;
+    }
     return true;
   })();
+
+  // Tooltip: units / morale / mission
+  const tooltip = (() => {
+    const lines: string[] = [`${squad.leaderName} (${squad.id})`];
+    lines.push(`Role: ${squad.role}`);
+    lines.push(`Units: ${totalUnits}`);
+    lines.push(`Morale: ${squad.morale.toFixed(1)}`);
+    lines.push(`Mission: ${squad.currentMission || "idle"}`);
+    if (squad.parentSquadId) lines.push(`Parent: ${squad.parentSquadId}`);
+    if (children.length > 0) lines.push(`Children: ${children.map((c) => c.id).join(", ")}`);
+    return lines.join("\n");
+  })();
+
+  // Flash animation on role change (promotion/demotion)
+  const [flash, setFlash] = useState(false);
+  const prevRoleRef = useRef(squad.role);
+  useEffect(() => {
+    if (prevRoleRef.current !== squad.role) {
+      prevRoleRef.current = squad.role;
+      setFlash(true);
+      const timer = setTimeout(() => setFlash(false), 400);
+      return () => clearTimeout(timer);
+    }
+  }, [squad.role]);
 
   const handleClick = useCallback(() => {
     const allIds = collectUnitsUnder(state, squad.id);
@@ -255,6 +299,7 @@ function SquadNode({
     <div style={{ marginLeft: depth > 1 ? 12 : 0 }}>
       <div
         draggable
+        title={tooltip}
         onDragStart={(e) => {
           e.stopPropagation();
           e.dataTransfer.setData("text/plain", squad.id);
@@ -285,10 +330,17 @@ function SquadNode({
         style={{
           ...nodeStyle,
           opacity: isDragging ? 0.4 : 1,
-          borderColor: isDropTarget ? "#3b82f6" : statusColor,
+          borderColor: isDropTarget
+            ? (willPromote ? "#8b5cf6" : "#3b82f6")
+            : flash
+              ? "#fbbf24"
+              : statusColor,
           background: isDropTarget
-            ? "rgba(59, 130, 246, 0.15)"
-            : "rgba(15, 23, 42, 0.6)",
+            ? (willPromote ? "rgba(139, 92, 246, 0.15)" : "rgba(59, 130, 246, 0.15)")
+            : flash
+              ? "rgba(251, 191, 36, 0.2)"
+              : "rgba(15, 23, 42, 0.6)",
+          boxShadow: flash ? "0 0 8px rgba(251, 191, 36, 0.5)" : "none",
         }}
       >
         <span style={{ fontSize: 12 }}>{icon}</span>
@@ -316,6 +368,9 @@ function SquadNode({
         </span>
         {squad.role === "commander" && (
           <span style={{ color: "#8b5cf6", fontSize: 9 }}>CMD</span>
+        )}
+        {isDropTarget && willPromote && (
+          <span style={{ color: "#fbbf24", fontSize: 9, fontWeight: "bold" }}>⬆CMD</span>
         )}
       </div>
       {children.length > 0 && (
