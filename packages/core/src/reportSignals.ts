@@ -14,6 +14,7 @@ let prevFacilityHp = new Map<string, number>();
 let prevPlayerHQHp: number | null = null;
 let cooldowns = new Map<string, number>();
 let reportedHeavyLoss = new Set<string>();
+let missionProgressSnapshot = new Map<string, { progress: number; time: number }>();
 let initialized = false;
 
 // --- Reset (must be called on restart / StrictMode remount) ---
@@ -25,6 +26,7 @@ export function resetReportSignals(): void {
   prevPlayerHQHp = null;
   cooldowns = new Map();
   reportedHeavyLoss = new Set();
+  missionProgressSnapshot = new Map();
   initialized = false;
 }
 
@@ -45,8 +47,9 @@ function emit(
   message: string,
   severity: "info" | "warning" | "critical",
   entityId?: string,
+  actionRequired?: boolean,
 ): void {
-  state.reportEvents.push({ type, time: state.time, message, severity, entityId });
+  state.reportEvents.push({ type, time: state.time, message, severity, entityId, actionRequired });
 }
 
 // --- Find which front a position belongs to ---
@@ -96,6 +99,15 @@ export function processReportSignals(state: GameState, _dt: number): void {
 
   // 6. SQUAD_HEAVY_LOSS (each squad reports once)
   detectSquadHeavyLoss(state);
+
+  // 7. POSITION_CRITICAL (cooldown 60s, actionRequired)
+  detectPositionCritical(state);
+
+  // 8. MISSION_STALLED (cooldown 120s, actionRequired)
+  detectMissionStalled(state);
+
+  // 9. ECONOMY_SURPLUS (cooldown 120s, report only)
+  detectEconomySurplus(state);
 
   // Update snapshots for next frame
   buildSnapshots(state);
@@ -240,6 +252,91 @@ function detectSquadHeavyLoss(state: GameState): void {
         `${sq.name} 减员严重！(存活 ${alive}/${total})`,
         "warning",
         sq.id,
+      );
+    }
+  }
+}
+
+// --- Detection: POSITION_CRITICAL ---
+// Front where playerPower/enemyPower < 0.3 AND actively engaged (engagementIntensity > 0.3)
+
+function detectPositionCritical(state: GameState): void {
+  for (const front of state.fronts) {
+    if (front.enemyPower <= 0 || front.engagementIntensity < 0.3) continue;
+    const ratio = front.playerPower / front.enemyPower;
+    if (ratio < 0.3) {
+      if (canFire(state, `POSITION_CRITICAL:${front.id}`, 60)) {
+        emit(
+          state,
+          "POSITION_CRITICAL",
+          `${front.name} about to collapse! Power ratio ${(ratio * 100).toFixed(0)}%, taking heavy fire!`,
+          "critical",
+          front.id,
+          true, // actionRequired
+        );
+      }
+    }
+  }
+}
+
+// --- Detection: MISSION_STALLED ---
+// Mission progress hasn't changed in 180s (3 minutes)
+
+function detectMissionStalled(state: GameState): void {
+  for (const m of state.missions) {
+    if (m.status !== "active") continue;
+
+    const snap = missionProgressSnapshot.get(m.id);
+    if (!snap) {
+      // First time seeing this mission — record snapshot
+      missionProgressSnapshot.set(m.id, { progress: m.progress, time: state.time });
+      continue;
+    }
+
+    // Update snapshot if progress changed
+    if (m.progress !== snap.progress) {
+      missionProgressSnapshot.set(m.id, { progress: m.progress, time: state.time });
+      continue;
+    }
+
+    // Progress unchanged — check if 180s have passed
+    if (state.time - snap.time >= 180) {
+      if (canFire(state, `MISSION_STALLED:${m.id}`, 120)) {
+        emit(
+          state,
+          "MISSION_STALLED",
+          `Mission "${m.name}" stalled at ${(m.progress * 100).toFixed(0)}% — no progress for 3 minutes.`,
+          "warning",
+          m.id,
+          true, // actionRequired
+        );
+      }
+    }
+  }
+
+  // Clean up completed/failed missions from snapshot
+  for (const [id] of missionProgressSnapshot) {
+    if (!state.missions.some(m => m.id === id && m.status === "active")) {
+      missionProgressSnapshot.delete(id);
+    }
+  }
+}
+
+// --- Detection: ECONOMY_SURPLUS ---
+// Money > 500 and no active production queue
+
+function detectEconomySurplus(state: GameState): void {
+  const money = state.economy.player.resources.money;
+  const queueEmpty = state.productionQueue.player.length === 0;
+  if (money > 500 && queueEmpty) {
+    if (canFire(state, "ECONOMY_SURPLUS", 120)) {
+      emit(
+        state,
+        "ECONOMY_SURPLUS",
+        `$${Math.floor(money)} available, no production queued. Recommend spending.`,
+        "info",
+        undefined,
+        false, // report only, no decision needed
       );
     }
   }

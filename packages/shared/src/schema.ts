@@ -4,8 +4,10 @@
 // Single source of truth for action/intent whitelists
 // ============================================================
 
-import type { AdvisorResponse, AdvisorOption, LightAdvisorResponse, OrderAction } from "./types";
+import type { AdvisorResponse, AdvisorOption, LightAdvisorResponse, OrderAction, ResponseType } from "./types";
 import type { IntentType, Intent, UrgencyLevel, UnitCategoryHint } from "./intents";
+
+const VALID_RESPONSE_TYPES: readonly ResponseType[] = ["EXECUTE", "CONFIRM", "ASK", "NOOP"];
 
 // ── Whitelists (single source of truth — import from here, don't duplicate) ──
 
@@ -133,8 +135,14 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
   if (typeof obj.brief !== "string") return null;
   if (!Array.isArray(obj.options)) return null;
 
+  // Parse responseType if present (case-insensitive — LLM may return "noop"/"Noop")
+  const rawRT = typeof obj.responseType === "string" ? obj.responseType.toUpperCase() : undefined;
+  const responseType = (rawRT && VALID_RESPONSE_TYPES.includes(rawRT as ResponseType))
+    ? rawRT as ResponseType
+    : undefined;
+
   // Day 13 Layer B: LLM may return empty options[] to reject invalid commands.
-  // Allow this through — frontend will show clarification prompt.
+  // Phase 2: NOOP responseType with options:[] is a valid conversational response.
   if (obj.options.length === 0) {
     const urgency = typeof obj.urgency === "number"
       ? Math.max(0, Math.min(1, obj.urgency))
@@ -144,6 +152,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
       options: [],
       recommended: "A" as const,
       urgency,
+      responseType,
     };
   }
 
@@ -188,11 +197,17 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
     ? Math.max(0, Math.min(1, obj.urgency))
     : 0.5;
 
+  // Enforce: NOOP must have empty options. If LLM returned NOOP with options, drop responseType.
+  const effectiveRT = (responseType === "NOOP" && validOptions.length > 0)
+    ? undefined
+    : responseType;
+
   return {
     brief: obj.brief as string,
     options: validOptions,
     recommended: recommended as "A" | "B" | "C",
     urgency,
+    responseType: effectiveRT,
     suggestProduction: obj.suggest_production
       ? (obj.suggest_production as AdvisorResponse["suggestProduction"])
       : undefined,

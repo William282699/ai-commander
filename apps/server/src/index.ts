@@ -24,7 +24,7 @@ app.get("/api/health", (_req, res) => {
 
 // Full advisor call (player command → 3 options)
 app.post("/api/command", async (req, res) => {
-  const { digest, message, styleNote } = req.body;
+  const { digest, message, styleNote, channel } = req.body;
 
   if (!digest || typeof digest !== "string") {
     res.status(400).json({ error: "digest (string) 必填" });
@@ -36,7 +36,7 @@ app.post("/api/command", async (req, res) => {
   }
 
   try {
-    const result = await callAdvisor(digest, message, styleNote || "");
+    const result = await callAdvisor(digest, message, styleNote || "", channel || "");
     // result always has data (fallback if LLM failed)
     if (result.warning) {
       res.json({ ...result.data, warning: result.warning });
@@ -65,6 +65,33 @@ app.post("/api/brief", async (req, res) => {
   }
 
   res.json(result);
+});
+
+// Phase 3: Staff-initiated decision request (event-driven)
+app.post("/api/staff-ask", async (req, res) => {
+  const { digest, eventType, eventMessage, channel, styleNote } = req.body;
+
+  if (!digest || typeof digest !== "string") {
+    res.status(400).json({ error: "digest (string) required" });
+    return;
+  }
+  if (!eventMessage || typeof eventMessage !== "string") {
+    res.status(400).json({ error: "eventMessage (string) required" });
+    return;
+  }
+
+  try {
+    const prompt = `[EVENT:${eventType || "UNKNOWN"}] ${eventMessage}\n\nProvide 2-3 response options for the commander.`;
+    const result = await callAdvisor(digest, prompt, styleNote || "", channel || "");
+    if (result.warning) {
+      res.json({ ...result.data, warning: result.warning });
+    } else {
+      res.json(result.data);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Server error";
+    res.status(503).json({ error: msg });
+  }
 });
 
 // Startup
