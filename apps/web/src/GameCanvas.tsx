@@ -45,8 +45,7 @@ import {
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { createSquad } from "@ai-commander/shared";
-import { CommandPanel } from "./CommandPanel";
-import { MessageFeed } from "./MessageFeed";
+import { ChatPanel } from "./ChatPanel";
 import {
   addMessage,
   clearMessages,
@@ -352,7 +351,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
       return u && u.team === "player" && u.state !== "dead" && !existingSquadUnitIds.has(id);
     });
     if (validIds.length === 0) {
-      addMessage("warning", "选中的单位已编入分队或不可用", state.time);
+      addMessage("warning", "选中的单位已编入分队或不可用", state.time, "ops", "player", "player");
       return;
     }
 
@@ -361,7 +360,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
       .map((u) => u.type);
     const squad = createSquad(validIds, unitTypes, state.nextSquadNum);
     state.squads.push(squad);
-    addMessage("info", `新建分队 ${squad.id}:${squad.name} (${validIds.length}人)`, state.time);
+    addMessage("info", `新建分队 ${squad.id}:${squad.name} (${validIds.length}人)`, state.time, "ops", "player", "player");
   }, []);
 
   // Day 12: war declaration callback
@@ -369,7 +368,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     const state = stateRef.current;
     if (!state || state.phase !== "CONFLICT" || state.warDeclared) return;
     state.warDeclared = true;
-    addMessage("urgent", "宣战！进入全面战争状态", state.time);
+    addMessage("urgent", "宣战！进入全面战争状态", state.time, "ops", "player", "player");
   }, []);
 
   // Day 12: restart callback
@@ -388,7 +387,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
       priority: "high",
     };
     applyPlayerCommands(state, [order]);
-    addMessage("info", `派遣单位占领 ${menu.facility.name}`, state.time);
+    addMessage("info", `派遣单位占领 ${menu.facility.name}`, state.time, "ops", "player", "player");
     setFacilityMenu(null);
   }, [facilityMenu]);
 
@@ -407,7 +406,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
       priority: "high",
     };
     applyPlayerCommands(state, [order]);
-    addMessage("info", `派遣单位破坏 ${menu.facility.name}`, state.time);
+    addMessage("info", `派遣单位破坏 ${menu.facility.name}`, state.time, "ops", "player", "player");
     setFacilityMenu(null);
   }, [facilityMenu]);
 
@@ -425,7 +424,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     resetStaffAskState();
     clearMessages();
     clearThreads();
-    addMessage("info", "等待指令...", 0);
+    addMessage("info", "等待指令...", 0, "ops", "system", "system");
     onStateReady?.(() => stateRef.current);
   }, [onStateReady]);
 
@@ -701,7 +700,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
           if (d.time > lastDrainedDiagTime) {
             if (SUPPRESSED_DIAG_CODES.has(d.code)) continue; // Day 9.5: suppress spam
             const lvl = DIAG_LEVEL[d.code] ?? "warning";
-            addMessage(lvl, d.message, d.time);
+            addMessage(lvl, d.message, d.time, "ops", undefined, "system");
           }
         }
         lastDrainedDiagTime =
@@ -743,7 +742,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
             if (reqSession !== staffAskState.session) return; // stale
             if (!ENABLE_STAFF_THREADS) return;
             if (data?.brief) {
-              addMessage("info", data.brief, capturedTime, channel);
+              addMessage("info", data.brief, capturedTime, channel, undefined, "event_report");
             }
             if (data?.options && Array.isArray(data.options) && data.options.length > 0) {
               createThread(
@@ -777,7 +776,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         // Phase 3: actionRequired events should always surface and eventually produce a decision thread.
         if (ENABLE_STAFF_ASK && evt.actionRequired) {
           const topicKey = `${evt.type}:${evt.entityId ?? "global"}`;
-          addMessage(level, evt.message, state.time, channel);
+          addMessage(level, evt.message, state.time, channel, undefined, "event_report");
 
           const started = tryStartStaffAsk(
             { type: evt.type, message: evt.message, entityId: evt.entityId },
@@ -798,7 +797,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
           }
         } else {
           // Regular report-only message
-          addMessage(level, evt.message, state.time, channel);
+          addMessage(level, evt.message, state.time, channel, undefined, "event_report");
         }
       }
 
@@ -845,7 +844,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
               .then((data) => {
                 if (reqSession !== heartbeatState.session) return; // stale: game restarted
                 if (data?.brief) {
-                  addMessage("info", data.brief, capturedTime, ch);
+                  addMessage("info", data.brief, capturedTime, ch, undefined, "heartbeat");
                 }
               })
               .catch(() => {}) // heartbeat failure is silent
@@ -953,14 +952,13 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         ref={canvasRef}
         style={{ display: "block", width: "100%", height: "100%" }}
       />
-      <CommandPanel
+      <ChatPanel
         getState={() => stateRef.current}
         getSelectedUnitIds={getSelectedUnitIds}
         onCreateSquad={handleCreateSquad}
         canCreateSquad={canCreateSquad}
         onDeclareWar={handleDeclareWar}
       />
-      <MessageFeed />
       {/* Day 13: Facility context menu */}
       {facilityMenu && (
         <div
@@ -1030,7 +1028,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
                   const trimmed = tagNameInput.trim();
                   const dup = state.tags.find(t => t.name === trimmed);
                   if (dup) {
-                    addMessage("warning", `标记名「${trimmed}」已存在 (${dup.id})，请换一个名字`, state.time);
+                    addMessage("warning", `标记名「${trimmed}」已存在 (${dup.id})，请换一个名字`, state.time, "ops", "system", "system");
                     return; // keep dialog open, let user change name
                   }
                   state.tags.push({
@@ -1040,7 +1038,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
                     createdAt: state.time,
                   });
                   state.nextTagNum++;
-                  addMessage("info", `标记: ${trimmed}`, state.time);
+                  addMessage("info", `标记: ${trimmed}`, state.time, "ops", "player", "player");
                 }
                 setTagNaming(null);
                 setTagNameInput("");
@@ -1106,7 +1104,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
               const state = stateRef.current;
               if (state) {
                 state.tags = state.tags.filter(t => t.id !== tagMenu.tag.id);
-                addMessage("info", `删除标记: ${tagMenu.tag.name}`, state.time);
+                addMessage("info", `删除标记: ${tagMenu.tag.name}`, state.time, "ops", "player", "player");
               }
               setTagMenu(null);
             }}
@@ -1154,7 +1152,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
                   const t = state.tags.find(t => t.id === tagRenaming.tag.id);
                   if (t) {
                     t.name = tagRenameInput.trim();
-                    addMessage("info", `标记重命名: ${t.name}`, state.time);
+                    addMessage("info", `标记重命名: ${t.name}`, state.time, "ops", "player", "player");
                   }
                 }
                 setTagRenaming(null);

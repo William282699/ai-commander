@@ -8,12 +8,28 @@ import type { Channel, ReportEventType, AdvisorOption } from "@ai-commander/shar
 
 export type MessageLevel = "info" | "warning" | "urgent";
 
+/** Who sent the message (persona or player). */
+export type MessageFrom = "player" | "chen" | "marcus" | "emily" | "system";
+
+/** How the message originated. */
+export type MessageSource = "heartbeat" | "event_report" | "command_ack" | "player" | "system";
+
+/** Channel → default persona mapping. */
+export const CHANNEL_PERSONA: Record<Channel, MessageFrom> = {
+  combat: "chen",
+  ops: "marcus",
+  logistics: "emily",
+};
+
 export interface FeedMessage {
   id: number;
   level: MessageLevel;
   text: string;
   time: number; // game time in seconds
   channel: Channel;
+  from?: MessageFrom;
+  source?: MessageSource;
+  groupChat?: boolean; // true = sent via ALL group chat, hidden in individual channel views
 }
 
 const MAX_MESSAGES = 50;
@@ -39,8 +55,13 @@ export function addMessage(
   text: string,
   gameTime: number,
   channel: Channel = "ops",
+  from?: MessageFrom,
+  source?: MessageSource,
+  groupChat?: boolean,
 ): void {
-  messages.push({ id: nextId++, level, text, time: gameTime, channel });
+  // Auto-derive `from` from channel if not provided and source isn't player/system
+  const resolvedFrom = from ?? (source === "player" ? "player" : source === "system" ? "system" : CHANNEL_PERSONA[channel]);
+  messages.push({ id: nextId++, level, text, time: gameTime, channel, from: resolvedFrom, source, ...(groupChat ? { groupChat: true } : {}) });
 
   while (messages.length > MAX_MESSAGES) {
     messages.shift();
@@ -56,12 +77,19 @@ export function clearMessages(): void {
   listeners.forEach((fn) => fn());
 }
 
+/** All messages (internal / legacy). */
 export function getMessages(): readonly FeedMessage[] {
   return messages;
 }
 
+/** ALL view: only group-chat messages (player asked in ALL → commanders replied). */
+export function getGroupChatMessages(): readonly FeedMessage[] {
+  return messages.filter((m) => m.groupChat);
+}
+
+/** Single-channel view: that channel's messages, excluding group-chat. */
 export function getMessagesByChannel(channel: Channel): readonly FeedMessage[] {
-  return messages.filter((m) => m.channel === channel);
+  return messages.filter((m) => m.channel === channel && !m.groupChat);
 }
 
 export function subscribe(listener: () => void): () => void {
