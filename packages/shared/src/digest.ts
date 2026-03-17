@@ -3,7 +3,8 @@
 // Compressed battlefield summary fed to LLM (200-400 tokens)
 // ============================================================
 
-import type { GameState, Front, Resources, StyleParams, Unit, Mission, Squad, Position } from "./types";
+import type { GameState, Front, Resources, StyleParams, Unit, Mission, Squad, Position, CommanderKey } from "./types";
+import { collectUnitsUnder } from "./squadHierarchy";
 
 /**
  * Generate a DigestV1 text summary from GameState.
@@ -106,21 +107,36 @@ export function generateDigestV1(
   digest += `---STYLE---\n`;
   digest += `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas_aversion=${state.style.casualtyAversion.toFixed(2)}\n`;
 
-  // Day 10.5: Squad summary (max 8 lines, P2-5)
+  // Phase 2: Squad summary with hierarchy (flat + parent field)
   if (state.squads && state.squads.length > 0) {
     digest += `---SQUADS---\n`;
-    let squadCount = 0;
-    for (const sq of state.squads) {
-      if (squadCount >= 8) break;
-      const alive = sq.unitIds.filter((id) => {
-        const u = state.units.get(id);
-        return u && u.state !== "dead";
-      });
-      if (alive.length === 0) continue;
-      const types = summarizeSquadTypes(alive, state);
-      const pos = squadAvgPos(alive, state);
-      digest += `${sq.id}:"${sq.name}" ${alive.length}units(${types}) @(${pos.x},${pos.y}) morale=${sq.morale.toFixed(1)} mission=${sq.currentMission || "idle"}\n`;
-      squadCount++;
+    const commanders: CommanderKey[] = ["chen", "marcus", "emily"];
+    const cmdLabels: Record<CommanderKey, string> = { chen: "Chen(combat)", marcus: "Marcus(ops)", emily: "Emily(logistics)" };
+    for (const cmd of commanders) {
+      const cmdSquads = state.squads.filter((s) => s.ownerCommander === cmd);
+      if (cmdSquads.length === 0) {
+        digest += `${cmdLabels[cmd]}: (empty)\n`;
+        continue;
+      }
+      digest += `${cmdLabels[cmd]}:\n`;
+      let lineCount = 0;
+      for (const sq of cmdSquads) {
+        if (lineCount >= 12) { digest += `  ...+${cmdSquads.length - lineCount} more\n`; break; }
+        const parentLabel = sq.parentSquadId ?? cmd;
+        if (sq.role === "commander") {
+          const childIds = state.squads.filter((s) => s.parentSquadId === sq.id).map((s) => s.id);
+          const totalUnits = collectUnitsUnder(state, sq.id).length;
+          const pos = squadAvgPos(sq.unitIds.length > 0 ? sq.unitIds : collectUnitsUnder(state, sq.id), state);
+          digest += `  ${sq.id}[commander] parent:${parentLabel} manages:[${childIds.join(",")}] ${totalUnits}units @(${pos.x},${pos.y})\n`;
+        } else {
+          const alive = sq.unitIds.filter((id) => { const u = state.units.get(id); return u && u.state !== "dead"; });
+          if (alive.length === 0) continue;
+          const types = summarizeSquadTypes(alive, state);
+          const pos = squadAvgPos(alive, state);
+          digest += `  ${sq.id}[leader] parent:${parentLabel} ${alive.length}units(${types}) @(${pos.x},${pos.y}) morale=${sq.morale.toFixed(1)} mission=${sq.currentMission || "idle"}\n`;
+        }
+        lineCount++;
+      }
     }
   }
 

@@ -45,7 +45,7 @@ import {
 } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
-import { createSquad } from "@ai-commander/shared";
+import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent } from "@ai-commander/shared";
 import { ChatPanel } from "./ChatPanel";
 import {
   addMessage,
@@ -339,7 +339,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
   }, []);
 
   // Stable callback: create a squad from selected units
-  const handleCreateSquad = useCallback(() => {
+  const handleCreateSquad = useCallback((owner: "chen" | "marcus" | "emily") => {
     const state = stateRef.current;
     if (!state) return;
     const ids = inputRef.current.selectedUnitIds;
@@ -361,9 +361,39 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     const unitTypes = validIds
       .map((id) => state.units.get(id)!)
       .map((u) => u.type);
-    const squad = createSquad(validIds, unitTypes, state.nextSquadNum);
+    const usedNames = getUsedLeaderNames(state.squads);
+    const leaderName = pickLeaderName(usedNames);
+    const squad = createSquad(validIds, unitTypes, state.nextSquadNum, owner, leaderName);
     state.squads.push(squad);
-    addMessage("info", `新建分队 ${squad.id}:${squad.name} (${validIds.length}人)`, state.time, "ops", "player", "player");
+    addMessage("info", `新建分队 ${squad.id}:${squad.name} (${validIds.length}人) → ${owner}`, state.time, "ops", "player", "player");
+  }, []);
+
+  // Phase 2: OrgTree callbacks
+  const handleSelectUnits = useCallback((unitIds: number[]) => {
+    const input = inputRef.current;
+    input.selectedUnitIds = unitIds;
+  }, []);
+
+  const handleMoveSquad = useCallback((squadId: string, newParentId: string) => {
+    const state = stateRef.current;
+    if (!state) return;
+    const result = moveSquadUnder(state, squadId, newParentId);
+    if (!result.ok) {
+      addMessage("warning", `编制移动失败: ${result.error}`, state.time, "ops", "player", "player");
+    }
+  }, []);
+
+  const handleRemoveFromParent = useCallback((squadId: string) => {
+    const state = stateRef.current;
+    if (!state) return;
+    removeSquadFromParent(state, squadId);
+  }, []);
+
+  const handleRenameLeader = useCallback((squadId: string, newName: string) => {
+    const state = stateRef.current;
+    if (!state) return;
+    const squad = state.squads.find((s) => s.id === squadId);
+    if (squad) squad.leaderName = newName;
   }, []);
 
   // Day 12: war declaration callback
@@ -969,6 +999,10 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         onCreateSquad={handleCreateSquad}
         canCreateSquad={canCreateSquad}
         onDeclareWar={handleDeclareWar}
+        onSelectUnits={handleSelectUnits}
+        onMoveSquad={handleMoveSquad}
+        onRemoveFromParent={handleRemoveFromParent}
+        onRenameLeader={handleRenameLeader}
       />
       {/* Day 13: Facility context menu */}
       {facilityMenu && (

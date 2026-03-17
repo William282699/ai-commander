@@ -3,7 +3,7 @@
 // Auto-generate squad IDs, ranks, and leader names.
 // ============================================================
 
-import type { UnitType, SquadRank, SquadLeader, Squad, Position } from "./types";
+import type { UnitType, SquadRank, SquadLeader, Squad, CommanderKey, SquadRole, Position } from "./types";
 
 // ── Unit type → squad prefix (P1-2: explicit deterministic mapping) ──
 
@@ -129,6 +129,9 @@ export function createSquad(
   unitIds: number[],
   unitTypes: UnitType[],
   nextNums: { [prefix: string]: number },
+  ownerCommander: CommanderKey,
+  leaderName: string,
+  opts?: { role?: SquadRole; parentSquadId?: string },
 ): Squad {
   const id = autoSquadId(unitTypes, nextNums);
   return {
@@ -140,5 +143,9 @@ export function createSquad(
     missionTarget: null,
     morale: 1.0,
     formationStyle: "line",
+    ownerCommander,
+    leaderName,
+    role: opts?.role ?? "leader",
+    parentSquadId: opts?.parentSquadId,
   };
 }

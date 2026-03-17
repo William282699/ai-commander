@@ -5,7 +5,8 @@
 // chat bubbles in the middle, input at the bottom.
 // ============================================================
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
+import { OrgTree } from "./OrgTree";
 import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel } from "@ai-commander/shared";
 import { CHANNEL_LABELS } from "@ai-commander/shared";
@@ -63,7 +64,7 @@ function isValidTarget(intent: Intent, state: GameState): boolean {
   if (intent.targetFacility && !state.facilities.has(intent.targetFacility)) return false;
   if (intent.toFront && !findFront(state, intent.toFront)) return false;
   if (intent.fromFront && !findFront(state, intent.fromFront)) return false;
-  if (intent.fromSquad && !state.squads?.find(s => s.id === intent.fromSquad)) return false;
+  if (intent.fromSquad && !state.squads?.find(s => s.id === intent.fromSquad || s.leaderName === intent.fromSquad)) return false;
   return true;
 }
 
@@ -84,9 +85,19 @@ function canAutoExecute(
   if (intents.length !== 1) return { auto: false, reason: "multi_intent" };
   const intent = intents[0];
 
-  const squadIdsInText = (userMessage.match(/\b[TIA]\d+\b/gi) ?? []).map(s => s.toUpperCase());
+  const squadIdsInText = (userMessage.match(/\b[TIANF]\d+\b/gi) ?? []).map(s => s.toUpperCase());
   const hasSelectedAnchor = /\bselected\b/i.test(userMessage) || /选中|圈起来|这队|这支/.test(userMessage);
   const hasSquadAnchor = squadIdsInText.length > 0;
+
+  // Phase 2: leaderName anchor — if fromSquad matches a leaderName (not a squad ID format),
+  // force manual confirm since human names are less precise
+  if (intent.fromSquad && typeof intent.fromSquad === "string") {
+    const isSquadIdFormat = /^[A-Z]\d+$/i.test(intent.fromSquad);
+    if (!isSquadIdFormat) {
+      // leaderName reference → always confirm
+      return { auto: false, reason: "leader_name_anchor" };
+    }
+  }
 
   if (!hasSquadAnchor && !hasSelectedAnchor) return { auto: false, reason: "no_anchor" };
 
@@ -187,9 +198,13 @@ const FROM_AVATARS: Record<string, string> = {
 interface Props {
   getState: () => GameState | null;
   getSelectedUnitIds?: () => number[];
-  onCreateSquad?: () => void;
+  onCreateSquad?: (owner: "chen" | "marcus" | "emily") => void;
   canCreateSquad?: () => boolean;
   onDeclareWar?: () => void;
+  onSelectUnits?: (unitIds: number[]) => void;
+  onMoveSquad?: (squadId: string, newParentId: string) => void;
+  onRemoveFromParent?: (squadId: string) => void;
+  onRenameLeader?: (squadId: string, newName: string) => void;
 }
 
 interface DisplayResponse extends AdvisorResponse {
@@ -197,7 +212,10 @@ interface DisplayResponse extends AdvisorResponse {
 }
 
 
-export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad, onDeclareWar }: Props) {
+export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader }: Props) {
+  // ── Tab state: "chat" or "org" ──
+  const [activeTab, setActiveTab] = useState<"chat" | "org">("chat");
+
   // ── Commander selection state ──
   const [selectedCommanders, setSelectedCommanders] = useState<Commander[]>(["marcus"]);
   const isGroupChat = selectedCommanders.length > 1;
@@ -736,7 +754,49 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         </button>
       </div>
 
-      {/* ── Middle: Chat message flow ── */}
+      {/* ── Tab switcher: Chat / Org ── */}
+      <div style={tabBarStyle}>
+        <button
+          onClick={() => setActiveTab("chat")}
+          style={{
+            ...tabBtnStyle,
+            borderBottomColor: activeTab === "chat" ? "#3b82f6" : "transparent",
+            color: activeTab === "chat" ? "#e2e8f0" : "#64748b",
+          }}
+        >
+          聊天 💬
+        </button>
+        <button
+          onClick={() => setActiveTab("org")}
+          style={{
+            ...tabBtnStyle,
+            borderBottomColor: activeTab === "org" ? "#3b82f6" : "transparent",
+            color: activeTab === "org" ? "#e2e8f0" : "#64748b",
+          }}
+        >
+          编制 🏗️
+        </button>
+      </div>
+
+      {/* ── Middle: Chat message flow OR OrgTree ── */}
+      {activeTab === "org" ? (
+        (() => {
+          const st = getState();
+          if (!st) return <div style={{ flex: 1, color: "#475569", textAlign: "center", padding: 20 }}>加载中...</div>;
+          return (
+            <OrgTree
+              squads={st.squads}
+              units={st.units}
+              state={st}
+              onSelectUnits={onSelectUnits ?? (() => {})}
+              onMoveSquad={onMoveSquad ?? (() => {})}
+              onRemoveFromParent={onRemoveFromParent ?? (() => {})}
+              onRenameLeader={onRenameLeader ?? (() => {})}
+            />
+          );
+        })()
+      ) : (
+      <>
       <div ref={scrollRef} style={chatFlowStyle}>
         {displayMessages.length === 0 && (
           <div style={{ color: "#475569", fontSize: 11, padding: "12px 0", textAlign: "center" }}>
@@ -897,6 +957,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           )}
         </div>
       )}
+      </>
+      )}
 
       {/* ── Bottom: Input area ── */}
       <div style={inputContainerStyle}>
@@ -933,7 +995,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         />
         {onCreateSquad && (
           <button
-            onClick={onCreateSquad}
+            onClick={() => onCreateSquad(selectedCommanders[0])}
             disabled={!squadBtnEnabled}
             style={{
               ...actionBtnStyle,
@@ -982,6 +1044,26 @@ const panelStyle: React.CSSProperties = {
   pointerEvents: "auto",
   display: "flex",
   flexDirection: "column",
+};
+
+const tabBarStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 0,
+  borderBottom: "1px solid #1e293b",
+  flexShrink: 0,
+};
+
+const tabBtnStyle: React.CSSProperties = {
+  flex: 1,
+  background: "transparent",
+  border: "none",
+  borderBottom: "2px solid transparent",
+  color: "#64748b",
+  fontSize: 12,
+  fontFamily: "monospace",
+  padding: "6px 0",
+  cursor: "pointer",
+  transition: "color 0.15s, border-color 0.15s",
 };
 
 const commanderBarStyle: React.CSSProperties = {

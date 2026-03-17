@@ -22,7 +22,7 @@ import type {
   QuantityHint,
   UnitCategoryHint,
 } from "@ai-commander/shared";
-import { getUnitCategory, UNIT_STATS, TRADE_COSTS } from "@ai-commander/shared";
+import { getUnitCategory, UNIT_STATS, TRADE_COSTS, collectUnitsUnder } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { createMission } from "./missions";
 
@@ -846,18 +846,23 @@ function resolveSourceUnitsRaw(
   intent: Intent,
   state: GameState,
 ): SourceUnitsResult {
-  // ── Day 10.5 Fix 6: fromSquad — highest priority ──
+  // ── Phase 2: fromSquad — match by squad.id first, then by leaderName ──
   if (intent.fromSquad && typeof intent.fromSquad === "string") {
-    const squad = state.squads.find((s) => s.id === intent.fromSquad);
+    let squad = state.squads.find((s) => s.id === intent.fromSquad);
+    if (!squad) {
+      squad = state.squads.find((s) => s.leaderName === intent.fromSquad);
+    }
     if (squad) {
-      const units = squad.unitIds
+      // Use collectUnitsUnder for hierarchy-aware unit collection
+      const allIds = collectUnitsUnder(state, squad.id);
+      const units = allIds
         .map((id) => state.units.get(id))
         .filter(
           (u): u is Unit =>
             u !== undefined &&
             u.team === "player" &&
             u.state !== "dead" &&
-            !u.manualOverride, // P1-3: exclude manually overridden units
+            !u.manualOverride,
         );
       if (units.length > 0) return { units };
       return { units: [], error: `分队 ${intent.fromSquad} 无可用单位（已阵亡或被手动接管）` };

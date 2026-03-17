@@ -19,7 +19,10 @@ import {
   SUPPLY_INTERVAL_SEC,
   MAP_WIDTH,
   MAP_HEIGHT,
+  pickLeaderName,
+  createSquad,
 } from "@ai-commander/shared";
+import type { Squad, CommanderKey } from "@ai-commander/shared";
 import { createFogState } from "../fog";
 import { resetMissionCounter } from "../missions";
 import { generateTerrain, FACILITIES, REGIONS, CHOKEPOINTS, FRONTS } from "@ai-commander/shared";
@@ -186,6 +189,48 @@ export function createInitialGameState(): GameState {
   const regionsMap = new Map(REGIONS.map((r) => [r.id, { ...r }]));
   const chokepointsMap = new Map(CHOKEPOINTS.map((c) => [c.id, { ...c }]));
 
+  // === Phase 2: Auto-generate initial squads by unit type ===
+  const nextSquadNum: { [prefix: string]: number } = {};
+  const usedNames = new Set<string>();
+  const squads: Squad[] = [];
+
+  // Collect player units by type
+  const playerUnits: Unit[] = [];
+  units.forEach((u) => { if (u.team === "player") playerUnits.push(u); });
+
+  const infantry = playerUnits.filter((u) => u.type === "infantry");
+  const mainTanks = playerUnits.filter((u) => u.type === "main_tank");
+  const lightTanks = playerUnits.filter((u) => u.type === "light_tank");
+  const artillery = playerUnits.filter((u) => u.type === "artillery");
+  const naval = playerUnits.filter((u) => u.type === "patrol_boat" || u.type === "destroyer" || u.type === "cruiser" || u.type === "carrier");
+
+  // Helper: create a squad from a batch of units
+  function makeSquad(batch: Unit[]): void {
+    if (batch.length === 0) return;
+    const ids = batch.map((u) => u.id);
+    const types = batch.map((u) => u.type);
+    const name = pickLeaderName(usedNames);
+    usedNames.add(name);
+    squads.push(createSquad(ids, types, nextSquadNum, "chen", name));
+  }
+
+  // Infantry: 3-4 per squad
+  for (let i = 0; i < infantry.length; i += 4) {
+    makeSquad(infantry.slice(i, i + 4));
+  }
+
+  // Tanks (main + light combined): split into 2 groups
+  const allTanks = [...mainTanks, ...lightTanks];
+  const half = Math.ceil(allTanks.length / 2);
+  makeSquad(allTanks.slice(0, half));
+  makeSquad(allTanks.slice(half));
+
+  // Artillery: 1 squad
+  makeSquad(artillery);
+
+  // Naval: 1 squad
+  makeSquad(naval);
+
   return {
     tick: 0,
     time: 0,
@@ -219,8 +264,8 @@ export function createInitialGameState(): GameState {
     reportEvents: [],
     patrolTasks: [],
     nextPatrolTaskId: 1,
-    squads: [],
-    nextSquadNum: {},
+    squads,
+    nextSquadNum,
     tags: [],
     nextTagNum: 1,
   };

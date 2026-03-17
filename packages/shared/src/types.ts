@@ -370,6 +370,9 @@ export interface SquadLeader {
   personality: "cautious" | "balanced" | "aggressive";
 }
 
+export type CommanderKey = "chen" | "marcus" | "emily";
+export type SquadRole = "leader" | "commander";
+
 export interface Squad {
   id: string;                      // "T5", "I3", etc.
   name: string;                    // "坦克5分队"
@@ -379,6 +382,11 @@ export interface Squad {
   missionTarget: Position | null;
   morale: number;                  // 0-1, affected by casualties
   formationStyle: "line" | "wedge" | "column";
+  // Phase 2: tree hierarchy fields
+  parentSquadId?: string;                // 上级 squad，undefined = 直属根指挥官
+  ownerCommander: CommanderKey;          // 所属根指挥官
+  leaderName: string;                    // 组长名字（可自定义）
+  role: SquadRole;                       // leader=直管兵，commander=管 leader
 }
 
 // --- Tag (player map markers, Day 15) ---

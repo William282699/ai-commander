@@ -222,7 +222,7 @@ export function applyEndgamePressure(state: GameState, dt: number): void {
 
   // Periodic attrition: all units lose a small amount of HP each tick
   // This creates urgency without complex lethality multiplier changes
-  const attritionPerSec = 0.5; // HP lost per second per unit
+  const attritionPerSec = 0.1; // HP lost per second per unit (was 0.5, too aggressive)
   state.units.forEach((u) => {
     if (u.state === "dead") return;
     u.hp -= attritionPerSec * dt;
