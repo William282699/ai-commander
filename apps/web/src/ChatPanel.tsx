@@ -6,7 +6,7 @@
 // ============================================================
 
 import { useState, useRef, useEffect } from "react";
-import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront } from "@ai-commander/core";
+import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel } from "@ai-commander/shared";
 import { CHANNEL_LABELS } from "@ai-commander/shared";
 import {
@@ -298,13 +298,21 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     return () => clearInterval(id);
   }, [getState]);
 
-  // Poll war declaration eligibility + clear panel on game over + detect restart
+  // Production button state
+  const [playerMoney, setPlayerMoney] = useState(0);
+  const [playerQueueLen, setPlayerQueueLen] = useState(0);
+
+  // Poll war declaration eligibility + clear panel on game over + detect restart + production state
   const lastSeenTimeRef = useRef(0);
   const [canDeclareWar, setCanDeclareWar] = useState(false);
   useEffect(() => {
     const id = setInterval(() => {
       const s = getState();
       setCanDeclareWar(!!s && s.phase === "CONFLICT" && !s.warDeclared && !s.gameOver);
+      if (s) {
+        setPlayerMoney(s.economy.player.resources.money);
+        setPlayerQueueLen(s.productionQueue.player.length);
+      }
       if (s?.gameOver && response) {
         setResponse(null);
         setApprovedIdx(null);
@@ -317,6 +325,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     }, 200);
     return () => clearInterval(id);
   }, [getState, response]);
+
+  // ── Production handlers ──
+  const handleProduce = (unitType: "infantry" | "light_tank") => {
+    const state = getState();
+    if (!state) return;
+    const result = enqueueProduction(state, "player", unitType);
+    const label = unitType === "infantry" ? "步兵" : "轻坦";
+    if (result.ok) {
+      addMessage("info", `已下令生产${label}`, state.time, "logistics", "player", "command_ack");
+    } else {
+      addMessage("warning", `无法生产${label}: ${result.reason}`, state.time, "logistics", "player", "command_ack");
+    }
+  };
 
   // ── Commander selection logic (0.3) ──
   const toggleCommander = (cmd: Commander) => {
@@ -879,6 +900,28 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
       {/* ── Bottom: Input area ── */}
       <div style={inputContainerStyle}>
+        <button
+          onClick={() => handleProduce("infantry")}
+          disabled={playerMoney < 100 || playerQueueLen >= 3}
+          style={{
+            ...prodBtnStyle,
+            opacity: playerMoney >= 100 && playerQueueLen < 3 ? 1 : 0.35,
+          }}
+          title={`生产步兵 ($100)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
+        >
+          +兵$100
+        </button>
+        <button
+          onClick={() => handleProduce("light_tank")}
+          disabled={playerMoney < 250 || playerQueueLen >= 3}
+          style={{
+            ...prodBtnStyle,
+            opacity: playerMoney >= 250 && playerQueueLen < 3 ? 1 : 0.35,
+          }}
+          title={`生产轻坦 ($250)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
+        >
+          +坦$250
+        </button>
         <input
           type="text"
           value={message}
@@ -1175,6 +1218,18 @@ const inputStyle: React.CSSProperties = {
   fontSize: 12,
   fontFamily: "monospace",
   outline: "none",
+};
+
+const prodBtnStyle: React.CSSProperties = {
+  background: "#1a3a2a",
+  color: "#4ade80",
+  border: "1px solid #166534",
+  borderRadius: 4,
+  padding: "6px 6px",
+  fontSize: 10,
+  fontFamily: "monospace",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
 };
 
 const actionBtnStyle: React.CSSProperties = {

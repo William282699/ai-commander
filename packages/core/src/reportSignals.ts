@@ -109,6 +109,9 @@ export function processReportSignals(state: GameState, _dt: number): void {
   // 9. ECONOMY_SURPLUS (cooldown 120s, report only)
   detectEconomySurplus(state);
 
+  // 10. ECONOMY_REPORT (periodic 120s economy status)
+  detectEconomyReport(state);
+
   // Update snapshots for next frame
   buildSnapshots(state);
 }
@@ -340,6 +343,25 @@ function detectEconomySurplus(state: GameState): void {
       );
     }
   }
+}
+
+// --- Detection: ECONOMY_REPORT ---
+// Periodic economy status report every 120s (info, not actionRequired)
+
+function detectEconomyReport(state: GameState): void {
+  if (!canFire(state, "ECONOMY_REPORT", 120)) return;
+
+  const res = state.economy.player.resources;
+  const queueLen = state.productionQueue.player.length;
+  const income = state.economy.player.baseIncome.money + state.economy.player.bonusIncome.money;
+  emit(
+    state,
+    "ECONOMY_REPORT",
+    `经济概况: $${Math.floor(res.money)} | 燃料${Math.floor(res.fuel)} | 弹药${Math.floor(res.ammo)} | 收入$${Math.floor(income)}/30s | 生产队列${queueLen}`,
+    "info",
+    undefined,
+    false,
+  );
 }
 
 // --- Drain helper (UI calls this to consume events) ---

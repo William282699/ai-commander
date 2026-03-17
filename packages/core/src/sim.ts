@@ -24,7 +24,7 @@ const DIAG_DEDUP_SEC = 5;
 
 /** Low-value diagnostics use a longer dedup window to avoid array pollution. */
 const DIAG_LOW_VALUE_DEDUP_SEC = 30;
-const LOW_VALUE_DIAG_CODES = new Set(["PATH_BLOCKED", "IMPASSABLE_TERRAIN"]);
+const LOW_VALUE_DIAG_CODES = new Set(["PATH_BLOCKED", "IMPASSABLE_TERRAIN", "NO_FUEL"]);
 
 function pushDiagnostic(state: GameState, code: string, message: string): void {
   const dedupSec = LOW_VALUE_DIAG_CODES.has(code) ? DIAG_LOW_VALUE_DEDUP_SEC : DIAG_DEDUP_SEC;
@@ -184,8 +184,10 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
   // Fuel gate: mechanized units cannot move if team fuel is 0
   if (!canUnitMove(unit, state)) {
     clearOneShotOrders(unit); // ⑦ release autoBehavior on fuel exhaustion
-    pushDiagnostic(state, "NO_FUEL",
-      `${unit.type}#${unit.id} 燃油耗尽，无法移动`);
+    if (unit.team === "player") {
+      pushDiagnostic(state, "NO_FUEL",
+        `${unit.type}#${unit.id} 燃油耗尽，无法移动`);
+    }
     return;
   }
 

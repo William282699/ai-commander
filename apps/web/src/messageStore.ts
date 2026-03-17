@@ -92,6 +92,15 @@ export function getMessagesByChannel(channel: Channel): readonly FeedMessage[] {
   return messages.filter((m) => m.channel === channel && !m.groupChat);
 }
 
+/** Return the game-time of the most recent message matching channel+source, or null. */
+export function getLastMessageTimeBySource(channel: Channel, source: MessageSource): number | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.channel === channel && m.source === source) return m.time;
+  }
+  return null;
+}
+
 export function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => {
