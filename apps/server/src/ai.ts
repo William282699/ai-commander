@@ -50,7 +50,7 @@ RESPONSE FORMAT — always valid JSON:
       "intents": [
         {
           "type": "${DAY7_SUPPORTED_INTENT_TYPES.join("|")}",
-          "fromSquad": "squad ID like T5, I3 (optional, takes priority over fromFront)",
+          "fromSquad": "squad ID (e.g. T5, I3) or leader name (e.g. Aiden, Carter) — optional, takes priority over fromFront",
           "fromFront": "front name (optional)",
           "toFront": "front name (optional)",
           "targetFacility": "facility ID (optional)",
@@ -87,8 +87,9 @@ IMPORTANT:
 - Each intent dispatches different units; engine prevents double-assignment.
 
 SQUAD SYSTEM:
-- Battlefield digest ---SQUADS--- lists all squads with ID, type, position.
-- If commander mentions a squad (e.g. "T5", "tank squad"), use fromSquad with the squad ID. fromSquad takes priority over fromFront.
+- Battlefield digest ---SQUADS--- lists squads as: leaderName(squadId,role). Example: Carter(T2,CMD) or Aiden(I1,leader).
+- fromSquad accepts EITHER the squad ID (e.g. "I1") OR the leader name (e.g. "Aiden"). The engine resolves both.
+- If commander mentions a leader by name (e.g. "Aiden, move to..."), set fromSquad to that leader name. All units under that leader (including sub-squads if CMD) will be dispatched.
 - When fromSquad is set, do NOT auto-fill unitType. The squad defines its unit set. Only split unitType when the commander explicitly distinguishes unit types within a squad.
 - If commander says "selected" / "圈起来的" / "选中的", omit fromSquad/fromFront — engine constrains to ---PLAYER_SELECTED---.
 - If no squad needed, omit fromSquad entirely. Never fill "none" or "null".

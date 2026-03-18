@@ -49,17 +49,24 @@ const COMMANDER_META: Record<Commander, { label: string; role: string; avatar: s
 
 function isValidTarget(intent: Intent, state: GameState): boolean {
   if (intent.targetRegion) {
+    const lower = intent.targetRegion.toLowerCase();
     const isTag = state.tags?.some(t => t.id === intent.targetRegion);
     const isFront = !!findFront(state, intent.targetRegion);
     const isRegion = state.regions.has(intent.targetRegion);
     const isRegionFuzzy = !isRegion && (() => {
-      const lower = intent.targetRegion!.toLowerCase();
       for (const [, r] of state.regions) {
         if (r.id.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower)) return true;
       }
       return false;
     })();
-    if (!isTag && !isFront && !isRegion && !isRegionFuzzy) return false;
+    // LLM sometimes puts facility names (e.g. "HQ") in targetRegion — allow that
+    const isFacility = (() => {
+      for (const [, f] of state.facilities) {
+        if (f.id.toLowerCase() === lower || f.name.toLowerCase().includes(lower)) return true;
+      }
+      return false;
+    })();
+    if (!isTag && !isFront && !isRegion && !isRegionFuzzy && !isFacility) return false;
   }
   if (intent.targetFacility && !state.facilities.has(intent.targetFacility)) return false;
   if (intent.toFront && !findFront(state, intent.toFront)) return false;
@@ -205,6 +212,7 @@ interface Props {
   onMoveSquad?: (squadId: string, newParentId: string) => void;
   onRemoveFromParent?: (squadId: string) => void;
   onRenameLeader?: (squadId: string, newName: string) => void;
+  onTransferSquad?: (squadId: string, newOwner: "chen" | "marcus" | "emily") => void;
 }
 
 interface DisplayResponse extends AdvisorResponse {
@@ -212,7 +220,7 @@ interface DisplayResponse extends AdvisorResponse {
 }
 
 
-export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader }: Props) {
+export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad }: Props) {
   // ── Panel collapse state ──
   const [collapsed, setCollapsed] = useState(false);
 
@@ -234,6 +242,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const [error, setError] = useState<string | null>(null);
   const [approvedIdx, setApprovedIdx] = useState<number | null>(null);
   const [clarification, setClarification] = useState<string | null>(null);
+  const [declinedContext, setDeclinedContext] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // P1: snapshot selected unit IDs at sendCommand time
   const selectedIdsSnapshotRef = useRef<number[] | undefined>(undefined);
@@ -438,6 +448,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
   // ── 0.5: Group chat — parallel requests (completion-order insertion) ──
   const sendGroupChat = async (userMsg: string, state: GameState, selectedIds: number[]) => {
+    // Clear stale response/error from previous command
+    setResponse(null);
+    setError(null);
+    setApprovedIdx(null);
+    responseExecCtxRef.current = null;
+    latestRequestIdRef.current = null;
+
     const channels = selectedCommanders.map(c => COMMANDER_CHANNEL[c]);
     const baseDigest = buildDigest(state, selectedIds, [], []);
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
@@ -541,13 +558,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     const digest = baseDigest + contextSuffix + threadContext;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
+    // Append declined context if player is refining a rejected proposal
+    let llmMessage = userMsg;
+    if (declinedContext) {
+      llmMessage += `\n---DECLINED---\n之前的命令和方案：${declinedContext}\n指挥官对以上方案都不满意，请根据补充说明重新制定方案。`;
+      setDeclinedContext(null);
+    }
+
     pushContext(channelContextRef.current, ch, { role: "user", text: userMsg, time: state.time });
 
     try {
       const res = await fetch(`${API_URL}/api/command`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: userMsg, styleNote, channel: ch }),
+        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch }),
       });
 
       const data = await res.json();
@@ -615,10 +639,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     const execCtx = ctx ?? responseExecCtxRef.current;
     const ch = execCtx?.channel ?? getActiveChannel();
 
-    // Validate requestId: the ctx captured at render must match the latest valid requestId.
-    // This rejects stale approve clicks after a newer response has arrived.
-    if (mode === "manual" && latestRequestIdRef.current && execCtx?.requestId
-        && latestRequestIdRef.current !== execCtx.requestId) {
+    // Validate: reject approve if response has already been cleared (stale click).
+    if (mode === "manual" && !response) {
       addMessage("warning", "响应已过期，请重新下令", state.time, ch, undefined, "system");
       return;
     }
@@ -688,13 +710,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     setClarification(null);
     setApprovedIdx(idx);
 
+    // Brief flash then clear card
     setTimeout(() => {
       setResponse(null);
       setApprovedIdx(null);
       selectedIdsSnapshotRef.current = undefined;
       responseExecCtxRef.current = null;
       latestRequestIdRef.current = null;
-    }, 800);
+    }, 400);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -821,6 +844,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
               onMoveSquad={onMoveSquad ?? (() => {})}
               onRemoveFromParent={onRemoveFromParent ?? (() => {})}
               onRenameLeader={onRenameLeader ?? (() => {})}
+              onTransferSquad={onTransferSquad ?? (() => {})}
             />
           );
         })()
@@ -952,6 +976,40 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             {response.warning && (
               <div style={warningStyle}>{response.warning}</div>
             )}
+
+            {/* Cancel + Supplement buttons */}
+            <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+              <button
+                onClick={() => {
+                  const state = getState();
+                  setResponse(null);
+                  setApprovedIdx(null);
+                  setClarification(null);
+                  responseExecCtxRef.current = null;
+                  latestRequestIdRef.current = null;
+                  if (state) addMessage("info", "指挥官取消了命令", state.time, getActiveChannel(), undefined, "system");
+                }}
+                style={cancelBtnStyle}
+              >
+                ✕ 取消
+              </button>
+              <button
+                onClick={() => {
+                  // Save current proposal context for next command
+                  const summary = response.brief + " | " + response.options.map((o, i) => `${["A","B","C"][i]}:${o.label}`).join("; ");
+                  setDeclinedContext(summary);
+                  setResponse(null);
+                  setApprovedIdx(null);
+                  setClarification(null);
+                  responseExecCtxRef.current = null;
+                  latestRequestIdRef.current = null;
+                  setTimeout(() => inputRef.current?.focus(), 50);
+                }}
+                style={supplementBtnStyle}
+              >
+                💬 补充
+              </button>
+            </div>
           </div>
         )}
 
@@ -1014,6 +1072,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           +坦$250
         </button>
         <input
+          ref={inputRef}
           type="text"
           value={message}
           onChange={(e) => setMessage(e.target.value)}
@@ -1238,6 +1297,28 @@ const approveBtnStyle: React.CSSProperties = {
   fontWeight: "bold",
   cursor: "pointer",
   letterSpacing: 1,
+};
+
+const cancelBtnStyle: React.CSSProperties = {
+  flex: 1,
+  padding: "4px 0",
+  fontSize: 10,
+  border: "1px solid #475569",
+  borderRadius: 4,
+  background: "rgba(71, 85, 105, 0.2)",
+  color: "#94a3b8",
+  cursor: "pointer",
+};
+
+const supplementBtnStyle: React.CSSProperties = {
+  flex: 1,
+  padding: "4px 0",
+  fontSize: 10,
+  border: "1px solid #3b82f6",
+  borderRadius: 4,
+  background: "rgba(59, 130, 246, 0.1)",
+  color: "#60a5fa",
+  cursor: "pointer",
 };
 
 const warningStyle: React.CSSProperties = {

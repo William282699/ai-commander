@@ -4,7 +4,7 @@
 // Other files read squad hierarchy fields only.
 // ============================================================
 
-import type { GameState, Squad, UnitType } from "./types";
+import type { GameState, Squad, UnitType, CommanderKey } from "./types";
 import { autoSquadId, autoSquadName, createSquadLeader } from "./squad";
 import { pickLeaderName, getUsedLeaderNames } from "./namePool";
 
@@ -200,9 +200,20 @@ export function moveSquadUnder(
     return { ok: false, error: "Cannot move squad under its own descendant" };
   }
 
-  // Same owner
+  // Cross-commander transfer: update ownerCommander for the moved squad and all descendants
   if (squad.ownerCommander !== parent.ownerCommander) {
-    return { ok: false, error: "Cannot move squad across commanders" };
+    // Detach from old parent first
+    if (squad.parentSquadId) {
+      removeSquadFromParent(state, squadId);
+    }
+    // Recursively update ownerCommander
+    const setOwner = (sid: string) => {
+      const s = state.squads.find(sq => sq.id === sid);
+      if (!s) return;
+      s.ownerCommander = parent.ownerCommander;
+      state.squads.filter(sq => sq.parentSquadId === sid).forEach(child => setOwner(child.id));
+    };
+    setOwner(squadId);
   }
 
   // Phase 2.5: auto-promote leader target to commander
@@ -252,6 +263,36 @@ export function removeSquadFromParent(
   if (oldParent) {
     tryDemoteCommander(state, oldParent);
   }
+
+  return { ok: true };
+}
+
+/**
+ * Transfer a squad (and all its descendants) to a different commander as a root squad.
+ * Detaches from old parent, recursively updates ownerCommander.
+ */
+export function transferSquadToCommander(
+  state: GameState,
+  squadId: string,
+  newOwner: CommanderKey,
+): { ok: boolean; error?: string } {
+  const squad = state.squads.find((s) => s.id === squadId);
+  if (!squad) return { ok: false, error: "Squad not found" };
+  if (squad.ownerCommander === newOwner && !squad.parentSquadId) return { ok: false, error: "Already under this commander" };
+
+  // Detach from old parent
+  if (squad.parentSquadId) {
+    removeSquadFromParent(state, squadId);
+  }
+
+  // Recursively update ownerCommander
+  const setOwner = (sid: string) => {
+    const s = state.squads.find(sq => sq.id === sid);
+    if (!s) return;
+    s.ownerCommander = newOwner;
+    state.squads.filter(sq => sq.parentSquadId === sid).forEach(child => setOwner(child.id));
+  };
+  setOwner(squadId);
 
   return { ok: true };
 }

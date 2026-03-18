@@ -127,13 +127,13 @@ export function generateDigestV1(
           const childIds = state.squads.filter((s) => s.parentSquadId === sq.id).map((s) => s.id);
           const totalUnits = collectUnitsUnder(state, sq.id).length;
           const pos = squadAvgPos(sq.unitIds.length > 0 ? sq.unitIds : collectUnitsUnder(state, sq.id), state);
-          digest += `  ${sq.id}[commander] parent:${parentLabel} manages:[${childIds.join(",")}] ${totalUnits}units @(${pos.x},${pos.y})\n`;
+          digest += `  ${sq.leaderName}(${sq.id},CMD) parent:${parentLabel} manages:[${childIds.join(",")}] ${totalUnits}units @(${pos.x},${pos.y})\n`;
         } else {
           const alive = sq.unitIds.filter((id) => { const u = state.units.get(id); return u && u.state !== "dead"; });
           if (alive.length === 0) continue;
           const types = summarizeSquadTypes(alive, state);
           const pos = squadAvgPos(alive, state);
-          digest += `  ${sq.id}[leader] parent:${parentLabel} ${alive.length}units(${types}) @(${pos.x},${pos.y}) morale=${sq.morale.toFixed(1)} mission=${sq.currentMission || "idle"}\n`;
+          digest += `  ${sq.leaderName}(${sq.id},leader) parent:${parentLabel} ${alive.length}units(${types}) @(${pos.x},${pos.y}) morale=${sq.morale.toFixed(1)} mission=${sq.currentMission || "idle"}\n`;
         }
         lineCount++;
       }

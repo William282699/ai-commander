@@ -46,7 +46,7 @@ import {
 } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
-import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad } from "@ai-commander/shared";
+import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import { ChatPanel } from "./ChatPanel";
 import {
   addMessage,
@@ -407,6 +407,17 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     const state = stateRef.current;
     if (!state) return;
     removeSquadFromParent(state, squadId);
+  }, []);
+
+  const handleTransferSquad = useCallback((squadId: string, newOwner: "chen" | "marcus" | "emily") => {
+    const state = stateRef.current;
+    if (!state) return;
+    const result = transferSquadToCommander(state, squadId, newOwner);
+    if (!result.ok) {
+      addMessage("warning", `调拨失败: ${result.error}`, state.time, "ops", "player", "player");
+    } else {
+      addMessage("info", `${squadId} 已调拨至 ${newOwner}`, state.time, "ops", "player", "player");
+    }
   }, []);
 
   const handleRenameLeader = useCallback((squadId: string, newName: string) => {
@@ -1038,6 +1049,7 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         onMoveSquad={handleMoveSquad}
         onRemoveFromParent={handleRemoveFromParent}
         onRenameLeader={handleRenameLeader}
+        onTransferSquad={handleTransferSquad}
       />
       {/* Day 13: Facility context menu */}
       {facilityMenu && (

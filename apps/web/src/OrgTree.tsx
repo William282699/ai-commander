@@ -1,6 +1,8 @@
 // ============================================================
 // AI Commander — OrgTree (Phase 2)
-// Tree view of squad hierarchy with drag & drop.
+// Three-column top-down tree: Chen | Marcus | Emily side by side.
+// Each column auto-scales when nodes overflow.
+// Drag & drop between columns to transfer squads.
 // ============================================================
 
 import React, { useState, useCallback, useRef, useEffect } from "react";
@@ -18,6 +20,7 @@ export interface OrgTreeProps {
   onMoveSquad: (squadId: string, newParentId: string) => void;
   onRemoveFromParent: (squadId: string) => void;
   onRenameLeader: (squadId: string, newName: string) => void;
+  onTransferSquad: (squadId: string, newOwner: CommanderKey) => void;
 }
 
 // ── Root commander config ──
@@ -28,11 +31,11 @@ const ROOT_COMMANDERS: { key: CommanderKey; label: string; avatar: string }[] = 
   { key: "emily", label: "Emily", avatar: "📦" },
 ];
 
-// ── Status colors ──
+// ── Helpers ──
 
 function getStatusColor(squad: Squad, units: Map<number, Unit>): string {
   const unitIds = squad.unitIds;
-  if (unitIds.length === 0) return "#64748b"; // grey for commander
+  if (unitIds.length === 0) return "#64748b";
   let hasAttacking = false;
   let hasMoving = false;
   for (const id of unitIds) {
@@ -41,9 +44,9 @@ function getStatusColor(squad: Squad, units: Map<number, Unit>): string {
     if (u.state === "attacking" || u.state === "defending") hasAttacking = true;
     if (u.state === "moving" || u.state === "patrolling") hasMoving = true;
   }
-  if (hasAttacking) return "#ef4444"; // red
-  if (hasMoving) return "#eab308"; // yellow
-  return "#22c55e"; // green - idle
+  if (hasAttacking) return "#ef4444";
+  if (hasMoving) return "#eab308";
+  return "#22c55e";
 }
 
 function getUnitTypeIcon(squad: Squad, units: Map<number, Unit>): string {
@@ -73,85 +76,127 @@ function getAliveCount(unitIds: number[], units: Map<number, Unit>): number {
   }).length;
 }
 
+// ── Constants ──
+
+const LINE_COLOR = "#334155";
+const VERT_GAP = 20;
+
 // ── Component ──
 
-export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader }: OrgTreeProps) {
+export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad }: OrgTreeProps) {
   const [dragSquadId, setDragSquadId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
   return (
     <div style={treeContainerStyle}>
-      {ROOT_COMMANDERS.map((cmd) => {
-        const cmdSquads = squads.filter((s) => s.ownerCommander === cmd.key && !s.parentSquadId);
-        return (
-          <div key={cmd.key} style={rootNodeStyle}>
-            <div style={rootLabelStyle}>
-              <span>{cmd.avatar}</span>
-              <span style={{ fontWeight: "bold" }}>{cmd.label}</span>
-              <span style={{ color: "#64748b", fontSize: 10 }}>
-                ({squads.filter((s) => s.ownerCommander === cmd.key).length} squads)
-              </span>
-            </div>
+      {/* Three columns side by side */}
+      <div style={columnsRowStyle}>
+        {ROOT_COMMANDERS.map((cmd) => {
+          const cmdSquads = squads.filter((s) => s.ownerCommander === cmd.key);
+          const rootSquads = cmdSquads.filter(s => !s.parentSquadId);
+
+          return (
             <div
-              style={childrenContainerStyle}
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-              }}
+              key={cmd.key}
+              style={columnStyle}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
               onDrop={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                // Drop on root = removeFromParent
                 if (dragSquadId) {
                   const sq = squads.find((s) => s.id === dragSquadId);
-                  if (sq?.parentSquadId && sq.ownerCommander === cmd.key) {
-                    onRemoveFromParent(dragSquadId);
+                  if (sq) {
+                    if (sq.ownerCommander !== cmd.key) {
+                      // Cross-commander transfer
+                      onTransferSquad(dragSquadId, cmd.key);
+                    } else if (sq.parentSquadId) {
+                      // Same commander, detach from parent
+                      onRemoveFromParent(dragSquadId);
+                    }
                   }
                 }
                 setDragSquadId(null);
                 setDropTargetId(null);
               }}
             >
-              {cmdSquads.length === 0 && (
-                <div style={{ color: "#475569", fontSize: 10, padding: "4px 0 4px 16px" }}>
-                  (empty)
-                </div>
-              )}
-              {cmdSquads.map((sq) => (
-                <SquadNode
-                  key={sq.id}
-                  squad={sq}
-                  squads={squads}
-                  units={units}
-                  state={state}
-                  depth={1}
-                  dragSquadId={dragSquadId}
-                  dropTargetId={dropTargetId}
-                  onDragStart={setDragSquadId}
-                  onDragEnd={() => { setDragSquadId(null); setDropTargetId(null); }}
-                  onDropTarget={setDropTargetId}
-                  onSelectUnits={onSelectUnits}
-                  onMoveSquad={onMoveSquad}
-                  onRemoveFromParent={onRemoveFromParent}
-                  onRenameLeader={onRenameLeader}
-                />
-              ))}
+              {/* Commander header */}
+              <div style={columnHeaderStyle}>
+                <span style={{ fontSize: 14 }}>{cmd.avatar}</span>
+                <span style={{ fontWeight: "bold", fontSize: 11 }}>{cmd.label}</span>
+                <span style={{ color: "#64748b", fontSize: 9 }}>({cmdSquads.length})</span>
+              </div>
+
+              {/* Divider line */}
+              <div style={{ height: 1, background: "#1e293b", margin: "2px 0" }} />
+
+              {/* Tree content — auto-scaled to fit column */}
+              <AutoScaleColumn>
+                {rootSquads.length === 0 ? (
+                  <div style={{ color: "#475569", fontSize: 10, padding: "8px 0" }}>(empty)</div>
+                ) : (
+                  <>
+                    <div style={{ width: 1, height: VERT_GAP / 2, background: LINE_COLOR }} />
+                    {rootSquads.length === 1 ? (
+                      <TreeNode
+                        squad={rootSquads[0]}
+                        squads={squads}
+                        units={units}
+                        state={state}
+                        dragSquadId={dragSquadId}
+                        dropTargetId={dropTargetId}
+                        onDragStart={setDragSquadId}
+                        onDragEnd={() => { setDragSquadId(null); setDropTargetId(null); }}
+                        onDropTarget={setDropTargetId}
+                        onSelectUnits={onSelectUnits}
+                        onMoveSquad={onMoveSquad}
+                        onRemoveFromParent={onRemoveFromParent}
+                        onRenameLeader={onRenameLeader} onTransferSquad={onTransferSquad}
+                      />
+                    ) : (
+                      <>
+                        <HorizontalBar count={rootSquads.length} />
+                        <div style={childrenRowStyle}>
+                          {rootSquads.map(sq => (
+                            <div key={sq.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1, minWidth: 0 }}>
+                              <div style={{ width: 1, height: VERT_GAP / 2, background: LINE_COLOR }} />
+                              <TreeNode
+                                squad={sq}
+                                squads={squads}
+                                units={units}
+                                state={state}
+                                dragSquadId={dragSquadId}
+                                dropTargetId={dropTargetId}
+                                onDragStart={setDragSquadId}
+                                onDragEnd={() => { setDragSquadId(null); setDropTargetId(null); }}
+                                onDropTarget={setDropTargetId}
+                                onSelectUnits={onSelectUnits}
+                                onMoveSquad={onMoveSquad}
+                                onRemoveFromParent={onRemoveFromParent}
+                                onRenameLeader={onRenameLeader} onTransferSquad={onTransferSquad}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+              </AutoScaleColumn>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-// ── SquadNode (recursive) ──
+// ── TreeNode ──
 
-interface SquadNodeProps {
+interface TreeNodeProps {
   squad: Squad;
   squads: Squad[];
   units: Map<number, Unit>;
   state: GameState;
-  depth: number;
   dragSquadId: string | null;
   dropTargetId: string | null;
   onDragStart: (id: string) => void;
@@ -161,14 +206,15 @@ interface SquadNodeProps {
   onMoveSquad: (squadId: string, newParentId: string) => void;
   onRemoveFromParent: (squadId: string) => void;
   onRenameLeader: (squadId: string, newName: string) => void;
+  onTransferSquad: (squadId: string, newOwner: CommanderKey) => void;
 }
 
-function SquadNode({
-  squad, squads, units, state, depth,
+function TreeNode({
+  squad, squads, units, state,
   dragSquadId, dropTargetId,
   onDragStart, onDragEnd, onDropTarget,
-  onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader,
-}: SquadNodeProps) {
+  onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad,
+}: TreeNodeProps) {
   const [editing, setEditing] = useState(false);
   const editRef = useRef<HTMLSpanElement>(null);
   const children = squads.filter((s) => s.parentSquadId === squad.id);
@@ -182,16 +228,19 @@ function SquadNode({
   const isDropTarget = dropTargetId === squad.id;
   const isDragging = dragSquadId === squad.id;
 
-  // Whether drop would trigger auto-promotion of target leader→commander
+  const isCrossCommander = (() => {
+    if (!dragSquadId) return false;
+    const draggedSquad = squads.find((s) => s.id === dragSquadId);
+    return draggedSquad ? draggedSquad.ownerCommander !== squad.ownerCommander : false;
+  })();
+
   const willPromote = (() => {
     if (!dragSquadId || dragSquadId === squad.id) return false;
     const draggedSquad = squads.find((s) => s.id === dragSquadId);
     if (!draggedSquad) return false;
     if (draggedSquad.role !== "leader") return false;
     if (squad.role !== "leader") return false;
-    if (draggedSquad.ownerCommander !== squad.ownerCommander) return false;
     if (isDescendantOrSelf(state, dragSquadId, squad.id)) return false;
-    // After promotion, target stays at same depth; new child + moved squad at depth+1
     const targetDepth = getSquadDepth(state, squad.id);
     if (targetDepth + 1 > 3) return false;
     return true;
@@ -201,18 +250,11 @@ function SquadNode({
     if (!dragSquadId || dragSquadId === squad.id) return false;
     const draggedSquad = squads.find((s) => s.id === dragSquadId);
     if (!draggedSquad) return false;
-    // Source must be leader
     if (draggedSquad.role !== "leader") return false;
-    // Target can be commander OR leader (leader will auto-promote)
     if (squad.role !== "commander" && squad.role !== "leader") return false;
-    // Same ownerCommander
-    if (draggedSquad.ownerCommander !== squad.ownerCommander) return false;
-    // Prevent cycle: can't drop under own descendant
     if (isDescendantOrSelf(state, dragSquadId, squad.id)) return false;
-    // Depth check
     const targetDepth = getSquadDepth(state, squad.id);
     if (squad.role === "leader") {
-      // After promotion: target depth stays same, child at depth+1
       if (targetDepth + 1 > 3) return false;
     } else {
       const draggedSubtreeDepth = getMaxSubtreeDepth(state, dragSquadId);
@@ -221,7 +263,6 @@ function SquadNode({
     return true;
   })();
 
-  // Tooltip: units / morale / mission
   const tooltip = (() => {
     const lines: string[] = [`${squad.leaderName} (${squad.id})`];
     lines.push(`Role: ${squad.role}`);
@@ -233,7 +274,6 @@ function SquadNode({
     return lines.join("\n");
   })();
 
-  // Flash animation on role change (promotion/demotion)
   const [flash, setFlash] = useState(false);
   const prevRoleRef = useRef(squad.role);
   useEffect(() => {
@@ -262,7 +302,6 @@ function SquadNode({
     setTimeout(() => {
       if (editRef.current) {
         editRef.current.focus();
-        // Select all text
         const range = document.createRange();
         range.selectNodeContents(editRef.current);
         const sel = window.getSelection();
@@ -296,21 +335,8 @@ function SquadNode({
   }, [squad.id, squad.leaderName, onRenameLeader]);
 
   return (
-    <div style={{ position: "relative", marginLeft: depth > 1 ? 16 : 0 }}>
-      {/* Tree connector: vertical line from parent */}
-      {depth > 1 && (
-        <div style={{
-          position: "absolute", left: -12, top: 0, bottom: 0,
-          width: 1, background: "#334155",
-        }} />
-      )}
-      {/* Tree connector: horizontal branch line */}
-      {depth > 1 && (
-        <div style={{
-          position: "absolute", left: -12, top: 14,
-          width: 12, height: 1, background: "#334155",
-        }} />
-      )}
+    <div style={treeNodeContainerStyle}>
+      {/* Node box */}
       <div
         draggable
         title={tooltip}
@@ -334,7 +360,14 @@ function SquadNode({
           e.preventDefault();
           e.stopPropagation();
           if (dragSquadId && canDrop) {
-            onMoveSquad(dragSquadId, squad.id);
+            if (isCrossCommander) {
+              // First transfer to this commander, then move under this squad
+              onTransferSquad(dragSquadId, squad.ownerCommander);
+              // After transfer, ownerCommander matches, so moveSquadUnder will work
+              setTimeout(() => onMoveSquad(dragSquadId, squad.id), 0);
+            } else {
+              onMoveSquad(dragSquadId, squad.id);
+            }
           }
           onDragEnd();
         }}
@@ -342,74 +375,152 @@ function SquadNode({
         onContextMenu={handleContextMenu}
         onDoubleClick={handleDoubleClick}
         style={{
-          ...nodeStyle,
+          ...nodeBoxStyle,
           opacity: isDragging ? 0.4 : 1,
           borderColor: isDropTarget
             ? (willPromote ? "#8b5cf6" : "#3b82f6")
-            : flash
-              ? "#fbbf24"
-              : statusColor,
+            : flash ? "#fbbf24" : statusColor,
           background: isDropTarget
             ? (willPromote ? "rgba(139, 92, 246, 0.15)" : "rgba(59, 130, 246, 0.15)")
-            : flash
-              ? "rgba(251, 191, 36, 0.2)"
-              : "rgba(15, 23, 42, 0.6)",
+            : flash ? "rgba(251, 191, 36, 0.2)" : "rgba(15, 23, 42, 0.7)",
           boxShadow: flash ? "0 0 8px rgba(251, 191, 36, 0.5)" : "none",
         }}
       >
-        <span style={{ fontSize: 12 }}>{icon}</span>
-        <span
-          ref={editRef}
-          contentEditable={editing}
-          suppressContentEditableWarning
-          onKeyDown={editing ? handleEditKeyDown : undefined}
-          onBlur={editing ? handleEditBlur : undefined}
-          style={{
-            fontWeight: "bold",
-            color: editing ? "#fbbf24" : "#e2e8f0",
-            fontSize: 11,
-            outline: editing ? "1px solid #fbbf24" : "none",
-            padding: editing ? "0 2px" : 0,
-            borderRadius: 2,
-            minWidth: 20,
-          }}
-        >
-          {squad.leaderName}
-        </span>
-        <span style={{ color: "#64748b", fontSize: 10 }}>{squad.id}</span>
-        <span style={{ color: statusColor, fontSize: 10, fontWeight: "bold" }}>
-          {totalUnits}
-        </span>
-        {squad.role === "commander" && (
-          <span style={{ color: "#8b5cf6", fontSize: 9 }}>CMD</span>
-        )}
-        {isDropTarget && willPromote && (
-          <span style={{ color: "#fbbf24", fontSize: 9, fontWeight: "bold" }}>⬆CMD</span>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 2, justifyContent: "center" }}>
+          <span style={{ fontSize: 10 }}>{icon}</span>
+          <span
+            ref={editRef}
+            contentEditable={editing}
+            suppressContentEditableWarning
+            onKeyDown={editing ? handleEditKeyDown : undefined}
+            onBlur={editing ? handleEditBlur : undefined}
+            style={{
+              fontWeight: "bold",
+              color: editing ? "#fbbf24" : "#e2e8f0",
+              fontSize: 10,
+              outline: editing ? "1px solid #fbbf24" : "none",
+              padding: editing ? "0 2px" : 0,
+              borderRadius: 2,
+              minWidth: 14,
+            }}
+          >
+            {squad.leaderName}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 2, justifyContent: "center", fontSize: 8 }}>
+          <span style={{ color: "#64748b" }}>{squad.id}</span>
+          <span style={{ color: statusColor, fontWeight: "bold" }}>{totalUnits}</span>
+          {squad.role === "commander" && <span style={{ color: "#8b5cf6", fontWeight: "bold" }}>CMD</span>}
+          {isDropTarget && willPromote && <span style={{ color: "#fbbf24", fontWeight: "bold" }}>⬆</span>}
+        </div>
       </div>
+
+      {/* Children below */}
       {children.length > 0 && (
-        <div style={childrenContainerStyle}>
-          {children.map((child) => (
-            <SquadNode
-              key={child.id}
-              squad={child}
-              squads={squads}
-              units={units}
-              state={state}
-              depth={depth + 1}
-              dragSquadId={dragSquadId}
-              dropTargetId={dropTargetId}
-              onDragStart={onDragStart}
-              onDragEnd={onDragEnd}
-              onDropTarget={onDropTarget}
-              onSelectUnits={onSelectUnits}
-              onMoveSquad={onMoveSquad}
-              onRemoveFromParent={onRemoveFromParent}
-              onRenameLeader={onRenameLeader}
-            />
-          ))}
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
+          <div style={{ width: 1, height: VERT_GAP / 2, background: LINE_COLOR }} />
+
+          {children.length === 1 ? (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
+              <div style={{ width: 1, height: VERT_GAP / 2, background: LINE_COLOR }} />
+              <TreeNode
+                squad={children[0]} squads={squads} units={units} state={state}
+                dragSquadId={dragSquadId} dropTargetId={dropTargetId}
+                onDragStart={onDragStart} onDragEnd={onDragEnd} onDropTarget={onDropTarget}
+                onSelectUnits={onSelectUnits} onMoveSquad={onMoveSquad}
+                onRemoveFromParent={onRemoveFromParent} onRenameLeader={onRenameLeader} onTransferSquad={onTransferSquad}
+              />
+            </div>
+          ) : (
+            <div style={{ width: "100%" }}>
+              <HorizontalBar count={children.length} />
+              <div style={childrenRowStyle}>
+                {children.map(child => (
+                  <div key={child.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1, minWidth: 0 }}>
+                    <div style={{ width: 1, height: VERT_GAP / 2, background: LINE_COLOR }} />
+                    <TreeNode
+                      squad={child} squads={squads} units={units} state={state}
+                      dragSquadId={dragSquadId} dropTargetId={dropTargetId}
+                      onDragStart={onDragStart} onDragEnd={onDragEnd} onDropTarget={onDropTarget}
+                      onSelectUnits={onSelectUnits} onMoveSquad={onMoveSquad}
+                      onRemoveFromParent={onRemoveFromParent} onRenameLeader={onRenameLeader} onTransferSquad={onTransferSquad}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── AutoScaleColumn: renders at full size first, measures, then scales to fit ──
+
+function AutoScaleColumn({ children }: { children: React.ReactNode }) {
+  const outerRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    const outer = outerRef.current;
+    const inner = innerRef.current;
+    if (!outer || !inner) return;
+
+    const update = () => {
+      // Temporarily reset scale to measure natural size
+      inner.style.transform = "none";
+      const outerW = outer.clientWidth;
+      const innerW = inner.scrollWidth;
+      const newScale = (innerW > outerW && outerW > 0)
+        ? Math.max(0.3, outerW / innerW)
+        : 1;
+      inner.style.transform = newScale < 1 ? `scale(${newScale})` : "none";
+      setScale(newScale);
+    };
+
+    // Use RAF to measure after render
+    const raf = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(raf);
+  });
+
+  return (
+    <div ref={outerRef} style={{
+      flex: 1,
+      overflow: "hidden",
+      width: "100%",
+    }}>
+      <div
+        ref={innerRef}
+        style={{
+          display: "inline-flex",
+          flexDirection: "column",
+          alignItems: "center",
+          transformOrigin: "top left",
+          width: "max-content",
+          minWidth: "100%",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ── HorizontalBar ──
+
+function HorizontalBar({ count }: { count: number }) {
+  const halfChild = 100 / (2 * count);
+  return (
+    <div style={{ position: "relative", width: "100%", height: 1 }}>
+      <div style={{
+        position: "absolute",
+        left: `${halfChild}%`,
+        right: `${halfChild}%`,
+        height: 1,
+        background: LINE_COLOR,
+      }} />
     </div>
   );
 }
@@ -419,38 +530,66 @@ function SquadNode({
 const treeContainerStyle: React.CSSProperties = {
   flex: 1,
   overflow: "auto",
-  padding: "8px 6px",
+  padding: "4px 2px",
 };
 
-const rootNodeStyle: React.CSSProperties = {
-  marginBottom: 8,
+const columnsRowStyle: React.CSSProperties = {
+  display: "flex",
+  width: "100%",
+  height: "100%",
+  gap: 0,
 };
 
-const rootLabelStyle: React.CSSProperties = {
+const columnStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  borderRight: "1px solid #1e293b",
+  padding: "4px 2px",
+  overflow: "hidden",
+};
+
+const columnHeaderStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 6,
-  padding: "4px 6px",
-  fontSize: 12,
-  color: "#e2e8f0",
-  borderBottom: "1px solid #1e293b",
-  marginBottom: 4,
-};
-
-const childrenContainerStyle: React.CSSProperties = {
-  paddingLeft: 12,
-  position: "relative",
-};
-
-const nodeStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
+  gap: 4,
   padding: "3px 8px",
-  marginBottom: 2,
+  fontSize: 11,
+  color: "#e2e8f0",
+  background: "rgba(15, 23, 42, 0.8)",
+  border: "1px solid #1e293b",
   borderRadius: 4,
+  whiteSpace: "nowrap",
+};
+
+const childrenRowStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "center",
+  width: "100%",
+};
+
+const treeNodeContainerStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  flex: 1,
+  minWidth: 0,
+};
+
+const nodeBoxStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 1,
+  padding: "2px 4px",
+  borderRadius: 3,
   border: "1px solid",
   cursor: "pointer",
   userSelect: "none",
   transition: "background 0.15s, border-color 0.15s",
+  minWidth: 44,
+  maxWidth: 80,
+  whiteSpace: "nowrap",
 };
