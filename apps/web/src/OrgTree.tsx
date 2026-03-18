@@ -296,7 +296,21 @@ function SquadNode({
   }, [squad.id, squad.leaderName, onRenameLeader]);
 
   return (
-    <div style={{ marginLeft: depth > 1 ? 12 : 0 }}>
+    <div style={{ position: "relative", marginLeft: depth > 1 ? 16 : 0 }}>
+      {/* Tree connector: vertical line from parent */}
+      {depth > 1 && (
+        <div style={{
+          position: "absolute", left: -12, top: 0, bottom: 0,
+          width: 1, background: "#334155",
+        }} />
+      )}
+      {/* Tree connector: horizontal branch line */}
+      {depth > 1 && (
+        <div style={{
+          position: "absolute", left: -12, top: 14,
+          width: 12, height: 1, background: "#334155",
+        }} />
+      )}
       <div
         draggable
         title={tooltip}
@@ -424,7 +438,8 @@ const rootLabelStyle: React.CSSProperties = {
 };
 
 const childrenContainerStyle: React.CSSProperties = {
-  paddingLeft: 8,
+  paddingLeft: 12,
+  position: "relative",
 };
 
 const nodeStyle: React.CSSProperties = {

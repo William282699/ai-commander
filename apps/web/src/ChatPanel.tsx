@@ -213,6 +213,9 @@ interface DisplayResponse extends AdvisorResponse {
 
 
 export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader }: Props) {
+  // ── Panel collapse state ──
+  const [collapsed, setCollapsed] = useState(false);
+
   // ── Tab state: "chat" or "org" ──
   const [activeTab, setActiveTab] = useState<"chat" | "org">("chat");
 
@@ -717,7 +720,33 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const approveSnapshotCtx = responseExecCtxRef.current ? { ...responseExecCtxRef.current } : undefined;
 
   return (
-    <div style={panelStyle}>
+    <>
+      {/* ── Toggle button (always visible) ── */}
+      <button
+        onClick={() => setCollapsed((c) => !c)}
+        style={{
+          position: "absolute",
+          top: 8,
+          right: collapsed ? 8 : 468,
+          zIndex: 110,
+          background: "rgba(15, 23, 42, 0.9)",
+          border: "1px solid #334155",
+          borderRadius: 4,
+          color: "#94a3b8",
+          fontSize: 14,
+          width: 28,
+          height: 28,
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          transition: "right 0.2s ease",
+        }}
+        title={collapsed ? "展开面板" : "收起面板"}
+      >
+        {collapsed ? "◀" : "▶"}
+      </button>
+    <div style={{ ...panelStyle, display: collapsed ? "none" : "flex" }}>
       {/* ── Top: Commander selection bar ── */}
       <div style={commanderBarStyle}>
         {COMMANDERS.map((cmd) => {
@@ -1024,6 +1053,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         </button>
       </div>
     </div>
+    </>
   );
 }
 
