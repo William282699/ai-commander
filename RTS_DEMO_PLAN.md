@@ -482,7 +482,411 @@ function updateTaskStatus(task: TaskCard, state: GameState): void {
 
 ---
 
-### 模块 D：复合命令支持
+### 模块 D：任务栏优先权系统
+
+**目的**：任务卡片根据战场态势动态排序，紧急任务自动置顶，玩家可手动调整优先级影响资源分配。
+
+**核心机制 — 动态优先级计算**：
+```typescript
+interface TaskPriority {
+  base: number;          // 玩家手动设定的基础优先级 (1-4)
+  urgencyBonus: number;  // 战况紧急度加成 (0-3)
+  doctrineBonus: number; // doctrine 关联加成 (must_hold = +2, critical = +3)
+  computed: number;      // 最终排序值 = base + urgencyBonus + doctrineBonus
+}
+
+function computeTaskPriority(task: TaskCard, state: GameState): number {
+  let urgency = 0;
+
+  // 正在交战且劣势 → 紧急度+1~2
+  if (task.status === "engaged") {
+    const front = findAssociatedFront(state, task);
+    if (front) {
+      const ratio = front.enemyPower / Math.max(front.playerPower, 1);
+      if (ratio > 2.0) urgency += 2;       // 严重劣势
+      else if (ratio > 1.3) urgency += 1;  // 轻微劣势
+    }
+  }
+
+  // 任务关联的 squad 有大量伤亡 → 紧急度+1
+  if (task.status === "failing") urgency += 3;
+
+  // doctrine 加成
+  let docBonus = 0;
+  if (task.doctrine) {
+    if (task.doctrine.type === "must_hold") docBonus += 2;
+    if (task.doctrine.priority === "critical") docBonus += 1;
+  }
+
+  const base = priorityToNumber(task.priority); // low=1, normal=2, high=3, critical=4
+  return base + urgency + docBonus;
+}
+```
+
+**排序 & 置顶逻辑**：
+```typescript
+function sortTasks(tasks: TaskCard[], state: GameState): TaskCard[] {
+  return tasks
+    .map(t => ({ task: t, score: computeTaskPriority(t, state) }))
+    .sort((a, b) => b.score - a.score)
+    .map(t => t.task);
+}
+```
+
+**优先级变化的视觉反馈**：
+```
+优先级上升 → 卡片边框闪烁黄色，上移动画 (0.3s ease)
+优先级 critical → 卡片边框持续红色脉冲
+优先级下降 → 卡片安静下移
+新任务插入 → 从右侧滑入到正确位置
+```
+
+**优先级影响资源分配**：
+- 当多个任务争抢增援时，高优先级任务优先获得增援
+- `findBestReinforcements()` 的 `missionPriority` 过滤会参考 computed priority
+- 玩家手动提升优先级 = 明确告诉系统"这个更重要"
+
+---
+
+### 模块 E：战情系统（BattleAwareness）
+
+**目的**：周期性扫描战场态势，异常时触发视觉标记 + LLM 智能研判，形成"AI战情室"体验。
+
+#### E1: Heartbeat 扫描引擎
+
+**实现位置**：`packages/core/src/battleAwareness.ts`（新文件）
+
+**核心循环**：
+```typescript
+interface HeartbeatState {
+  lastScanTime: number;
+  scanInterval: number;        // 默认 3s
+  activeMarkers: BattleMarker[];
+  recentCases: CrisisCase[];   // 最近触发的 case（用于去重）
+  llmCooldown: number;         // LLM 调用冷却（最短间隔 10s）
+  lastLlmCallTime: number;
+}
+
+function heartbeatTick(state: GameState, hb: HeartbeatState, dt: number): void {
+  hb.lastScanTime += dt;
+  if (hb.lastScanTime < hb.scanInterval) return;
+  hb.lastScanTime = 0;
+
+  // 1. 收集本轮数据
+  const scanResult = scanBattlefield(state);
+
+  // 2. 更新视觉标记（纯前端，零成本）
+  updateMarkers(hb, scanResult, state.time);
+
+  // 3. 规则引擎检测异常
+  const cases = detectAnomalies(scanResult, hb.recentCases);
+
+  // 4. 有异常且冷却结束 → 触发 LLM 研判
+  if (cases.length > 0 && canCallLlm(hb, state.time)) {
+    const topCase = cases.sort((a, b) => b.severity - a.severity)[0];
+    triggerLlmAssessment(topCase, scanResult, hb);
+  }
+
+  // 5. 清理过期标记
+  cleanExpiredMarkers(hb, state.time);
+}
+```
+
+**战场扫描数据**：
+```typescript
+interface BattlefieldScan {
+  // 死亡统计
+  recentDeaths: { x: number; y: number; unitType: string; killedBy: string; time: number }[];
+
+  // 前线状态
+  fronts: { id: string; name: string; pressure: number; trend: "rising" | "stable" | "falling" }[];
+
+  // 活跃交战区
+  engagementZones: { x: number; y: number; radius: number; myUnits: number; enemyUnits: number }[];
+
+  // 资源状态
+  resources: { current: number; income: number; burnRate: number };
+
+  // 编队状态
+  squads: { id: string; name: string; alive: number; total: number; isIdle: boolean; idleDuration: number }[];
+}
+
+function scanBattlefield(state: GameState): BattlefieldScan {
+  // 遍历所有 front → 计算压力比和趋势
+  // 收集最近 scanInterval 内的死亡事件
+  // 识别交战热区（双方单位距离 < 阈值的聚集点）
+  // 统计资源和编队情况
+}
+```
+
+#### E2: 战场视觉标记层
+
+**实现位置**：渲染逻辑加入 `apps/web/src/rendererCanvas.ts`
+
+**标记数据结构**：
+```typescript
+interface BattleMarker {
+  id: string;
+  type: "attack_zone" | "death" | "critical_front";
+  x: number;
+  y: number;
+  radius?: number;         // attack_zone 的警圈半径
+  createdAt: number;       // 游戏时间
+  expiresAt?: number;      // death 标记 = createdAt + 10s
+  opacity: number;         // 渐隐动画用
+  pulsePhase: number;      // 脉冲动画相位
+}
+```
+
+**渲染逻辑**：
+```typescript
+function drawBattleMarkers(ctx: CanvasRenderingContext2D, markers: BattleMarker[], gameTime: number): void {
+  for (const marker of markers) {
+    // 计算当前 opacity（渐隐）
+    if (marker.expiresAt) {
+      const remaining = marker.expiresAt - gameTime;
+      const fadeDuration = 3; // 最后 3s 渐隐
+      marker.opacity = Math.min(1, remaining / fadeDuration);
+      if (marker.opacity <= 0) continue;
+    }
+
+    ctx.save();
+    ctx.globalAlpha = marker.opacity;
+
+    switch (marker.type) {
+      case "attack_zone":
+        // 红色脉冲圆圈
+        const pulse = 0.8 + 0.2 * Math.sin(marker.pulsePhase);
+        ctx.strokeStyle = `rgba(255, 40, 40, ${pulse})`;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 4]);
+        ctx.beginPath();
+        ctx.arc(marker.x, marker.y, marker.radius! * pulse, 0, Math.PI * 2);
+        ctx.stroke();
+        // 半透明红色填充
+        ctx.fillStyle = `rgba(255, 0, 0, ${0.08 * pulse})`;
+        ctx.fill();
+        marker.pulsePhase += 0.05;
+        break;
+
+      case "death":
+        // 红色 ✕ 标记
+        const size = 6;
+        ctx.strokeStyle = `rgba(255, 60, 60, ${marker.opacity})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(marker.x - size, marker.y - size);
+        ctx.lineTo(marker.x + size, marker.y + size);
+        ctx.moveTo(marker.x + size, marker.y - size);
+        ctx.lineTo(marker.x - size, marker.y + size);
+        ctx.stroke();
+        break;
+
+      case "critical_front":
+        // 前线段变红 + 呼吸动画
+        const breathe = 0.6 + 0.4 * Math.sin(marker.pulsePhase);
+        ctx.strokeStyle = `rgba(255, 0, 0, ${breathe})`;
+        ctx.lineWidth = 4;
+        // 前线段绘制由 front 几何数据驱动
+        marker.pulsePhase += 0.03;
+        break;
+    }
+
+    ctx.restore();
+  }
+}
+```
+
+**标记生命周期**：
+```
+attack_zone  → 首次检测到交战 → 持续到脱战后 5s → 消失
+death        → 单位死亡瞬间 → 持续 10s → 最后 3s 渐隐 → 消失
+critical_front → front.pressure > 2.0 → 持续到压力缓解 → 消失
+```
+
+#### E3: LLM 智能研判（异常触发）
+
+**触发 Case 类型**：
+```typescript
+type CaseType =
+  | "MASS_CASUALTY"      // 短时间内大量伤亡
+  | "FRONT_BREACH"       // 防线被突破
+  | "RESOURCE_CRISIS"    // 资源即将耗尽
+  | "FLANK_DETECTED"     // 敌方侧翼攻击
+  | "IDLE_FORCE"         // 大量部队闲置
+  | "MOMENTUM_SHIFT";    // 战场态势突然逆转
+
+interface CrisisCase {
+  type: CaseType;
+  severity: number;       // 1-5
+  triggeredAt: number;
+  data: Record<string, any>;  // case 相关数据
+  cooldownUntil: number;  // 同类 case 冷却到此时间
+}
+```
+
+**异常检测规则**：
+```typescript
+function detectAnomalies(scan: BattlefieldScan, recentCases: CrisisCase[]): CrisisCase[] {
+  const cases: CrisisCase[] = [];
+
+  // MASS_CASUALTY: 3s 内死亡 > 5
+  if (scan.recentDeaths.length > 5) {
+    if (!isOnCooldown(recentCases, "MASS_CASUALTY")) {
+      cases.push({
+        type: "MASS_CASUALTY",
+        severity: Math.min(5, scan.recentDeaths.length - 3),
+        data: { deaths: scan.recentDeaths, count: scan.recentDeaths.length }
+      });
+    }
+  }
+
+  // FRONT_BREACH: 前线压力 > 3.0 且趋势上升
+  for (const front of scan.fronts) {
+    if (front.pressure > 3.0 && front.trend === "rising") {
+      if (!isOnCooldown(recentCases, "FRONT_BREACH")) {
+        cases.push({
+          type: "FRONT_BREACH",
+          severity: 5,
+          data: { frontId: front.id, frontName: front.name, pressure: front.pressure }
+        });
+      }
+    }
+  }
+
+  // IDLE_FORCE: 编队闲置 > 15s 且有活跃战线
+  const idleSquads = scan.squads.filter(s => s.isIdle && s.idleDuration > 15 && s.alive > 0);
+  const hasActiveFronts = scan.fronts.some(f => f.pressure > 1.0);
+  if (idleSquads.length >= 2 && hasActiveFronts) {
+    if (!isOnCooldown(recentCases, "IDLE_FORCE")) {
+      cases.push({
+        type: "IDLE_FORCE",
+        severity: 2,
+        data: { squads: idleSquads }
+      });
+    }
+  }
+
+  // MOMENTUM_SHIFT: 交换比突然逆转（需要历史对比，从 scan 趋势推断）
+  // FLANK_DETECTED: 敌方出现在非正面方向
+  // RESOURCE_CRISIS: 资源 < 20% 且在持续消耗
+
+  return cases;
+}
+```
+
+**LLM 研判调用**：
+```typescript
+interface LlmCrisisContext {
+  caseType: CaseType;
+  timestamp: number;
+
+  // 精简战场快照（控制 token 量）
+  snapshot: {
+    myForces: { type: string; count: number; avgHp: number }[];
+    enemyForces: { type: string; count: number; nearestFront: string }[];
+    frontStatus: { name: string; pressure: number; trend: string }[];
+    recentDeaths: { x: number; y: number; unitType: string; killedBy: string }[];
+  };
+
+  // 避免重复警报
+  recentAlerts: string[];  // 最近 3 条已发过的警报摘要
+}
+
+// LLM System Prompt
+const CRISIS_ANALYST_PROMPT = `
+你是 RTS 游戏的战场 AI 参谋。根据战况生成简短警报。
+规则：
+- 不超过 2 句话
+- 必须包含具体位置和建议动作
+- 不要重复最近已发过的警报
+- 语气：冷静专业，像军事参谋
+
+返回 JSON：
+{
+  "severity": "warning" | "critical" | "info",
+  "message": "简短警报文本",
+  "suggestedAction": "REINFORCE_FRONT" | "RETREAT" | "REPOSITION" | "SCOUT" | "NONE",
+  "targetArea": { "x": number, "y": number }
+}
+`;
+
+async function triggerLlmAssessment(
+  crisis: CrisisCase,
+  scan: BattlefieldScan,
+  hb: HeartbeatState
+): Promise<void> {
+  hb.lastLlmCallTime = scan.timestamp;
+
+  const context: LlmCrisisContext = buildContext(crisis, scan, hb.recentCases);
+
+  // 异步调用，不阻塞 heartbeat
+  const result = await callLlm(CRISIS_ANALYST_PROMPT, JSON.stringify(context));
+
+  if (result) {
+    // 同时触发三路输出
+    // 1. 地图标记 → targetArea 位置加红圈
+    hb.activeMarkers.push({
+      type: "attack_zone",
+      x: result.targetArea.x,
+      y: result.targetArea.y,
+      radius: 60,
+      createdAt: scan.timestamp,
+      opacity: 1,
+      pulsePhase: 0
+    });
+
+    // 2. 危急卡片 → 推送到 UI
+    pushCrisisAlert(result.message, result.severity, result.suggestedAction);
+
+    // 3. 记录到 recentAlerts（用于去重）
+    hb.recentCases.push({
+      ...crisis,
+      cooldownUntil: scan.timestamp + 30  // 同类 case 30s 内不重复
+    });
+  }
+}
+```
+
+**去重与节流策略**：
+```
+┌──────────────────────────────────────────────┐
+│ 去重策略                                      │
+├──────────────────────────────────────────────┤
+│ 同类 case 冷却       30s 内不重复触发同类型    │
+│ LLM 调用间隔         最短 10s 一次            │
+│ 最大并发 LLM 调用    1（排队制，新的替换旧的）  │
+│ 历史警报对比          最近 3 条，LLM prompt 含  │
+│ 离线降级             LLM 超时 5s → 用本地模板  │
+└──────────────────────────────────────────────┘
+```
+
+**本地降级模板（LLM 超时时兜底）**：
+```typescript
+const FALLBACK_TEMPLATES: Record<CaseType, string> = {
+  MASS_CASUALTY: "{frontName}方向遭受重大伤亡，{count}个单位阵亡。建议增援或撤退。",
+  FRONT_BREACH: "{frontName}防线被突破！敌军压力比 {pressure}:1。紧急增援！",
+  RESOURCE_CRISIS: "资源告急，当前储量 {current}，消耗率 {burnRate}/s。",
+  FLANK_DETECTED: "检测到敌方侧翼机动，方向：{direction}。注意防御。",
+  IDLE_FORCE: "{count}支编队处于闲置状态，建议重新部署。",
+  MOMENTUM_SHIFT: "战场态势逆转，交换比从 {oldRatio} 变为 {newRatio}。"
+};
+```
+
+**与现有模块的关系**：
+```
+reportSignals.ts (已有事件检测)
+       ↓ 提供基础事件
+battleAwareness.ts (新增 heartbeat 引擎)
+       ↓ 输出三路
+       ├── markers[] → rendererCanvas.ts (已有渲染管线，加 drawBattleMarkers 层)
+       ├── crisisAlert → crisisResponse.ts (已有紧急卡片) + ChatPanel UI
+       └── recentCases → 自身去重 + doctrine.ts 联动
+```
+
+---
+
+### 模块 F：复合命令支持
 
 **目的**：玩家一句话包含多条战术意图，系统正确拆分并执行。
 
@@ -510,7 +914,7 @@ function updateTaskStatus(task: TaskCard, state: GameState): void {
 
 ---
 
-### 模块 E：Advisor 主动推送系统
+### 模块 G：Advisor 主动推送系统
 
 **目的**：副官在特定时机主动给玩家建议，不需要玩家主动发问。
 
@@ -577,6 +981,8 @@ const demoScript: DemoScript = {
 | Order 系统 | `types.ts` | `Order.priority` 已有 low/medium/high |
 | Front 数据 | `types.ts` | `front.playerPower/enemyPower` 已有压力比 |
 | 消息推送 | `messageStore.ts` | `addMessage()` 向聊天面板推送消息 |
+| 渲染管线 | `rendererCanvas.ts` | 已有攻击弹道线/爆炸光圈，加 `drawBattleMarkers()` 层 |
+| 事件信号 | `reportSignals.ts` | `UNDER_ATTACK`、`SQUAD_HEAVY_LOSS` 等事件作为 heartbeat 数据源 |
 
 ---
 
@@ -588,10 +994,11 @@ const demoScript: DemoScript = {
 | `crisisResponse.ts` | `packages/core/src/` | ~200 | 紧急卡片生成 + 最优增援查找 |
 | `doctrine.ts` | `packages/shared/src/` | ~100 | StandingOrder 类型 + doctrine 检查逻辑 |
 | `advisorTrigger.ts` | `packages/core/src/` | ~120 | Advisor 主动推送触发器 |
-| `TaskBar.tsx` | `apps/web/src/` | ~200 | 任务栏 UI 组件 |
+| `TaskBar.tsx` | `apps/web/src/` | ~200 | 任务栏 UI 组件（含动态优先级排序） |
+| `battleAwareness.ts` | `packages/core/src/` | ~300 | Heartbeat 扫描引擎 + 异常检测 + LLM 研判触发 |
 | streaming 端点 | `apps/server/src/` | ~80 | `/api/command-stream` SSE 端点 |
 
-**总新增代码量**：~850 行
+**总新增代码量**：~1150 行
 
 ---
 
@@ -605,27 +1012,37 @@ const demoScript: DemoScript = {
 
 **验收**：能跑一局节奏可控的 8 分钟对局，紧急时刻有零延迟卡片。
 
-### Phase 2: Doctrine 层 + 任务栏
+### Phase 2: Doctrine 层 + 任务栏（含优先权）
 5. `doctrine.ts` — StandingOrder 数据结构 + `checkDoctrines()` 规则
 6. LLM prompt 增加 doctrine 提取
-7. `TaskBar.tsx` — 任务栏 UI + 自动状态更新
-8. Doctrine 危机 → 自动触发紧急卡片
+7. `TaskBar.tsx` — 任务栏 UI + 自动状态更新 + **动态优先级排序**
+8. 优先级计算引擎 — `computeTaskPriority()` 战况联动
+9. Doctrine 危机 → 自动触发紧急卡片
 
-**验收**：玩家说"金三角不能丢" → 任务栏出现 → 危机时自动增援建议。
+**验收**：玩家说"金三角不能丢" → 任务栏出现 → 战况恶化时卡片自动上移变红 → 危机时自动增援建议。
 
-### Phase 3: Streaming 对话 + 复合命令
-9. `/api/command-stream` SSE 端点
-10. `ChatPanel.tsx` 增加 streaming 文本 + 卡片两阶段渲染
-11. Prompt 优化支持复合命令拆分
-12. Advisor 主动推送系统
+### Phase 3: 战情系统（BattleAwareness）
+10. `battleAwareness.ts` — Heartbeat 扫描引擎 + 战场数据采集
+11. 视觉标记层 — `rendererCanvas.ts` 加 `drawBattleMarkers()`（红圈、红叉、前线变红）
+12. 异常检测规则引擎 — `detectAnomalies()` 六种 case 类型
+13. LLM 智能研判 — 异常触发 → context 组装 → LLM 调用 → 三路输出（标记+卡片+警报）
+14. 去重/节流/降级 — 冷却策略 + 本地模板兜底
+
+**验收**：战斗发生 → 地图红圈脉冲 → 单位阵亡红叉 10s 渐隐 → 重大异常时 LLM 推送自然语言研判。
+
+### Phase 4: Streaming 对话 + 复合命令
+15. `/api/command-stream` SSE 端点
+16. `ChatPanel.tsx` 增加 streaming 文本 + 卡片两阶段渲染
+17. Prompt 优化支持复合命令拆分
+18. Advisor 主动推送系统
 
 **验收**：策略对话有 streaming 文字流 → 卡片弹出；一句话可拆多条意图。
 
-### Phase 4: 打磨 & 录制
-13. 调整 demo 剧本节奏
-14. 微调 LLM prompt
-15. UI 视觉优化（卡片动画、任务栏过渡）
-16. 录制 demo
+### Phase 5: 打磨 & 录制
+19. 调整 demo 剧本节奏
+20. 微调 LLM prompt
+21. UI 视觉优化（卡片动画、任务栏过渡、标记动画）
+22. 录制 demo
 
 ---
 
@@ -638,6 +1055,9 @@ const demoScript: DemoScript = {
 | 紧急卡片选项不合理 | 推荐的增援单位不对 | `findBestReinforcements` 有优先级过滤 + 距离打分，比 LLM 更可控 |
 | Demo 节奏感不好 | 太平淡或太混乱 | 脚本引擎参数可快速调整（intensity/time），多次试跑 |
 | 任务栏遮挡地图 | 影响操作 | 默认折叠，只显示 3 条，半透明，可关闭 |
+| Heartbeat LLM 调用过多 | 成本 & 延迟 | 最短 10s 间隔 + 同类 case 30s 冷却 + 本地模板降级 |
+| 视觉标记过多杂乱 | 视觉污染 | 标记有生命周期自动清理 + 同区域合并 + 最大标记数限制 |
+| LLM 研判重复/无意义 | 玩家疲劳 | 最近 3 条警报传入 prompt 做去重 + severity 门槛过滤 |
 
 ---
 
@@ -647,4 +1067,6 @@ const demoScript: DemoScript = {
 2. **"副官真的在帮你"** — 紧急时刻零延迟自动建议增援方案（不是 loading…）
 3. **"你的命令持续生效"** — "金三角不能丢" 不是聊天记录，是持续执行的作战命令
 4. **"一句话多线作战"** — "东线反攻，中央固守，南线迂回" 一次批准三条意图
-5. **"像真的战情室"** — 任务栏追踪所有作战任务状态，优先级可调
+5. **"像真的战情室"** — 任务栏追踪所有作战任务状态，优先级动态排序
+6. **"AI 参谋主动研判"** — 不是每 3 秒重复废话，而是异常时才推送有价值的自然语言警报
+7. **"战场一目了然"** — 攻击区红圈脉冲、阵亡点红叉渐隐、危急前线呼吸变红
