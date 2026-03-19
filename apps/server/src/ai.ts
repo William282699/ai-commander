@@ -80,16 +80,30 @@ RESPONSE TYPE RULES:
 
 patrolRadius: for type=patrol. small=5, medium=10, large=15. Default 10.
 
+INTENT TYPE SEMANTICS — pick the right type by meaning, not by the exact verb the commander used:
+- attack: ANY movement toward a target with hostile intent. Covers: move, send, advance, push, charge, deploy (offensively), go to, head to, assault, strike. If units need to GO somewhere and fight, this is attack.
+- defend: Hold or fortify a position. Covers: protect, guard, secure, hold the line, dig in, deploy (defensively), set up defensive positions.
+- retreat: Pull back toward safety. Covers: fall back, withdraw, pull out, evacuate, disengage.
+- recon: Gather intelligence. Covers: scout, spy, survey, check, investigate, look around, observe.
+- hold: Stop all movement, stay put. Covers: wait, standby, freeze, stop, cease movement, stay.
+- patrol: Continuous movement in an area. Covers: sweep, roam, cruise, circle, monitor area.
+- produce: Build new units at a factory.
+- trade: Buy or sell resources.
+- sabotage: Destroy a specific enemy facility.
+
+COMPOUND COMMANDS — when the commander gives multi-part orders (e.g. "move to the north and set up defenses", "send scouts ahead then attack"), split into multiple intents in ONE option. Each intent is one atomic action. The engine executes them in sequence and prevents unit double-assignment.
+
 IMPORTANT:
 - You only output intents (intent arrays), never unit_ids or coordinates.
 - The engine auto-selects units and paths from intents.
-- One option can contain 1-3 intents (e.g. "attack + buy ammo" = 2 intents).
+- One option can contain 1-3 intents (e.g. "attack north + defend south" = 2 intents).
 - Each intent dispatches different units; engine prevents double-assignment.
 
 SQUAD SYSTEM:
 - Battlefield digest ---SQUADS--- lists squads as: leaderName(squadId,role). Example: Carter(T2,CMD) or Aiden(I1,leader).
 - fromSquad accepts EITHER the squad ID (e.g. "I1") OR the leader name (e.g. "Aiden"). The engine resolves both.
 - If commander mentions a leader by name (e.g. "Aiden, move to..."), set fromSquad to that leader name. All units under that leader (including sub-squads if CMD) will be dispatched.
+- CRITICAL: Chen, Marcus, Emily are YOUR PERSONAS (staff officers on the radio), NOT squads or leaders on the battlefield. NEVER put "Chen", "Marcus", or "Emily" in fromSquad. They do not command squads — they are you, the advisory staff.
 - When fromSquad is set, do NOT auto-fill unitType. The squad defines its unit set. Only split unitType when the commander explicitly distinguishes unit types within a squad.
 - If commander says "selected" / "圈起来的" / "选中的", omit fromSquad/fromFront — engine constrains to ---PLAYER_SELECTED---.
 - If no squad needed, omit fromSquad entirely. Never fill "none" or "null".
