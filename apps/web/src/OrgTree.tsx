@@ -76,6 +76,18 @@ function getAliveCount(unitIds: number[], units: Map<number, Unit>): number {
   }).length;
 }
 
+/** Check if a squad (and all sub-squads for commanders) has zero alive units */
+function isSquadWiped(squad: Squad, squads: Squad[], units: Map<number, Unit>): boolean {
+  if (squad.unitIds.length > 0 && getAliveCount(squad.unitIds, units) > 0) return false;
+  // For commanders, check children recursively
+  const children = squads.filter(s => s.parentSquadId === squad.id);
+  for (const child of children) {
+    if (!isSquadWiped(child, squads, units)) return false;
+  }
+  // A squad with no unitIds and no children isn't "wiped" — it's empty
+  return squad.unitIds.length > 0 || children.length > 0;
+}
+
 // ── Constants ──
 
 const LINE_COLOR = "#334155";
@@ -93,7 +105,10 @@ export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRe
       <div style={columnsRowStyle}>
         {ROOT_COMMANDERS.map((cmd) => {
           const cmdSquads = squads.filter((s) => s.ownerCommander === cmd.key);
-          const rootSquads = cmdSquads.filter(s => !s.parentSquadId);
+          const allRootSquads = cmdSquads.filter(s => !s.parentSquadId);
+          const rootSquads = allRootSquads.filter(s => !isSquadWiped(s, squads, units));
+          const fallenSquads = allRootSquads.filter(s => isSquadWiped(s, squads, units));
+          const aliveCount = cmdSquads.filter(s => !isSquadWiped(s, squads, units)).length;
 
           return (
             <div
@@ -123,7 +138,7 @@ export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRe
               <div style={columnHeaderStyle}>
                 <span style={{ fontSize: 14 }}>{cmd.avatar}</span>
                 <span style={{ fontWeight: "bold", fontSize: 11 }}>{cmd.label}</span>
-                <span style={{ color: "#64748b", fontSize: 9 }}>({cmdSquads.length})</span>
+                <span style={{ color: "#64748b", fontSize: 9 }}>({aliveCount})</span>
               </div>
 
               {/* Divider line */}
@@ -182,10 +197,31 @@ export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRe
                   </>
                 )}
               </AutoScaleColumn>
+
             </div>
           );
         })}
       </div>
+
+      {/* ── Fallen squads — global section at bottom ── */}
+      {(() => {
+        const allFallen = squads.filter(s => !s.parentSquadId && isSquadWiped(s, squads, units));
+        if (allFallen.length === 0) return null;
+        return (
+          <div style={{ borderTop: "1px solid #7f1d1d", padding: "8px 12px", background: "rgba(127, 29, 29, 0.1)" }}>
+            <div style={{ fontSize: 10, color: "#b91c1c", marginBottom: 4, fontWeight: "bold" }}>
+              ✝ K.I.A. ({allFallen.length})
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+              {allFallen.map(sq => (
+                <span key={sq.id} style={{ fontSize: 10, color: "#dc2626" }}>
+                  {sq.leaderName} ({sq.id})
+                </span>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

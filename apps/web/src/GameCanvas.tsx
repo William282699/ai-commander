@@ -276,11 +276,33 @@ const NON_CAPTURABLE_TYPES = new Set([
   "headquarters", "barracks", "shipyard", "airfield", "defense_tower",
 ]);
 
-interface GameCanvasProps {
-  onStateReady?: (getter: () => GameState | null) => void;
+// ── Split-screen bridge: expose ChatPanel props on window for pop-out panel ──
+export interface GameBridge {
+  getState: () => GameState | null;
+  getSelectedUnitIds: () => number[];
+  onCreateSquad: (owner: "chen" | "marcus" | "emily") => void;
+  canCreateSquad: () => boolean;
+  onDeclareWar: () => void;
+  onSelectUnits: (unitIds: number[]) => void;
+  onMoveSquad: (squadId: string, newParentId: string) => void;
+  onRemoveFromParent: (squadId: string) => void;
+  onRenameLeader: (squadId: string, newName: string) => void;
+  onTransferSquad: (squadId: string, newOwner: "chen" | "marcus" | "emily") => void;
 }
 
-export function GameCanvas({ onStateReady }: GameCanvasProps) {
+declare global {
+  interface Window {
+    __GAME_BRIDGE__?: GameBridge;
+    __PANEL_DETACHED__?: boolean;
+  }
+}
+
+interface GameCanvasProps {
+  onStateReady?: (getter: () => GameState | null) => void;
+  panelDetached?: boolean;
+}
+
+export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<GameState | null>(null);
   const inputRef = useRef(createInputState());
@@ -434,6 +456,23 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
     state.warDeclared = true;
     addMessage("urgent", "宣战！进入全面战争状态", state.time, "ops", "player", "player");
   }, []);
+
+  // ── Split-screen: expose bridge on window for pop-out panel ──
+  useEffect(() => {
+    window.__GAME_BRIDGE__ = {
+      getState: () => stateRef.current,
+      getSelectedUnitIds,
+      onCreateSquad: handleCreateSquad,
+      canCreateSquad,
+      onDeclareWar: handleDeclareWar,
+      onSelectUnits: handleSelectUnits,
+      onMoveSquad: handleMoveSquad,
+      onRemoveFromParent: handleRemoveFromParent,
+      onRenameLeader: handleRenameLeader,
+      onTransferSquad: handleTransferSquad,
+    };
+    return () => { delete window.__GAME_BRIDGE__; };
+  }, [getSelectedUnitIds, handleCreateSquad, canCreateSquad, handleDeclareWar, handleSelectUnits, handleMoveSquad, handleRemoveFromParent, handleRenameLeader, handleTransferSquad]);
 
   // Day 12: restart callback
   // Day 13: Facility context menu action handlers
@@ -1039,18 +1078,20 @@ export function GameCanvas({ onStateReady }: GameCanvasProps) {
         ref={canvasRef}
         style={{ display: "block", width: "100%", height: "100%" }}
       />
-      <ChatPanel
-        getState={() => stateRef.current}
-        getSelectedUnitIds={getSelectedUnitIds}
-        onCreateSquad={handleCreateSquad}
-        canCreateSquad={canCreateSquad}
-        onDeclareWar={handleDeclareWar}
-        onSelectUnits={handleSelectUnits}
-        onMoveSquad={handleMoveSquad}
-        onRemoveFromParent={handleRemoveFromParent}
-        onRenameLeader={handleRenameLeader}
-        onTransferSquad={handleTransferSquad}
-      />
+      {!panelDetached && (
+        <ChatPanel
+          getState={() => stateRef.current}
+          getSelectedUnitIds={getSelectedUnitIds}
+          onCreateSquad={handleCreateSquad}
+          canCreateSquad={canCreateSquad}
+          onDeclareWar={handleDeclareWar}
+          onSelectUnits={handleSelectUnits}
+          onMoveSquad={handleMoveSquad}
+          onRemoveFromParent={handleRemoveFromParent}
+          onRenameLeader={handleRenameLeader}
+          onTransferSquad={handleTransferSquad}
+        />
+      )}
       {/* Day 13: Facility context menu */}
       {facilityMenu && (
         <div

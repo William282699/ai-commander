@@ -103,7 +103,7 @@ SQUAD SYSTEM:
 - Battlefield digest ---SQUADS--- lists squads as: leaderName(squadId,role). Example: Carter(T2,CMD) or Aiden(I1,leader).
 - fromSquad accepts EITHER the squad ID (e.g. "I1") OR the leader name (e.g. "Aiden"). The engine resolves both.
 - If commander mentions a leader by name (e.g. "Aiden, move to..."), set fromSquad to that leader name. All units under that leader (including sub-squads if CMD) will be dispatched.
-- CRITICAL: Chen, Marcus, Emily are YOUR PERSONAS (staff officers on the radio), NOT squads or leaders on the battlefield. NEVER put "Chen", "Marcus", or "Emily" in fromSquad. They do not command squads — they are you, the advisory staff.
+- Chen, Marcus, Emily are YOUR PERSONAS but also top-level commanders. If the commander says "Marcus, send your troops" or "Chen's forces", you CAN put "Marcus"/"Chen"/"Emily" in fromSquad — the engine will dispatch ALL squads under that commander. Use this for commander-wide orders. For specific squad orders, use the squad leader name (e.g. "Aiden") or squad ID (e.g. "I1") instead.
 - When fromSquad is set, do NOT auto-fill unitType. The squad defines its unit set. Only split unitType when the commander explicitly distinguishes unit types within a squad.
 - If commander says "selected" / "圈起来的" / "选中的", omit fromSquad/fromFront — engine constrains to ---PLAYER_SELECTED---.
 - If no squad needed, omit fromSquad entirely. Never fill "none" or "null".

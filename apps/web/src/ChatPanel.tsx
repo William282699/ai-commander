@@ -71,7 +71,12 @@ function isValidTarget(intent: Intent, state: GameState): boolean {
   if (intent.targetFacility && !state.facilities.has(intent.targetFacility)) return false;
   if (intent.toFront && !findFront(state, intent.toFront)) return false;
   if (intent.fromFront && !findFront(state, intent.fromFront)) return false;
-  if (intent.fromSquad && !state.squads?.find(s => s.id === intent.fromSquad || s.leaderName === intent.fromSquad)) return false;
+  if (intent.fromSquad) {
+    const fs = intent.fromSquad.toLowerCase();
+    const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
+    const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
+    if (!isSquad && !isCommander) return false;
+  }
   return true;
 }
 
@@ -213,6 +218,7 @@ interface Props {
   onRemoveFromParent?: (squadId: string) => void;
   onRenameLeader?: (squadId: string, newName: string) => void;
   onTransferSquad?: (squadId: string, newOwner: "chen" | "marcus" | "emily") => void;
+  isDetached?: boolean;
 }
 
 interface DisplayResponse extends AdvisorResponse {
@@ -220,7 +226,7 @@ interface DisplayResponse extends AdvisorResponse {
 }
 
 
-export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad }: Props) {
+export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
   // ── Panel collapse state ──
   const [collapsed, setCollapsed] = useState(false);
 
@@ -456,7 +462,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     latestRequestIdRef.current = null;
 
     const channels = selectedCommanders.map(c => COMMANDER_CHANNEL[c]);
-    const baseDigest = buildDigest(state, selectedIds, [], []);
+    const baseDigest = buildDigest(state, [], [], []);
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
     // Add player message to all channels
@@ -532,14 +538,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     // Add player message to feed (mark as groupChat if in ALL mode so it stays out of individual channels)
     addMessage("info", userMsg, state.time, primaryChannel, "player", "player", isGroupChat ? true : undefined);
 
-    // P1: lock selected unit IDs at send time
-    const selectedIds = getSelectedUnitIds ? [...getSelectedUnitIds()] : [];
-    selectedIdsSnapshotRef.current = selectedIds.length > 0 ? selectedIds : undefined;
+    // Chat commands are not constrained by map box-selection.
+    // Only manual unit control (right-click move) uses selectedUnitIds as hard constraint.
+    selectedIdsSnapshotRef.current = undefined;
 
     setMessage("");
 
     if (isGroupChat) {
-      await sendGroupChat(userMsg, state, selectedIds);
+      await sendGroupChat(userMsg, state, []);
       setLoading(false);
       return;
     }
@@ -553,7 +559,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       ? `\n---ACTIVE_THREAD---\n[${activeThreadOnChannel.eventType}] ${activeThreadOnChannel.eventMessage}\nStaff brief: ${activeThreadOnChannel.brief}`
       : "";
 
-    const baseDigest = buildDigest(state, selectedIds, [], []);
+    const baseDigest = buildDigest(state, [], [], []);
     const contextSuffix = formatContext(channelContextRef.current, ch);
     const digest = baseDigest + contextSuffix + threadContext;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
@@ -601,7 +607,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         }
 
         const gate = (Array.isArray(data.options) && data.options.length >= 1)
-          ? canAutoExecute(data.options[0], userMsg, state, selectedIds, isGroupChat)
+          ? canAutoExecute(data.options[0], userMsg, state, [], isGroupChat)
           : { auto: false };
 
         const requestId = crypto.randomUUID();
@@ -742,34 +748,40 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   // not the (potentially stale or updated) ref value at click time.
   const approveSnapshotCtx = responseExecCtxRef.current ? { ...responseExecCtxRef.current } : undefined;
 
+  const detachedPanelStyle: React.CSSProperties = isDetached
+    ? { position: "relative", width: "100%", height: "100%", background: "#0f172a", fontFamily: "monospace", fontSize: 12, color: "#a0c4ff", display: "flex", flexDirection: "column" as const }
+    : { ...panelStyle, display: collapsed ? "none" : "flex" };
+
   return (
     <>
-      {/* ── Toggle button (always visible) ── */}
-      <button
-        onClick={() => setCollapsed((c) => !c)}
-        style={{
-          position: "absolute",
-          top: 8,
-          right: collapsed ? 8 : 468,
-          zIndex: 110,
-          background: "rgba(15, 23, 42, 0.9)",
-          border: "1px solid #334155",
-          borderRadius: 4,
-          color: "#94a3b8",
-          fontSize: 14,
-          width: 28,
-          height: 28,
-          cursor: "pointer",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          transition: "right 0.2s ease",
-        }}
-        title={collapsed ? "展开面板" : "收起面板"}
-      >
-        {collapsed ? "◀" : "▶"}
-      </button>
-    <div style={{ ...panelStyle, display: collapsed ? "none" : "flex" }}>
+      {/* ── Toggle button (only in embedded mode) ── */}
+      {!isDetached && (
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          style={{
+            position: "absolute",
+            top: 8,
+            right: collapsed ? 8 : 468,
+            zIndex: 110,
+            background: "rgba(15, 23, 42, 0.9)",
+            border: "1px solid #334155",
+            borderRadius: 4,
+            color: "#94a3b8",
+            fontSize: 14,
+            width: 28,
+            height: 28,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            transition: "right 0.2s ease",
+          }}
+          title={collapsed ? "展开面板" : "收起面板"}
+        >
+          {collapsed ? "◀" : "▶"}
+        </button>
+      )}
+    <div style={detachedPanelStyle}>
       {/* ── Top: Commander selection bar ── */}
       <div style={commanderBarStyle}>
         {COMMANDERS.map((cmd) => {
@@ -806,32 +818,63 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         </button>
       </div>
 
-      {/* ── Tab switcher: Chat / Org ── */}
-      <div style={tabBarStyle}>
-        <button
-          onClick={() => setActiveTab("chat")}
-          style={{
-            ...tabBtnStyle,
-            borderBottomColor: activeTab === "chat" ? "#3b82f6" : "transparent",
-            color: activeTab === "chat" ? "#e2e8f0" : "#64748b",
-          }}
-        >
-          聊天 💬
-        </button>
-        <button
-          onClick={() => setActiveTab("org")}
-          style={{
-            ...tabBtnStyle,
-            borderBottomColor: activeTab === "org" ? "#3b82f6" : "transparent",
-            color: activeTab === "org" ? "#e2e8f0" : "#64748b",
-          }}
-        >
-          编制 🏗️
-        </button>
-      </div>
+      {/* ── Tab switcher: Chat / Org (hidden in detached mode — both shown) ── */}
+      {!isDetached && (
+        <div style={tabBarStyle}>
+          <button
+            onClick={() => setActiveTab("chat")}
+            style={{
+              ...tabBtnStyle,
+              borderBottomColor: activeTab === "chat" ? "#3b82f6" : "transparent",
+              color: activeTab === "chat" ? "#e2e8f0" : "#64748b",
+            }}
+          >
+            聊天 💬
+          </button>
+          <button
+            onClick={() => setActiveTab("org")}
+            style={{
+              ...tabBtnStyle,
+              borderBottomColor: activeTab === "org" ? "#3b82f6" : "transparent",
+              color: activeTab === "org" ? "#e2e8f0" : "#64748b",
+            }}
+          >
+            编制 🏗️
+          </button>
+        </div>
+      )}
 
-      {/* ── Middle: Chat message flow OR OrgTree ── */}
-      {activeTab === "org" ? (
+      {/* ── Content area: left-right in detached, column in embedded ── */}
+      <div style={isDetached ? { display: "flex", flex: 1, flexDirection: "row" as const, overflow: "hidden" } : { display: "flex", flex: 1, flexDirection: "column" as const, overflow: "hidden" }}>
+
+      {/* ── Detached mode: OrgTree on left ── */}
+      {isDetached && (() => {
+        const st = getState();
+        return (
+          <div style={{ borderRight: "1px solid #1e293b", overflow: "auto", width: "40%", minWidth: 300, flexShrink: 0 }}>
+            {st ? (
+              <OrgTree
+                squads={st.squads}
+                units={st.units}
+                state={st}
+                onSelectUnits={onSelectUnits ?? (() => {})}
+                onMoveSquad={onMoveSquad ?? (() => {})}
+                onRemoveFromParent={onRemoveFromParent ?? (() => {})}
+                onRenameLeader={onRenameLeader ?? (() => {})}
+                onTransferSquad={onTransferSquad ?? (() => {})}
+              />
+            ) : (
+              <div style={{ color: "#475569", textAlign: "center", padding: 12 }}>加载中...</div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ── Chat column (right side in detached, full area in embedded) ── */}
+      <div style={{ display: "flex", flexDirection: "column" as const, flex: 1, overflow: "hidden" }}>
+
+      {/* ── Embedded: tab-switched OrgTree or Chat ── */}
+      {!isDetached && activeTab === "org" ? (
         (() => {
           const st = getState();
           if (!st) return <div style={{ flex: 1, color: "#475569", textAlign: "center", padding: 20 }}>加载中...</div>;
@@ -1110,6 +1153,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         >
           {loading ? "..." : "发送"}
         </button>
+      </div>
+      </div>
       </div>
     </div>
     </>

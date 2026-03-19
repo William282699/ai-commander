@@ -820,9 +820,8 @@ function resolveSourceUnits(
   let units = raw.units;
   if (raw.error) return raw;
 
-  // Day 10.5 (P1-1 new): selectedUnitIds is a HARD constraint.
-  // When the player has box-selected specific units, intersect with candidates
-  // so only those units are dispatched, regardless of what LLM outputs.
+  // selectedUnitIds is a HARD constraint for manual unit control (right-click move).
+  // Chat commands never pass selectedUnitIds — they let the LLM decide.
   if (selectedUnitIds && selectedUnitIds.length > 0) {
     const selectedSet = new Set(selectedUnitIds);
     units = units.filter((u) => selectedSet.has(u.id));
@@ -846,9 +845,11 @@ function resolveSourceUnitsRaw(
   intent: Intent,
   state: GameState,
 ): SourceUnitsResult {
-  // ── Phase 2: fromSquad — match by squad.id first, then by leaderName ──
+  // ── Phase 2: fromSquad — match by squad.id, leaderName, or ownerCommander ──
   if (intent.fromSquad && typeof intent.fromSquad === "string") {
+    // 1. Exact squad id
     let squad = state.squads.find((s) => s.id === intent.fromSquad);
+    // 2. Squad leader name
     if (!squad) {
       squad = state.squads.find((s) => s.leaderName === intent.fromSquad);
     }
@@ -866,6 +867,26 @@ function resolveSourceUnitsRaw(
         );
       if (units.length > 0) return { units };
       return { units: [], error: `分队 ${intent.fromSquad} 无可用单位（已阵亡或被手动接管）` };
+    }
+    // 3. Commander name (chen/marcus/emily) → all squads under that commander
+    const cmdKey = intent.fromSquad.toLowerCase() as import("@ai-commander/shared").CommanderKey;
+    const cmdSquads = state.squads.filter((s) => s.ownerCommander === cmdKey);
+    if (cmdSquads.length > 0) {
+      const allIds = new Set<number>();
+      for (const sq of cmdSquads) {
+        for (const id of collectUnitsUnder(state, sq.id)) allIds.add(id);
+      }
+      const units = Array.from(allIds)
+        .map((id) => state.units.get(id))
+        .filter(
+          (u): u is Unit =>
+            u !== undefined &&
+            u.team === "player" &&
+            u.state !== "dead" &&
+            !u.manualOverride,
+        );
+      if (units.length > 0) return { units };
+      return { units: [], error: `指挥官 ${intent.fromSquad} 下属无可用单位` };
     }
     return { units: [], error: `无法找到分队: ${intent.fromSquad}` };
   }
