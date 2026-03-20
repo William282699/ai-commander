@@ -776,22 +776,22 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       }
       const squads = [...new Set(intentSquads)];
       const primaryIntent = intents[0];
-      const squadlessTypes = new Set(["produce", "trade"]);
-      const allowSquadlessTask = state.squads.length === 0 && !squadlessTypes.has(primaryIntent.type);
-      if (squads.length === 0 && !allowSquadlessTask) {
-        // No squads resolved — skip TaskCard (economy command or unresolved target)
-      } else {
-      const frontHint = primaryIntent.toFront || primaryIntent.fromFront || "";
+      // Always create TaskCard if orders executed successfully.
+      // Even without resolved squads — the task tracker handles squadless tasks.
+      {
+      const locationHint = primaryIntent.toFront || primaryIntent.fromFront
+        || primaryIntent.targetRegion || "";
       const titleMap: Record<string, string> = {
-        defend: `防守 ${frontHint}`,
-        attack: `进攻 ${frontHint}`,
-        retreat: "撤退整补",
-        recon: `侦察 ${frontHint}`,
-        hold: `固守 ${frontHint}`,
-        patrol: `巡逻 ${frontHint}`,
-        sabotage: `破坏 ${primaryIntent.targetFacility || ""}`,
-        produce: "生产单位",
-        trade: "资源交易",
+        defend: `防守 ${locationHint || "阵地"}`,
+        attack: `进攻 ${locationHint || "目标"}`,
+        retreat: `撤退整补 ${locationHint}`,
+        recon: `侦察 ${locationHint || "区域"}`,
+        hold: `固守 ${locationHint || "阵地"}`,
+        patrol: `巡逻 ${locationHint || "区域"}`,
+        reinforce: `增援 ${locationHint || "前线"}`,
+        sabotage: `破坏 ${primaryIntent.targetFacility || locationHint || "设施"}`,
+        produce: `生产 ${primaryIntent.produceType || "单位"}`,
+        trade: `交易 ${primaryIntent.tradeAction || "资源"}`,
       };
       const taskTitle = (titleMap[primaryIntent.type] || primaryIntent.type).trim();
 
@@ -802,6 +802,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       );
 
       const taskId = `task_${Date.now().toString(36)}_${state.tasks.length}`;
+      const economyTypes = new Set(["produce", "trade"]);
+      const taskKind = economyTypes.has(primaryIntent.type) ? "economy" as const : "combat" as const;
       const newTask: TaskCard = {
         id: taskId,
         title: taskTitle,
@@ -809,6 +811,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         assignedSquads: squads,
         status: "assigned",
         priority: linkedDoctrine?.priority as TaskPriority ?? "normal",
+        kind: taskKind,
         constraint: linkedDoctrine?.type,
         createdAt: state.time,
         statusChangedAt: state.time,

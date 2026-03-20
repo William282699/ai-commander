@@ -17,7 +17,7 @@ const STATUS_LABELS: Record<string, string> = {
   assigned: "已分配",
   moving: "移动中",
   engaged: "交战中",
-  holding: "固守中",
+  holding: "执行中",
   failing: "告急",
   completed: "完成",
   cancelled: "已取消",
@@ -53,14 +53,13 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
   const [confirmCancel, setConfirmCancel] = useState<string | null>(null);
 
   const activeTasks = tasks.filter(t => t.status !== "completed" && t.status !== "cancelled");
-  if (activeTasks.length === 0) return null;
 
   const displayTasks = expanded ? activeTasks : activeTasks.slice(0, 5);
 
   return (
     <div style={{
       position: "absolute",
-      top: 40,
+      bottom: 8,
       left: 8,
       width: 220,
       maxHeight: expanded ? 400 : 260,
@@ -104,6 +103,11 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
         </div>
 
         <div style={{ maxHeight: expanded ? 360 : 220, overflowY: "auto" }}>
+          {activeTasks.length === 0 && (
+            <div style={{ color: "#475569", fontSize: 10, padding: "4px 2px", textAlign: "center" }}>
+              暂无任务
+            </div>
+          )}
           {displayTasks.map((task) => (
             <div
               key={task.id}

@@ -54,7 +54,23 @@ export function updateTasks(state: GameState): void {
   for (const task of state.tasks) {
     if (task.status === "completed" || task.status === "cancelled") continue;
 
-    // Collect alive unit IDs from assigned squads
+    // Economy tasks (produce/trade) are fire-and-forget: mark holding immediately,
+    // they stay visible until the production queue completes or cleanup runs.
+    if (task.kind === "economy") {
+      if (task.status === "assigned") {
+        task.status = "holding";
+        task.statusChangedAt = state.time;
+      }
+      // Economy tasks auto-complete after hold timer (no squad tracking needed)
+      if (task.status === "holding" &&
+          state.time - task.statusChangedAt >= HOLD_COMPLETE_SEC) {
+        task.status = "completed";
+        task.statusChangedAt = state.time;
+      }
+      continue;
+    }
+
+    // Combat tasks — track via assigned squads/units
     const aliveUnitIds: number[] = [];
     for (const sqId of task.assignedSquads) {
       const unitIds = collectUnitsUnder(state, sqId);
@@ -69,8 +85,13 @@ export function updateTasks(state: GameState): void {
     // Determine new status from unit states
     let newStatus = task.status;
 
-    if (task.assignedSquads.length === 0) {
-      // Fallback for early-game commands before squads exist.
+    // Check if any assigned squad actually exists in state
+    const hasResolvedSquad = task.assignedSquads.some(sqId =>
+      state.squads.some(s => s.id === sqId),
+    );
+
+    if (task.assignedSquads.length === 0 || !hasResolvedSquad) {
+      // Squadless combat task — units were assigned but not via squads
       if (task.status === "assigned") {
         task.status = "holding";
         task.statusChangedAt = state.time;

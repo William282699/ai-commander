@@ -479,6 +479,7 @@ export interface GameState {
 
 export type TaskStatus = "assigned" | "moving" | "engaged" | "holding" | "failing" | "completed" | "cancelled";
 export type TaskPriority = "low" | "normal" | "high" | "critical";
+export type TaskKind = "combat" | "economy";
 
 export interface TaskCard {
   id: string;
@@ -487,6 +488,7 @@ export interface TaskCard {
   assignedSquads: string[];
   status: TaskStatus;
   priority: TaskPriority;
+  kind: TaskKind;             // "combat" = squad-tracked, "economy" = fire-and-forget
   constraint?: string;       // e.g. "must_hold", "delay_only"
   createdAt: number;
   statusChangedAt: number;   // every status transition must update this
