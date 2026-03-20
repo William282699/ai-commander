@@ -45,6 +45,8 @@ import {
   buildDigest,
   checkDoctrines,
   cancelDoctrine,
+  findBestReinforcements,
+  generateCrisisCard,
 } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
@@ -778,9 +780,24 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       const crises = checkDoctrines(state);
       for (const crisis of crises) {
         const level: MessageLevel = crisis.severity === "critical" ? "urgent" : "warning";
-        const channel = state.doctrines.find(d => d.id === crisis.doctrineId)?.commander ?? "ops";
+        const doctrine = state.doctrines.find(d => d.id === crisis.doctrineId);
+        const channel = doctrine?.commander ?? "ops";
         addMessage(level, crisis.message, crisis.time, channel, undefined, "event_report");
-        // TODO (Prompt 2): crisisResponse() — generate emergency card + createThread
+
+        // DOCTRINE_BREACH: generate zero-delay crisis card + thread
+        if (crisis.type === "DOCTRINE_BREACH" && doctrine && doctrine.status === "active") {
+          const candidates = findBestReinforcements(state, crisis, doctrine);
+          const crisisOptions = generateCrisisCard(state, crisis, candidates, doctrine);
+          createThread(
+            `DOCTRINE_BREACH:${crisis.doctrineId}`,
+            "DOCTRINE_BREACH",
+            channel,
+            crisis.message,
+            crisis.message,
+            crisisOptions,
+            state.time,
+          );
+        }
       }
 
       // --- War Phase & Game-Over (Day 12) ---

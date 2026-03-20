@@ -110,10 +110,13 @@ export function subscribe(listener: () => void): () => void {
 
 // ── Phase 3: Staff Thread System ──
 
+/** Extended event type for threads — includes doctrine crisis types beyond ReportEventType. */
+export type StaffEventType = ReportEventType | "DOCTRINE_BREACH" | "DOCTRINE_WARNING";
+
 export interface StaffThread {
   id: string;
   topicKey: string;          // "POSITION_CRITICAL:front_north"
-  eventType: ReportEventType;
+  eventType: StaffEventType;
   channel: Channel;
   brief: string;             // LLM in-character brief
   eventMessage: string;      // original event message
@@ -129,7 +132,7 @@ let _nextThreadId = 1;
 
 export function createThread(
   topicKey: string,
-  eventType: ReportEventType,
+  eventType: StaffEventType,
   channel: Channel,
   brief: string,
   eventMessage: string,
