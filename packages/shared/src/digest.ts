@@ -103,6 +103,15 @@ export function generateDigestV1(
     }
   }
 
+  // Doctrines (active standing orders)
+  const activeDoctrines = state.doctrines?.filter(d => d.status === "active") ?? [];
+  if (activeDoctrines.length > 0) {
+    digest += `---DOCTRINES---\n`;
+    for (const d of activeDoctrines) {
+      digest += `${d.id} ${d.type} ${d.locationTag} ${d.priority.toUpperCase()} squads=[${d.assignedSquads.join(",")}] reinforce=${d.allowAutoReinforce}\n`;
+    }
+  }
+
   // Style
   digest += `---STYLE---\n`;
   digest += `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas_aversion=${state.style.casualtyAversion.toFixed(2)}\n`;

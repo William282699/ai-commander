@@ -7,8 +7,9 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { OrgTree } from "./OrgTree";
-import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction } from "@ai-commander/core";
+import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel } from "@ai-commander/shared";
+import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
 import { CHANNEL_LABELS } from "@ai-commander/shared";
 import {
   addMessage,
@@ -452,6 +453,55 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     }
   };
 
+  // ── Doctrine: process standingOrder / cancelDoctrine from LLM response ──
+  const processDoctrineFields = (data: Record<string, unknown>, state: GameState, ch: Channel, approvedIntents?: Intent[]) => {
+    // Standing order creation
+    if (data.standingOrder && typeof data.standingOrder === "object") {
+      const so = data.standingOrder as Record<string, unknown>;
+      if (typeof so.type === "string" && typeof so.locationTag === "string") {
+        const VALID_SO_TYPES: string[] = ["must_hold", "can_trade_space", "preserve_force", "no_retreat", "delay_only"];
+        const VALID_PRIORITIES: string[] = ["low", "normal", "high", "critical"];
+        const soType = VALID_SO_TYPES.includes(so.type) ? so.type as StandingOrderType : "must_hold";
+        const soPriority = (typeof so.priority === "string" && VALID_PRIORITIES.includes(so.priority))
+          ? so.priority as DoctrinePriority : "normal";
+
+        // Deduplicate: skip if an active doctrine with same type+location already exists
+        const dup = state.doctrines.find(d => d.status === "active" && d.type === soType && d.locationTag === so.locationTag);
+        if (!dup) {
+          const docId = `doc_${String(state.doctrines.length + 1).padStart(3, "0")}`;
+          // Extract assigned squads from approved intents
+          const squads: string[] = [];
+          if (approvedIntents) {
+            for (const intent of approvedIntents) {
+              if (intent.fromSquad) squads.push(intent.fromSquad);
+            }
+          }
+          const newDoc: StandingOrder = {
+            id: docId,
+            type: soType,
+            commander: ch,
+            locationTag: so.locationTag as string,
+            priority: soPriority,
+            allowAutoReinforce: typeof so.allowAutoReinforce === "boolean" ? so.allowAutoReinforce : false,
+            assignedSquads: squads,
+            createdAt: state.time,
+            status: "active",
+          };
+          state.doctrines.push(newDoc);
+          addMessage("info", `持续命令已登记: ${soType} @ ${so.locationTag} [${soPriority.toUpperCase()}]`, state.time, ch, undefined, "command_ack");
+        }
+      }
+    }
+
+    // Doctrine cancellation
+    if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
+      const result = cancelDoctrine(state, data.cancelDoctrine);
+      if (result.cancelled) {
+        addMessage("info", `${result.locationTag} 的 ${result.type} 命令已取消，部队恢复自由调度。`, state.time, result.channel, undefined, "command_ack");
+      }
+    }
+  };
+
   // ── 0.5: Group chat — parallel requests (completion-order insertion) ──
   const sendGroupChat = async (userMsg: string, state: GameState, selectedIds: number[]) => {
     // Clear stale response/error from previous command
@@ -500,6 +550,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         }
 
         if (data.responseType?.toUpperCase() === "NOOP") {
+          // NOOP can carry cancelDoctrine (natural language cancellation doesn't need approval)
+          if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
+            processDoctrineFields({ cancelDoctrine: data.cancelDoctrine }, state, ch);
+          }
           return; // Conversational — already added brief above
         }
 
@@ -581,6 +635,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       });
 
       const data = await res.json();
+
       if (data.error) {
         setError(data.error);
         setResponse(null);
@@ -594,6 +649,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         addMessage("info", msg, state.time, ch, undefined, "command_ack");
         if (data.brief) {
           pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief, time: state.time });
+        }
+        // NOOP can carry cancelDoctrine (natural language cancellation doesn't need approval)
+        if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
+          processDoctrineFields({ cancelDoctrine: data.cancelDoctrine }, state, ch);
         }
       } else if (Array.isArray(data.options) && data.options.length === 0) {
         setResponse(null);
@@ -616,7 +675,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
         if (gate.auto && data.options.length >= 1) {
           const autoData = data as DisplayResponse;
-          setTimeout(() => handleApprove(autoData.options[0], 0, "auto", execCtx), 0);
+          setTimeout(() => handleApprove(autoData.options[0], 0, "auto", execCtx, autoData), 0);
         } else {
           if (!gate.auto && gate.reason) {
             console.debug(`[P1 gate] no-auto: ${gate.reason}`);
@@ -638,7 +697,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   };
 
   // ── handleApprove (0.4: migrated from CommandPanel) ──
-  const handleApprove = (opt: AdvisorOption, idx: number, mode: "auto" | "manual" = "manual", ctx?: ExecContext) => {
+  const handleApprove = (opt: AdvisorOption, idx: number, mode: "auto" | "manual" = "manual", ctx?: ExecContext, sourceResponse?: DisplayResponse) => {
     const state = getState();
     if (!state) return;
 
@@ -695,6 +754,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         addMessage("info", `Roger. Executing ${letter}: ${cleanLabel}`, state.time, ch, undefined, "command_ack");
       }
       applyOrders(state, allOrders);
+
+      // Process doctrine fields at approve time (not at response time)
+      const docSource = sourceResponse ?? response;
+      if (docSource) {
+        processDoctrineFields(docSource as unknown as Record<string, unknown>, state, ch, intents);
+      }
 
       if (execCtx?.threadId) {
         resolveThread(execCtx.threadId);

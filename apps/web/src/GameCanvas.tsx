@@ -43,6 +43,8 @@ import {
   drainReportEvents,
   resetReportSignals,
   buildDigest,
+  checkDoctrines,
+  cancelDoctrine,
 } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
@@ -771,6 +773,15 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
 
       // --- Event Detection (Day 16A) ---
       processReportSignals(state, dt);
+
+      // --- Doctrine Checks ---
+      const crises = checkDoctrines(state);
+      for (const crisis of crises) {
+        const level: MessageLevel = crisis.severity === "critical" ? "urgent" : "warning";
+        const channel = state.doctrines.find(d => d.id === crisis.doctrineId)?.commander ?? "ops";
+        addMessage(level, crisis.message, crisis.time, channel, undefined, "event_report");
+        // TODO (Prompt 2): crisisResponse() — generate emergency card + createThread
+      }
 
       // --- War Phase & Game-Over (Day 12) ---
       updateGamePhase(state, dt);        // PEACE→CONFLICT→WAR→ENDGAME transitions

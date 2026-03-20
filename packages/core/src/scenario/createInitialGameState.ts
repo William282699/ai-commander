@@ -228,5 +228,7 @@ export function createInitialGameState(): GameState {
     nextSquadNum,
     tags: [],
     nextTagNum: 1,
+    doctrines: [],
+    doctrineCooldowns: {},
   };
 }

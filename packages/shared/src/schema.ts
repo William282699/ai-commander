@@ -141,6 +141,23 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
     ? rawRT as ResponseType
     : undefined;
 
+  // Doctrine fields — extract early so NOOP/empty-options paths also get them
+  let standingOrder: AdvisorResponse["standingOrder"] | undefined;
+  if (obj.standingOrder && typeof obj.standingOrder === "object") {
+    const so = obj.standingOrder as Record<string, unknown>;
+    if (typeof so.type === "string" && typeof so.locationTag === "string") {
+      standingOrder = {
+        type: so.type,
+        locationTag: so.locationTag,
+        priority: typeof so.priority === "string" ? so.priority : "normal",
+        allowAutoReinforce: typeof so.allowAutoReinforce === "boolean" ? so.allowAutoReinforce : false,
+      };
+    }
+  }
+  const cancelDoctrineId = typeof obj.cancelDoctrine === "string" && obj.cancelDoctrine.length > 0
+    ? obj.cancelDoctrine
+    : undefined;
+
   // Day 13 Layer B: LLM may return empty options[] to reject invalid commands.
   // Phase 2: NOOP responseType with options:[] is a valid conversational response.
   if (obj.options.length === 0) {
@@ -153,6 +170,8 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
       recommended: "A" as const,
       urgency,
       responseType,
+      standingOrder,
+      cancelDoctrine: cancelDoctrineId,
     };
   }
 
@@ -211,6 +230,8 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
     suggestProduction: obj.suggest_production
       ? (obj.suggest_production as AdvisorResponse["suggestProduction"])
       : undefined,
+    standingOrder,
+    cancelDoctrine: cancelDoctrineId,
   };
 }
 

@@ -14,3 +14,4 @@ export type { ResolveResult } from "./tacticalPlanner";
 export { buildDigest } from "./intelDigest";
 export { processReportSignals, drainReportEvents, resetReportSignals } from "./reportSignals";
 export { createInitialGameState } from "./scenario";
+export { checkDoctrines, cancelDoctrine } from "./doctrine";

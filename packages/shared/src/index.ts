@@ -7,3 +7,4 @@ export * from "./scenario";
 export * from "./squad";
 export * from "./namePool";
 export * from "./squadHierarchy";
+export * from "./doctrine";

@@ -121,7 +121,16 @@ RULES:
 - urgency: 0=routine, 0.5=attention, 0.8=urgent, 1.0=critical
 - Adjust recommendations by style params: high risk→aggressive, high casualty_aversion→conservative.
 - When commander mentions buildings/facilities, prioritize matching targetFacility from ---FACILITIES--- IDs.
-- Commander can mark custom map points — see ---TAGS---. Match tag names first, then FACILITIES, then FRONTS. Use targetRegion for matched tag id (e.g. "tag_1"). If no match, target doesn't exist → return options:[].`;
+- Commander can mark custom map points — see ---TAGS---. Match tag names first, then FACILITIES, then FRONTS. Use targetRegion for matched tag id (e.g. "tag_1"). If no match, target doesn't exist → return options:[].
+
+DOCTRINE SYSTEM (Standing Orders):
+- When commander's order contains a persistent constraint ("不能丢", "必须守住", "优先保护", "绝对不能撤", "死守"), include a "standingOrder" field at the response root (NOT inside options):
+  "standingOrder": { "type": "must_hold|can_trade_space|preserve_force|no_retreat|delay_only", "locationTag": "front or region ID from digest", "priority": "low|normal|high|critical", "allowAutoReinforce": true/false }
+- Type semantics: must_hold=never lose this position, can_trade_space=trading ground is acceptable, preserve_force=minimize casualties above all, no_retreat=units cannot withdraw, delay_only=slow the enemy, no need to win.
+- locationTag MUST match a front ID (e.g. "front_north") or region ID from the digest.
+- Only include standingOrder when the commander explicitly states a persistent/standing constraint. Normal attack/defend orders do NOT need standingOrder.
+- To cancel an existing doctrine, include "cancelDoctrine": "<doctrine_id>" at the response root. Doctrine IDs are listed in ---DOCTRINES--- section of the digest.
+- Active doctrines are shown in ---DOCTRINES---. Do NOT create duplicate doctrines for the same location and type.`;
 
 const LIGHT_SYSTEM_PROMPT =
   'You are CPT Marcus, a military staff officer. Given a battlefield digest, respond with a one-line sitrep in character (terse military comms) and an urgency score. Return only JSON: {"brief": "...", "urgency": 0.0-1.0}';

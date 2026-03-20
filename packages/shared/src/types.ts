@@ -470,6 +470,8 @@ export interface GameState {
   nextSquadNum: { [prefix: string]: number };
   tags: Tag[];
   nextTagNum: number;
+  doctrines: import("./doctrine").StandingOrder[];
+  doctrineCooldowns: Record<string, number>; // doctrineId → last alert game time
 }
 
 // --- LLM Response Types ---
@@ -497,6 +499,13 @@ export interface AdvisorResponse {
     type: UnitType;
     reason: string;
   };
+  standingOrder?: {
+    type: string;
+    locationTag: string;
+    priority: string;
+    allowAutoReinforce: boolean;
+  };
+  cancelDoctrine?: string; // doctrine ID to cancel
 }
 
 export interface LightAdvisorResponse {
