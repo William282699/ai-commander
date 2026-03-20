@@ -230,5 +230,6 @@ export function createInitialGameState(): GameState {
     nextTagNum: 1,
     doctrines: [],
     doctrineCooldowns: {},
+    tasks: [],
   };
 }

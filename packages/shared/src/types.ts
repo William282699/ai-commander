@@ -472,6 +472,25 @@ export interface GameState {
   nextTagNum: number;
   doctrines: import("./doctrine").StandingOrder[];
   doctrineCooldowns: Record<string, number>; // doctrineId → last alert game time
+  tasks: TaskCard[];
+}
+
+// --- Task Card (Prompt 3: visible task tracking) ---
+
+export type TaskStatus = "assigned" | "moving" | "engaged" | "holding" | "failing" | "completed" | "cancelled";
+export type TaskPriority = "low" | "normal" | "high" | "critical";
+
+export interface TaskCard {
+  id: string;
+  title: string;
+  commander: Channel;
+  assignedSquads: string[];
+  status: TaskStatus;
+  priority: TaskPriority;
+  constraint?: string;       // e.g. "must_hold", "delay_only"
+  createdAt: number;
+  statusChangedAt: number;   // every status transition must update this
+  doctrineId?: string;
 }
 
 // --- LLM Response Types ---

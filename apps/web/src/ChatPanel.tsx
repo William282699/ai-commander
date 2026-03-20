@@ -8,7 +8,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { OrgTree } from "./OrgTree";
 import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine } from "@ai-commander/core";
-import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel } from "@ai-commander/shared";
+import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, TaskCard, TaskPriority } from "@ai-commander/shared";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
 import { CHANNEL_LABELS } from "@ai-commander/shared";
 import {
@@ -727,6 +727,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     const reserved = new Set<number>();
     let degradedCount = 0;
 
+    const allAssignedUnitIds: number[] = [];
     for (const intent of intents) {
       const result = resolveIntent(intent, state, state.style, reserved, selectedIdsSnapshotRef.current);
       if (result.degraded) {
@@ -736,6 +737,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         addMessage("info", `执行: ${result.log}`, state.time, ch, undefined, "command_ack");
       }
       for (const id of result.assignedUnitIds) reserved.add(id);
+      allAssignedUnitIds.push(...result.assignedUnitIds);
       allOrders.push(...result.orders);
     }
 
@@ -759,6 +761,60 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       const docSource = sourceResponse ?? response;
       if (docSource) {
         processDoctrineFields(docSource as unknown as Record<string, unknown>, state, ch, intents);
+      }
+
+      // Create TaskCard — resolve squads from intents + assigned unit reverse-lookup
+      const intentSquads = intents.map(i => i.fromSquad).filter((s): s is string => !!s);
+      // Reverse-lookup: find squads owning assigned units
+      if (intentSquads.length === 0 && allAssignedUnitIds.length > 0) {
+        const unitIdSet = new Set(allAssignedUnitIds);
+        for (const sq of state.squads) {
+          if (sq.unitIds.some(id => unitIdSet.has(id))) {
+            intentSquads.push(sq.id);
+          }
+        }
+      }
+      const squads = [...new Set(intentSquads)];
+      const primaryIntent = intents[0];
+      const squadlessTypes = new Set(["produce", "trade"]);
+      const allowSquadlessTask = state.squads.length === 0 && !squadlessTypes.has(primaryIntent.type);
+      if (squads.length === 0 && !allowSquadlessTask) {
+        // No squads resolved — skip TaskCard (economy command or unresolved target)
+      } else {
+      const frontHint = primaryIntent.toFront || primaryIntent.fromFront || "";
+      const titleMap: Record<string, string> = {
+        defend: `防守 ${frontHint}`,
+        attack: `进攻 ${frontHint}`,
+        retreat: "撤退整补",
+        recon: `侦察 ${frontHint}`,
+        hold: `固守 ${frontHint}`,
+        patrol: `巡逻 ${frontHint}`,
+        sabotage: `破坏 ${primaryIntent.targetFacility || ""}`,
+        produce: "生产单位",
+        trade: "资源交易",
+      };
+      const taskTitle = (titleMap[primaryIntent.type] || primaryIntent.type).trim();
+
+      // Find associated doctrine if standingOrder was just created
+      const linkedDoctrine = state.doctrines.find(
+        d => d.status === "active" && d.commander === ch &&
+        d.createdAt === state.time,
+      );
+
+      const taskId = `task_${Date.now().toString(36)}_${state.tasks.length}`;
+      const newTask: TaskCard = {
+        id: taskId,
+        title: taskTitle,
+        commander: ch,
+        assignedSquads: squads,
+        status: "assigned",
+        priority: linkedDoctrine?.priority as TaskPriority ?? "normal",
+        constraint: linkedDoctrine?.type,
+        createdAt: state.time,
+        statusChangedAt: state.time,
+        doctrineId: linkedDoctrine?.id,
+      };
+      state.tasks.push(newTask);
       }
 
       if (execCtx?.threadId) {

@@ -47,11 +47,13 @@ import {
   cancelDoctrine,
   findBestReinforcements,
   generateCrisisCard,
+  updateTasks,
 } from "@ai-commander/core";
-import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType } from "@ai-commander/shared";
+import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import { ChatPanel } from "./ChatPanel";
+import { TaskBar } from "./TaskBar";
 import {
   addMessage,
   clearMessages,
@@ -346,6 +348,62 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
   } | null>(null);
   const [tagRenaming, setTagRenaming] = useState<{ tag: Tag } | null>(null);
   const [tagRenameInput, setTagRenameInput] = useState("");
+
+  // Prompt 3: Task bar state — snapshot tasks for React rendering
+  const [taskSnapshot, setTaskSnapshot] = useState<GameState["tasks"]>([]);
+  const taskHashRef = useRef("");
+  useEffect(() => {
+    const id = setInterval(() => {
+      const s = stateRef.current;
+      if (!s) return;
+      const hash = JSON.stringify(s.tasks);
+      if (hash !== taskHashRef.current) {
+        taskHashRef.current = hash;
+        setTaskSnapshot([...s.tasks]);
+      }
+    }, 500);
+    return () => clearInterval(id);
+  });
+
+  const handleTaskCancel = useCallback((taskId: string) => {
+    const state = stateRef.current;
+    if (!state) return;
+    const task = state.tasks.find(t => t.id === taskId);
+    if (!task || task.status === "completed" || task.status === "cancelled") return;
+
+    task.status = "cancelled";
+    task.statusChangedAt = state.time;
+
+    // Cancel associated doctrine
+    if (task.doctrineId) {
+      const result = cancelDoctrine(state, task.doctrineId);
+      if (result.cancelled) {
+        addMessage("info", `${result.locationTag} 的 ${result.type} 命令已取消，部队恢复自由调度。`, state.time, result.channel, undefined, "command_ack");
+      }
+    }
+
+    // Clear squad missions
+    for (const sqId of task.assignedSquads) {
+      const sq = state.squads.find(s => s.id === sqId);
+      if (sq) {
+        sq.currentMission = null;
+        sq.missionTarget = null;
+      }
+    }
+
+    addMessage("info", `任务已取消: ${task.title}`, state.time, task.commander, undefined, "command_ack");
+    setTaskSnapshot([...state.tasks]);
+  }, []);
+
+  const handleTaskPriority = useCallback((taskId: string, priority: TaskPriority) => {
+    const state = stateRef.current;
+    if (!state) return;
+    const task = state.tasks.find(t => t.id === taskId);
+    if (task) {
+      task.priority = priority;
+      setTaskSnapshot([...state.tasks]);
+    }
+  }, []);
 
   // Stable callback: returns current box-selected unit IDs
   const getSelectedUnitIds = useCallback((): number[] => {
@@ -807,6 +865,9 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       // --- Missions (Day 11) --- (guards: if gameOver return)
       processMissions(state, dt);        // mission progress, success/fail, squad linkage
 
+      // --- Task Tracker (Prompt 3) ---
+      updateTasks(state);
+
       // --- AI & Auto-Behavior (Day 8) --- (guards: if gameOver return)
       processEnemyAI(state, dt);        // enemy strategic decisions (5s interval)
       processAutoBehavior(state, dt);    // both teams micro-behavior (2s interval)
@@ -1105,6 +1166,11 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       <canvas
         ref={canvasRef}
         style={{ display: "block", width: "100%", height: "100%" }}
+      />
+      <TaskBar
+        tasks={taskSnapshot}
+        onChangePriority={handleTaskPriority}
+        onCancel={handleTaskCancel}
       />
       {!panelDetached && (
         <ChatPanel
