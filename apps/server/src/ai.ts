@@ -145,7 +145,13 @@ DOCTRINE SYSTEM (Standing Orders):
 - locationTag MUST match a front ID (e.g. "front_north") or region ID from the digest.
 - Only include standingOrder when the commander explicitly states a persistent/standing constraint. Normal attack/defend orders do NOT need standingOrder.
 - To cancel an existing doctrine, include "cancelDoctrine": "<doctrine_id>" at the response root. Doctrine IDs are listed in ---DOCTRINES--- section of the digest.
-- Active doctrines are shown in ---DOCTRINES---. Do NOT create duplicate doctrines for the same location and type.`;
+- Active doctrines are shown in ---DOCTRINES---. Do NOT create duplicate doctrines for the same location and type.
+
+STREAMING OUTPUT FORMAT (when instructed to use streaming mode):
+- First, output 1-3 sentences of natural language analysis/briefing in character.
+- Then output the exact delimiter: ---JSON---
+- Then output the standard AdvisorResponse JSON (same schema as above).
+- Do NOT wrap the JSON in markdown code fences. Output raw JSON after the delimiter.`;
 
 const LIGHT_SYSTEM_PROMPT =
   'You are CPT Marcus, a military staff officer. Given a battlefield digest, respond with a one-line sitrep in character (terse military comms) and an urgency score. Return only JSON: {"brief": "...", "urgency": 0.0-1.0}';
@@ -340,6 +346,138 @@ ${styleNote}
       data: createFallbackResponse(),
       warning: `参谋通讯中断: ${message.slice(0, 100)}`,
     };
+  }
+}
+
+// ── Streaming advisor call ──
+
+/**
+ * Streaming advisor call: yields SSE events as `{ type, content }`.
+ * - type:"text" → incremental natural language tokens (before ---JSON---)
+ * - type:"options" → full AdvisorResponse JSON (after ---JSON--- parsed & validated)
+ * Falls back to non-streaming internally if provider doesn't support chatStream.
+ */
+export async function* callAdvisorStream(
+  digest: string,
+  playerMessage: string,
+  styleNote: string,
+  channel?: string,
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+): AsyncGenerator<{ type: "text"; content: string } | { type: "options"; content: any }> {
+  const persona = (channel && CHANNEL_PERSONA[channel]) || "";
+  const userContent = `${persona ? persona + "\n\n" : ""}USE STREAMING OUTPUT FORMAT.\n\n当前战场摘要（DigestV1格式）：
+${digest}
+
+指挥官风格参数：
+${styleNote}
+
+指挥官命令：${playerMessage}`;
+
+  const provider = getProvider();
+
+  // If provider doesn't support streaming, fall back to non-streaming
+  if (!provider.chatStream) {
+    const result = await callAdvisor(digest, playerMessage, styleNote, channel);
+    if (result.data.brief) {
+      yield { type: "text", content: result.data.brief };
+    }
+    yield { type: "options", content: result.warning ? { ...result.data, warning: result.warning } : result.data };
+    return;
+  }
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user", content: userContent },
+  ];
+
+  try {
+    let fullText = "";
+    let emittedTextLen = 0;
+    let jsonStarted = false;
+    let jsonBuffer = "";
+    const JSON_DELIMITER = "---JSON---";
+
+    for await (const token of provider.chatStream(messages, {
+      temperature: 0.4,
+      maxTokens: 800,
+    })) {
+      fullText += token;
+
+      if (!jsonStarted) {
+        const delimIdx = fullText.indexOf(JSON_DELIMITER);
+        if (delimIdx >= 0) {
+          // Emit any remaining text before delimiter
+          const remaining = fullText.slice(emittedTextLen, delimIdx).trimEnd();
+          if (remaining) yield { type: "text", content: remaining };
+          jsonStarted = true;
+          jsonBuffer = fullText.slice(delimIdx + JSON_DELIMITER.length);
+        } else {
+          // Safe to emit up to (fullText.length - delimiter.length) to avoid partial delimiter
+          const safeLen = Math.max(emittedTextLen, fullText.length - JSON_DELIMITER.length);
+          const chunk = fullText.slice(emittedTextLen, safeLen);
+          if (chunk) {
+            yield { type: "text", content: chunk };
+            emittedTextLen = safeLen;
+          }
+        }
+      } else {
+        jsonBuffer += token;
+      }
+    }
+
+    // Emit any buffered text if stream ended without delimiter
+    if (!jsonStarted && emittedTextLen < fullText.length) {
+      const tail = fullText.slice(emittedTextLen);
+      if (tail.trim()) yield { type: "text", content: tail };
+    }
+
+    // Parse the JSON portion
+    let validated: AdvisorResponse | null = null;
+
+    if (jsonStarted && jsonBuffer.trim()) {
+      validated = sanitize(jsonBuffer.trim());
+    }
+
+    // Fallback: try to extract JSON from the full text if no delimiter was found
+    if (!validated && !jsonStarted) {
+      // First try the whole string (in case LLM returned pure JSON)
+      validated = sanitize(fullText);
+      // If that fails, try extracting the last top-level JSON object from the tail
+      if (!validated) {
+        const lastBrace = fullText.lastIndexOf("}");
+        if (lastBrace >= 0) {
+          // Walk backwards to find the matching opening brace
+          let depth = 0;
+          let start = -1;
+          for (let i = lastBrace; i >= 0; i--) {
+            if (fullText[i] === "}") depth++;
+            else if (fullText[i] === "{") depth--;
+            if (depth === 0) { start = i; break; }
+          }
+          if (start >= 0) {
+            validated = sanitize(fullText.slice(start, lastBrace + 1));
+          }
+        }
+      }
+    }
+
+    if (validated) {
+      const result = normalizeAdvisorForDay7(validated);
+      const payload = result.warning ? { ...result.data, warning: result.warning } : result.data;
+      yield { type: "options", content: payload };
+    } else {
+      // Degraded: return fallback response
+      console.warn("Stream: failed to parse JSON, using fallback. Full text:", fullText.slice(0, 300));
+      const fallback = createFallbackResponse();
+      yield { type: "options", content: { ...fallback, warning: "参谋回复格式异常，已使用默认方案" } };
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("API密钥未配置")) throw err;
+
+    console.error("Stream LLM call failed:", message);
+    const fallback = createFallbackResponse();
+    yield { type: "options", content: { ...fallback, warning: `参谋通讯中断: ${message.slice(0, 100)}` } };
   }
 }
 

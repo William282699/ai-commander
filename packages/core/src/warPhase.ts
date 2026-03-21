@@ -220,15 +220,6 @@ export function applyEndgamePressure(state: GameState, dt: number): void {
     eco.resources.ammo = Math.max(0, eco.resources.ammo - eco.baseIncome.ammo * (1 - ENDGAME_INCOME_MULT) * (dt / 30));
   }
 
-  // Periodic attrition: all units lose a small amount of HP each tick
-  // This creates urgency without complex lethality multiplier changes
-  const attritionPerSec = 0.1; // HP lost per second per unit (was 0.5, too aggressive)
-  state.units.forEach((u) => {
-    if (u.state === "dead") return;
-    u.hp -= attritionPerSec * dt;
-    if (u.hp <= 0) {
-      u.hp = 0;
-      u.state = "dead";
-    }
-  });
+  // Attrition removed: units don't lose HP from thin air during endgame.
+  // Endgame pressure comes from resource income reduction + timeout forced scoring.
 }

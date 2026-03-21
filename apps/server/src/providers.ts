@@ -18,6 +18,7 @@ export interface ChatOptions {
 export interface LLMProvider {
   name: string;
   chat(messages: ChatMessage[], options?: ChatOptions): Promise<string>;
+  chatStream?(messages: ChatMessage[], options?: ChatOptions): AsyncIterable<string>;
 }
 
 // ── OpenAI-compatible provider (works for DeepSeek + OpenAI) ──
@@ -67,6 +68,76 @@ class OpenAICompatibleProvider implements LLMProvider {
     }
     return content;
   }
+
+  async *chatStream(messages: ChatMessage[], options?: ChatOptions): AsyncIterable<string> {
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages,
+      temperature: options?.temperature ?? 0.7,
+      max_tokens: options?.maxTokens ?? 800,
+      stream: true,
+    };
+    // No jsonMode for streaming — first half is natural language
+
+    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`LLM API ${res.status}: ${text.slice(0, 200)}`);
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error("No response body for streaming");
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const payload = trimmed.slice(6);
+          if (payload === "[DONE]") return;
+          try {
+            const chunk = JSON.parse(payload);
+            const delta = chunk.choices?.[0]?.delta?.content;
+            if (typeof delta === "string") yield delta;
+          } catch { /* skip malformed chunks */ }
+        }
+      }
+      // Flush remaining buffer on EOF
+      if (buffer.trim()) {
+        const trimmed = buffer.trim();
+        if (trimmed.startsWith("data: ")) {
+          const payload = trimmed.slice(6);
+          if (payload !== "[DONE]") {
+            try {
+              const chunk = JSON.parse(payload);
+              const delta = chunk.choices?.[0]?.delta?.content;
+              if (typeof delta === "string") yield delta;
+            } catch { /* skip */ }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
 }
 
 // ── Claude provider (Anthropic Messages API) ──
@@ -111,6 +182,79 @@ class ClaudeProvider implements LLMProvider {
       throw new Error("Claude returned empty response");
     }
     return content;
+  }
+
+  async *chatStream(messages: ChatMessage[], options?: ChatOptions): AsyncIterable<string> {
+    const systemMsg = messages.find((m) => m.role === "system");
+    const nonSystemMsgs = messages.filter((m) => m.role !== "system");
+
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": this.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: this.model,
+        max_tokens: options?.maxTokens ?? 800,
+        system: systemMsg?.content ?? "",
+        messages: nonSystemMsgs.map((m) => ({ role: m.role, content: m.content })),
+        stream: true,
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Claude API ${res.status}: ${text.slice(0, 200)}`);
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error("No response body for streaming");
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const payload = trimmed.slice(6);
+          if (payload === "[DONE]") return;
+          try {
+            const event = JSON.parse(payload);
+            if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
+              yield event.delta.text;
+            }
+          } catch { /* skip malformed chunks */ }
+        }
+      }
+      // Flush remaining buffer on EOF
+      if (buffer.trim()) {
+        const trimmed = buffer.trim();
+        if (trimmed.startsWith("data: ")) {
+          const payload = trimmed.slice(6);
+          if (payload !== "[DONE]") {
+            try {
+              const event = JSON.parse(payload);
+              if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
+                yield event.delta.text;
+              }
+            } catch { /* skip */ }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 }
 

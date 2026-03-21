@@ -247,6 +247,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const [approvedIdx, setApprovedIdx] = useState<number | null>(null);
   const [clarification, setClarification] = useState<string | null>(null);
   const [declinedContext, setDeclinedContext] = useState<string | null>(null);
+  const [streamingText, setStreamingText] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // P1: snapshot selected unit IDs at sendCommand time
@@ -591,6 +592,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     setApprovedIdx(null);
     setClarification(null);
     setResponse(null);
+    setStreamingText(null);
     responseExecCtxRef.current = null;
     latestRequestIdRef.current = null;
 
@@ -635,53 +637,46 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
     pushContext(channelContextRef.current, ch, { role: "user", text: userMsg, time: state.time });
 
-    try {
-      const res = await fetch(`${API_URL}/api/command`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch }),
-      });
-
-      const data = await res.json();
-
+    // Helper: process a completed AdvisorResponse (shared by streaming & non-streaming paths)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const processAdvisorData = (data: any) => {
       if (data.error) {
-        setError(data.error);
+        setError(data.error as string);
         setResponse(null);
         selectedIdsSnapshotRef.current = undefined;
         addMessage("urgent", `后端错误: ${data.error}`, state.time, ch, undefined, "system");
-      } else if (typeof data.responseType === "string" && data.responseType.toUpperCase() === "NOOP") {
+      } else if (typeof data.responseType === "string" && (data.responseType as string).toUpperCase() === "NOOP") {
         setResponse(null);
         setError(null);
         setClarification(null);
-        const msg = data.brief || "Copy, standing by.";
+        const msg = (data.brief as string) || "Copy, standing by.";
         addMessage("info", msg, state.time, ch, undefined, "command_ack");
         if (data.brief) {
-          pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief, time: state.time });
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
         }
-        // NOOP can carry cancelDoctrine (natural language cancellation doesn't need approval)
         if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
           processDoctrineFields({ cancelDoctrine: data.cancelDoctrine }, state, ch);
         }
       } else if (Array.isArray(data.options) && data.options.length === 0) {
         setResponse(null);
         setError(null);
-        const reason = data.brief || "命令目标不存在或不明确";
+        const reason = (data.brief as string) || "命令目标不存在或不明确";
         setClarification(reason + " — 请重新描述指令");
         addMessage("warning", reason, state.time, ch, undefined, "command_ack");
       } else {
         if (data.brief) {
-          pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief, time: state.time });
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
         }
 
         const gate = (Array.isArray(data.options) && data.options.length >= 1)
-          ? canAutoExecute(data.options[0], userMsg, state, [], isGroupChat)
+          ? canAutoExecute((data.options as AdvisorOption[])[0], userMsg, state, [], isGroupChat)
           : { auto: false };
 
         const requestId = crypto.randomUUID();
         const execCtx: ExecContext = { channel: ch, threadId: activeThreadOnChannel?.id, requestId };
         latestRequestIdRef.current = requestId;
 
-        if (gate.auto && data.options.length >= 1) {
+        if (gate.auto && (data.options as AdvisorOption[]).length >= 1) {
           const autoData = data as DisplayResponse;
           setTimeout(() => handleApprove(autoData.options[0], 0, "auto", execCtx, autoData), 0);
         } else {
@@ -694,12 +689,121 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           addMessage("info", "Advisor briefing received", state.time, ch, undefined, "command_ack");
         }
       }
-    } catch {
-      const errMsg = "无法连接服务器，请确保后端运行在 localhost:3001";
-      setError(errMsg);
-      setResponse(null);
-      selectedIdsSnapshotRef.current = undefined;
-      addMessage("urgent", "通信中断: 无法连接后端", state.time, ch, undefined, "system");
+    };
+
+    // ── Streaming path (default), with fallback to non-streaming ──
+    try {
+      const streamRes = await fetch(`${API_URL}/api/command-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch }),
+      });
+
+      if (!streamRes.ok || !streamRes.body) {
+        throw new Error("stream_unavailable");
+      }
+
+      // SSE streaming
+      const reader = streamRes.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
+      let accumulatedText = "";
+      let gotOptions = false;
+
+      setStreamingText("");
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+
+        const lines = sseBuffer.split("\n");
+        sseBuffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          const payload = trimmed.slice(6);
+          if (payload === "[DONE]") continue;
+
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const event = JSON.parse(payload) as { type: string; content: any };
+            if (event.type === "text") {
+              accumulatedText += event.content;
+              setStreamingText(accumulatedText);
+            } else if (event.type === "options") {
+              gotOptions = true;
+              setStreamingText(null);
+              const data = event.content; // already an object, no double-parse
+              // Override brief with streamed text if LLM didn't include it in JSON
+              if (accumulatedText && !data.brief) {
+                data.brief = accumulatedText.trim();
+              }
+              processAdvisorData(data);
+            } else if (event.type === "error") {
+              throw new Error(event.content);
+            }
+          } catch (parseErr) {
+            if (parseErr instanceof SyntaxError) continue; // skip malformed SSE
+            throw parseErr;
+          }
+        }
+      }
+
+      // Flush remaining buffer on EOF
+      if (sseBuffer.trim()) {
+        const trimmed = sseBuffer.trim();
+        if (trimmed.startsWith("data: ")) {
+          const payload = trimmed.slice(6);
+          if (payload !== "[DONE]") {
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const event = JSON.parse(payload) as { type: string; content: any };
+              if (event.type === "text") {
+                accumulatedText += event.content;
+                setStreamingText(accumulatedText);
+              } else if (event.type === "options") {
+                gotOptions = true;
+                setStreamingText(null);
+                const data = event.content;
+                if (accumulatedText && !data.brief) data.brief = accumulatedText.trim();
+                processAdvisorData(data);
+              }
+            } catch { /* skip */ }
+          }
+        }
+      }
+
+      if (!gotOptions) {
+        setStreamingText(null);
+        throw new Error("stream_no_options");
+      }
+    } catch (streamErr) {
+      // Fallback to non-streaming /api/command
+      setStreamingText(null);
+      const isStreamFailure = streamErr instanceof Error &&
+        (streamErr.message === "stream_unavailable" || streamErr.message === "stream_no_options");
+
+      if (isStreamFailure) {
+        console.debug("[Streaming] falling back to /api/command");
+      }
+
+      try {
+        const res = await fetch(`${API_URL}/api/command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch }),
+        });
+        const data = await res.json();
+        processAdvisorData(data);
+      } catch {
+        const errMsg = "无法连接服务器，请确保后端运行在 localhost:3001";
+        setError(errMsg);
+        setResponse(null);
+        selectedIdsSnapshotRef.current = undefined;
+        addMessage("urgent", "通信中断: 无法连接后端", state.time, ch, undefined, "system");
+      }
     }
     setLoading(false);
   };
@@ -1104,6 +1208,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             </div>
           </div>
         ))}
+
+        {/* Streaming text bubble */}
+        {streamingText !== null && (
+          <div style={{ padding: "6px 10px", margin: "4px 0", background: "rgba(30, 41, 59, 0.9)", borderRadius: 6, border: "1px solid #334155", fontSize: 11, color: "#94a3b8", fontStyle: "italic" }}>
+            {streamingText || "…"}
+            <span style={{ display: "inline-block", width: 4, height: 12, background: "#fbbf24", marginLeft: 2, animation: "blink 1s step-end infinite" }} />
+          </div>
+        )}
 
         {/* Inline A/B/C option cards */}
         {response && (
