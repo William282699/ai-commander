@@ -241,6 +241,12 @@ export function processCombat(state: GameState, dt: number): void {
         duration: 0.6,
         radius: getUnitCategory(target.type) === "ground" ? 0.8 : 1.2,
       });
+
+      // Prompt 5: record death location for battle awareness markers (player units only)
+      // Trim is handled by updateBattleMarkers after cursor consumption — do not shift here
+      if (target.team === "player") {
+        state.recentDeaths.push({ x: target.position.x, y: target.position.y, time: now });
+      }
     }
   });
 

@@ -231,5 +231,9 @@ export function createInitialGameState(): GameState {
     doctrines: [],
     doctrineCooldowns: {},
     tasks: [],
+    battleMarkers: [],
+    recentDeaths: [],
+    battleMarkerScanAccum: 0,
+    battleMarkerDeathCursor: 0,
   };
 }

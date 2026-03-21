@@ -11,6 +11,7 @@ import type {
   Visibility,
   CombatEffects,
   Tag,
+  BattleMarker,
 } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 
@@ -868,6 +869,95 @@ export function renderCombatEffects(
       ctx.arc(sx, sy, currentRadius * 0.2, 0, Math.PI * 2);
       ctx.fillStyle = `rgba(255,255,255,${alpha})`;
       ctx.fill();
+    }
+
+    ctx.restore();
+  }
+}
+
+// ──────────────────────────────────────────────
+// Render: Battle Markers (Prompt 5: attack zones, deaths, critical fronts)
+// ──────────────────────────────────────────────
+
+export function drawBattleMarkers(
+  ctx: CanvasRenderingContext2D,
+  markers: BattleMarker[],
+  camera: Camera,
+  fog: Visibility[][],
+  currentTime: number,
+): void {
+  const tileScreenSize = TILE_SIZE * camera.zoom;
+  const halfTile = tileScreenSize / 2;
+
+  const isVisibleTile = (x: number, y: number): boolean => {
+    const tx = Math.floor(x);
+    const ty = Math.floor(y);
+    if (tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT) return false;
+    return fog[ty]?.[tx] === "visible";
+  };
+
+  // Viewport culling bounds (world coords)
+  const viewLeft = camera.x / TILE_SIZE - 1;
+  const viewTop = camera.y / TILE_SIZE - 1;
+  const viewRight = viewLeft + (ctx.canvas.width / camera.zoom) / TILE_SIZE + 2;
+  const viewBottom = viewTop + (ctx.canvas.height / camera.zoom) / TILE_SIZE + 2;
+
+  for (const m of markers) {
+    // Viewport culling
+    if (m.x < viewLeft || m.x > viewRight || m.y < viewTop || m.y > viewBottom) continue;
+    // Fog check
+    if (!isVisibleTile(m.x, m.y)) continue;
+    if (m.opacity <= 0) continue;
+
+    const sx = (m.x * TILE_SIZE - camera.x) * camera.zoom + halfTile;
+    const sy = (m.y * TILE_SIZE - camera.y) * camera.zoom + halfTile;
+
+    ctx.save();
+
+    if (m.type === "death") {
+      // Red × mark, fading out
+      const size = Math.max(4, 6 * camera.zoom);
+      ctx.globalAlpha = m.opacity * 0.8;
+      ctx.strokeStyle = "#ff3333";
+      ctx.lineWidth = Math.max(1.5, 2 * camera.zoom);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(sx - size, sy - size);
+      ctx.lineTo(sx + size, sy + size);
+      ctx.moveTo(sx + size, sy - size);
+      ctx.lineTo(sx - size, sy + size);
+      ctx.stroke();
+    } else if (m.type === "attack_zone") {
+      // Red pulsing translucent circle
+      const baseRadius = (m.radius ?? 5) * tileScreenSize;
+      const pulse = 1 + 0.1 * Math.sin(m.pulsePhase);
+      const r = baseRadius * pulse;
+      ctx.globalAlpha = m.opacity * 0.25;
+      ctx.fillStyle = "#ff2200";
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      // Outline ring
+      ctx.globalAlpha = m.opacity * 0.5;
+      ctx.strokeStyle = "#ff4400";
+      ctx.lineWidth = Math.max(1, 2 * camera.zoom);
+      ctx.stroke();
+    } else if (m.type === "critical_front") {
+      // Breathing red highlight overlay
+      const baseRadius = (m.radius ?? 6) * tileScreenSize;
+      const breath = 0.5 + 0.5 * Math.sin(m.pulsePhase * 0.8);
+      ctx.globalAlpha = m.opacity * 0.2 * breath;
+      ctx.fillStyle = "#ff0000";
+      ctx.beginPath();
+      ctx.arc(sx, sy, baseRadius, 0, Math.PI * 2);
+      ctx.fill();
+      // Inner brighter ring
+      ctx.globalAlpha = m.opacity * 0.4 * breath;
+      ctx.strokeStyle = "#ff3300";
+      ctx.lineWidth = Math.max(2, 3 * camera.zoom);
+      ctx.setLineDash([8, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
 
     ctx.restore();

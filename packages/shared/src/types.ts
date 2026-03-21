@@ -431,6 +431,20 @@ export interface DiagnosticEntry {
   message: string;
 }
 
+// --- Battle Markers (Prompt 5: battlefield visual awareness) ---
+
+export interface BattleMarker {
+  id: string;
+  type: "attack_zone" | "death" | "critical_front";
+  x: number;
+  y: number;
+  radius?: number;
+  createdAt: number;
+  expiresAt?: number;
+  opacity: number;
+  pulsePhase: number;
+}
+
 // --- Game State (the big one) ---
 
 export interface GameState {
@@ -473,6 +487,10 @@ export interface GameState {
   doctrines: import("./doctrine").StandingOrder[];
   doctrineCooldowns: Record<string, number>; // doctrineId → last alert game time
   tasks: TaskCard[];
+  battleMarkers: BattleMarker[];
+  recentDeaths: { x: number; y: number; time: number }[];
+  battleMarkerScanAccum: number;
+  battleMarkerDeathCursor: number;
 }
 
 // --- Task Card (Prompt 3: visible task tracking) ---

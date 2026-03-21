@@ -18,3 +18,4 @@ export { checkDoctrines, cancelDoctrine } from "./doctrine";
 export { findBestReinforcements, generateCrisisCard } from "./crisisResponse";
 export type { ReinforceCandidate } from "./crisisResponse";
 export { updateTasks, computeTaskPriority } from "./taskTracker";
+export { updateBattleMarkers } from "./battleAwareness";

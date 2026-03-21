@@ -7,6 +7,7 @@ import {
   renderUnits,
   renderFog,
   renderCombatEffects,
+  drawBattleMarkers,
   renderSelectionBox,
   renderInfoPanel,
   renderTags,
@@ -48,6 +49,7 @@ import {
   findBestReinforcements,
   generateCrisisCard,
   updateTasks,
+  updateBattleMarkers,
 } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
@@ -875,6 +877,9 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       // --- Event Detection (Day 16A) ---
       processReportSignals(state, dt);
 
+      // --- Battle Awareness (Prompt 5) ---
+      updateBattleMarkers(state, dt);
+
       // --- Doctrine Checks ---
       const crises = checkDoctrines(state);
       for (const crisis of crises) {
@@ -1130,6 +1135,9 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
 
       // 5. Combat effects (attack lines + explosions) — drawn above units
       renderCombatEffects(ctx, state.combatEffects, camera, state.fog, state.time);
+
+      // 5.5 Battle markers (attack zones, death marks, critical fronts)
+      drawBattleMarkers(ctx, state.battleMarkers, camera, state.fog, state.time);
 
       // 6. Selection box (while dragging)
       if (input.isSelecting) {
