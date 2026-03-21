@@ -149,6 +149,26 @@ export function generateDigestV1(
     }
   }
 
+  // Unassigned units summary — so LLM knows available unit types outside squads
+  {
+    const assignedIds = new Set<number>();
+    for (const sq of state.squads) {
+      for (const id of sq.unitIds) assignedIds.add(id);
+    }
+    const unassignedCounts = new Map<string, number>();
+    state.units.forEach((u) => {
+      if (u.team !== "player" || u.state === "dead") return;
+      if (assignedIds.has(u.id)) return;
+      unassignedCounts.set(u.type, (unassignedCounts.get(u.type) || 0) + 1);
+    });
+    if (unassignedCounts.size > 0) {
+      digest += `---UNASSIGNED_UNITS---\n`;
+      for (const [type, count] of unassignedCounts) {
+        digest += `${count}×${type}\n`;
+      }
+    }
+  }
+
   // Day 10.5: Player selected units — detailed info (max 8 lines, P2-5)
   if (playerSelectedUnitIds.length > 0) {
     digest += `---PLAYER_SELECTED---\n`;

@@ -48,6 +48,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   "trade",
   "patrol",
   "sabotage",
+  "capture",
 ];
 
 // ── Diagnostics helper ──
@@ -122,6 +123,30 @@ export function isIntentSupported(type: IntentType): boolean {
  * Day 7 MVP: supports attack / defend / retreat / recon / hold.
  * Unsupported intents return { orders: [], degraded: true }.
  */
+/**
+ * Normalize intent location fields: LLM often puts tag/region IDs into
+ * toFront/fromFront fields. This single-pass normalization moves them to
+ * targetRegion so all downstream resolvers get clean front-only fields.
+ */
+function normalizeIntentLocations(intent: Intent, state: GameState): Intent {
+  const normalized = { ...intent };
+  for (const field of ["toFront", "fromFront"] as const) {
+    const val = normalized[field];
+    if (!val) continue;
+    if (findFront(state, val)) continue; // genuine front — keep it
+    // Not a front: check if tag or region
+    const isTag = state.tags?.some(t => t.id === val);
+    const isRegion = state.regions.has(val);
+    if (isTag || isRegion) {
+      // Move to targetRegion (resolveTarget handles tags/regions there)
+      if (!normalized.targetRegion) normalized.targetRegion = val;
+      normalized[field] = undefined;
+    }
+    // If it's neither front/tag/region, leave it — isValidTarget will catch it
+  }
+  return normalized;
+}
+
 export function resolveIntent(
   intent: Intent,
   state: GameState,
@@ -129,7 +154,8 @@ export function resolveIntent(
   excludeUnitIds?: ReadonlySet<number>,
   selectedUnitIds?: readonly number[],  // Day 10.5: hard constraint from player box-select
 ): ResolveResult {
-  const inner = resolveIntentInner(intent, state, style, excludeUnitIds, selectedUnitIds);
+  const normalized = normalizeIntentLocations(intent, state);
+  const inner = resolveIntentInner(normalized, state, style, excludeUnitIds, selectedUnitIds);
 
   // Compute assignedUnitIds from orders (for multi-intent reserved-set tracking)
   const ids = new Set<number>();
@@ -172,6 +198,8 @@ function resolveIntentInner(
       return resolvePatrol(intent, state, style, exclude, selectedUnitIds);
     case "sabotage":
       return resolveSabotage(intent, state, style, exclude, selectedUnitIds);
+    case "capture":
+      return resolveCapture(intent, state, style, exclude, selectedUnitIds);
     default:
       return {
         orders: [],
@@ -746,6 +774,85 @@ function resolveSabotage(
   return { orders: spread.orders, log, degraded: false };
 }
 
+function resolveCapture(
+  intent: Intent,
+  state: GameState,
+  style: StyleParams,
+  exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
+): Omit<ResolveResult, "assignedUnitIds"> {
+  // Resolve target: prefer facility, fall back to front/region
+  let target: Position | null = null;
+  let facilityName = intent.targetFacility ?? "";
+
+  if (intent.targetFacility) {
+    target = findFacilityPosition(state, intent.targetFacility);
+    const fac = findFacilityById(state, intent.targetFacility);
+    if (fac) facilityName = fac.name;
+  }
+  if (!target) {
+    target = resolveTarget(intent, state);
+  }
+  if (!target) {
+    const msg = `占领命令无法定位目标: ${intent.targetFacility ?? intent.toFront ?? "未指定"}`;
+    pushDiagnostic(state, "CAPTURE_NO_TARGET", msg);
+    return { orders: [], log: msg, degraded: true };
+  }
+
+  const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
+  if (source.error) {
+    pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
+    return { orders: [], log: source.error, degraded: true };
+  }
+
+  let units = source.units;
+  // Prefer infantry for captures
+  const infantry = units.filter((u) => u.type === "infantry");
+  units = infantry.length > 0 ? infantry : units;
+
+  const count = resolveQuantity(intent.quantity ?? "some", units.length, style);
+  units = sortByDistance(units, target).slice(0, count);
+
+  if (units.length === 0) {
+    return { orders: [], log: "无可用单位执行占领任务", degraded: true };
+  }
+
+  // Move units to facility and set up capture (uses attack_move to handle hostiles en route)
+  const spread = createOrdersWithSpread(
+    units, target, state, "attack_move", mapUrgency(intent.urgency), 1.0,
+  );
+
+  if (spread.orders.length === 0) {
+    return { orders: [], log: "目标地形不可达，无法执行占领", degraded: true };
+  }
+
+  // Mark orders with targetFacilityId so the economy layer picks up capture proximity
+  if (intent.targetFacility) {
+    const fac = findFacilityById(state, intent.targetFacility);
+    for (const order of spread.orders) {
+      order.targetFacilityId = fac?.id ?? intent.targetFacility;
+    }
+  }
+
+  // Create tracking mission
+  const actualUnitIds = spread.orders.flatMap((o) => o.unitIds);
+  const squadId = intent.fromSquad || undefined;
+  createMission(state, "capture", {
+    name: `占领${facilityName || "目标"}`,
+    description: `派遣 ${actualUnitIds.length} 个单位占领目标`,
+    assignedUnitIds: actualUnitIds,
+    etaSec: 90,
+    squadId,
+    targetFacilityId: intent.targetFacility ?? undefined,
+  });
+
+  let log = `派出 ${spread.orders.length} 个单位执行占领: ${facilityName || "目标区域"}`;
+  if (spread.degradedCount > 0) {
+    log += ` (${spread.degradedCount} 个已调整目标)`;
+  }
+  return { orders: spread.orders, log, degraded: false };
+}
+
 /** Find a facility by id, type, name, or tag (returns full Facility or undefined). */
 function findFacilityById(
   state: GameState,
@@ -836,8 +943,20 @@ function resolveSourceUnits(
     if (filtered.length === 0 && units.length > 0) {
       return { units: [], error: "所有可用单位已被前序意图占用" };
     }
-    return { units: filtered };
+    units = filtered;
   }
+
+  // Prefer idle units: avoid pulling units already on a mission (defending/attacking/etc.)
+  // Unless intent.quantity is "all"/"most" (e.g. "所有人撤退"), or not enough idle units.
+  const busyStates = new Set(["defending", "attacking", "moving", "retreating"]);
+  if (intent.quantity !== "all" && intent.quantity !== "most") {
+    const idleUnits = units.filter((u) => !busyStates.has(u.state));
+    // Only use idle pool if there are enough; otherwise fall back to full pool
+    if (idleUnits.length >= 2) {
+      units = idleUnits;
+    }
+  }
+
   return { units };
 }
 

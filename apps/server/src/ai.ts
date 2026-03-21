@@ -82,7 +82,7 @@ patrolRadius: for type=patrol. small=5, medium=10, large=15. Default 10.
 
 INTENT TYPE SEMANTICS — pick the right type by meaning, not by the exact verb the commander used:
 - attack: ANY movement toward a target with hostile intent. Covers: move, send, advance, push, charge, deploy (offensively), go to, head to, assault, strike. If units need to GO somewhere and fight, this is attack.
-- defend: Hold or fortify a position. Covers: protect, guard, secure, hold the line, dig in, deploy (defensively), set up defensive positions.
+- defend: Hold or fortify a position. If a destination is given (toFront/targetRegion), units MOVE there and then defend — no separate move intent needed. Covers: protect, guard, secure, hold the line, dig in, deploy (defensively), set up defensive positions.
 - retreat: Pull back toward safety. Covers: fall back, withdraw, pull out, evacuate, disengage.
 - recon: Gather intelligence. Covers: scout, spy, survey, check, investigate, look around, observe.
 - hold: Stop all movement, stay put. Covers: wait, standby, freeze, stop, cease movement, stay.
@@ -90,14 +90,29 @@ INTENT TYPE SEMANTICS — pick the right type by meaning, not by the exact verb 
 - produce: Build new units at a factory.
 - trade: Buy or sell resources.
 - sabotage: Destroy a specific enemy facility.
+- capture: Send units to occupy a neutral or enemy facility. Requires: targetFacility (facility ID from ---FACILITIES---) or toFront.
 
 COMPOUND COMMANDS — when the commander gives multi-part orders (e.g. "move to the north and set up defenses", "send scouts ahead then attack"), split into multiple intents in ONE option. Each intent is one atomic action. The engine executes them in sequence and prevents unit double-assignment.
+
+DEFEND WITH DESTINATION — A "defend" intent with toFront/targetRegion MOVES units TO that location AND sets them to defensive posture. You do NOT need a separate "attack" or "move" intent first. A single defend intent handles both movement and posture. Example: "派兵去金三角防守" →
+  intents: [{ "type": "defend", "targetRegion": "tag_1", "quantity": 4 }]
+
+UNIT QUANTITY CONSTRAINT — Every attack/defend/hold/patrol intent MUST specify "fromSquad" (an existing squad ID from the SQUADS section) or "quantity" (number of units). Never leave both empty — that causes ALL available units to be assigned, which is almost never the player's intent. If the player doesn't specify a number, use reasonable judgment (e.g. 3-6 units for a defensive position, not the entire army).
+
+RESPECT PLAYER NUMBERS — When the commander specifies exact quantities (e.g. "send 2 tanks", "派一个infantry"), you MUST use those exact numbers in "quantity". When the commander specifies a unit type (e.g. "light tank", "infantry"), you MUST set "unitType" to match. Do NOT override the player's explicit numbers with your own judgment. Example: "派遣两个light tank去防守，一个infantry去侦察" →
+  intents: [
+    { "type": "defend", "targetRegion": "tag_1", "unitType": "armor", "quantity": 2 },
+    { "type": "recon", "toFront": "front_west", "unitType": "infantry", "quantity": 1 }
+  ]
+
+MULTI-INTENT UNIT SEPARATION — When generating multiple intents in one option, each intent MUST use a DIFFERENT fromSquad, or you must split units by specifying different "quantity" values. Do not assign the same squad to multiple intents — the system processes intents sequentially and units claimed by the first intent become unavailable for subsequent ones.
 
 IMPORTANT:
 - You only output intents (intent arrays), never unit_ids or coordinates.
 - The engine auto-selects units and paths from intents.
 - One option can contain 1-3 intents (e.g. "attack north + defend south" = 2 intents).
 - Each intent dispatches different units; engine prevents double-assignment.
+- "fromSquad" must be an exact squad ID from the SQUADS section of the digest. Do NOT invent squad IDs. If no squads exist yet, omit the fromSquad field entirely.
 
 SQUAD SYSTEM:
 - Battlefield digest ---SQUADS--- lists squads as: leaderName(squadId,role). Example: Carter(T2,CMD) or Aiden(I1,leader).

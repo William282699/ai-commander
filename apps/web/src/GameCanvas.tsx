@@ -49,7 +49,7 @@ import {
   generateCrisisCard,
   updateTasks,
 } from "@ai-commander/core";
-import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority } from "@ai-commander/shared";
+import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import { ChatPanel } from "./ChatPanel";
@@ -363,7 +363,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       }
     }, 500);
     return () => clearInterval(id);
-  });
+  }, []);
 
   const handleTaskCancel = useCallback((taskId: string) => {
     const state = stateRef.current;
@@ -403,6 +403,47 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       task.priority = priority;
       setTaskSnapshot([...state.tasks]);
     }
+  }, []);
+
+  // Debug: Shift+D to simulate a doctrine breach (for testing crisis response cards)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "D" || !e.shiftKey) return;
+      const el = e.target as HTMLElement;
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) return;
+
+      const state = stateRef.current;
+      if (!state) return;
+      const activeDoctrine = state.doctrines.find(d => d.status === "active");
+      if (!activeDoctrine) {
+        addMessage("warning", "[DEBUG] 无活跃 doctrine，无法模拟 breach", state.time, "ops", undefined, "system");
+        return;
+      }
+      const crisis: CrisisEvent = {
+        type: "DOCTRINE_BREACH",
+        severity: "critical",
+        doctrineId: activeDoctrine.id,
+        locationTag: activeDoctrine.locationTag,
+        message: `[DEBUG] 模拟 breach @ ${activeDoctrine.locationTag}`,
+        time: state.time,
+      };
+      const channel = activeDoctrine.commander ?? "ops";
+      addMessage("urgent", crisis.message, state.time, channel, undefined, "event_report");
+      const candidates = findBestReinforcements(state, crisis, activeDoctrine);
+      const crisisOptions = generateCrisisCard(state, crisis, candidates, activeDoctrine);
+      createThread(
+        `DOCTRINE_BREACH:${activeDoctrine.id}:debug`,
+        "DOCTRINE_BREACH",
+        channel,
+        crisis.message,
+        crisis.message,
+        crisisOptions,
+        state.time,
+      );
+      addMessage("info", `[DEBUG] Crisis card 已生成 (${crisisOptions.length} 选项, ${candidates.length} 候选增援)`, state.time, "ops", undefined, "system");
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
   }, []);
 
   // Stable callback: returns current box-selected unit IDs

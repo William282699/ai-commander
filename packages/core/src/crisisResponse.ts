@@ -198,7 +198,11 @@ export function generateCrisisCard(
     intents: [retreatIntent],
   });
 
-  // Option C: Reinforce (only if >= 2 candidates)
+  // Option C: Reinforce (only if >= 2 candidates), otherwise explain why
+  if (candidates.length < 2) {
+    // Append notice to option A's description so player understands why no reinforce option
+    options[0].description += "\n⚠ 当前无可调度增援部队——所有分队均在执行高优先级任务。";
+  }
   if (candidates.length >= 2) {
     const reinforceIntents: Intent[] = candidates.slice(0, 2).map((c) => ({
       type: "attack" as const,

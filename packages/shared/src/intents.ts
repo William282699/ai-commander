@@ -17,6 +17,7 @@ export type IntentType =
   | "air_support"
   | "produce"
   | "trade"
+  | "capture"
   | "cover_retreat";
 
 export type UrgencyLevel = "low" | "medium" | "high" | "critical";

@@ -219,6 +219,7 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
       unit.state = "defending";
       if (order.target) {
         unit.target = order.target;
+        unit.waypoints = [order.target];
       }
       break;
 

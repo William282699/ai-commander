@@ -107,7 +107,8 @@ export function tick(state: GameState, dt: number): void {
     if (
       unit.state === "moving" ||
       unit.state === "retreating" ||
-      unit.state === "patrolling"
+      unit.state === "patrolling" ||
+      (unit.state === "defending" && unit.target !== null)
     ) {
       moveUnit(unit, dt, state);
     }
@@ -234,7 +235,9 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
     } else {
       unit.target = null;
       unit.waypoints = [];
-      if (unit.state !== "patrolling") {
+      if (unit.state === "defending") {
+        // Arrived at defend location — stay in defending posture
+      } else if (unit.state !== "patrolling") {
         unit.state = "idle";
         clearOneShotOrders(unit); // ⑦ release autoBehavior
       }

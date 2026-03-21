@@ -48,30 +48,26 @@ const COMMANDER_META: Record<Commander, { label: string; role: string; avatar: s
 
 // ── Phase 1: Shared intent target validator (from CommandPanel) ──
 
-function isValidTarget(intent: Intent, state: GameState): boolean {
-  if (intent.targetRegion) {
-    const lower = intent.targetRegion.toLowerCase();
-    const isTag = state.tags?.some(t => t.id === intent.targetRegion);
-    const isFront = !!findFront(state, intent.targetRegion);
-    const isRegion = state.regions.has(intent.targetRegion);
-    const isRegionFuzzy = !isRegion && (() => {
-      for (const [, r] of state.regions) {
-        if (r.id.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower)) return true;
-      }
-      return false;
-    })();
-    // LLM sometimes puts facility names (e.g. "HQ") in targetRegion — allow that
-    const isFacility = (() => {
-      for (const [, f] of state.facilities) {
-        if (f.id.toLowerCase() === lower || f.name.toLowerCase().includes(lower)) return true;
-      }
-      return false;
-    })();
-    if (!isTag && !isFront && !isRegion && !isRegionFuzzy && !isFacility) return false;
+/** Check if a string matches any known location: front, tag, region, or facility. */
+function isKnownLocation(val: string, state: GameState): boolean {
+  if (findFront(state, val)) return true;
+  if (state.tags?.some(t => t.id === val)) return true;
+  if (state.regions.has(val)) return true;
+  const lower = val.toLowerCase();
+  for (const [, r] of state.regions) {
+    if (r.id.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower)) return true;
   }
+  for (const [, f] of state.facilities) {
+    if (f.id.toLowerCase() === lower || f.name.toLowerCase().includes(lower)) return true;
+  }
+  return false;
+}
+
+function isValidTarget(intent: Intent, state: GameState): boolean {
+  if (intent.targetRegion && !isKnownLocation(intent.targetRegion, state)) return false;
   if (intent.targetFacility && !state.facilities.has(intent.targetFacility)) return false;
-  if (intent.toFront && !findFront(state, intent.toFront)) return false;
-  if (intent.fromFront && !findFront(state, intent.fromFront)) return false;
+  if (intent.toFront && !isKnownLocation(intent.toFront, state)) return false;
+  if (intent.fromFront && !isKnownLocation(intent.fromFront, state)) return false;
   if (intent.fromSquad) {
     const fs = intent.fromSquad.toLowerCase();
     const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
@@ -123,6 +119,7 @@ function canAutoExecute(
     if (!selectedIds || selectedIds.length === 0) return { auto: false, reason: "no_selected_units" };
     if (intent.fromSquad) return { auto: false, reason: "anchor_mismatch" };
   }
+
 
   if (!isValidTarget(intent, state)) return { auto: false, reason: "invalid_intent_fields" };
 
@@ -422,8 +419,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       const intents = opt.intents ?? [opt.intent];
 
       for (const intent of intents) {
+        // Soft-fix: clear invalid fromSquad so engine auto-selects units
+        if (intent.fromSquad) {
+          const fs = intent.fromSquad.toLowerCase();
+          const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
+          const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
+          if (!isSquad && !isCommander) {
+            addMessage("warning", `分队 ${intent.fromSquad} 不存在，将自动分配单位`, state.time, thread.channel, undefined, "command_ack");
+            intent.fromSquad = undefined;
+          }
+        }
+      
         if (!isValidTarget(intent, state)) {
-          const field = intent.fromSquad || intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
+          const field = intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
           addMessage("warning", `目标 ${field} 不存在`, state.time, thread.channel, undefined, "command_ack");
           return;
         }
@@ -715,8 +723,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     const intents = opt.intents ?? [opt.intent];
 
     for (const intent of intents) {
+      // Soft-fix: if fromSquad is invalid, clear it so the engine auto-selects units
+      if (intent.fromSquad) {
+        const fs = intent.fromSquad.toLowerCase();
+        const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
+        const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
+        if (!isSquad && !isCommander) {
+          addMessage("warning", `分队 ${intent.fromSquad} 不存在，将自动分配单位`, state.time, ch, undefined, "command_ack");
+          intent.fromSquad = undefined;
+        }
+      }
+    
       if (!isValidTarget(intent, state)) {
-        const field = intent.fromSquad || intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
+        const field = intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
         addMessage("warning", `目标 ${field} 不存在`, state.time, ch, undefined, "command_ack");
         setClarification("命令引用了不存在的目标，请重新描述");
         return;
@@ -789,6 +808,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         hold: `固守 ${locationHint || "阵地"}`,
         patrol: `巡逻 ${locationHint || "区域"}`,
         reinforce: `增援 ${locationHint || "前线"}`,
+        capture: `占领 ${primaryIntent.targetFacility || locationHint || "设施"}`,
         sabotage: `破坏 ${primaryIntent.targetFacility || locationHint || "设施"}`,
         produce: `生产 ${primaryIntent.produceType || "单位"}`,
         trade: `交易 ${primaryIntent.tradeAction || "资源"}`,

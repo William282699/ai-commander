@@ -19,7 +19,7 @@ export const VALID_ACTIONS: readonly OrderAction[] = [
 export const VALID_INTENT_TYPES: readonly IntentType[] = [
   "reinforce", "attack", "defend", "retreat", "flank",
   "sabotage", "recon", "patrol", "escort", "hold",
-  "air_support", "produce", "trade", "cover_retreat",
+  "air_support", "produce", "trade", "capture", "cover_retreat",
 ] as const;
 
 // Tactical planner supported intent types (Day 7 base + Day 9 economy + Day 11 sabotage).
@@ -33,6 +33,7 @@ export const DAY7_SUPPORTED_INTENT_TYPES: readonly IntentType[] = [
   "trade",
   "patrol",
   "sabotage",
+  "capture",
 ] as const;
 
 const VALID_URGENCY: readonly UrgencyLevel[] = ["low", "medium", "high", "critical"];
