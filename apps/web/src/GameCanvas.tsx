@@ -50,7 +50,9 @@ import {
   generateCrisisCard,
   updateTasks,
   updateBattleMarkers,
+  processAdvisorTriggers,
 } from "@ai-commander/core";
+import type { AdvisorTriggerResult } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
@@ -879,6 +881,68 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
 
       // --- Battle Awareness (Prompt 5) ---
       updateBattleMarkers(state, dt);
+
+      // --- Advisor Triggers (Prompt 6) ---
+      const advisorTriggers = processAdvisorTriggers(state);
+      for (const trig of advisorTriggers) {
+        if (trig.type === "crisis_card") {
+          // Build synthetic doctrine + crisis for generateCrisisCard reuse
+          const locationTag = trig.event.type === "FACILITY_LOST" && trig.event.entityId
+            ? (state.facilities.get(trig.event.entityId)?.regionId ?? trig.event.entityId)
+            : (trig.event.entityId ?? "unknown");
+          const syntheticDoctrine = {
+            id: `advisor_trig_${Date.now()}`,
+            type: "must_hold" as const,
+            commander: trig.channel,
+            locationTag,
+            priority: "high" as const,
+            allowAutoReinforce: true,
+            assignedSquads: [] as string[],
+            createdAt: state.time,
+            status: "active" as const,
+          };
+          const syntheticCrisis = {
+            type: "DOCTRINE_BREACH" as const,
+            severity: "critical" as const,
+            doctrineId: syntheticDoctrine.id,
+            locationTag,
+            message: trig.event.message,
+            time: state.time,
+          };
+          const candidates = findBestReinforcements(state, syntheticCrisis, syntheticDoctrine);
+          const crisisOptions = generateCrisisCard(state, syntheticCrisis, candidates, syntheticDoctrine);
+          if (crisisOptions.length > 0) {
+            const threadKey = `ADVISOR_CRISIS:${trig.event.type}:${trig.event.entityId ?? "global"}`;
+            createThread(
+              threadKey,
+              trig.event.type,
+              trig.channel,
+              trig.event.message,
+              trig.event.message,
+              crisisOptions,
+              state.time,
+            );
+          }
+        } else if (trig.type === "llm_advice") {
+          // Fire-and-forget /api/brief call
+          const digest = buildDigest(state, [], [], []);
+          const evtInfo = `[${trig.event.type}] ${trig.event.message}`;
+          const capturedTime = state.time;
+          const ch = trig.channel;
+          fetch(`${API_URL}/api/brief`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ digest: `${evtInfo}\n\n${digest}`, channel: ch }),
+          })
+            .then((r) => r.json())
+            .then((data) => {
+              if (data?.brief) {
+                addMessage("info", data.brief, capturedTime, ch, undefined, "event_report");
+              }
+            })
+            .catch(() => {}); // advisor trigger brief failure is silent
+        }
+      }
 
       // --- Doctrine Checks ---
       const crises = checkDoctrines(state);

@@ -235,5 +235,6 @@ export function createInitialGameState(): GameState {
     recentDeaths: [],
     battleMarkerScanAccum: 0,
     battleMarkerDeathCursor: 0,
+    advisorTriggerCooldowns: {},
   };
 }

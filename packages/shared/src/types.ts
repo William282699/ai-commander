@@ -491,6 +491,7 @@ export interface GameState {
   recentDeaths: { x: number; y: number; time: number }[];
   battleMarkerScanAccum: number;
   battleMarkerDeathCursor: number;
+  advisorTriggerCooldowns: Record<string, number>; // ruleKey → last trigger game time
 }
 
 // --- Task Card (Prompt 3: visible task tracking) ---

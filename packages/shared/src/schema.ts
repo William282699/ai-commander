@@ -198,6 +198,12 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
       }
       if (intents.length === 0) return null;
 
+      // Prompt6: cap intents per option at 5 to match schema safety limit
+      if (intents.length > 5) {
+        console.warn(`[schema] Option "${o.label}" had ${intents.length} intents — truncated to 5`);
+        intents = intents.slice(0, 5);
+      }
+
       return {
         label: o.label,
         description: o.description,

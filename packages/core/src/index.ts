@@ -19,3 +19,5 @@ export { findBestReinforcements, generateCrisisCard } from "./crisisResponse";
 export type { ReinforceCandidate } from "./crisisResponse";
 export { updateTasks, computeTaskPriority } from "./taskTracker";
 export { updateBattleMarkers } from "./battleAwareness";
+export { processAdvisorTriggers } from "./advisorTrigger";
+export type { AdvisorTriggerResult } from "./advisorTrigger";
