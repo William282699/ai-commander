@@ -5,7 +5,17 @@
 // chat bubbles in the middle, input at the bottom.
 // ============================================================
 
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+
+// ── Push-to-Talk: SpeechRecognition type shim ──
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SpeechRecClass = { new (): any };
+declare global {
+  interface Window {
+    SpeechRecognition?: SpeechRecClass;
+    webkitSpeechRecognition?: SpeechRecClass;
+  }
+}
 import { OrgTree } from "./OrgTree";
 import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, TaskCard, TaskPriority } from "@ai-commander/shared";
@@ -45,6 +55,29 @@ const COMMANDER_META: Record<Commander, { label: string; role: string; avatar: s
   marcus: { label: "马克斯上尉", role: "作战", avatar: "🎖️" },
   emily: { label: "艾米莉中尉", role: "后勤", avatar: "📦" },
 };
+
+// ── Voice confirmations per commander personality ──
+const VOICE_CONFIRMS: Record<Commander, string[]> = {
+  chen: [
+    "Yes sir!", "Copy that!", "On it!", "Got it, moving out!",
+    "Roger that, let's go!", "Hell yeah, consider it done!",
+    "Loud and clear!", "You got it, boss!",
+  ],
+  marcus: [
+    "Roger, executing now.", "Understood, sir.", "Copy that, General.",
+    "Affirmative. Orders received.", "Yes sir, proceeding as planned.",
+    "Acknowledged. Moving to execute.", "Will do, Commander.",
+  ],
+  emily: [
+    "Got it!", "Copy that, on my way.", "Understood, I'll handle it.",
+    "Roger, coordinating now.", "Affirmative, resources allocated.",
+    "Right away, Commander.", "Consider it done, sir.",
+  ],
+};
+function pickVoiceConfirm(commander: Commander): string {
+  const pool = VOICE_CONFIRMS[commander];
+  return pool[Math.floor(Math.random() * pool.length)];
+}
 
 // ── Phase 1: Shared intent target validator (from CommandPanel) ──
 
@@ -249,6 +282,114 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const [declinedContext, setDeclinedContext] = useState<string | null>(null);
   const [streamingText, setStreamingText] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // ── Push-to-Talk state ──
+  type PTTStatus = "idle" | "listening" | "error" | "unsupported";
+  const SpeechRecCtor = typeof window !== "undefined"
+    ? (window.SpeechRecognition ?? window.webkitSpeechRecognition ?? null)
+    : null;
+  const [pttStatus, setPttStatus] = useState<PTTStatus>(SpeechRecCtor ? "idle" : "unsupported");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pttRecRef = useRef<any>(null);
+
+  // ── TTS (Text-to-Speech) for streaming readback ──
+  const hasTTS = typeof window !== "undefined" && "speechSynthesis" in window;
+  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const ttsBufferRef = useRef("");        // accumulates streamed text not yet spoken
+  const ttsSpokenLenRef = useRef(0);      // how many chars of accumulatedText we already spoke
+
+  const ttsSpeakSentence = useCallback((text: string) => {
+    if (!hasTTS || !text.trim()) return;
+    const synth = window.speechSynthesis;
+    const utt = new SpeechSynthesisUtterance(text.trim());
+    utt.lang = "en-US";
+    utt.rate = 1.1;
+    synth.speak(utt);
+  }, [hasTTS]);
+
+  /** Feed new accumulated text; extracts complete sentences and queues them for TTS */
+  const ttsFeedChunk = useCallback((accumulated: string) => {
+    if (!ttsEnabled || !hasTTS) return;
+    const newText = accumulated.slice(ttsSpokenLenRef.current);
+    if (!newText) return;
+    // Split on sentence-ending punctuation, keeping delimiters
+    const parts = newText.split(/(?<=[.!?;,\n])\s*/);
+    // If last part doesn't end with punctuation, keep it buffered
+    const lastPart = parts[parts.length - 1];
+    const lastComplete = /[.!?;,\n]$/.test(lastPart);
+    const toSpeak = lastComplete ? parts : parts.slice(0, -1);
+    const spoken = toSpeak.join(" ");
+    if (spoken.trim()) {
+      ttsSpeakSentence(spoken);
+      ttsSpokenLenRef.current += spoken.length;
+    }
+  }, [ttsEnabled, hasTTS, ttsSpeakSentence]);
+
+  /** Flush remaining buffered TTS text (call on stream end) */
+  const ttsFlush = useCallback((accumulated: string) => {
+    if (!ttsEnabled || !hasTTS) return;
+    const remaining = accumulated.slice(ttsSpokenLenRef.current);
+    if (remaining.trim()) ttsSpeakSentence(remaining);
+    ttsSpokenLenRef.current = 0;
+  }, [ttsEnabled, hasTTS, ttsSpeakSentence]);
+
+  /** Cancel all queued TTS and reset */
+  const ttsCancel = useCallback(() => {
+    if (hasTTS) window.speechSynthesis.cancel();
+    ttsSpokenLenRef.current = 0;
+  }, [hasTTS]);
+
+  const startPTT = useCallback(() => {
+    if (!SpeechRecCtor || loading) return;
+    const rec = new SpeechRecCtor();
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    rec.continuous = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rec.onresult = (e: any) => {
+      let interim = "";
+      let final_ = "";
+      for (let i = 0; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) final_ += r[0].transcript;
+        else interim += r[0].transcript;
+      }
+      setMessage(prev => {
+        const base = prev.replace(/\u200B.*$/, ""); // strip previous interim
+        if (final_) return base + final_ + (interim ? "\u200B" + interim : "");
+        return base + (interim ? "\u200B" + interim : "");
+      });
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rec.onerror = (e: any) => {
+      if (e.error === "not-allowed") setPttStatus("error");
+      if (e.error !== "aborted") console.warn("[PTT] error:", e.error);
+    };
+    rec.onend = () => {
+      setMessage(prev => {
+        const clean = prev.replace(/\u200B.*$/, "");
+        // Auto-send if we got final text
+        if (clean.trim()) {
+          setTimeout(() => {
+            const sendBtn = document.querySelector("[data-send-btn]") as HTMLButtonElement | null;
+            sendBtn?.click();
+          }, 50);
+        }
+        return clean;
+      });
+      setPttStatus(s => (s === "error" ? s : "idle"));
+      pttRecRef.current = null;
+    };
+    pttRecRef.current = rec;
+    setPttStatus("listening");
+    rec.start();
+  }, [SpeechRecCtor, loading]);
+
+  const stopPTT = useCallback(() => {
+    if (pttRecRef.current) {
+      pttRecRef.current.stop();
+    }
+  }, []);
 
   // P1: snapshot selected unit IDs at sendCommand time
   const selectedIdsSnapshotRef = useRef<number[] | undefined>(undefined);
@@ -711,6 +852,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       let gotOptions = false;
 
       setStreamingText("");
+      ttsCancel(); // reset TTS for new stream
+      ttsSpokenLenRef.current = 0;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -732,6 +875,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             if (event.type === "text") {
               accumulatedText += event.content;
               setStreamingText(accumulatedText);
+              ttsFeedChunk(accumulatedText);
             } else if (event.type === "options") {
               gotOptions = true;
               setStreamingText(null);
@@ -774,6 +918,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           }
         }
       }
+
+      // Flush any remaining TTS text
+      ttsFlush(accumulatedText);
 
       if (!gotOptions) {
         setStreamingText(null);
@@ -873,10 +1020,17 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     }
 
     if (allOrders.length > 0) {
+      // Pick personality-appropriate voice confirmation
+      const approveCommander = COMMANDERS.find(c => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
+      const voiceConfirm = pickVoiceConfirm(approveCommander);
       if (mode === "auto") {
-        addMessage("info", `Copy that sir. ${cleanLabel}`, state.time, ch, undefined, "command_ack");
+        addMessage("info", `${voiceConfirm} ${cleanLabel}`, state.time, ch, undefined, "command_ack");
       } else {
-        addMessage("info", `Roger. Executing ${letter}: ${cleanLabel}`, state.time, ch, undefined, "command_ack");
+        addMessage("info", `${voiceConfirm} Executing ${letter}: ${cleanLabel}`, state.time, ch, undefined, "command_ack");
+      }
+      // TTS readback of confirmation
+      if (ttsEnabled && hasTTS) {
+        ttsSpeakSentence(voiceConfirm);
       }
       applyOrders(state, allOrders);
 
@@ -1380,6 +1534,44 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           disabled={loading}
           style={inputStyle}
         />
+        {/* Push-to-Talk button */}
+        <button
+          onPointerDown={(e) => { e.preventDefault(); startPTT(); }}
+          onPointerUp={stopPTT}
+          onPointerCancel={stopPTT}
+          onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }}
+          disabled={pttStatus === "unsupported" || loading}
+          style={{
+            ...pttBtnStyle,
+            background: pttStatus === "listening" ? "#dc2626" : pttStatus === "error" ? "#7f1d1d" : "#1e3a5f",
+            opacity: pttStatus === "unsupported" || loading ? 0.35 : 1,
+            cursor: pttStatus === "unsupported" || loading ? "default" : "pointer",
+          }}
+          title={
+            pttStatus === "unsupported" ? "浏览器不支持语音识别"
+            : pttStatus === "error" ? "麦克风权限被拒绝，请在浏览器设置中允许"
+            : pttStatus === "listening" ? "松开结束录音并发送"
+            : "按住说话"
+          }
+        >
+          {pttStatus === "listening" ? "🔴" : "🎤"}
+        </button>
+        {/* TTS toggle */}
+        {hasTTS && (
+          <button
+            onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) ttsCancel(); }}
+            style={{
+              ...pttBtnStyle,
+              background: ttsEnabled ? "#1d4ed8" : "#1e3a5f",
+              opacity: 1,
+              cursor: "pointer",
+              fontSize: 14,
+            }}
+            title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}
+          >
+            {ttsEnabled ? "🔊" : "🔇"}
+          </button>
+        )}
         {onCreateSquad && (
           <button
             onClick={() => onCreateSquad(selectedCommanders[0])}
@@ -1400,6 +1592,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           </button>
         )}
         <button
+          data-send-btn
           onClick={sendCommand}
           disabled={loading || !message.trim()}
           style={{
@@ -1749,6 +1942,20 @@ const warBtnStyle: React.CSSProperties = {
   fontWeight: "bold",
   cursor: "pointer",
   whiteSpace: "nowrap",
+};
+
+const pttBtnStyle: React.CSSProperties = {
+  background: "#1e3a5f",
+  color: "#e2e8f0",
+  border: "1px solid #2563eb",
+  borderRadius: 4,
+  padding: "6px 8px",
+  fontSize: 11,
+  fontFamily: "monospace",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+  userSelect: "none",
+  touchAction: "none",
 };
 
 const sendBtnStyle: React.CSSProperties = {
