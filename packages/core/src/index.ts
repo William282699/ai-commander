@@ -1,9 +1,10 @@
 export { applyOrders, applyEnemyOrders, replaceProvisionalOrders, applyPlayerCommands, releaseManualOverride } from "./applyOrders";
 export { tick, canUnitEnterTile } from "./sim";
 export { calculateDamage, processCombat } from "./combat";
+export { processRegen } from "./regen";
 export { createFogState, updateFog } from "./fog";
 export { processEconomy, enqueueProduction, canUnitMove, isMechanized } from "./economy";
-export { processEnemyAI, resetEnemyAITimer, resetEnemyProdToggle } from "./enemyAI";
+export { processEnemyAI, resetEnemyAITimer, resetEnemyProdToggle, resetAttackWaveState } from "./enemyAI";
 export { processAutoBehavior, resetAutoBehaviorTimer } from "./autoBehavior";
 export { processMissions, createMission, resetMissionCounter } from "./missions";
 export type { CreateMissionOpts } from "./missions";

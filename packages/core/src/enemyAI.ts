@@ -45,8 +45,31 @@ export function processEnemyAI(state: GameState, dt: number): void {
   }
 }
 
+// MVP2: Attack wave system
+let attackWaveTimer = 0;
+let attackWaveCount = 0;
+const ATTACK_WAVE_INTERVAL_MIN = 60;
+const ATTACK_WAVE_INTERVAL_MAX = 90;
+let nextWaveTime = ATTACK_WAVE_INTERVAL_MIN + Math.random() * (ATTACK_WAVE_INTERVAL_MAX - ATTACK_WAVE_INTERVAL_MIN);
+
+/** Reset attack wave state on new game session. */
+export function resetAttackWaveState(): void {
+  attackWaveTimer = 0;
+  attackWaveCount = 0;
+  nextWaveTime = ATTACK_WAVE_INTERVAL_MIN + Math.random() * (ATTACK_WAVE_INTERVAL_MAX - ATTACK_WAVE_INTERVAL_MIN);
+}
+
 function runEnemyAI(state: GameState): void {
   const assessments = assessFronts(state);
+
+  // MVP2: Attack wave check
+  attackWaveTimer += ENEMY_AI_INTERVAL;
+  if (attackWaveTimer >= nextWaveTime) {
+    attackWaveTimer = 0;
+    attackWaveCount++;
+    nextWaveTime = ATTACK_WAVE_INTERVAL_MIN + Math.random() * (ATTACK_WAVE_INTERVAL_MAX - ATTACK_WAVE_INTERVAL_MIN);
+    executeAttackWave(state, assessments);
+  }
 
   for (const assessment of assessments) {
     executeEnemyDecision(state, assessment, assessments);
@@ -65,42 +88,28 @@ export function resetEnemyProdToggle(): void {
 }
 
 function enemyProductionAI(state: GameState): void {
-  // Don't queue more than 2 items
-  if (state.productionQueue.enemy.length >= 2) return;
+  // MVP2: Allow up to 4 queued items (was 2)
+  if (state.productionQueue.enemy.length >= 4) return;
 
   const money = state.economy.enemy.resources.money;
 
-  // Count alive enemy units
-  let aliveCount = 0;
-  state.units.forEach((u) => {
-    if (u.team === "enemy" && u.state !== "dead") aliveCount++;
-  });
-
+  // MVP2: Aggressive production — 50% infantry, 30% light_tank, 20% main_tank
+  const roll = Math.random();
   let result: { ok: boolean };
-  if (aliveCount < 15) {
-    // Low troop count — prioritize infantry ($100)
-    if (money >= 100) {
-      result = enqueueProduction(state, "enemy", "infantry");
-      if (result.ok) enemyProdToggle = !enemyProdToggle;
-    }
-  } else if (aliveCount <= 25) {
-    // Mid range — alternate infantry / light_tank via toggle
-    if (enemyProdToggle && money >= 250) {
-      result = enqueueProduction(state, "enemy", "light_tank");
-      if (result.ok) enemyProdToggle = !enemyProdToggle;
-    } else if (money >= 100) {
-      result = enqueueProduction(state, "enemy", "infantry");
-      if (result.ok) enemyProdToggle = !enemyProdToggle;
-    }
-  } else {
-    // Large army — occasionally build main_tank
-    if (Math.random() < 0.4 && money >= 500) {
-      result = enqueueProduction(state, "enemy", "main_tank");
-      if (result.ok) enemyProdToggle = !enemyProdToggle;
-    } else if (money >= 100) {
-      result = enqueueProduction(state, "enemy", "infantry");
-      if (result.ok) enemyProdToggle = !enemyProdToggle;
-    }
+
+  if (roll < 0.5 && money >= 100) {
+    result = enqueueProduction(state, "enemy", "infantry");
+    if (result.ok) enemyProdToggle = !enemyProdToggle;
+  } else if (roll < 0.8 && money >= 250) {
+    result = enqueueProduction(state, "enemy", "light_tank");
+    if (result.ok) enemyProdToggle = !enemyProdToggle;
+  } else if (money >= 500) {
+    result = enqueueProduction(state, "enemy", "main_tank");
+    if (result.ok) enemyProdToggle = !enemyProdToggle;
+  } else if (money >= 100) {
+    // Fallback: infantry if can't afford desired type
+    result = enqueueProduction(state, "enemy", "infantry");
+    if (result.ok) enemyProdToggle = !enemyProdToggle;
   }
 }
 
@@ -371,6 +380,104 @@ function executePatrol(state: GameState, assessment: FrontAssessment): void {
   if (orders.length > 0) {
     applyEnemyOrders(state, orders);
   }
+}
+
+// ── MVP2: Attack Wave Execution ──
+
+function executeAttackWave(state: GameState, assessments: FrontAssessment[]): void {
+  // Wave size: 5 + 3 * (waveCount - 1), capped at available units
+  const waveSize = Math.min(5 + 3 * (attackWaveCount - 1), 20);
+
+  // Find weakest player front (lowest player power)
+  let weakestFront: FrontAssessment | null = null;
+  let weakestPower = Infinity;
+  for (const a of assessments) {
+    if (a.playerPower < weakestPower && a.playerPower >= 0) {
+      weakestPower = a.playerPower;
+      weakestFront = a;
+    }
+  }
+
+  // Gather all available enemy units (not currently attacking)
+  const availableUnits: Unit[] = [];
+  state.units.forEach((u) => {
+    if (u.team !== "enemy" || u.state === "dead" || u.hp <= 0) return;
+    if (getUnitCategory(u.type) !== "ground") return;
+    availableUnits.push(u);
+  });
+
+  if (availableUnits.length === 0) return;
+
+  // Sort by HP (strongest first)
+  availableUnits.sort((a, b) => b.hp - a.hp);
+  const attackers = availableUnits.slice(0, Math.min(waveSize, availableUnits.length));
+
+  // MVP2: Target priority — look for player commander first
+  let target: Position | null = null;
+
+  // Priority 1: Commander
+  state.units.forEach((u) => {
+    if (u.type === "commander" && u.team === "player" && u.state !== "dead" && u.hp > 0) {
+      target = { x: u.position.x, y: u.position.y };
+    }
+  });
+
+  // Priority 2: Weakest front or player HQ
+  if (!target) {
+    if (weakestFront && weakestFront.playerPower === 0) {
+      // Empty front → push toward player HQ
+      target = findPlayerHQ(state);
+    } else if (weakestFront) {
+      target = getFrontCenter(state, weakestFront.front) ?? findPlayerHQ(state);
+    } else {
+      target = findPlayerHQ(state);
+    }
+  }
+
+  const orders: Order[] = [{
+    unitIds: attackers.map((u) => u.id),
+    action: "attack_move",
+    target,
+    priority: "high",
+  }];
+
+  // MVP2: 20% chance to split attack on two fronts
+  if (Math.random() < 0.2 && assessments.length >= 2 && attackers.length >= 6) {
+    const halfCount = Math.floor(attackers.length / 2);
+    const group1 = attackers.slice(0, halfCount);
+    const group2 = attackers.slice(halfCount);
+
+    // Find second weakest front
+    const sortedFronts = [...assessments].sort((a, b) => a.playerPower - b.playerPower);
+    const secondTarget = sortedFronts.length >= 2
+      ? (getFrontCenter(state, sortedFronts[1].front) ?? target)
+      : target;
+
+    orders.length = 0;
+    orders.push({
+      unitIds: group1.map((u) => u.id),
+      action: "attack_move",
+      target,
+      priority: "high",
+    });
+    orders.push({
+      unitIds: group2.map((u) => u.id),
+      action: "attack_move",
+      target: secondTarget,
+      priority: "high",
+    });
+  }
+
+  applyEnemyOrders(state, orders);
+}
+
+function findPlayerHQ(state: GameState): Position {
+  for (const [, fac] of state.facilities) {
+    if (fac.type === "headquarters" && fac.team === "player") {
+      return { x: fac.position.x, y: fac.position.y };
+    }
+  }
+  return { x: 5, y: 5 }; // fallback: top-left
 }
 
 // ── Helpers ──

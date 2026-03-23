@@ -38,6 +38,7 @@ import {
   applyEndgamePressure,
   resetEnemyAITimer,
   resetEnemyProdToggle,
+  resetAttackWaveState,
   resetAutoBehaviorTimer,
   resetWarPhaseTimers,
   processReportSignals,
@@ -322,6 +323,9 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     winner: string;
     reason: string;
     time: number;
+    playerUnits: number;
+    enemyUnits: number;
+    isVictory: boolean;
   } | null>(null);
   const gameOverDetectedRef = useRef(false); // loop-safe flag (avoids stale closure on gameOverInfo)
 
@@ -505,14 +509,23 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       }
     }
 
-    const unitTypes = validIds
+    // MVP2: Filter out elite units (commander/elite_guard are mouse-only, not assignable to squads)
+    const squadIds = validIds.filter((id) => {
+      const u = state.units.get(id);
+      return u && !u.isPlayerControlled;
+    });
+    if (squadIds.length === 0) {
+      addMessage("info", "精英部队不可编入分队，请用鼠标直接操控", state.time, "ops", "system", "system");
+      return;
+    }
+    const unitTypes = squadIds
       .map((id) => state.units.get(id)!)
       .map((u) => u.type);
     const usedNames = getUsedLeaderNames(state.squads);
     const leaderName = pickLeaderName(usedNames);
-    const squad = createSquad(validIds, unitTypes, state.nextSquadNum, owner, leaderName);
+    const squad = createSquad(squadIds, unitTypes, state.nextSquadNum, owner, leaderName);
     state.squads.push(squad);
-    addMessage("info", `新建分队 ${squad.id}:${squad.name} (${validIds.length}人) → ${owner}`, state.time, "ops", "player", "player");
+    addMessage("info", `新建分队 ${squad.id}:${squad.name} (${squadIds.length}人) → ${owner}`, state.time, "ops", "player", "player");
   }, []);
 
   // Phase 2: OrgTree callbacks
@@ -628,6 +641,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     // Reset module-level timers so new session starts clean
     resetEnemyAITimer();
     resetEnemyProdToggle();
+    resetAttackWaveState();
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
     resetReportSignals();
@@ -662,6 +676,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     // P3: reset module-level timers for clean start (handles StrictMode / HMR)
     resetEnemyAITimer();
     resetEnemyProdToggle();
+    resetAttackWaveState();
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
     resetReportSignals();
@@ -827,44 +842,65 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
           const screenY = (tagHit.position.y * TILE_SIZE - camera.y) * camera.zoom;
           setTagMenu({ tag: tagHit, screenX: Math.round(screenX), screenY: Math.round(screenY) });
         } else if (input.selectedUnitIds.length > 0) {
-          // Check if clicking on an enemy unit (highest priority)
-          const enemyTarget = findEnemyAtPosition(state, cmd.worldX, cmd.worldY);
+          // MVP2: Filter to only controllable units (isPlayerControlled=true)
+          const controllableIds = input.selectedUnitIds.filter((id) => {
+            const u = state.units.get(id);
+            return u && u.isPlayerControlled;
+          });
 
-          if (enemyTarget) {
-            // Attack order
-            const order: Order = {
-              unitIds: [...input.selectedUnitIds],
-              action: "attack_move",
-              target: { x: enemyTarget.position.x, y: enemyTarget.position.y },
-              targetUnitId: enemyTarget.id,
-              priority: "high",
-            };
-            applyPlayerCommands(state, [order]);
-          } else {
-            // Day 13: Check if clicking on a facility → show context menu
-            const facTarget = findFacilityAtPosition(state, cmd.worldX, cmd.worldY);
-            if (facTarget) {
-              // Compute screen position for the menu
-              // Fix: camera.x/y already in pixels, don't multiply by TILE_SIZE again
-              const screenX = (facTarget.position.x * TILE_SIZE - camera.x) * camera.zoom;
-              const screenY = (facTarget.position.y * TILE_SIZE - camera.y) * camera.zoom;
-              const canCapture = !NON_CAPTURABLE_TYPES.has(facTarget.type);
-              setFacilityMenu({
-                facility: facTarget,
-                screenX: Math.round(screenX),
-                screenY: Math.round(screenY),
-                canCapture,
+          if (controllableIds.length === 0 && input.selectedUnitIds.length > 0) {
+            // All selected units are non-controllable — show voice hint
+            state.diagnostics.push({
+              time: state.time,
+              code: "VOICE_HINT",
+              message: "请用语音指挥这些部队",
+            });
+          } else if (controllableIds.length > 0) {
+            // Check if clicking on an enemy unit (highest priority)
+            const enemyTarget = findEnemyAtPosition(state, cmd.worldX, cmd.worldY);
+
+            if (controllableIds.length < input.selectedUnitIds.length) {
+              // Mixed selection — notify about non-controllable units
+              state.diagnostics.push({
+                time: state.time,
+                code: "VOICE_HINT",
+                message: "部分部队需要语音指挥",
               });
-              // Don't issue move order — menu will handle the action
-            } else {
-              // Move order (no enemy unit, no facility)
+            }
+
+            if (enemyTarget) {
+              // Attack order
               const order: Order = {
-                unitIds: [...input.selectedUnitIds],
+                unitIds: [...controllableIds],
                 action: "attack_move",
-                target: { x: cmd.worldX, y: cmd.worldY },
-                priority: "medium",
+                target: { x: enemyTarget.position.x, y: enemyTarget.position.y },
+                targetUnitId: enemyTarget.id,
+                priority: "high",
               };
               applyPlayerCommands(state, [order]);
+            } else {
+              // Day 13: Check if clicking on a facility → show context menu
+              const facTarget = findFacilityAtPosition(state, cmd.worldX, cmd.worldY);
+              if (facTarget) {
+                const screenX = (facTarget.position.x * TILE_SIZE - camera.x) * camera.zoom;
+                const screenY = (facTarget.position.y * TILE_SIZE - camera.y) * camera.zoom;
+                const canCapture = !NON_CAPTURABLE_TYPES.has(facTarget.type);
+                setFacilityMenu({
+                  facility: facTarget,
+                  screenX: Math.round(screenX),
+                  screenY: Math.round(screenY),
+                  canCapture,
+                });
+              } else {
+                // Move order (no enemy unit, no facility)
+                const order: Order = {
+                  unitIds: [...controllableIds],
+                  action: "attack_move",
+                  target: { x: cmd.worldX, y: cmd.worldY },
+                  priority: "medium",
+                };
+                applyPlayerCommands(state, [order]);
+              }
             }
           }
         }
@@ -989,10 +1025,22 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       // Uses ref instead of closure-captured gameOverInfo to avoid stale-closure re-render storm
       if (state.gameOver && !gameOverDetectedRef.current) {
         gameOverDetectedRef.current = true;
+        // Count surviving units for stats
+        let playerAlive = 0;
+        let enemyAlive = 0;
+        state.units.forEach((u) => {
+          if (u.state === "dead" || u.hp <= 0) return;
+          if (u.team === "player") playerAlive++;
+          else if (u.team === "enemy") enemyAlive++;
+        });
+        const isVictory = state.winner === "player";
         setGameOverInfo({
-          winner: state.winner === "player" ? "我方胜利" : "敌方胜利",
+          winner: isVictory ? "VICTORY" : "DEFEAT",
           reason: state.gameOverReason ?? "未知原因",
           time: state.time,
+          playerUnits: playerAlive,
+          enemyUnits: enemyAlive,
+          isVictory,
         });
       }
 
@@ -1545,14 +1593,41 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       {gameOverInfo && (
         <div style={gameOverOverlayStyle}>
           <div style={gameOverBoxStyle}>
-            <div style={{ fontSize: 28, fontWeight: "bold", color: gameOverInfo.winner === "我方胜利" ? "#4ade80" : "#ef4444" }}>
+            <div style={{
+              fontSize: 42,
+              fontWeight: "bold",
+              color: gameOverInfo.isVictory ? "#FFD700" : "#ef4444",
+              textShadow: gameOverInfo.isVictory
+                ? "0 0 20px rgba(255,215,0,0.5)"
+                : "0 0 20px rgba(239,68,68,0.5)",
+              letterSpacing: 4,
+            }}>
               {gameOverInfo.winner}
             </div>
-            <div style={{ fontSize: 14, color: "#94a3b8", marginTop: 8 }}>
+            <div style={{ fontSize: 16, color: "#e2e8f0", marginTop: 12 }}>
               {gameOverInfo.reason}
             </div>
-            <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>
-              用时 {Math.floor(gameOverInfo.time / 60)}分{Math.floor(gameOverInfo.time % 60)}秒
+            <div style={{
+              display: "flex",
+              gap: 32,
+              marginTop: 20,
+              fontSize: 13,
+              color: "#94a3b8",
+            }}>
+              <div>
+                <div style={{ color: "#64748b", fontSize: 11 }}>存活单位</div>
+                <div style={{ color: "#4ade80", fontSize: 18, fontWeight: "bold" }}>{gameOverInfo.playerUnits}</div>
+              </div>
+              <div>
+                <div style={{ color: "#64748b", fontSize: 11 }}>敌方存活</div>
+                <div style={{ color: "#ef4444", fontSize: 18, fontWeight: "bold" }}>{gameOverInfo.enemyUnits}</div>
+              </div>
+              <div>
+                <div style={{ color: "#64748b", fontSize: 11 }}>用时</div>
+                <div style={{ color: "#e2e8f0", fontSize: 18, fontWeight: "bold" }}>
+                  {Math.floor(gameOverInfo.time / 60)}:{String(Math.floor(gameOverInfo.time % 60)).padStart(2, "0")}
+                </div>
+              </div>
             </div>
             <button onClick={handleRestart} style={restartBtnStyle}>
               再来一局

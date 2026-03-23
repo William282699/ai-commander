@@ -13,6 +13,8 @@ const UNIT_PREFIX_MAP: Record<UnitType, string> = {
   light_tank: "T",
   main_tank: "T",
   artillery: "A",
+  commander: "CMD",
+  elite_guard: "E",
   // Naval
   patrol_boat: "N",
   destroyer: "N",
@@ -125,6 +127,9 @@ export function autoSquadName(squadId: string): string {
  * Create a full Squad object from selected unit IDs.
  * Caller must ensure unitIds are validated (player, alive, not in another squad).
  */
+/** MVP2: Unit types that cannot be assigned to squads (mouse-only elite units) */
+const SQUAD_EXCLUDED_TYPES: readonly UnitType[] = ["commander", "elite_guard"];
+
 export function createSquad(
   unitIds: number[],
   unitTypes: UnitType[],
@@ -133,11 +138,14 @@ export function createSquad(
   leaderName: string,
   opts?: { role?: SquadRole; parentSquadId?: string },
 ): Squad {
-  const id = autoSquadId(unitTypes, nextNums);
+  // MVP2: Filter out elite units that are mouse-only
+  const filteredIds = unitIds.filter((_, i) => !SQUAD_EXCLUDED_TYPES.includes(unitTypes[i]));
+  const filteredTypes = unitTypes.filter((t) => !SQUAD_EXCLUDED_TYPES.includes(t));
+  const id = autoSquadId(filteredTypes.length > 0 ? filteredTypes : unitTypes, nextNums);
   return {
     id,
     name: autoSquadName(id),
-    unitIds: [...unitIds],
+    unitIds: [...filteredIds],
     leader: createSquadLeader(unitIds.length),
     currentMission: null,
     missionTarget: null,

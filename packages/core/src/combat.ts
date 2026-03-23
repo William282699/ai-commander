@@ -6,6 +6,7 @@
 import type { GameState, Unit, Facility, TerrainType } from "@ai-commander/shared";
 import {
   COUNTER_MATRIX,
+  UNIT_STATS,
   AMMO_PER_ATTACK,
   AMMO_EMPTY_FIRE_MULT,
   TERRAIN_DEFENSE_BONUS,
@@ -99,6 +100,12 @@ export function calculateDamage(attacker: Unit, defender: Unit, state: GameState
   const ammo = state.economy[ecoKey].resources.ammo;
   if (ammo <= 0) {
     damage *= AMMO_EMPTY_FIRE_MULT;
+  }
+
+  // MVP2: projectileCount multiplier (commander & elite_guard fire 3 projectiles)
+  const specials = UNIT_STATS[attacker.type]?.special ?? [];
+  if (specials.includes("projectile3")) {
+    damage *= 3;
   }
 
   return Math.max(1, Math.round(damage));
@@ -207,6 +214,9 @@ export function processCombat(state: GameState, dt: number): void {
 
     target.hp -= damage;
 
+    // MVP2: record last damage time for regen delay
+    target.lastDamagedAt = now;
+
     // Consume ammo
     const ecoKey = unit.team === "player" ? "player" : "enemy" as const;
     state.economy[ecoKey].resources.ammo = Math.max(
@@ -216,15 +226,39 @@ export function processCombat(state: GameState, dt: number): void {
 
     // Attack line visual effect
     const lineColor = unit.team === "player" ? "#4488ff" : "#ff4444";
-    state.combatEffects.attackLines.push({
-      fromX: unit.position.x,
-      fromY: unit.position.y,
-      toX: target.position.x,
-      toY: target.position.y,
-      startTime: now,
-      duration: 0.15,
-      color: lineColor,
-    });
+    const attackerSpecials = UNIT_STATS[unit.type]?.special ?? [];
+    const projectileCount = attackerSpecials.includes("projectile3") ? 3 : 1;
+
+    if (projectileCount > 1) {
+      // Fan spread for multi-projectile units
+      const dx = target.position.x - unit.position.x;
+      const dy = target.position.y - unit.position.y;
+      const spreadAngle = 0.15; // radians
+      for (let p = 0; p < projectileCount; p++) {
+        const angle = (p - 1) * spreadAngle; // -spread, 0, +spread
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        state.combatEffects.attackLines.push({
+          fromX: unit.position.x,
+          fromY: unit.position.y,
+          toX: unit.position.x + dx * cos - dy * sin,
+          toY: unit.position.y + dx * sin + dy * cos,
+          startTime: now,
+          duration: 0.15,
+          color: lineColor,
+        });
+      }
+    } else {
+      state.combatEffects.attackLines.push({
+        fromX: unit.position.x,
+        fromY: unit.position.y,
+        toX: target.position.x,
+        toY: target.position.y,
+        startTime: now,
+        duration: 0.15,
+        color: lineColor,
+      });
+    }
 
     // Unit flash (handled by renderer checking lastAttackTime)
 
@@ -249,6 +283,9 @@ export function processCombat(state: GameState, dt: number): void {
       }
     }
   });
+
+  // --- MVP2: HQ attack — units near enemy HQ can damage it ---
+  processHQAttack(state, now);
 
   // --- Day 11: Facility sabotage damage ---
   processFacilitySabotage(state, now);
@@ -346,6 +383,64 @@ function processFacilitySabotage(state: GameState, now: number): void {
           if (u.state !== "dead") u.state = "idle";
         }
       });
+    }
+  });
+}
+
+// ── MVP2: HQ Attack — units within 2 tiles of enemy HQ deal damage ──
+
+const HQ_ATTACK_RANGE = 2; // tiles
+
+function processHQAttack(state: GameState, now: number): void {
+  // Collect HQ facilities
+  const hqs: Facility[] = [];
+  for (const [, f] of state.facilities) {
+    if (f.type === "headquarters" && f.hp > 0) hqs.push(f);
+  }
+  if (hqs.length === 0) return;
+
+  state.units.forEach((unit) => {
+    if (unit.hp <= 0 || unit.state === "dead") return;
+    if (unit.attackDamage <= 0 || unit.attackInterval <= 0) return;
+
+    // Only attack enemy HQ
+    for (const hq of hqs) {
+      if (hq.team === unit.team) continue;
+
+      const dx = unit.position.x - hq.position.x;
+      const dy = unit.position.y - hq.position.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > HQ_ATTACK_RANGE) continue;
+
+      // Only attack HQ if unit has no other target (no unit to fight)
+      if (unit.attackTarget !== null) {
+        const currentTarget = state.units.get(unit.attackTarget);
+        if (currentTarget && currentTarget.hp > 0 && currentTarget.state !== "dead") continue;
+      }
+
+      // Cooldown check
+      const timeSinceLastAttack = now - unit.lastAttackTime;
+      if (timeSinceLastAttack < unit.attackInterval) continue;
+
+      // Deal damage to HQ
+      unit.lastAttackTime = now;
+      const damage = Math.round(unit.attackDamage * 0.5); // reduced damage vs buildings
+      hq.hp = Math.max(0, hq.hp - damage);
+      hq.lastDamagedAt = now;
+
+      // Visual
+      const lineColor = unit.team === "player" ? "#ffaa00" : "#ff4444";
+      state.combatEffects.attackLines.push({
+        fromX: unit.position.x,
+        fromY: unit.position.y,
+        toX: hq.position.x,
+        toY: hq.position.y,
+        startTime: now,
+        duration: 0.2,
+        color: lineColor,
+      });
+
+      break; // only attack one HQ per tick
     }
   });
 }

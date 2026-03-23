@@ -56,6 +56,8 @@ export const UNIT_STATS: Record<UnitType, UnitStats> = {
   light_tank: { hp: 120, attack: 15, attackInterval: 1.5, range: 5,  speed: 3.0, cost: 250,  fuelCost: 5,  buildTime: 8,  vision: 7,  category: "ground", special: ["fast"] },
   main_tank:  { hp: 250, attack: 30, attackInterval: 2.0, range: 6,  speed: 2.0, cost: 500,  fuelCost: 10, buildTime: 12, vision: 5,  category: "ground", special: ["frontal_armor"] },
   artillery:  { hp: 80,  attack: 45, attackInterval: 4.0, range: 12, speed: 1.0, cost: 400,  fuelCost: 5,  buildTime: 10, vision: 5,  category: "ground", special: ["indirect_fire", "no_move_attack"] },
+  commander:  { hp: 400, attack: 18, attackInterval: 1.0, range: 5,  speed: 2.0, cost: 0,    fuelCost: 0,  buildTime: 0,  vision: 7,  category: "ground", special: ["regen", "projectile3"] },
+  elite_guard:{ hp: 250, attack: 18, attackInterval: 1.0, range: 5,  speed: 2.0, cost: 0,    fuelCost: 0,  buildTime: 0,  vision: 5,  category: "ground", special: ["projectile3"] },
   // Naval
   patrol_boat:{ hp: 80,  attack: 10, attackInterval: 1.0, range: 4,  speed: 4.0, cost: 150,  fuelCost: 3,  buildTime: 6,  vision: 8,  category: "naval",  special: ["fast", "shallow_water"] },
   destroyer:  { hp: 200, attack: 25, attackInterval: 1.5, range: 7,  speed: 2.5, cost: 450,  fuelCost: 8,  buildTime: 12, vision: 7,  category: "naval",  special: ["anti_air"] },
@@ -73,16 +75,18 @@ export const UNIT_STATS: Record<UnitType, UnitStats> = {
 
 type CounterKey = UnitType;
 export const COUNTER_MATRIX: Record<CounterKey, Partial<Record<CounterKey, number>>> = {
-  infantry:    { infantry: 1.0, light_tank: 0.5, main_tank: 0.25, artillery: 1.0 },
-  light_tank:  { infantry: 1.5, light_tank: 1.0, main_tank: 0.5,  artillery: 1.5 },
-  main_tank:   { infantry: 2.0, light_tank: 1.5, main_tank: 1.0,  artillery: 2.0 },
-  artillery:   { infantry: 1.5, light_tank: 1.5, main_tank: 1.2,  artillery: 1.0, destroyer: 1.0, cruiser: 0.8, carrier: 1.0 },
+  infantry:    { infantry: 1.0, light_tank: 0.5, main_tank: 0.25, artillery: 1.0, commander: 0.5, elite_guard: 0.8 },
+  light_tank:  { infantry: 1.5, light_tank: 1.0, main_tank: 0.5,  artillery: 1.5, commander: 1.0, elite_guard: 1.0 },
+  main_tank:   { infantry: 2.0, light_tank: 1.5, main_tank: 1.0,  artillery: 2.0, commander: 1.5, elite_guard: 1.5 },
+  commander:   { infantry: 1.5, light_tank: 1.0, main_tank: 1.0,  artillery: 1.5, commander: 1.0, elite_guard: 1.0 },
+  elite_guard: { infantry: 1.5, light_tank: 1.0, main_tank: 1.0,  artillery: 1.5, commander: 1.0, elite_guard: 1.0 },
+  artillery:   { infantry: 1.5, light_tank: 1.5, main_tank: 1.2,  artillery: 1.0, commander: 1.2, elite_guard: 1.2, destroyer: 1.0, cruiser: 0.8, carrier: 1.0 },
   patrol_boat: { patrol_boat: 1.0, destroyer: 0.5, cruiser: 0.25, carrier: 0.5 },
   destroyer:   { patrol_boat: 2.0, destroyer: 1.0, cruiser: 0.6,  carrier: 1.0, fighter: 1.5, bomber: 1.5, recon_plane: 1.5 },
-  cruiser:     { infantry: 1.0, light_tank: 1.0, main_tank: 0.8, artillery: 1.0, patrol_boat: 1.5, destroyer: 1.2, cruiser: 1.0, carrier: 1.2 },
-  carrier:     { infantry: 0.8, light_tank: 0.8, main_tank: 0.6, artillery: 1.2, patrol_boat: 1.0, destroyer: 0.8, cruiser: 0.6, carrier: 0.5, fighter: 1.0, bomber: 1.0, recon_plane: 1.0 },
-  fighter:     { infantry: 0.5, light_tank: 0.3, main_tank: 0.2, artillery: 0.8, patrol_boat: 0.6, destroyer: 0.4, cruiser: 0.2, carrier: 0.3, fighter: 2.0, bomber: 2.0, recon_plane: 2.0 },
-  bomber:      { infantry: 1.0, light_tank: 0.8, main_tank: 0.6, artillery: 1.5, patrol_boat: 0.8, destroyer: 0.5, cruiser: 0.4, carrier: 0.6, fighter: 0.3, bomber: 0.5, recon_plane: 0.8 },
+  cruiser:     { infantry: 1.0, light_tank: 1.0, main_tank: 0.8, artillery: 1.0, commander: 1.0, elite_guard: 1.0, patrol_boat: 1.5, destroyer: 1.2, cruiser: 1.0, carrier: 1.2 },
+  carrier:     { infantry: 0.8, light_tank: 0.8, main_tank: 0.6, artillery: 1.2, commander: 0.8, elite_guard: 0.8, patrol_boat: 1.0, destroyer: 0.8, cruiser: 0.6, carrier: 0.5, fighter: 1.0, bomber: 1.0, recon_plane: 1.0 },
+  fighter:     { infantry: 0.5, light_tank: 0.3, main_tank: 0.2, artillery: 0.8, commander: 0.5, elite_guard: 0.5, patrol_boat: 0.6, destroyer: 0.4, cruiser: 0.2, carrier: 0.3, fighter: 2.0, bomber: 2.0, recon_plane: 2.0 },
+  bomber:      { infantry: 1.0, light_tank: 0.8, main_tank: 0.6, artillery: 1.5, commander: 1.0, elite_guard: 1.0, patrol_boat: 0.8, destroyer: 0.5, cruiser: 0.4, carrier: 0.6, fighter: 0.3, bomber: 0.5, recon_plane: 0.8 },
   recon_plane: {},
 };
 

@@ -11,6 +11,7 @@ import {
   getUnitCategory,
 } from "@ai-commander/shared";
 import { processCombat } from "./combat";
+import { processRegen } from "./regen";
 import { canUnitMove, consumeMovementFuel } from "./economy";
 
 // Actions that complete when the unit reaches its target (vs defend/hold/patrol which persist)
@@ -116,6 +117,9 @@ export function tick(state: GameState, dt: number): void {
 
   // 2. Combat: auto-target, fire, apply damage, create effects
   processCombat(state, dt);
+
+  // 2.5. Regen: commander HP regen + HQ repair (after combat)
+  processRegen(state, dt);
 
   // 3. Remove dead units (after a short grace period for effects)
   const deadIds: number[] = [];

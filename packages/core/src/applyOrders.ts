@@ -23,6 +23,8 @@ export function applyOrders(state: GameState, orders: Order[]): void {
       const unit = state.units.get(unitId);
       if (!unit) continue;
       if (unit.team !== "player") continue;
+      // MVP2: elite units (commander/elite_guard) are mouse-only, skip voice/LLM orders
+      if (unit.isPlayerControlled && !order.isPlayerCommand) continue;
       if (unit.manualOverride && !order.provisional && !order.isPlayerCommand) continue;
 
       applyOrderToUnit(unit, order, state);

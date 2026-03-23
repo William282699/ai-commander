@@ -79,6 +79,24 @@ export function createInitialGameState(): GameState {
 
   // === Player units (north side) ===
 
+  // Commander — deployed near HQ (1 total)
+  const commanderUnit = createUnit(uid, "commander", "player", { x: 100, y: 12 });
+  commanderUnit.isPlayerControlled = true;
+  units.set(uid, commanderUnit);
+  uid++;
+
+  // Elite guard — surrounding commander (10 total)
+  const elitePositions: [number, number][] = [
+    [98, 11], [102, 11], [97, 13], [103, 13], [99, 10],
+    [101, 10], [96, 12], [104, 12], [98, 14], [102, 14],
+  ];
+  for (const [x, y] of elitePositions) {
+    const guard = createUnit(uid, "elite_guard", "player", { x, y });
+    guard.isPlayerControlled = true;
+    units.set(uid, guard);
+    uid++;
+  }
+
   // Infantry squads — spread across north (11 total)
   const playerInfantry: [number, number][] = [
     [85, 20],
@@ -120,45 +138,44 @@ export function createInitialGameState(): GameState {
   units.set(uid, createUnit(uid, "patrol_boat", "player", { x: 70, y: 65 }));
   uid++;
 
-  // === Enemy units (south side) ===
+  // === Enemy units (south side) — ~40 total ===
 
-  // Infantry (13 total: mirror 11 + 2 extra)
+  // Infantry (18 total)
   const enemyInfantry: [number, number][] = [
-    [85, 128],
-    [95, 130],
-    [105, 128],
-    [115, 130],
-    [45, 112], // SW hills
-    [155, 120], // SE forest
-    [75, 126],  // mirror extra
-    [125, 128], // mirror extra
-    [90, 124],  // mirror extra
-    [110, 124], // mirror extra
-    [65, 118],  // bonus infantry west
-    [145, 126], // bonus infantry east
-    [100, 132], // bonus infantry center
+    [85, 128], [95, 130], [105, 128], [115, 130],
+    [45, 112], [155, 120], [75, 126], [125, 128],
+    [90, 124], [110, 124], [65, 118], [145, 126],
+    [100, 132], [80, 130], [120, 130], [70, 122],
+    [140, 122], [100, 126],
   ];
   for (const [x, y] of enemyInfantry) {
     units.set(uid, createUnit(uid, "infantry", "enemy", { x, y }));
     uid++;
   }
 
-  // Main tanks (5 total, mirror player)
-  for (const [x, y] of [[95, 122], [105, 122], [100, 118], [90, 120], [110, 120]] as [number, number][]) {
-    units.set(uid, createUnit(uid, "main_tank", "enemy", { x, y }));
-    uid++;
-  }
-
-  // Light tanks (4 total, mirror player)
-  for (const [x, y] of [[40, 108], [150, 118], [130, 126], [145, 132]] as [number, number][]) {
+  // Light tanks (8 total)
+  for (const [x, y] of [
+    [40, 108], [150, 118], [130, 126], [145, 132],
+    [60, 116], [135, 120], [85, 122], [115, 126],
+  ] as [number, number][]) {
     units.set(uid, createUnit(uid, "light_tank", "enemy", { x, y }));
     uid++;
   }
 
-  // Artillery (2 total, mirror player)
+  // Main tanks (6 total)
+  for (const [x, y] of [
+    [95, 122], [105, 122], [100, 118], [90, 120], [110, 120], [100, 124],
+  ] as [number, number][]) {
+    units.set(uid, createUnit(uid, "main_tank", "enemy", { x, y }));
+    uid++;
+  }
+
+  // Artillery (3 total)
   units.set(uid, createUnit(uid, "artillery", "enemy", { x: 100, y: 136 }));
   uid++;
   units.set(uid, createUnit(uid, "artillery", "enemy", { x: 90, y: 134 }));
+  uid++;
+  units.set(uid, createUnit(uid, "artillery", "enemy", { x: 110, y: 136 }));
   uid++;
 
   // Patrol boat — strait south shore
@@ -167,15 +184,15 @@ export function createInitialGameState(): GameState {
 
   // === Give a few player scouts movement targets ===
 
-  // NW forest infantry scouts south toward bridge approach
-  const scout = units.get(5);
+  // NW forest infantry scouts south toward bridge approach (5th infantry = uid offset by 11 commander+guard)
+  const scout = units.get(16); // infantry at [35, 28]
   if (scout) {
     scout.target = { x: 40, y: 50 };
     scout.state = "moving";
   }
 
   // NE light tank patrols east hills (first light tank)
-  const flanker = units.get(17);
+  const flanker = units.get(28); // first light_tank at [140, 20]
   if (flanker) {
     flanker.target = { x: 165, y: 40 };
     flanker.state = "moving";
@@ -187,7 +204,15 @@ export function createInitialGameState(): GameState {
   const regionsMap = new Map(REGIONS.map((r) => [r.id, { ...r }]));
   const chokepointsMap = new Map(CHOKEPOINTS.map((c) => [c.id, { ...c }]));
 
-  // === Phase 2: Squads start empty — player creates them manually ===
+  // MVP2: Set HQ hp to 3000
+  for (const [, fac] of facilitiesMap) {
+    if (fac.type === "headquarters") {
+      fac.hp = 3000;
+      fac.maxHp = 3000;
+    }
+  }
+
+  // === Phase 2: Squads start empty — commander/elite_guard are mouse-only, not in squads ===
   const nextSquadNum: { [prefix: string]: number } = {};
   const squads: Squad[] = [];
 
@@ -203,7 +228,15 @@ export function createInitialGameState(): GameState {
     regions: regionsMap,
     chokepoints: chokepointsMap,
     fronts: FRONTS.map((f) => ({ ...f })),
-    economy: { player: makeEconomy(), enemy: makeEconomy() },
+    economy: {
+      player: makeEconomy(),
+      enemy: (() => {
+        const eco = makeEconomy();
+        eco.resources.money = 3000; // MVP2: enemy starts with more money
+        eco.baseIncome = { money: 150, fuel: 30, ammo: 30, intel: 10 }; // 1.5x income
+        return eco;
+      })(),
+    },
     fog: createFogState(),
     missions: [],
     conditionalOrders: [],

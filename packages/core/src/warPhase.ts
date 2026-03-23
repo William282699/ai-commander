@@ -121,44 +121,34 @@ function transitionTo(state: GameState, newPhase: GameState["phase"]): void {
 export function checkGameOver(state: GameState, dt: number): void {
   if (state.gameOver) return;
 
-  // 1. HQ destroyed
+  // MVP2 Rule 1: Commander killed → defeat
+  let commanderAlive = false;
+  state.units.forEach((u) => {
+    if (u.type === "commander" && u.team === "player" && u.state !== "dead" && u.hp > 0) {
+      commanderAlive = true;
+    }
+  });
+  // Only check after game has started (time > 1s to avoid false trigger before units spawn)
+  if (!commanderAlive && state.time > 1) {
+    endGame(state, "enemy", "司令阵亡");
+    return;
+  }
+
+  // MVP2 Rule 2: Player HQ destroyed → defeat
   const playerHQ = findHQ(state, "player");
-  const enemyHQ = findHQ(state, "enemy");
-
   if (playerHQ && playerHQ.hp <= 0) {
-    endGame(state, "enemy", "我方司令部被摧毁");
+    endGame(state, "enemy", "我方总部被摧毁");
     return;
   }
+
+  // MVP2 Rule 3: Enemy HQ destroyed → victory
+  const enemyHQ = findHQ(state, "enemy");
   if (enemyHQ && enemyHQ.hp <= 0) {
-    endGame(state, "player", "敌方司令部被摧毁");
+    endGame(state, "player", "敌方总部已被摧毁");
     return;
   }
 
-  // 2. Logistics collapse: fuel+ammo == 0 for LOGISTICS_ZERO_SEC
-  const pRes = state.economy.player.resources;
-  const eRes = state.economy.enemy.resources;
-
-  if (pRes.fuel + pRes.ammo === 0) {
-    state.logisticsZeroSec.player += dt;
-    if (state.logisticsZeroSec.player >= LOGISTICS_ZERO_SEC) {
-      endGame(state, "enemy", "我方后勤断裂（燃油弹药耗尽60秒）");
-      return;
-    }
-  } else {
-    state.logisticsZeroSec.player = 0;
-  }
-
-  if (eRes.fuel + eRes.ammo === 0) {
-    state.logisticsZeroSec.enemy += dt;
-    if (state.logisticsZeroSec.enemy >= LOGISTICS_ZERO_SEC) {
-      endGame(state, "player", "敌方后勤断裂（燃油弹药耗尽60秒）");
-      return;
-    }
-  } else {
-    state.logisticsZeroSec.enemy = 0;
-  }
-
-  // 3. ENDGAME timeout → forced game-over by score
+  // Fallback: ENDGAME timeout → forced game-over by score
   if (state.phase === "ENDGAME" && state.endgameStartTime !== null) {
     const endgameElapsed = state.time - state.endgameStartTime;
     if (endgameElapsed >= ENDGAME_MAX_SEC) {

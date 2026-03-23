@@ -41,7 +41,7 @@ export type TerrainType =
 
 // --- Unit Types ---
 
-export type GroundUnitType = "infantry" | "light_tank" | "main_tank" | "artillery";
+export type GroundUnitType = "infantry" | "light_tank" | "main_tank" | "artillery" | "commander" | "elite_guard";
 export type NavalUnitType = "patrol_boat" | "destroyer" | "cruiser" | "carrier";
 export type AirUnitType = "fighter" | "bomber" | "recon_plane";
 export type UnitType = GroundUnitType | NavalUnitType | AirUnitType;
@@ -49,7 +49,7 @@ export type UnitType = GroundUnitType | NavalUnitType | AirUnitType;
 export type UnitCategory = "ground" | "naval" | "air";
 
 export function getUnitCategory(type: UnitType): UnitCategory {
-  const ground: UnitType[] = ["infantry", "light_tank", "main_tank", "artillery"];
+  const ground: UnitType[] = ["infantry", "light_tank", "main_tank", "artillery", "commander", "elite_guard"];
   const naval: UnitType[] = ["patrol_boat", "destroyer", "cruiser", "carrier"];
   if (ground.includes(type)) return "ground";
   if (naval.includes(type)) return "naval";
@@ -91,6 +91,8 @@ export interface Unit {
   patrolPoints: Position[];
   orders: Order[];
   patrolTaskId: number | null; // Day 9.5: active PatrolTask id, null if not in a task
+  isPlayerControlled?: boolean; // MVP2: commander + elite_guard can receive mouse commands
+  lastDamagedAt?: number;       // MVP2: game time of last damage taken (for regen delay)
 }
 
 // --- Facility Types ---
@@ -123,6 +125,7 @@ export interface Facility {
   strategicEffect: string;
   captureProgress: number; // 0-1, who is capturing
   capturingTeam: Team | null;
+  lastDamagedAt?: number;  // MVP2: game time of last damage taken (for HQ regen delay)
 }
 
 // --- Region (LLM sees this, not tiles) ---

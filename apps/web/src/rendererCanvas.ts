@@ -67,6 +67,8 @@ const UNIT_SYMBOLS: Record<string, string> = {
   light_tank: "L",
   main_tank: "T",
   artillery: "A",
+  commander: "\u2605", // ★
+  elite_guard: "E",
   patrol_boat: "P",
   destroyer: "D",
   cruiser: "C",
@@ -75,6 +77,33 @@ const UNIT_SYMBOLS: Record<string, string> = {
   bomber: "B",
   recon_plane: "R",
 };
+
+// --- MVP2: Shape drawing helpers ---
+
+function drawStar(ctx: CanvasRenderingContext2D, cx: number, cy: number, radius: number, points: number = 5): void {
+  ctx.beginPath();
+  for (let i = 0; i < points * 2; i++) {
+    const r = i % 2 === 0 ? radius : radius * 0.45;
+    const angle = (Math.PI * i) / points - Math.PI / 2;
+    const x = cx + Math.cos(angle) * r;
+    const y = cy + Math.sin(angle) * r;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function drawHexagon(ctx: CanvasRenderingContext2D, cx: number, cy: number, radius: number): void {
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const angle = (Math.PI * 2 * i) / 6 - Math.PI / 6;
+    const x = cx + Math.cos(angle) * radius;
+    const y = cy + Math.sin(angle) * radius;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
 
 // --- Camera ---
 
@@ -248,6 +277,40 @@ export function renderFacilities(
       ctx.strokeText(fac.name, cx, cy + iconSize / 2 + 8);
       ctx.fillText(fac.name, cx, cy + iconSize / 2 + 8);
     }
+
+    // MVP2: HQ health bar (always visible)
+    if (fac.type === "headquarters") {
+      const hpRatio = fac.hp / fac.maxHp;
+      const barWidth = iconSize * 2;
+      const barHeight = Math.max(4, iconSize * 0.2);
+      const barX = cx - barWidth / 2;
+      const barY = cy - iconSize / 2 - barHeight - 4;
+
+      // Background
+      ctx.fillStyle = "rgba(0,0,0,0.7)";
+      ctx.fillRect(barX, barY, barWidth, barHeight);
+
+      // HP fill (green → yellow → red)
+      let hpColor = "#44ff44";
+      if (hpRatio < 0.3) hpColor = "#ff4444";
+      else if (hpRatio < 0.6) hpColor = "#ffaa00";
+
+      ctx.fillStyle = hpColor;
+      ctx.fillRect(barX, barY, barWidth * hpRatio, barHeight);
+
+      // HP text
+      if (camera.zoom >= 0.6) {
+        const hpText = `HP: ${Math.round(fac.hp)}/${fac.maxHp}`;
+        ctx.font = `bold ${Math.max(8, 9 * camera.zoom)}px monospace`;
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 2;
+        ctx.strokeText(hpText, cx, barY - 1);
+        ctx.fillText(hpText, cx, barY - 1);
+      }
+    }
   }
 
   // Reset text alignment
@@ -295,7 +358,9 @@ export function renderUnits(
       continue;
     }
 
-    const unitSize = Math.max(8, tileScreenSize * 0.7);
+    // MVP2: commander is 1.5x size
+    const baseUnitSize = Math.max(8, tileScreenSize * 0.7);
+    const unitSize = unit.type === "commander" ? baseUnitSize * 1.5 : baseUnitSize;
     const cx = screenX + tileScreenSize / 2;
     const cy = screenY + tileScreenSize / 2;
 
@@ -312,22 +377,47 @@ export function renderUnits(
 
     // --- Team colors ---
     const isPlayer = unit.team === "player";
-    let fillColor = isPlayer
-      ? "rgba(40,120,255,0.85)"
-      : "rgba(220,50,50,0.85)";
-    const borderColor = isPlayer ? "#1a5ab8" : "#a02020";
+    let fillColor: string;
+    let borderColor: string;
+
+    if (unit.type === "commander") {
+      // Gold star for commander
+      fillColor = "#FFD700";
+      borderColor = "#B8860B";
+    } else if (unit.type === "elite_guard") {
+      // White hexagon for elite guard
+      fillColor = isPlayer ? "#FFFFFF" : "rgba(255,180,180,0.95)";
+      borderColor = isPlayer ? "#888888" : "#a02020";
+    } else {
+      fillColor = isPlayer
+        ? "rgba(40,120,255,0.85)"
+        : "rgba(220,50,50,0.85)";
+      borderColor = isPlayer ? "#1a5ab8" : "#a02020";
+    }
 
     // --- Attack flash: briefly brighten unit when it fires ---
     const timeSinceAttack = gameTime - unit.lastAttackTime;
     if (unit.state === "attacking" && timeSinceAttack < 0.12) {
-      fillColor = isPlayer
-        ? "rgba(120,200,255,1.0)"
-        : "rgba(255,150,100,1.0)";
+      if (unit.type === "commander") {
+        fillColor = "#FFEC80";
+      } else if (unit.type === "elite_guard") {
+        fillColor = "#FFFFAA";
+      } else {
+        fillColor = isPlayer
+          ? "rgba(120,200,255,1.0)"
+          : "rgba(255,150,100,1.0)";
+      }
     }
 
     // --- Draw unit body ---
-    ctx.beginPath();
-    ctx.arc(cx, cy, unitSize / 2, 0, Math.PI * 2);
+    if (unit.type === "commander") {
+      drawStar(ctx, cx, cy, unitSize / 2);
+    } else if (unit.type === "elite_guard") {
+      drawHexagon(ctx, cx, cy, unitSize / 2);
+    } else {
+      ctx.beginPath();
+      ctx.arc(cx, cy, unitSize / 2, 0, Math.PI * 2);
+    }
     ctx.fillStyle = fillColor;
     ctx.fill();
     ctx.strokeStyle = borderColor;
