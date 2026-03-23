@@ -95,6 +95,29 @@ export interface Unit {
   lastDamagedAt?: number;       // MVP2: game time of last damage taken (for regen delay)
 }
 
+/**
+ * Units that are hard-reserved for direct player control.
+ * They may still auto-fire in combat, but they are not dispatchable by LLM/planner/auto-behavior.
+ */
+export function isManualOnlyUnit(unit: Pick<Unit, "isPlayerControlled">): boolean {
+  return unit.isPlayerControlled === true;
+}
+
+/**
+ * Player units available to planner/LLM dispatch.
+ * Excludes dead, manually overridden, and manual-only units.
+ */
+export function isDispatchablePlayerUnit(
+  unit: Pick<Unit, "team" | "state" | "manualOverride" | "isPlayerControlled">,
+): boolean {
+  return (
+    unit.team === "player" &&
+    unit.state !== "dead" &&
+    !unit.manualOverride &&
+    !isManualOnlyUnit(unit)
+  );
+}
+
 // --- Facility Types ---
 
 export type FacilityType =

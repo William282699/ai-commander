@@ -22,7 +22,7 @@ import type {
   QuantityHint,
   UnitCategoryHint,
 } from "@ai-commander/shared";
-import { getUnitCategory, UNIT_STATS, TRADE_COSTS, collectUnitsUnder } from "@ai-commander/shared";
+import { getUnitCategory, UNIT_STATS, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { createMission } from "./missions";
 
@@ -978,11 +978,7 @@ function resolveSourceUnitsRaw(
       const units = allIds
         .map((id) => state.units.get(id))
         .filter(
-          (u): u is Unit =>
-            u !== undefined &&
-            u.team === "player" &&
-            u.state !== "dead" &&
-            !u.manualOverride,
+          (u): u is Unit => u !== undefined && isDispatchablePlayerUnit(u),
         );
       if (units.length > 0) return { units };
       return { units: [], error: `分队 ${intent.fromSquad} 无可用单位（已阵亡或被手动接管）` };
@@ -998,11 +994,7 @@ function resolveSourceUnitsRaw(
       const units = Array.from(allIds)
         .map((id) => state.units.get(id))
         .filter(
-          (u): u is Unit =>
-            u !== undefined &&
-            u.team === "player" &&
-            u.state !== "dead" &&
-            !u.manualOverride,
+          (u): u is Unit => u !== undefined && isDispatchablePlayerUnit(u),
         );
       if (units.length > 0) return { units };
       return { units: [], error: `指挥官 ${intent.fromSquad} 下属无可用单位` };
@@ -1023,13 +1015,7 @@ function resolveSourceUnitsRaw(
   if (fromHint) {
     // Common LLM output: "all", "全军", etc. Treat as global pool.
     if (isAllFrontHint(fromHint)) {
-      const all: Unit[] = [];
-      state.units.forEach((u) => {
-        if (u.team === "player" && u.state !== "dead" && !u.manualOverride) {
-          all.push(u);
-        }
-      });
-      return { units: all };
+      return { units: getAllAvailablePlayerUnits(state) };
     }
 
     // Day 10.5 Fix 3: quantity=all/most with fromFront → global pool
@@ -1045,13 +1031,7 @@ function resolveSourceUnitsRaw(
       let matchedFrontCount = 0;
       for (const part of parts) {
         if (isAllFrontHint(part)) {
-          const all: Unit[] = [];
-          state.units.forEach((u) => {
-            if (u.team === "player" && u.state !== "dead" && !u.manualOverride) {
-              all.push(u);
-            }
-          });
-          return { units: all };
+          return { units: getAllAvailablePlayerUnits(state) };
         }
         const front = findFront(state, part);
         if (!front) continue;
@@ -1118,7 +1098,7 @@ function resolveSourceUnitsRaw(
 function getAllAvailablePlayerUnits(state: GameState): Unit[] {
   const all: Unit[] = [];
   state.units.forEach((u) => {
-    if (u.team === "player" && u.state !== "dead" && !u.manualOverride) {
+    if (isDispatchablePlayerUnit(u)) {
       all.push(u);
     }
   });
@@ -1161,7 +1141,7 @@ export function findFront(state: GameState, hint: string): Front | undefined {
   );
 }
 
-/** Get all alive, non-overridden player units within a front's regions. */
+/** Get all dispatchable player units within a front's regions. */
 function getUnitsOnFront(state: GameState, front: Front): Unit[] {
   const bboxes = front.regionIds
     .map((rid) => state.regions.get(rid))
@@ -1170,7 +1150,7 @@ function getUnitsOnFront(state: GameState, front: Front): Unit[] {
 
   const units: Unit[] = [];
   state.units.forEach((u) => {
-    if (u.team !== "player" || u.state === "dead" || u.manualOverride) return;
+    if (!isDispatchablePlayerUnit(u)) return;
     const inFront = bboxes.some(
       ([x1, y1, x2, y2]) =>
         u.position.x >= x1 &&

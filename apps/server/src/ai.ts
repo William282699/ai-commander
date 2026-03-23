@@ -112,6 +112,7 @@ IMPORTANT:
 - The engine auto-selects units and paths from intents.
 - One option can contain 1-5 intents (e.g. "attack north + defend south + patrol east" = 3 intents).
 - Each intent dispatches different units; engine prevents double-assignment.
+- Units listed under ---MANUAL_UNITS--- are controlled directly by the commander. Never count them as dispatchable reserves and never plan around using them.
 - "fromSquad" must be an exact squad ID from the SQUADS section of the digest. Do NOT invent squad IDs. If no squads exist yet, omit the fromSquad field entirely.
 
 SQUAD SYSTEM:

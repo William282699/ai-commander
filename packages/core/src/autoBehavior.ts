@@ -4,7 +4,7 @@
 // Directly mutates unit state (no Order[] generation).
 //
 // FIXED priority order (top-down short-circuit):
-//   1. manualOverride guard — ABSOLUTE, no exceptions
+//   1. player-controlled guard — ABSOLUTE, no exceptions
 //   2. lowHP emergency retreat (hp < 25%, overrides C1 active-orders)
 //   3. active orders skip (unit.orders.length > 0 is PRIMARY check)
 //   4. engage / patrol
@@ -13,7 +13,7 @@
 // ============================================================
 
 import type { GameState, Unit, Position, Team, PatrolTask } from "@ai-commander/shared";
-import { getUnitCategory } from "@ai-commander/shared";
+import { getUnitCategory, isManualOnlyUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 
 // ── Timer (C2: while-loop, no setInterval) ──
@@ -48,11 +48,11 @@ function runAutoBehavior(state: GameState): void {
   state.units.forEach((unit) => {
     if (unit.hp <= 0 || unit.state === "dead") return;
 
-    // ── Priority 1: manualOverride guard (ABSOLUTE, no exceptions) ──
-    if (unit.team === "player" && unit.manualOverride) return;
+    // ── Priority 1: player-controlled guard (ABSOLUTE, no exceptions) ──
+    if (unit.team === "player" && (unit.manualOverride || isManualOnlyUnit(unit))) return;
 
     // ── Priority 2: lowHP emergency retreat ──
-    // Overrides C1 (active orders), but NOT manualOverride (already filtered above)
+    // Overrides C1 (active orders), but NOT player-controlled units (already filtered above)
     if (unit.hp / unit.maxHp < LOW_HP_THRESHOLD && unit.state !== "retreating") {
       const hqPos = findTeamHQ(state, unit.team);
       const dx = hqPos.x - unit.position.x;
@@ -219,7 +219,7 @@ function processPatrolTasks(state: GameState): void {
       const u = state.units.get(uid);
       if (!u || u.state === "dead") return false;
       if (u.team !== "player") return false;
-      if (u.manualOverride) return false;
+      if (u.manualOverride || isManualOnlyUnit(u)) return false;
       if (u.patrolTaskId !== task.id) return false;
       // Dedup: if this unit is in a newer task, remove from this one
       if (unitHighestTask.get(uid) !== task.id) {

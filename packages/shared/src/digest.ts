@@ -4,6 +4,7 @@
 // ============================================================
 
 import type { GameState, Front, Resources, StyleParams, Unit, Mission, Squad, Position, CommanderKey } from "./types";
+import { isManualOnlyUnit } from "./types";
 import { collectUnitsUnder } from "./squadHierarchy";
 
 /**
@@ -149,7 +150,28 @@ export function generateDigestV1(
     }
   }
 
-  // Unassigned units summary — so LLM knows available unit types outside squads
+  // Manual-only units — visible to the LLM for awareness, but not dispatchable.
+  const manualOnlyUnits = Array.from(state.units.values()).filter(
+    (u) => u.team === "player" && u.state !== "dead" && isManualOnlyUnit(u),
+  );
+  if (manualOnlyUnits.length > 0) {
+    digest += `---MANUAL_UNITS---\n`;
+
+    const commander = manualOnlyUnits.find((u) => u.type === "commander");
+    if (commander) {
+      digest += `commander#${commander.id} hp=${Math.round(commander.hp)}/${commander.maxHp} @(${Math.round(commander.position.x)},${Math.round(commander.position.y)}) manual-only\n`;
+    }
+
+    const eliteGuards = manualOnlyUnits.filter((u) => u.type === "elite_guard");
+    if (eliteGuards.length > 0) {
+      const pos = unitsAvgPos(eliteGuards);
+      const totalHp = eliteGuards.reduce((sum, u) => sum + Math.round(u.hp), 0);
+      const totalMaxHp = eliteGuards.reduce((sum, u) => sum + u.maxHp, 0);
+      digest += `elite_guard×${eliteGuards.length} hp=${totalHp}/${totalMaxHp} @(${pos.x},${pos.y}) manual-only\n`;
+    }
+  }
+
+  // Unassigned units summary — dispatchable unit types outside squads
   {
     const assignedIds = new Set<number>();
     for (const sq of state.squads) {
@@ -158,6 +180,7 @@ export function generateDigestV1(
     const unassignedCounts = new Map<string, number>();
     state.units.forEach((u) => {
       if (u.team !== "player" || u.state === "dead") return;
+      if (isManualOnlyUnit(u)) return;
       if (assignedIds.has(u.id)) return;
       unassignedCounts.set(u.type, (unassignedCounts.get(u.type) || 0) + 1);
     });
@@ -252,4 +275,11 @@ function squadAvgPos(unitIds: number[], state: GameState): { x: number; y: numbe
   }
   if (n === 0) return { x: 0, y: 0 };
   return { x: Math.round(sx / n), y: Math.round(sy / n) };
+}
+
+function unitsAvgPos(units: Unit[]): { x: number; y: number } {
+  if (units.length === 0) return { x: 0, y: 0 };
+  const sx = units.reduce((sum, u) => sum + u.position.x, 0);
+  const sy = units.reduce((sum, u) => sum + u.position.y, 0);
+  return { x: Math.round(sx / units.length), y: Math.round(sy / units.length) };
 }
