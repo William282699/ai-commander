@@ -93,6 +93,7 @@ export interface Unit {
   patrolTaskId: number | null; // Day 9.5: active PatrolTask id, null if not in a task
   isPlayerControlled?: boolean; // MVP2: commander + elite_guard can receive mouse commands
   lastDamagedAt?: number;       // MVP2: game time of last damage taken (for regen delay)
+  entrenchLevel?: 0 | 1 | 2;   // El Alamein: infantry trench level (0=none, 1=shallow, 2=deep)
 }
 
 /**
@@ -224,6 +225,7 @@ export interface Order {
   targetUnitId?: number;
   targetFacilityId?: string;
   priority: "low" | "medium" | "high";
+  waypoints?: Position[]; // optional multi-waypoint path (from named routes)
   provisional?: boolean; // local engine guess, will be replaced by LLM
   isPlayerCommand?: boolean; // allows player-issued orders on manualOverride units
   produceUnitType?: UnitType; // for "produce" action: which unit type to build
@@ -407,7 +409,7 @@ export interface Squad {
   currentMission: string | null;   // "advance", "defend", etc.
   missionTarget: Position | null;
   morale: number;                  // 0-1, affected by casualties
-  formationStyle: "line" | "wedge" | "column";
+  formationStyle: "line" | "wedge" | "column" | "encircle";
   // Phase 2: tree hierarchy fields
   parentSquadId?: string;                // 上级 squad，undefined = 直属根指挥官
   ownerCommander: CommanderKey;          // 所属根指挥官
@@ -471,6 +473,20 @@ export interface BattleMarker {
   pulsePhase: number;
 }
 
+// --- Scenario ---
+
+export type ScenarioId = "dual_island" | "el_alamein";
+
+// --- Named Route (scenario-specific pre-defined movement paths) ---
+
+export interface NamedRoute {
+  id: string;           // "via_balbia"
+  name: string;         // "沿海公路"
+  waypoints: Position[];// ordered waypoints
+  passableFor: UnitCategory[];
+  connectedRoutes: string[]; // IDs of routes that intersect
+}
+
 // --- Game State (the big one) ---
 
 export interface GameState {
@@ -518,6 +534,13 @@ export interface GameState {
   battleMarkerScanAccum: number;
   battleMarkerDeathCursor: number;
   advisorTriggerCooldowns: Record<string, number>; // ruleKey → last trigger game time
+
+  // --- Scenario system ---
+  scenarioId: ScenarioId;
+  namedRoutes: NamedRoute[];
+  captureObjectives?: string[];  // facility IDs that must be captured for victory
+  enemyAIMode?: "offensive" | "defensive";
+  entrenchTimers: Map<number, number>;  // unitId → seconds spent stationary in defend
 }
 
 // --- Task Card (Prompt 3: visible task tracking) ---

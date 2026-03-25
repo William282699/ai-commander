@@ -1,0 +1,10 @@
+export { generateElAlameinTerrain } from "./terrainGen";
+export {
+  EL_ALAMEIN_REGIONS,
+  EL_ALAMEIN_CHOKEPOINTS,
+  EL_ALAMEIN_FACILITIES,
+  EL_ALAMEIN_FRONTS,
+  EL_ALAMEIN_ROUTES,
+  EL_ALAMEIN_CAMERA_TARGETS,
+  EL_ALAMEIN_OBJECTIVES,
+} from "./mapData";

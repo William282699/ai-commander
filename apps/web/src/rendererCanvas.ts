@@ -138,11 +138,13 @@ function buildMinimapCache(
     return new ImageData(mmWidth, mmHeight);
   }
 
-  const pixelW = mmWidth / MAP_WIDTH;
-  const pixelH = mmHeight / MAP_HEIGHT;
+  const terrainH = terrain.length;
+  const terrainW = terrain[0]?.length ?? MAP_WIDTH;
+  const pixelW = mmWidth / terrainW;
+  const pixelH = mmHeight / terrainH;
 
-  for (let row = 0; row < MAP_HEIGHT; row++) {
-    for (let col = 0; col < MAP_WIDTH; col++) {
+  for (let row = 0; row < terrainH; row++) {
+    for (let col = 0; col < terrainW; col++) {
       const t = terrain[row]?.[col] ?? "plains";
       octx.fillStyle = TERRAIN_COLORS[t];
       octx.fillRect(
@@ -170,15 +172,17 @@ export function renderTerrain(
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
 
-  // Visible tile range
+  // Visible tile range (derive bounds from terrain array, not constants)
+  const mapCols = terrain[0]?.length ?? MAP_WIDTH;
+  const mapRows = terrain.length;
   const startCol = Math.max(0, Math.floor(camera.x / TILE_SIZE));
   const startRow = Math.max(0, Math.floor(camera.y / TILE_SIZE));
   const endCol = Math.min(
-    MAP_WIDTH,
+    mapCols,
     Math.ceil((camera.x + canvasWidth / camera.zoom) / TILE_SIZE),
   );
   const endRow = Math.min(
-    MAP_HEIGHT,
+    mapRows,
     Math.ceil((camera.y + canvasHeight / camera.zoom) / TILE_SIZE),
   );
 
@@ -341,7 +345,9 @@ export function renderUnits(
     if (unit.team === "enemy") {
       const tx = Math.floor(unit.position.x);
       const ty = Math.floor(unit.position.y);
-      if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) continue;
+      const fogW = fog[0]?.length ?? MAP_WIDTH;
+      const fogH = fog.length;
+      if (tx < 0 || ty < 0 || tx >= fogW || ty >= fogH) continue;
       if (fog[ty]?.[tx] !== "visible") continue;
     }
 
@@ -424,6 +430,41 @@ export function renderUnits(
     ctx.lineWidth = 2;
     ctx.stroke();
 
+    // --- Entrench visual (trench arcs around infantry) ---
+    const entrench = unit.entrenchLevel ?? 0;
+    if (entrench > 0) {
+      ctx.save();
+      const trenchRadius = unitSize * 0.75;
+      if (entrench >= 2) {
+        // Deep trench: double arc + sandbag dots
+        ctx.strokeStyle = "#8B7355";
+        ctx.lineWidth = Math.max(2, unitSize * 0.15);
+        ctx.beginPath();
+        ctx.arc(cx, cy, trenchRadius, Math.PI * 0.15, Math.PI * 0.85);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx, cy, trenchRadius + 2, Math.PI * 0.2, Math.PI * 0.8);
+        ctx.stroke();
+        // Sandbag dots
+        ctx.fillStyle = "#A0916A";
+        for (let a = 0.25; a <= 0.75; a += 0.1) {
+          const sx = cx + Math.cos(Math.PI * a) * (trenchRadius + 4);
+          const sy = cy + Math.sin(Math.PI * a) * (trenchRadius + 4);
+          ctx.beginPath();
+          ctx.arc(sx, sy, Math.max(1, unitSize * 0.06), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        // Shallow trench: single arc
+        ctx.strokeStyle = "#A09070";
+        ctx.lineWidth = Math.max(1.5, unitSize * 0.1);
+        ctx.beginPath();
+        ctx.arc(cx, cy, trenchRadius, Math.PI * 0.2, Math.PI * 0.8);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     // --- Unit type symbol ---
     const symbol = UNIT_SYMBOLS[unit.type] || "?";
     const fontSize = Math.max(7, unitSize * 0.55);
@@ -502,15 +543,17 @@ export function renderFog(
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
 
-  // Visible tile range (same culling as terrain)
+  // Visible tile range (derive bounds from fog array)
+  const fogCols = fog[0]?.length ?? MAP_WIDTH;
+  const fogRows = fog.length;
   const startCol = Math.max(0, Math.floor(camera.x / TILE_SIZE));
   const startRow = Math.max(0, Math.floor(camera.y / TILE_SIZE));
   const endCol = Math.min(
-    MAP_WIDTH,
+    fogCols,
     Math.ceil((camera.x + canvasWidth / camera.zoom) / TILE_SIZE),
   );
   const endRow = Math.min(
-    MAP_HEIGHT,
+    fogRows,
     Math.ceil((camera.y + canvasHeight / camera.zoom) / TILE_SIZE),
   );
 
@@ -543,16 +586,19 @@ export function renderFog(
 // Render: Minimap (bottom-right corner)
 // ──────────────────────────────────────────────
 
-export const MINIMAP_WIDTH = 200;
-export const MINIMAP_HEIGHT = 150;
+export const MINIMAP_MAX_WIDTH = 200;
 export const MINIMAP_PADDING = 10;
 
-export function getMinimapRect(canvasWidth: number, canvasHeight: number) {
+export function getMinimapRect(canvasWidth: number, canvasHeight: number, mapW: number = MAP_WIDTH, mapH: number = MAP_HEIGHT) {
+  // Scale minimap to fit within max width while preserving aspect ratio
+  const aspect = mapH / mapW;
+  const w = MINIMAP_MAX_WIDTH;
+  const h = Math.round(w * aspect);
   return {
-    x: canvasWidth - MINIMAP_WIDTH - MINIMAP_PADDING,
-    y: canvasHeight - MINIMAP_HEIGHT - MINIMAP_PADDING,
-    w: MINIMAP_WIDTH,
-    h: MINIMAP_HEIGHT,
+    x: canvasWidth - w - MINIMAP_PADDING,
+    y: canvasHeight - h - MINIMAP_PADDING,
+    w,
+    h,
   };
 }
 
@@ -565,8 +611,10 @@ export function renderMinimap(
   facilities?: Facility[],
   units?: Unit[],
   fog?: Visibility[][],
+  mapW: number = MAP_WIDTH,
+  mapH: number = MAP_HEIGHT,
 ): void {
-  const mm = getMinimapRect(canvasWidth, canvasHeight);
+  const mm = getMinimapRect(canvasWidth, canvasHeight, mapW, mapH);
 
   // Background border
   ctx.fillStyle = "rgba(0,0,0,0.8)";
@@ -582,8 +630,8 @@ export function renderMinimap(
   }
   ctx.putImageData(minimapCache, mm.x, mm.y);
 
-  const pixelW = mm.w / MAP_WIDTH;
-  const pixelH = mm.h / MAP_HEIGHT;
+  const pixelW = mm.w / mapW;
+  const pixelH = mm.h / mapH;
 
   // Facility dots on minimap
   if (facilities) {
@@ -614,7 +662,7 @@ export function renderMinimap(
       if (unit.team === "enemy" && fog) {
         const tx = Math.floor(unit.position.x);
         const ty = Math.floor(unit.position.y);
-        if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) continue;
+        if (tx < 0 || ty < 0 || tx >= mapW || ty >= mapH) continue;
         if (fog[ty]?.[tx] !== "visible") continue;
       }
 
@@ -683,6 +731,100 @@ export function renderFrontLabels(
     ctx.fillText(front.name, screenX, screenY);
   }
 
+  ctx.textAlign = "start";
+  ctx.textBaseline = "alphabetic";
+}
+
+// ──────────────────────────────────────────────
+// Render: Route name labels (drawn along roads)
+// ──────────────────────────────────────────────
+
+export function renderRouteLabels(
+  ctx: CanvasRenderingContext2D,
+  routes: { id: string; name: string; waypoints: { x: number; y: number }[] }[],
+  camera: Camera,
+): void {
+  if (camera.zoom > 1.2) return; // hide when zoomed in too much (cluttered)
+
+  const fontSize = Math.max(9, 11 * camera.zoom);
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  for (const route of routes) {
+    const wps = route.waypoints;
+    if (wps.length < 2) continue;
+
+    // Place label at the midpoint waypoint
+    const midIdx = Math.floor(wps.length / 2);
+    const wp = wps[midIdx];
+    const screenX = (wp.x * TILE_SIZE - camera.x) * camera.zoom;
+    const screenY = (wp.y * TILE_SIZE - camera.y) * camera.zoom;
+
+    // Compute angle from adjacent waypoints for text rotation
+    const prev = wps[Math.max(0, midIdx - 1)];
+    const next = wps[Math.min(wps.length - 1, midIdx + 1)];
+    let angle = Math.atan2((next.y - prev.y), (next.x - prev.x));
+    // Keep text upright: flip if angle would render text upside-down
+    if (angle > Math.PI / 2) angle -= Math.PI;
+    if (angle < -Math.PI / 2) angle += Math.PI;
+
+    ctx.save();
+    ctx.translate(screenX, screenY);
+    ctx.rotate(angle);
+
+    // Background pill
+    const textW = ctx.measureText(route.name).width + 12;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    const pillH = fontSize + 6;
+    ctx.beginPath();
+    const pillR = pillH / 2;
+    ctx.roundRect(-textW / 2, -pillH / 2, textW, pillH, pillR);
+    ctx.fill();
+
+    // Text
+    ctx.fillStyle = "#ddd";
+    ctx.fillText(route.name, 0, 0);
+
+    ctx.restore();
+  }
+
+  ctx.textAlign = "start";
+  ctx.textBaseline = "alphabetic";
+}
+
+// ──────────────────────────────────────────────
+// Render: Region labels (geographic area names on the map)
+// ──────────────────────────────────────────────
+
+export function renderRegionLabels(
+  ctx: CanvasRenderingContext2D,
+  regions: { id: string; name: string; bbox: [number, number, number, number] }[],
+  camera: Camera,
+): void {
+  if (camera.zoom > 0.9) return; // only show when zoomed out enough
+
+  const fontSize = Math.max(10, 12 * camera.zoom);
+  ctx.font = `italic ${fontSize}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.globalAlpha = 0.5;
+
+  for (const region of regions) {
+    const [x1, y1, x2, y2] = region.bbox;
+    const cx = ((x1 + x2) / 2) * TILE_SIZE;
+    const cy = ((y1 + y2) / 2) * TILE_SIZE;
+    const screenX = (cx - camera.x) * camera.zoom;
+    const screenY = (cy - camera.y) * camera.zoom;
+
+    // Skip off-screen
+    if (screenX < -100 || screenY < -100 || screenX > ctx.canvas.width + 100 || screenY > ctx.canvas.height + 100) continue;
+
+    ctx.fillStyle = "#c8c0b0";
+    ctx.fillText(region.name, screenX, screenY);
+  }
+
+  ctx.globalAlpha = 1.0;
   ctx.textAlign = "start";
   ctx.textBaseline = "alphabetic";
 }
@@ -886,10 +1028,12 @@ export function renderCombatEffects(
   const tileScreenSize = TILE_SIZE * camera.zoom;
   const halfTile = tileScreenSize / 2;
 
+  const fogW = fog[0]?.length ?? MAP_WIDTH;
+  const fogH = fog.length;
   const isVisibleTile = (x: number, y: number): boolean => {
     const tx = Math.floor(x);
     const ty = Math.floor(y);
-    if (tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT) return false;
+    if (tx < 0 || tx >= fogW || ty < 0 || ty >= fogH) return false;
     return fog[ty]?.[tx] === "visible";
   };
 
@@ -979,10 +1123,12 @@ export function drawBattleMarkers(
   const tileScreenSize = TILE_SIZE * camera.zoom;
   const halfTile = tileScreenSize / 2;
 
+  const bmFogW = fog[0]?.length ?? MAP_WIDTH;
+  const bmFogH = fog.length;
   const isVisibleTile = (x: number, y: number): boolean => {
     const tx = Math.floor(x);
     const ty = Math.floor(y);
-    if (tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT) return false;
+    if (tx < 0 || tx >= bmFogW || ty < 0 || ty >= bmFogH) return false;
     return fog[ty]?.[tx] === "visible";
   };
 

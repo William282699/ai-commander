@@ -10,11 +10,14 @@ export { processMissions, createMission, resetMissionCounter } from "./missions"
 export type { CreateMissionOpts } from "./missions";
 export { createDefaultStyle, updateStyleParam } from "./styleEngine";
 export { updateGamePhase, checkGameOver, applyEndgamePressure, resetWarPhaseTimers } from "./warPhase";
-export { resolveIntent, isIntentSupported, findFront } from "./tacticalPlanner";
+export { resolveIntent, isIntentSupported, findFront, resolveRoute, resolveRouteChain } from "./tacticalPlanner";
+export { getFormationOffset, computeHeading } from "./formation";
+export type { FormationStyle } from "./formation";
 export type { ResolveResult } from "./tacticalPlanner";
 export { buildDigest } from "./intelDigest";
 export { processReportSignals, drainReportEvents, resetReportSignals } from "./reportSignals";
 export { createInitialGameState } from "./scenario";
+export { processDefensiveAI, resetDefensiveAITimer } from "./scenario/elAlamein";
 export { checkDoctrines, cancelDoctrine } from "./doctrine";
 export { findBestReinforcements, generateCrisisCard } from "./crisisResponse";
 export type { ReinforceCandidate } from "./crisisResponse";

@@ -6,6 +6,34 @@
 import type { GameState, Order, Unit, Position, TradeType, PatrolTask } from "@ai-commander/shared";
 import { TRADE_COSTS } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
+import { findPath } from "./pathfinding";
+
+/**
+ * Compute a shared A* path for a group of units heading to the same target.
+ * Uses the unit closest to the group centroid as the "leader" — all units
+ * follow the same path so they don't split around obstacles.
+ */
+function computeGroupPath(units: Unit[], target: Position, state: GameState): Position[] | null {
+  if (units.length === 0) return null;
+
+  // Find centroid of the group
+  let cx = 0, cy = 0;
+  for (const u of units) { cx += u.position.x; cy += u.position.y; }
+  cx /= units.length;
+  cy /= units.length;
+
+  // Pick leader: unit closest to centroid
+  let leader = units[0];
+  let bestDist = Infinity;
+  for (const u of units) {
+    const d = (u.position.x - cx) ** 2 + (u.position.y - cy) ** 2;
+    if (d < bestDist) { bestDist = d; leader = u; }
+  }
+
+  // A* from leader to target
+  const path = findPath(leader.position.x, leader.position.y, target.x, target.y, leader.type, state);
+  return path;
+}
 
 /**
  * Apply a batch of orders to the game state.
@@ -19,15 +47,28 @@ export function applyOrders(state: GameState, orders: Order[]): void {
       continue;
     }
 
+    // Collect eligible units for this order
+    const eligibleUnits: Unit[] = [];
     for (const unitId of order.unitIds) {
       const unit = state.units.get(unitId);
       if (!unit) continue;
       if (unit.team !== "player") continue;
-      // MVP2: elite units (commander/elite_guard) are mouse-only, skip voice/LLM orders
       if (unit.isPlayerControlled && !order.isPlayerCommand) continue;
       if (unit.manualOverride && !order.provisional && !order.isPlayerCommand) continue;
+      eligibleUnits.push(unit);
+    }
 
-      applyOrderToUnit(unit, order, state);
+    // Compute shared A* path for the group (leader = unit closest to centroid)
+    let effectiveOrder = order;
+    if (eligibleUnits.length > 1 && order.target && !order.waypoints?.length) {
+      const sharedPath = computeGroupPath(eligibleUnits, order.target, state);
+      if (sharedPath) {
+        effectiveOrder = { ...order, waypoints: sharedPath };
+      }
+    }
+
+    for (const unit of eligibleUnits) {
+      applyOrderToUnit(unit, effectiveOrder, state);
     }
   }
 }
@@ -207,37 +248,47 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
     unbindPatrolTask(unit, state);
   }
 
+  // Use route waypoints if available, otherwise just [target]
+  const orderWaypoints = (t: Position) =>
+    order.waypoints && order.waypoints.length > 0
+      ? [...order.waypoints]
+      : [t];
+
   switch (order.action) {
     case "attack_move":
       unit.state = "moving";
       unit.attackTarget = order.targetUnitId ?? null;
       if (order.target) {
-        unit.target = order.target;
-        unit.waypoints = [order.target];
+        const wps = orderWaypoints(order.target);
+        unit.target = wps[0];
+        unit.waypoints = wps;
       }
       break;
 
     case "defend":
       unit.state = "defending";
       if (order.target) {
-        unit.target = order.target;
-        unit.waypoints = [order.target];
+        const wps = orderWaypoints(order.target);
+        unit.target = wps[0];
+        unit.waypoints = wps;
       }
       break;
 
     case "retreat":
       unit.state = "retreating";
       if (order.target) {
-        unit.target = order.target;
-        unit.waypoints = [order.target];
+        const wps = orderWaypoints(order.target);
+        unit.target = wps[0];
+        unit.waypoints = wps;
       }
       break;
 
     case "flank":
       unit.state = "moving";
       if (order.target) {
-        unit.target = order.target;
-        unit.waypoints = [order.target];
+        const wps = orderWaypoints(order.target);
+        unit.target = wps[0];
+        unit.waypoints = wps;
       }
       break;
 
@@ -283,16 +334,18 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
     case "sabotage":
       unit.state = "moving";
       if (order.target) {
-        unit.target = order.target;
-        unit.waypoints = [order.target];
+        const wps = orderWaypoints(order.target);
+        unit.target = wps[0];
+        unit.waypoints = wps;
       }
       break;
 
     case "recon":
       unit.state = "moving";
       if (order.target) {
-        unit.target = order.target;
-        unit.waypoints = [order.target];
+        const wps = orderWaypoints(order.target);
+        unit.target = wps[0];
+        unit.waypoints = wps;
       }
       break;
 

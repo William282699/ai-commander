@@ -54,4 +54,8 @@ export interface Intent {
 
   // Patrol specifics (Day 9.5)
   patrolRadius?: number; // 小=5, 中=10, 大=15 (clamped [3,30])
+
+  // Named route (El Alamein scenario)
+  routeId?: string;       // "via_balbia" — single named route
+  routeIds?: string[];    // multi-segment route chain
 }

@@ -63,7 +63,9 @@ RESPONSE FORMAT — always valid JSON:
           "stealth": true/false,
           "produceType": "infantry|light_tank|main_tank|artillery|patrol_boat|destroyer|cruiser|carrier|fighter|bomber|recon_plane (only for type=produce)",
           "tradeAction": "buy_fuel|buy_ammo|buy_intel|sell_fuel|sell_ammo (only for type=trade)",
-          "patrolRadius": 10
+          "patrolRadius": 10,
+          "routeId": "route ID from ---ROUTES--- (optional, preferred path)",
+          "routeIds": ["route1","route2"] // multi-segment route chain (optional)
         }
       ]
     }
@@ -137,6 +139,7 @@ RULES:
 - urgency: 0=routine, 0.5=attention, 0.8=urgent, 1.0=critical
 - Adjust recommendations by style params: high risk→aggressive, high casualty_aversion→conservative.
 - When commander mentions buildings/facilities, prioritize matching targetFacility from ---FACILITIES--- IDs.
+- ROUTES: If ---ROUTES--- section exists, you may specify routeId to control which road/path units take. Use routeIds (array) for multi-leg journeys (e.g. desert_track then front_line_road). If omitted, engine auto-selects a route. If commander says "go via the coast" or "走沙漠小道", match to the closest route ID.
 - Commander can mark custom map points — see ---TAGS---. Match tag names first, then FACILITIES, then FRONTS. Use targetRegion for matched tag id (e.g. "tag_1"). If no match, target doesn't exist → return options:[].
 
 DOCTRINE SYSTEM (Standing Orders):

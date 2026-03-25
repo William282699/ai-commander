@@ -25,6 +25,7 @@ import type {
 import { getUnitCategory, UNIT_STATS, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { createMission } from "./missions";
+import { getFormationOffset, computeHeading, type FormationStyle } from "./formation";
 
 // ── Result type ──
 
@@ -258,6 +259,7 @@ function resolveAttack(
     if (fac && fac.team !== "player") {
       const spread = createOrdersWithSpread(
         units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
+        undefined, intent.routeId, intent.routeIds,
       );
       if (spread.orders.length === 0) {
         const msg = "目标地形不可达，无可用单位执行进攻";
@@ -288,8 +290,12 @@ function resolveAttack(
   }
 
   // ④ + ③: spread targets + passability degradation (replaces filterByTargetPassability)
+  // Look up squad formation style if dispatching from a squad
+  const squad = intent.fromSquad ? state.squads.find(s => s.id === intent.fromSquad) : undefined;
+  const formation = squad?.formationStyle as FormationStyle | undefined;
   const spread = createOrdersWithSpread(
-    units, target, state, "attack_move", mapUrgency(intent.urgency), 1.5,
+    units, target, state, "attack_move", mapUrgency(intent.urgency), 1.5, formation,
+    intent.routeId, intent.routeIds,
   );
 
   if (spread.orders.length === 0) {
@@ -1338,16 +1344,35 @@ function createOrdersWithSpread(
   action: OrderAction,
   priority: Order["priority"],
   spreadRadius: number = 1.5,
+  formationStyle?: FormationStyle,
+  routeId?: string,
+  routeIds?: string[],
 ): { orders: Order[]; degradedCount: number; skippedCount: number } {
   const orders: Order[] = [];
   let degradedCount = 0;
   let skippedCount = 0;
 
+  // Compute heading for formation offset (from centroid to target)
+  let heading = 0;
+  if (formationStyle && units.length > 1) {
+    let cx = 0, cy = 0;
+    for (const u of units) { cx += u.position.x; cy += u.position.y; }
+    cx /= units.length; cy /= units.length;
+    heading = computeHeading({ x: cx, y: cy }, center);
+  }
+
+  // Determine if we should use named route resolution
+  const useRoutes = state.namedRoutes.length > 0 && (routeId || (routeIds && routeIds.length > 0));
+
   for (let i = 0; i < units.length; i++) {
     const unit = units[i];
-    // Step 1: spread position
+    // Step 1: spread position (formation-aware or default circular)
     const spread =
-      units.length > 1 ? spreadTarget(center, i, units.length, spreadRadius) : center;
+      formationStyle && units.length > 1
+        ? getFormationOffset(center, i, units.length, formationStyle, heading)
+        : units.length > 1
+          ? spreadTarget(center, i, units.length, spreadRadius)
+          : center;
 
     // Step 2: passability check
     const sx = Math.floor(spread.x);
@@ -1370,7 +1395,72 @@ function createOrdersWithSpread(
       }
     }
 
-    orders.push({ unitIds: [unit.id], action, target: finalTarget, priority });
+    // Step 3: resolve route waypoints if available
+    let waypoints: Position[] | undefined;
+    if (useRoutes) {
+      const rIds = routeIds && routeIds.length > 0 ? routeIds : routeId ? [routeId] : [];
+      const resolved = rIds.length > 1
+        ? resolveRouteChain(state, unit.position, finalTarget, rIds)
+        : rIds.length === 1
+          ? resolveRoute(state, unit.position, finalTarget, rIds[0])
+          : null;
+      if (resolved && resolved.length > 0) {
+        waypoints = resolved;
+      }
+    }
+    // Auto-route: if no explicit route but scenario has routes and unit needs to cross
+    // far distance (>30 tiles), try to find a suitable route automatically
+    if (!waypoints && state.namedRoutes.length > 0) {
+      const dist = Math.abs(unit.position.x - finalTarget.x) + Math.abs(unit.position.y - finalTarget.y);
+      if (dist > 30) {
+        const cat = getUnitCategory(unit.type);
+        const passableRoutes = state.namedRoutes.filter(nr => nr.passableFor.includes(cat));
+
+        // Try single routes first — pick the one whose exit is closest to target
+        let bestSingle: Position[] | null = null;
+        let bestSingleExitDist = Infinity;
+        for (const nr of passableRoutes) {
+          const resolved = resolveRoute(state, unit.position, finalTarget, nr.id);
+          if (resolved && resolved.length > 1) {
+            // Check how close the last route waypoint (before appended target) gets to target
+            const lastRouteWp = resolved[resolved.length - 2]; // second-to-last is last route wp
+            const exitDist = Math.abs(lastRouteWp.x - finalTarget.x) + Math.abs(lastRouteWp.y - finalTarget.y);
+            if (exitDist < bestSingleExitDist) {
+              bestSingleExitDist = exitDist;
+              bestSingle = resolved;
+            }
+          }
+        }
+
+        // If best single route still leaves >20 tile gap to target, try 2-route chains
+        if (bestSingleExitDist > 20 && passableRoutes.length >= 2) {
+          for (let a = 0; a < passableRoutes.length; a++) {
+            for (let b = 0; b < passableRoutes.length; b++) {
+              if (a === b) continue;
+              const chain = resolveRouteChain(
+                state, unit.position, finalTarget, [passableRoutes[a].id, passableRoutes[b].id],
+              );
+              if (chain && chain.length > 0) {
+                const lastChainWp = chain[chain.length - 2];
+                const chainExitDist = lastChainWp
+                  ? Math.abs(lastChainWp.x - finalTarget.x) + Math.abs(lastChainWp.y - finalTarget.y)
+                  : Infinity;
+                if (chainExitDist < bestSingleExitDist) {
+                  bestSingleExitDist = chainExitDist;
+                  bestSingle = chain;
+                }
+              }
+            }
+          }
+        }
+
+        if (bestSingle) {
+          waypoints = bestSingle;
+        }
+      }
+    }
+
+    orders.push({ unitIds: [unit.id], action, target: finalTarget, priority, waypoints });
   }
 
   return { orders, degradedCount, skippedCount };
@@ -1401,4 +1491,106 @@ function ensurePassableTarget(
     }
   }
   return null;
+}
+
+// ============================================================
+// Named Route Resolution (El Alamein)
+// ============================================================
+
+/**
+ * Build waypoints along a named route from a unit's position to a target.
+ * Returns the route waypoints to inject into unit orders, or null if no route found.
+ */
+export function resolveRoute(
+  state: GameState,
+  unitPos: Position,
+  target: Position,
+  routeId: string,
+): Position[] | null {
+  const route = state.namedRoutes.find(r => r.id === routeId);
+  if (!route || route.waypoints.length === 0) return null;
+
+  // Find closest route entry point (to unit)
+  let entryIdx = 0;
+  let entryDist = Infinity;
+  for (let i = 0; i < route.waypoints.length; i++) {
+    const wp = route.waypoints[i];
+    const d = (wp.x - unitPos.x) ** 2 + (wp.y - unitPos.y) ** 2;
+    if (d < entryDist) { entryDist = d; entryIdx = i; }
+  }
+
+  // Find closest route exit point (to target)
+  let exitIdx = 0;
+  let exitDist = Infinity;
+  for (let i = 0; i < route.waypoints.length; i++) {
+    const wp = route.waypoints[i];
+    const d = (wp.x - target.x) ** 2 + (wp.y - target.y) ** 2;
+    if (d < exitDist) { exitDist = d; exitIdx = i; }
+  }
+
+  // Extract waypoints between entry and exit (in correct order)
+  const waypoints: Position[] = [];
+  if (entryIdx <= exitIdx) {
+    for (let i = entryIdx; i <= exitIdx; i++) {
+      waypoints.push({ ...route.waypoints[i] });
+    }
+  } else {
+    for (let i = entryIdx; i >= exitIdx; i--) {
+      waypoints.push({ ...route.waypoints[i] });
+    }
+  }
+
+  // Append final target
+  waypoints.push({ ...target });
+  return waypoints;
+}
+
+/**
+ * Resolve multi-segment route chain.
+ */
+export function resolveRouteChain(
+  state: GameState,
+  unitPos: Position,
+  target: Position,
+  routeIds: string[],
+): Position[] | null {
+  if (routeIds.length === 0) return null;
+  if (routeIds.length === 1) return resolveRoute(state, unitPos, target, routeIds[0]);
+
+  // Chain: resolve first route from unit to midpoint, then second from midpoint to target
+  const allWaypoints: Position[] = [];
+  let currentPos = unitPos;
+
+  for (let i = 0; i < routeIds.length; i++) {
+    const isLast = i === routeIds.length - 1;
+    const routeTarget = isLast ? target : findRouteIntersection(state, routeIds[i], routeIds[i + 1]) ?? target;
+    const segment = resolveRoute(state, currentPos, routeTarget, routeIds[i]);
+    if (segment) {
+      allWaypoints.push(...segment);
+      currentPos = segment[segment.length - 1];
+    }
+  }
+
+  if (allWaypoints.length === 0) return null;
+  return allWaypoints;
+}
+
+function findRouteIntersection(state: GameState, routeId1: string, routeId2: string): Position | null {
+  const r1 = state.namedRoutes.find(r => r.id === routeId1);
+  const r2 = state.namedRoutes.find(r => r.id === routeId2);
+  if (!r1 || !r2) return null;
+
+  // Find closest pair of waypoints between the two routes
+  let bestDist = Infinity;
+  let bestPos: Position | null = null;
+  for (const wp1 of r1.waypoints) {
+    for (const wp2 of r2.waypoints) {
+      const d = (wp1.x - wp2.x) ** 2 + (wp1.y - wp2.y) ** 2;
+      if (d < bestDist) {
+        bestDist = d;
+        bestPos = { x: Math.round((wp1.x + wp2.x) / 2), y: Math.round((wp1.y + wp2.y) / 2) };
+      }
+    }
+  }
+  return bestPos;
 }

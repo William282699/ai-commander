@@ -4,6 +4,8 @@ import {
   renderMinimap,
   renderFacilities,
   renderFrontLabels,
+  renderRouteLabels,
+  renderRegionLabels,
   renderUnits,
   renderFog,
   renderCombatEffects,
@@ -22,7 +24,7 @@ import {
   screenToTile,
   isBoxSelection,
 } from "./input";
-import { FRONT_CAMERA_TARGETS } from "@ai-commander/shared";
+import { FRONT_CAMERA_TARGETS, EL_ALAMEIN_CAMERA_TARGETS } from "@ai-commander/shared";
 import { createInitialGameState } from "@ai-commander/core";
 import {
   tick,
@@ -52,6 +54,8 @@ import {
   updateTasks,
   updateBattleMarkers,
   processAdvisorTriggers,
+  processDefensiveAI,
+  resetDefensiveAITimer,
 } from "@ai-commander/core";
 import type { AdvisorTriggerResult } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
@@ -634,7 +638,10 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
   }, [facilityMenu]);
 
   const handleRestart = useCallback(() => {
-    const newState = createInitialGameState();
+    const urlParams = new URLSearchParams(window.location.search);
+    const scenarioParam = urlParams.get("scenario");
+    const sid = scenarioParam === "el_alamein" ? "el_alamein" as const : "dual_island" as const;
+    const newState = createInitialGameState(sid);
     stateRef.current = newState;
     gameOverDetectedRef.current = false;
     setGameOverInfo(null);
@@ -645,6 +652,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
     resetReportSignals();
+    resetDefensiveAITimer();
     resetHeartbeatState();
     resetStaffAskState();
     clearMessages();
@@ -669,8 +677,12 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     resize();
     window.addEventListener("resize", resize);
 
-    // Create game state (terrain + units + fog + facilities + ...)
-    const initialState = createInitialGameState();
+    // Create game state — read scenario from URL param (?scenario=el_alamein)
+    const urlParams = new URLSearchParams(window.location.search);
+    const scenarioParam = urlParams.get("scenario");
+    const scenarioId = scenarioParam === "el_alamein" ? "el_alamein" as const : "dual_island" as const;
+    const noFog = urlParams.get("nofog") === "1";
+    const initialState = createInitialGameState(scenarioId);
     stateRef.current = initialState;
 
     // P3: reset module-level timers for clean start (handles StrictMode / HMR)
@@ -680,25 +692,37 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
     resetReportSignals();
+    resetDefensiveAITimer();
     resetHeartbeatState();
     resetStaffAskState();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
 
-    // Camera: center on player HQ (tile 100, 7)
+    // Camera: center on player HQ
     const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
-    centerCameraOn(camera, 100, 7, canvas.width, canvas.height);
+    const hqCenter = scenarioId === "el_alamein" ? { x: 430, y: 90 } : { x: 100, y: 7 };
+    centerCameraOn(camera, hqCenter.x, hqCenter.y, canvas.width, canvas.height, initialState.mapWidth, initialState.mapHeight);
 
     // Input — use ref so it's accessible outside useEffect
     const input = inputRef.current;
+    input.mapWidth = initialState.mapWidth;
+    input.mapHeight = initialState.mapHeight;
     const cleanup = setupInputListeners(canvas, camera, input);
 
     // Fronts array (ordered 1-5 for hotkey mapping) — `let` so restart can refresh
     let frontIds = initialState.fronts.map((f) => f.id);
+    // Merge camera targets for all scenarios
+    const cameraTargets = { ...FRONT_CAMERA_TARGETS, ...EL_ALAMEIN_CAMERA_TARGETS };
 
     // Compute initial fog so first frame shows visibility
     updateFog(initialState);
+    // Debug: reveal all fog when ?nofog=1
+    if (noFog) {
+      for (const row of initialState.fog) {
+        for (let i = 0; i < row.length; i++) row[i] = "visible";
+      }
+    }
 
     // Track "Return to AI" button rect for click detection
     let returnToAIBtnRect: { x: number; y: number; w: number; h: number } | null = null;
@@ -724,7 +748,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
         lastDrainedDiagTime = -Infinity;
         frontIds = state.fronts.map((f) => f.id);
         input.selectedUnitIds = [];
-        updateFog(state);
+        if (!noFog) updateFog(state);
       }
 
       const dt = Math.min((now - lastTime) / 1000, 0.05); // cap dt
@@ -734,7 +758,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       if (input.frontJumpRequest !== null) {
         const idx = input.frontJumpRequest - 1;
         if (idx >= 0 && idx < frontIds.length) {
-          const target = FRONT_CAMERA_TARGETS[frontIds[idx]];
+          const target = cameraTargets[frontIds[idx]];
           if (target) {
             centerCameraOn(
               camera,
@@ -742,6 +766,8 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
               target.y,
               canvas.width,
               canvas.height,
+              input.mapWidth,
+              input.mapHeight,
             );
           }
         }
@@ -1016,6 +1042,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
 
       // --- AI & Auto-Behavior (Day 8) --- (guards: if gameOver return)
       processEnemyAI(state, dt);        // enemy strategic decisions (5s interval)
+      processDefensiveAI(state, dt);    // El Alamein defensive AI (5s interval, no-op for other scenarios)
       processAutoBehavior(state, dt);    // both teams micro-behavior (2s interval)
 
       // --- ENDGAME Pressure (Day 12) ---
@@ -1044,7 +1071,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
         });
       }
 
-      updateFog(state);
+      if (!noFog) updateFog(state);
 
       // --- Drain diagnostics → Staff Feed (≈1/sec) ---
       if (state.tick % 60 === 0 && state.diagnostics.length > 0) {
@@ -1226,7 +1253,9 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       renderFacilities(ctx, facArray, camera);
 
       // 3. Fog of war overlay (darkens unseen areas)
-      renderFog(ctx, state.fog, camera, canvas.width, canvas.height);
+      if (!noFog) {
+        renderFog(ctx, state.fog, camera, canvas.width, canvas.height);
+      }
 
       // 3.5 Day 15: Tags (player map markers) — rendered AFTER fog so tags are visible on fogged areas
       renderTags(ctx, state.tags, camera, input.tagMode, input.mouseX, input.mouseY);
@@ -1263,7 +1292,16 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       }
 
       // 7. Front labels (when zoomed out)
-      renderFrontLabels(ctx, state.fronts, FRONT_CAMERA_TARGETS, camera);
+      renderFrontLabels(ctx, state.fronts, cameraTargets, camera);
+
+      // 7.5 Route labels + region labels (on terrain, zoomed out)
+      if (state.namedRoutes.length > 0) {
+        renderRouteLabels(ctx, state.namedRoutes, camera);
+      }
+      const regions = state.regions ? Array.from(state.regions.values()) : [];
+      if (regions.length > 0) {
+        renderRegionLabels(ctx, regions, camera);
+      }
 
       // 8. Minimap (bottom-right, with facility + unit dots)
       renderMinimap(
@@ -1275,6 +1313,8 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
         facArray,
         unitArray,
         state.fog,
+        state.mapWidth,
+        state.mapHeight,
       );
 
       // 9. Info panel (bottom-left, when units selected)

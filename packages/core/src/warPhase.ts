@@ -121,6 +121,24 @@ function transitionTo(state: GameState, newPhase: GameState["phase"]): void {
 export function checkGameOver(state: GameState, dt: number): void {
   if (state.gameOver) return;
 
+  // El Alamein: All capture objectives taken → victory
+  if (state.captureObjectives && state.captureObjectives.length > 0) {
+    const allCaptured = state.captureObjectives.every(objId => {
+      const fac = state.facilities.get(objId);
+      return fac && fac.team === "player";
+    });
+    if (allCaptured) {
+      endGame(state, "player", "所有据点已夺取 — 阿拉曼大捷！");
+      return;
+    }
+  }
+
+  // El Alamein: 20-minute timeout → defeat
+  if (state.scenarioId === "el_alamein" && state.time >= 1200) {
+    endGame(state, "enemy", "超时未能夺取全部据点 — 进攻失败");
+    return;
+  }
+
   // MVP2 Rule 1: Commander killed → defeat
   let commanderAlive = false;
   state.units.forEach((u) => {

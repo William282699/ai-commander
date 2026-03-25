@@ -96,37 +96,46 @@ function generateAttackZoneMarkers(state: GameState, now: number): void {
   // Remove old attack_zone markers — they'll be regenerated if still valid
   state.battleMarkers = state.battleMarkers.filter((m) => m.type !== "attack_zone");
 
-  // Find clusters of attacking units
-  const attackingUnits: { x: number; y: number; team: string }[] = [];
+  // Collect units actually engaged in combat (have a live target within weapon range)
+  const engagedUnits: { x: number; y: number; team: string }[] = [];
   for (const unit of state.units.values()) {
     if (unit.state === "dead") continue;
-    if (unit.state === "attacking" && unit.attackTarget != null) {
-      attackingUnits.push({ x: unit.position.x, y: unit.position.y, team: unit.team });
+    if (unit.attackTarget == null) continue;
+    const target = state.units.get(unit.attackTarget);
+    if (!target || target.state === "dead") continue;
+    // Both units must be alive and close enough to actually fight
+    const dx = unit.position.x - target.position.x;
+    const dy = unit.position.y - target.position.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist <= (unit.attackRange ?? 5) * 1.5) {
+      engagedUnits.push({ x: unit.position.x, y: unit.position.y, team: unit.team });
     }
   }
 
-  if (attackingUnits.length < 4) return; // need meaningful engagement
+  if (engagedUnits.length < 4) return; // need meaningful engagement
 
-  // Simple grid-based clustering: bucket units into cells
+  // Grid-based clustering: bucket units into cells
   const cellSize = ATTACK_ZONE_CLUSTER_RADIUS;
-  const clusters = new Map<string, { xs: number[]; ys: number[]; count: number }>();
+  const clusters = new Map<string, { xs: number[]; ys: number[]; count: number; teams: Set<string> }>();
 
-  for (const u of attackingUnits) {
+  for (const u of engagedUnits) {
     const cx = Math.floor(u.x / cellSize);
     const cy = Math.floor(u.y / cellSize);
     const key = `${cx},${cy}`;
     let cluster = clusters.get(key);
     if (!cluster) {
-      cluster = { xs: [], ys: [], count: 0 };
+      cluster = { xs: [], ys: [], count: 0, teams: new Set() };
       clusters.set(key, cluster);
     }
     cluster.xs.push(u.x);
     cluster.ys.push(u.y);
     cluster.count++;
+    cluster.teams.add(u.team);
   }
 
   for (const cluster of clusters.values()) {
-    if (cluster.count < 4) continue; // need 4+ units fighting in proximity
+    // Must have both sides fighting in same cell — this IS a battle, not a march
+    if (cluster.count < 4 || cluster.teams.size < 2) continue;
 
     const avgX = cluster.xs.reduce((a, b) => a + b, 0) / cluster.count;
     const avgY = cluster.ys.reduce((a, b) => a + b, 0) / cluster.count;
@@ -151,14 +160,15 @@ function generateCriticalFrontMarkers(state: GameState, now: number): void {
   // Remove old critical_front markers
   state.battleMarkers = state.battleMarkers.filter((m) => m.type !== "critical_front");
 
+  // Offensive scenarios (player is attacking, enemy is defending) — skip entirely.
+  // critical_front is a DEFENSIVE alarm ("your front is being overwhelmed"), meaningless
+  // when all fronts are enemy-held by design.
+  if (state.enemyAIMode === "defensive") return;
+
   for (const front of state.fronts) {
-    // Compute pressure ratio; playerPower=0 with enemy present is maximally critical
-    let ratio: number;
-    if (front.playerPower <= 0) {
-      ratio = front.enemyPower > 0 ? Infinity : 0;
-    } else {
-      ratio = front.enemyPower / front.playerPower;
-    }
+    // Only flag as critical when player HAS forces on this front but is being overwhelmed.
+    if (front.playerPower <= 0) continue;
+    const ratio = front.enemyPower / front.playerPower;
     if (ratio < CRITICAL_FRONT_POWER_RATIO) continue;
 
     // Place marker at average position of the front's regions

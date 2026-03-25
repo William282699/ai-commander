@@ -10,6 +10,7 @@ import type {
   Team,
   Position,
   EconomyState,
+  ScenarioId,
 } from "@ai-commander/shared";
 import {
   UNIT_STATS,
@@ -24,6 +25,7 @@ import type { Squad } from "@ai-commander/shared";
 import { createFogState } from "../fog";
 import { resetMissionCounter } from "../missions";
 import { generateTerrain, FACILITIES, REGIONS, CHOKEPOINTS, FRONTS } from "@ai-commander/shared";
+import { createElAlameinState } from "./elAlamein";
 
 // --- Unit factory ---
 
@@ -71,8 +73,12 @@ function makeEconomy(): EconomyState {
 
 // --- Initial deployment ---
 
-export function createInitialGameState(): GameState {
+export function createInitialGameState(scenarioId: ScenarioId = "dual_island"): GameState {
   resetMissionCounter(); // Day 11: reset mission ID counter for new game session
+
+  if (scenarioId === "el_alamein") {
+    return createElAlameinState();
+  }
   const terrain = generateTerrain();
   const units = new Map<number, Unit>();
   let uid = 1;
@@ -269,5 +275,8 @@ export function createInitialGameState(): GameState {
     battleMarkerScanAccum: 0,
     battleMarkerDeathCursor: 0,
     advisorTriggerCooldowns: {},
+    scenarioId: "dual_island",
+    namedRoutes: [],
+    entrenchTimers: new Map(),
   };
 }

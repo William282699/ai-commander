@@ -25,6 +25,7 @@ import {
   PRODUCTION_FACILITY,
   TERRAIN_MOVE_MULT,
   getUnitCategory,
+  type UnitCategory,
 } from "@ai-commander/shared";
 
 // ── Non-capturable facility types (blacklist) ──
@@ -101,12 +102,18 @@ function tickFacilityCapture(state: GameState, dt: number): void {
     // Skip destroyed facilities
     if (fac.hp <= 0) return;
 
-    // Find infantry near this facility (within 1.5 tiles)
+    // Find capture-capable units near this facility (within 1.5 tiles)
+    // El Alamein: all ground units can capture; default: infantry only
+    const isElAlamein = state.scenarioId === "el_alamein";
     let playerInf = 0;
     let enemyInf = 0;
 
     state.units.forEach((unit) => {
-      if (unit.type !== "infantry" || unit.hp <= 0 || unit.state === "dead") return;
+      if (unit.hp <= 0 || unit.state === "dead") return;
+      const canCapture = isElAlamein
+        ? getUnitCategory(unit.type) === "ground"
+        : unit.type === "infantry";
+      if (!canCapture) return;
       const dx = unit.position.x - fac.position.x;
       const dy = unit.position.y - fac.position.y;
       const dist = Math.sqrt(dx * dx + dy * dy);

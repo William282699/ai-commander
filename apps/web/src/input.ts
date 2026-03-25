@@ -73,6 +73,10 @@ export interface InputState {
   // --- Day 15: Tag mode ---
   tagMode: boolean;
   pendingTag: { worldX: number; worldY: number } | null;
+
+  // --- Scenario map dimensions (set at init, used for camera clamp + minimap) ---
+  mapWidth: number;
+  mapHeight: number;
 }
 
 export function createInputState(): InputState {
@@ -102,6 +106,8 @@ export function createInputState(): InputState {
 
     tagMode: false,
     pendingTag: null,
+    mapWidth: MAP_WIDTH,
+    mapHeight: MAP_HEIGHT,
   };
 }
 
@@ -166,7 +172,7 @@ export function setupInputListeners(
     const my = e.clientY - rect.top;
     camera.x += mx / oldZoom - mx / camera.zoom;
     camera.y += my / oldZoom - my / camera.zoom;
-    clampCamera(camera, canvas.width, canvas.height);
+    clampCamera(camera, canvas.width, canvas.height, input.mapWidth, input.mapHeight);
   };
 
   // Track right-click drag distance for command vs pan detection
@@ -192,10 +198,10 @@ export function setupInputListeners(
     // --- Left click ---
     if (e.button === 0) {
       // Check minimap click first
-      const mm = getMinimapRect(canvas.width, canvas.height);
+      const mm = getMinimapRect(canvas.width, canvas.height, input.mapWidth, input.mapHeight);
       if (mx >= mm.x && mx <= mm.x + mm.w && my >= mm.y && my <= mm.y + mm.h) {
-        const tileX = ((mx - mm.x) / mm.w) * MAP_WIDTH;
-        const tileY = ((my - mm.y) / mm.h) * MAP_HEIGHT;
+        const tileX = ((mx - mm.x) / mm.w) * input.mapWidth;
+        const tileY = ((my - mm.y) / mm.h) * input.mapHeight;
         centerCameraOn(camera, tileX, tileY, canvas.width, canvas.height);
         e.preventDefault();
         return;
@@ -263,7 +269,7 @@ export function setupInputListeners(
       const dy = (e.clientY - input.dragStartY) / camera.zoom;
       camera.x = input.cameraStartX - dx;
       camera.y = input.cameraStartY - dy;
-      clampCamera(camera, canvas.width, canvas.height);
+      clampCamera(camera, canvas.width, canvas.height, input.mapWidth, input.mapHeight);
     }
   };
 
@@ -397,7 +403,7 @@ export function processKeyboardCamera(
     if (input.mouseY > canvasHeight - EDGE_SCROLL_MARGIN) camera.y += edgeSpeed;
   }
 
-  clampCamera(camera, canvasWidth, canvasHeight);
+  clampCamera(camera, canvasWidth, canvasHeight, input.mapWidth, input.mapHeight);
 }
 
 /**
@@ -409,15 +415,17 @@ export function centerCameraOn(
   tileY: number,
   canvasWidth: number,
   canvasHeight: number,
+  mapW: number = MAP_WIDTH,
+  mapH: number = MAP_HEIGHT,
 ): void {
   camera.x = tileX * TILE_SIZE - canvasWidth / camera.zoom / 2;
   camera.y = tileY * TILE_SIZE - canvasHeight / camera.zoom / 2;
-  clampCamera(camera, canvasWidth, canvasHeight);
+  clampCamera(camera, canvasWidth, canvasHeight, mapW, mapH);
 }
 
-function clampCamera(camera: Camera, canvasWidth: number, canvasHeight: number): void {
-  const maxX = MAP_WIDTH * TILE_SIZE - canvasWidth / camera.zoom;
-  const maxY = MAP_HEIGHT * TILE_SIZE - canvasHeight / camera.zoom;
+function clampCamera(camera: Camera, canvasWidth: number, canvasHeight: number, mapW: number = MAP_WIDTH, mapH: number = MAP_HEIGHT): void {
+  const maxX = mapW * TILE_SIZE - canvasWidth / camera.zoom;
+  const maxY = mapH * TILE_SIZE - canvasHeight / camera.zoom;
   camera.x = Math.max(0, Math.min(maxX, camera.x));
   camera.y = Math.max(0, Math.min(maxY, camera.y));
 }

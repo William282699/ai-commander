@@ -60,6 +60,9 @@ export function resetAttackWaveState(): void {
 }
 
 function runEnemyAI(state: GameState): void {
+  // Defensive AI mode (El Alamein) — handled by separate module
+  if (state.enemyAIMode === "defensive") return;
+
   const assessments = assessFronts(state);
 
   // MVP2: Attack wave check

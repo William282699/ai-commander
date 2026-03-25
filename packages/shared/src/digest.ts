@@ -113,6 +113,16 @@ export function generateDigestV1(
     }
   }
 
+  // Named routes (El Alamein etc.)
+  if (state.namedRoutes && state.namedRoutes.length > 0) {
+    digest += `---ROUTES---\n`;
+    for (const nr of state.namedRoutes) {
+      const from = nr.waypoints[0];
+      const to = nr.waypoints[nr.waypoints.length - 1];
+      digest += `${nr.id}:"${nr.name}" (${Math.round(from.x)},${Math.round(from.y)})→(${Math.round(to.x)},${Math.round(to.y)}) for:${nr.passableFor.join(",")}\n`;
+    }
+  }
+
   // Style
   digest += `---STYLE---\n`;
   digest += `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas_aversion=${state.style.casualtyAversion.toFixed(2)}\n`;

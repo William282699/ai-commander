@@ -108,6 +108,14 @@ export function calculateDamage(attacker: Unit, defender: Unit, state: GameState
     damage *= 3;
   }
 
+  // Entrench damage reduction (El Alamein infantry trenches)
+  const entrench = defender.entrenchLevel ?? 0;
+  if (entrench === 1) {
+    damage *= 0.8; // -20%
+  } else if (entrench === 2) {
+    damage *= 0.6; // -40%
+  }
+
   return Math.max(1, Math.round(damage));
 }
 
