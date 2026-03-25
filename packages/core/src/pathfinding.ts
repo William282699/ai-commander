@@ -216,22 +216,9 @@ function findNearestPassable(
 const pathCache = new Map<number, { goalX: number; goalY: number; path: Position[] }>();
 
 /**
- * Group path cache — keyed by "unitType:goalTileX,goalTileY".
- * When multiple units of the same type go to the same target, the first one
- * computes A* and all others reuse the same path. This prevents squad members
- * from taking different routes around obstacles.
- * Expires after 2 seconds (cleared by age check).
- */
-const groupPathCache = new Map<string, { path: Position[]; timestamp: number }>();
-const GROUP_CACHE_TTL = 2000; // ms
-
-function getGroupCacheKey(unitType: UnitType, goalX: number, goalY: number): string {
-  return `${unitType}:${Math.floor(goalX)},${Math.floor(goalY)}`;
-}
-
-/**
  * Get a cached A* path for a unit, or compute a new one.
- * Uses group cache so same-type units going to the same target share one path.
+ * Path sharing for squads is handled at the order level (applyOrders.ts computeGroupPath),
+ * not here. This cache is strictly per-unit to avoid wrong-start-point reuse.
  */
 export function getOrComputePath(
   unitId: number,
@@ -250,22 +237,9 @@ export function getOrComputePath(
     return cached.path;
   }
 
-  // Check group cache — another unit of same type already computed this route
-  const groupKey = getGroupCacheKey(unitType, goalX, goalY);
-  const groupCached = groupPathCache.get(groupKey);
-  const now = Date.now();
-  if (groupCached && (now - groupCached.timestamp) < GROUP_CACHE_TTL && groupCached.path.length > 0) {
-    const sharedPath = groupCached.path.map(p => ({ ...p })); // deep copy
-    pathCache.set(unitId, { goalX, goalY, path: sharedPath });
-    return sharedPath;
-  }
-
-  // Compute new A* path
   const path = findPath(startX, startY, goalX, goalY, unitType, state);
   if (path && path.length > 0) {
     pathCache.set(unitId, { goalX, goalY, path });
-    // Store in group cache for other units of same type
-    groupPathCache.set(groupKey, { path: path.map(p => ({ ...p })), timestamp: now });
   } else {
     pathCache.delete(unitId);
   }
