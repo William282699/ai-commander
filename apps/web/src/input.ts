@@ -202,7 +202,7 @@ export function setupInputListeners(
       if (mx >= mm.x && mx <= mm.x + mm.w && my >= mm.y && my <= mm.y + mm.h) {
         const tileX = ((mx - mm.x) / mm.w) * input.mapWidth;
         const tileY = ((my - mm.y) / mm.h) * input.mapHeight;
-        centerCameraOn(camera, tileX, tileY, canvas.width, canvas.height);
+        centerCameraOn(camera, tileX, tileY, canvas.width, canvas.height, input.mapWidth, input.mapHeight);
         e.preventDefault();
         return;
       }

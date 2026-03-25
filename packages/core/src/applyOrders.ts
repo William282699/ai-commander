@@ -6,7 +6,7 @@
 import type { GameState, Order, Unit, Position, TradeType, PatrolTask } from "@ai-commander/shared";
 import { TRADE_COSTS } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
-import { findPath } from "./pathfinding";
+import { findPath, clearPathCache } from "./pathfinding";
 
 /**
  * Compute a shared A* path for a group of units heading to the same target.
@@ -242,6 +242,8 @@ function findOrCreatePatrolTask(
 function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
   // Store order on unit
   unit.orders = [order];
+  // CONTRACT: clear cached A* path before any target change
+  clearPathCache(unit.id);
 
   // Day 9.5: all non-patrol orders unbind from patrol task
   if (order.action !== "patrol") {
