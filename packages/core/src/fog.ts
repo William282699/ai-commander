@@ -4,14 +4,15 @@
 // ============================================================
 
 import type { GameState, Visibility } from "@ai-commander/shared";
-import { MAP_WIDTH, MAP_HEIGHT, getUnitCategory } from "@ai-commander/shared";
+import { getUnitCategory } from "@ai-commander/shared";
 
 /**
  * Create initial fog state (all unknown).
+ * Width and height are required — no default to avoid silent mismatch on new scenarios.
  */
-export function createFogState(): Visibility[][] {
-  return Array.from({ length: MAP_HEIGHT }, () =>
-    Array.from({ length: MAP_WIDTH }, () => "unknown" as Visibility),
+export function createFogState(width: number, height: number): Visibility[][] {
+  return Array.from({ length: height }, () =>
+    Array.from({ length: width }, () => "unknown" as Visibility),
   );
 }
 

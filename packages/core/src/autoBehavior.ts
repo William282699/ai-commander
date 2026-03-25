@@ -15,6 +15,7 @@
 import type { GameState, Unit, Position, Team, PatrolTask } from "@ai-commander/shared";
 import { getUnitCategory, isManualOnlyUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
+import { clearPathCache } from "./pathfinding";
 
 // ── Timer (C2: while-loop, no setInterval) ──
 
@@ -86,6 +87,7 @@ function runAutoBehavior(state: GameState): void {
 
       // Direct state mutation (micro-level, no Order[])
       unit.state = "retreating";
+      clearPathCache(unit.id);
       unit.target = target;
       unit.waypoints = [target];
       unit.attackTarget = null;
@@ -104,6 +106,7 @@ function runAutoBehavior(state: GameState): void {
       const enemy = findNearestEnemy(unit, state, ENGAGE_RANGE);
       if (enemy) {
         unit.state = "moving";
+        clearPathCache(unit.id);
         unit.target = { x: enemy.position.x, y: enemy.position.y };
         unit.waypoints = [{ x: enemy.position.x, y: enemy.position.y }];
         unit.attackTarget = null; // combat.ts will acquire target when in range
@@ -258,6 +261,7 @@ function processPatrolTasks(state: GameState): void {
       if (target) {
         unit.state = "patrolling";
         unit.patrolPoints = [{ ...unit.position }, target];
+        clearPathCache(unit.id);
         unit.target = target;
         unit.waypoints = [target];
         anySuccess = true;

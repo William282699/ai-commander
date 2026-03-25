@@ -12,6 +12,7 @@ import {
   TERRAIN_DEFENSE_BONUS,
   getUnitCategory,
 } from "@ai-commander/shared";
+import { clearPathCache } from "./pathfinding";
 
 // --- Distance helper ---
 
@@ -329,6 +330,7 @@ function processFacilitySabotage(state: GameState, now: number): void {
     if (!facility || facility.hp <= 0) {
       // P2 fix: fully clean unit state when facility gone/destroyed
       unit.orders = [];
+      clearPathCache(unit.id);
       unit.target = null;
       unit.waypoints = [];
       unit.state = "idle"; // safe: dead units already filtered at function entry
@@ -386,6 +388,7 @@ function processFacilitySabotage(state: GameState, now: number): void {
           u.orders[0]?.targetFacilityId === order.targetFacilityId
         ) {
           u.orders = [];
+          clearPathCache(u.id);
           u.target = null;
           u.waypoints = [];
           if (u.state !== "dead") u.state = "idle";

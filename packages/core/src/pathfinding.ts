@@ -7,10 +7,13 @@
 //   3. Returns waypoints in tile coordinates
 //   4. Cached per unit — path recalculated only when target changes
 //   5. Max search budget to prevent frame drops
+//
+// CONTRACT: any code that sets unit.target MUST call clearPathCache(unit.id) first.
+// This includes: applyOrders.ts, autoBehavior.ts, combat.ts, sim.ts
 // ============================================================
 
 import type { GameState, UnitType, Position } from "@ai-commander/shared";
-import { canUnitEnterTile } from "./sim";
+import { canUnitEnterTile } from "./movementRules";
 
 /** Maximum nodes to expand before giving up (prevents frame stalls).
  *  500×300 map with large obstacles (minefields) needs ~8000-12000 to route around.

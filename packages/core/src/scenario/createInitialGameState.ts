@@ -243,7 +243,7 @@ export function createInitialGameState(scenarioId: ScenarioId = "dual_island"): 
         return eco;
       })(),
     },
-    fog: createFogState(),
+    fog: createFogState(MAP_WIDTH, MAP_HEIGHT),
     missions: [],
     conditionalOrders: [],
     style: { ...DEFAULT_STYLE },

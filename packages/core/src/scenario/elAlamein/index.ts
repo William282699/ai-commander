@@ -64,9 +64,7 @@ export function createElAlameinState(): GameState {
   const nextSquadNum: { [prefix: string]: number } = {};
 
   // El Alamein fog: use scenario-specific dimensions
-  const fog = Array.from({ length: EL_ALAMEIN_HEIGHT }, () =>
-    Array.from({ length: EL_ALAMEIN_WIDTH }, () => "unknown" as const),
-  );
+  const fog = createFogState(EL_ALAMEIN_WIDTH, EL_ALAMEIN_HEIGHT);
 
   return {
     tick: 0,

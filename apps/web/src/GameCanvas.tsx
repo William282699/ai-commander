@@ -59,7 +59,7 @@ import {
 } from "@ai-commander/core";
 import type { AdvisorTriggerResult } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
-import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
+import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import { ChatPanel } from "./ChatPanel";
 import { TaskBar } from "./TaskBar";
@@ -236,7 +236,7 @@ function findEnemyAtPosition(
     // Must be visible
     const tx = Math.floor(unit.position.x);
     const ty = Math.floor(unit.position.y);
-    if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) return;
+    if (tx < 0 || ty < 0 || tx >= state.mapWidth || ty >= state.mapHeight) return;
     if (state.fog[ty]?.[tx] !== "visible") return;
 
     const dx = unit.position.x - worldTileX;
@@ -270,7 +270,7 @@ function findFacilityAtPosition(
     // Must be visible on the fog
     const tx = Math.floor(fac.position.x);
     const ty = Math.floor(fac.position.y);
-    if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) return;
+    if (tx < 0 || ty < 0 || tx >= state.mapWidth || ty >= state.mapHeight) return;
     if (state.fog[ty]?.[tx] !== "visible") return;
 
     const dx = fac.position.x - worldTileX;
@@ -712,8 +712,10 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
 
     // Fronts array (ordered 1-5 for hotkey mapping) — `let` so restart can refresh
     let frontIds = initialState.fronts.map((f) => f.id);
-    // Merge camera targets for all scenarios
-    const cameraTargets = { ...FRONT_CAMERA_TARGETS, ...EL_ALAMEIN_CAMERA_TARGETS };
+    // Select camera targets by scenario (no merge — keys like front_center overlap)
+    const cameraTargets = scenarioId === "el_alamein"
+      ? EL_ALAMEIN_CAMERA_TARGETS
+      : FRONT_CAMERA_TARGETS;
 
     // Compute initial fog so first frame shows visibility
     updateFog(initialState);
