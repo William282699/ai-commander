@@ -269,6 +269,7 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
 
     case "defend":
       unit.state = "defending";
+      unit.attackTarget = null;
       if (order.target) {
         const wps = orderWaypoints(order.target);
         unit.target = wps[0];
@@ -278,6 +279,7 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
 
     case "retreat":
       unit.state = "retreating";
+      unit.attackTarget = null;
       if (order.target) {
         const wps = orderWaypoints(order.target);
         unit.target = wps[0];
@@ -287,6 +289,7 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
 
     case "flank":
       unit.state = "moving";
+      unit.attackTarget = null;
       if (order.target) {
         const wps = orderWaypoints(order.target);
         unit.target = wps[0];
@@ -296,6 +299,7 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
 
     case "hold":
       unit.state = "idle";
+      unit.attackTarget = null;
       unit.target = null;
       unit.waypoints = [];
       break;
@@ -314,11 +318,13 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
         unit.patrolTaskId = taskId;
         // Set idle — processPatrolTasks will pick the first fog-frontier target
         unit.state = "idle";
+        unit.attackTarget = null;
         unit.target = null;
         unit.patrolPoints = [];
       } else {
         // Legacy patrol (no task params — enemy AI, etc.)
         unit.state = "patrolling";
+        unit.attackTarget = null;
         if (order.target) {
           unit.patrolPoints = [{ ...unit.position }, order.target];
           unit.target = order.target;
@@ -328,6 +334,7 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
 
     case "escort":
       unit.state = "moving";
+      unit.attackTarget = null;
       if (order.target) {
         unit.target = order.target;
       }
@@ -335,6 +342,7 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
 
     case "sabotage":
       unit.state = "moving";
+      unit.attackTarget = null;
       if (order.target) {
         const wps = orderWaypoints(order.target);
         unit.target = wps[0];
@@ -344,6 +352,7 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
 
     case "recon":
       unit.state = "moving";
+      unit.attackTarget = null;
       if (order.target) {
         const wps = orderWaypoints(order.target);
         unit.target = wps[0];

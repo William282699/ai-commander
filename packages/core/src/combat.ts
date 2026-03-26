@@ -183,6 +183,11 @@ export function processCombat(state: GameState, dt: number): void {
 
   state.units.forEach((unit) => {
     if (unit.hp <= 0 || unit.state === "dead") return;
+    // Retreat orders must remain pure movement: do not acquire/track combat targets.
+    if (unit.state === "retreating") {
+      unit.attackTarget = null;
+      return;
+    }
 
     // Find target
     const target = findTarget(unit, state);
@@ -327,6 +332,16 @@ function processFacilitySabotage(state: GameState, now: number): void {
     if (unit.attackDamage <= 0 || unit.attackInterval <= 0) return;
 
     const facility = state.facilities.get(order.targetFacilityId);
+
+    // Capture objectives cannot be attacked by player (prevent accidental destruction)
+    if (facility && unit.team === "player" && state.captureObjectives?.includes(order.targetFacilityId)) {
+      unit.orders = [];
+      unit.target = null;
+      unit.waypoints = [];
+      unit.state = "idle";
+      return;
+    }
+
     if (!facility || facility.hp <= 0) {
       // P2 fix: fully clean unit state when facility gone/destroyed
       unit.orders = [];

@@ -58,11 +58,16 @@ export function findPath(
   // If goal tile is impassable, find nearest passable tile around it
   let finalGx = gx;
   let finalGy = gy;
+  let resolvedGoalX = goalX;
+  let resolvedGoalY = goalY;
   if (!canUnitEnterTile(unitType, gx, gy, state)) {
     const alt = findNearestPassable(gx, gy, unitType, state, 8);
     if (!alt) return null; // completely surrounded by impassable
     finalGx = alt.x;
     finalGy = alt.y;
+    // Important: do not force path endpoint back to an impassable original goal.
+    resolvedGoalX = alt.x + 0.5;
+    resolvedGoalY = alt.y + 0.5;
   }
 
   // Binary heap (min-heap by f-score) for open set
@@ -97,7 +102,7 @@ export function findPath(
 
     // Goal reached
     if (cx === finalGx && cy === finalGy) {
-      return reconstructPath(current, nodeMap, goalX, goalY);
+      return reconstructPath(current, nodeMap, resolvedGoalX, resolvedGoalY);
     }
 
     if (++expansions > MAX_EXPANSIONS) {

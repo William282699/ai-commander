@@ -8,7 +8,8 @@ import {
   TERRAIN_MOVE_MULT,
   getUnitCategory,
 } from "@ai-commander/shared";
-export { canUnitEnterTile } from "./movementRules";
+import { canUnitEnterTile } from "./movementRules";
+export { canUnitEnterTile };
 import { processCombat } from "./combat";
 import { processRegen } from "./regen";
 import { canUnitMove, consumeMovementFuel } from "./economy";
@@ -133,20 +134,25 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
 
   // Track locked attack target — sync movement to enemy position
   if (unit.attackTarget !== null) {
-    const tracked = state.units.get(unit.attackTarget);
-    if (tracked && tracked.hp > 0 && tracked.state !== "dead" && tracked.team !== unit.team) {
-      const newTarget = { ...tracked.position };
-      if (unit.target && (Math.abs(unit.target.x - newTarget.x) > 2 || Math.abs(unit.target.y - newTarget.y) > 2)) {
-        clearPathCache(unit.id);
-      }
-      unit.target = newTarget;
-      if (unit.waypoints.length > 0) {
-        unit.waypoints[0] = unit.target;
-      } else {
-        unit.waypoints = [unit.target];
-      }
-    } else {
+    if (unit.state === "retreating") {
+      // Retreat semantics: never chase lock-targets.
       unit.attackTarget = null;
+    } else {
+      const tracked = state.units.get(unit.attackTarget);
+      if (tracked && tracked.hp > 0 && tracked.state !== "dead" && tracked.team !== unit.team) {
+        const newTarget = { ...tracked.position };
+        if (unit.target && (Math.abs(unit.target.x - newTarget.x) > 2 || Math.abs(unit.target.y - newTarget.y) > 2)) {
+          clearPathCache(unit.id);
+        }
+        unit.target = newTarget;
+        if (unit.waypoints.length > 0) {
+          unit.waypoints[0] = unit.target;
+        } else {
+          unit.waypoints = [unit.target];
+        }
+      } else {
+        unit.attackTarget = null;
+      }
     }
   }
 
@@ -170,7 +176,9 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
     } else {
       // Fallback: direct move for very short distances
       const directDist = Math.abs(unit.target.x - unit.position.x) + Math.abs(unit.target.y - unit.position.y);
-      if (directDist < 3) {
+      const tx = Math.floor(unit.target.x);
+      const ty = Math.floor(unit.target.y);
+      if (directDist < 3 && canUnitEnterTile(unit.type, tx, ty, state)) {
         moveTarget = unit.target;
       } else {
         unit.target = null;
