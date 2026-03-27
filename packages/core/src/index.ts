@@ -15,6 +15,7 @@ export { getFormationOffset, computeHeading } from "./formation";
 export type { FormationStyle } from "./formation";
 export type { ResolveResult } from "./tacticalPlanner";
 export { buildDigest } from "./intelDigest";
+export { buildBattleContextV2 } from "./battleContext";
 export { processReportSignals, drainReportEvents, resetReportSignals } from "./reportSignals";
 export { createInitialGameState } from "./scenario";
 export { processDefensiveAI, resetDefensiveAITimer } from "./scenario/elAlamein";

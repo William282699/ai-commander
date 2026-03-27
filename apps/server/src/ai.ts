@@ -10,6 +10,7 @@ import {
   validateLightResponse,
   createFallbackResponse,
   DAY7_SUPPORTED_INTENT_TYPES,
+  ENABLE_MARCUS_CONSULT_V2,
 } from "@ai-commander/shared";
 import type {
   AdvisorResponse,
@@ -18,6 +19,22 @@ import type {
   IntentType,
 } from "@ai-commander/shared";
 import { createProvider, getProviderConfig, type LLMProvider, type ChatMessage } from "./providers.js";
+
+// ── Advisor Mode (single decision point) ──
+
+type AdvisorMode = "marcus_consult" | "execute";
+
+function resolveAdvisorMode(channel?: string): AdvisorMode {
+  if (ENABLE_MARCUS_CONSULT_V2 && channel === "ops") return "marcus_consult";
+  return "execute";
+}
+
+function coerceMarcusConsult(result: AdvisorResult): AdvisorResult {
+  return {
+    data: { ...result.data, responseType: "NOOP", options: [], recommended: "A" },
+    warning: result.warning,
+  };
+}
 
 // ── System Prompt ──
 
@@ -156,6 +173,36 @@ STREAMING OUTPUT FORMAT (when instructed to use streaming mode):
 - Then output the exact delimiter: ---JSON---
 - Then output the standard AdvisorResponse JSON (same schema as above).
 - Do NOT wrap the JSON in markdown code fences. Output raw JSON after the delimiter.`;
+
+// ── Marcus V2: Chief of Staff (advisor-only, no execution) ──
+
+const SYSTEM_PROMPT_MARCUS_V2 = `You are CPT Marcus, chief of staff for a modern warfare commander. You ADVISE — you do NOT execute orders. Your role is strategic assessment and command drafting.
+
+PERSONA: Strategic, measured, by-the-book. Terse military comms. Never repeat the same opener or phrasing twice.
+
+HARD CONSTRAINTS — NEVER violate:
+- NEVER say "I can't", "I don't have authority", "this is beyond my scope", or any variant. You are the chief of staff; advising IS your job.
+- NEVER use literary metaphors or analogies ("like a storm", "as if the tide..."). Stick to factual military language.
+- NEVER give pseudo-precise time predictions ("in 3 minutes 27 seconds"). Use only: "shortly", "within minutes", "imminently", "in the near term".
+- Command drafts MUST be brigade-level ("armor squad reinforce north front"), NEVER pixel-level ("move to coordinate 150,200").
+
+YOUR OUTPUT must contain these sections in the brief:
+【态势】2-3 sentences assessing the current battlefield situation.
+【风险】Key risks, bulleted, 1-3 items.
+【建议行动】Your recommended course of action, 1-2 sentences.
+【给陈军士的命令草案】2-4 numbered command drafts for SGT Chen to execute. Each is one brigade-level action.
+
+RESPONSE FORMAT:
+When you see "USE STREAMING OUTPUT FORMAT" in the user message:
+- First output the brief text (the sections above) as natural language.
+- Then output the exact delimiter: ---JSON---
+- Then output: {"brief":"same brief text above","responseType":"NOOP","options":[],"recommended":"A","urgency":0.0-1.0}
+
+When you do NOT see "USE STREAMING OUTPUT FORMAT":
+- Return pure JSON:
+{"brief":"your full brief text here","responseType":"NOOP","options":[],"recommended":"A","urgency":0.0-1.0}
+
+urgency: 0=routine, 0.5=attention, 0.8=urgent, 1.0=critical`;
 
 const LIGHT_SYSTEM_PROMPT =
   'You are CPT Marcus, a military staff officer. Given a battlefield digest, respond with a one-line sitrep in character (terse military comms) and an urgency score. Return only JSON: {"brief": "...", "urgency": 0.0-1.0}';
@@ -314,8 +361,13 @@ export async function callAdvisor(
   styleNote: string,
   channel?: string,
 ): Promise<AdvisorResult> {
+  const mode = resolveAdvisorMode(channel);
+  const systemPrompt = mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT;
   const persona = (channel && CHANNEL_PERSONA[channel]) || "";
-  const userContent = `${persona ? persona + "\n\n" : ""}当前战场摘要（DigestV1格式）：
+  const digestLabel = mode === "marcus_consult"
+    ? "战场压缩摘要（BattleContextV2格式）"
+    : "当前战场摘要（DigestV1格式）";
+  const userContent = `${persona ? persona + "\n\n" : ""}${digestLabel}：
 ${digest}
 
 指挥官风格参数：
@@ -324,19 +376,21 @@ ${styleNote}
 指挥官命令：${playerMessage}`;
 
   try {
-    const raw = await callDeepSeek(SYSTEM_PROMPT, userContent);
+    const raw = await callDeepSeek(systemPrompt, userContent);
     const validated = sanitize(raw);
 
     if (validated) {
-      return normalizeAdvisorForDay7(validated);
+      const result = normalizeAdvisorForDay7(validated);
+      return mode === "marcus_consult" ? coerceMarcusConsult(result) : result;
     }
 
     // LLM returned something but not valid JSON → fallback
     console.warn("LLM returned invalid JSON, using fallback. Raw:", raw.slice(0, 200));
-    return {
+    const fallback: AdvisorResult = {
       data: createFallbackResponse(),
       warning: "参谋回复格式异常，已使用默认方案",
     };
+    return mode === "marcus_consult" ? coerceMarcusConsult(fallback) : fallback;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
 
@@ -346,10 +400,11 @@ ${styleNote}
     }
 
     console.error("LLM call failed:", message);
-    return {
+    const fallback: AdvisorResult = {
       data: createFallbackResponse(),
       warning: `参谋通讯中断: ${message.slice(0, 100)}`,
     };
+    return mode === "marcus_consult" ? coerceMarcusConsult(fallback) : fallback;
   }
 }
 
@@ -368,8 +423,13 @@ export async function* callAdvisorStream(
   channel?: string,
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): AsyncGenerator<{ type: "text"; content: string } | { type: "options"; content: any }> {
+  const mode = resolveAdvisorMode(channel);
+  const systemPrompt = mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT;
   const persona = (channel && CHANNEL_PERSONA[channel]) || "";
-  const userContent = `${persona ? persona + "\n\n" : ""}USE STREAMING OUTPUT FORMAT.\n\n当前战场摘要（DigestV1格式）：
+  const digestLabel = mode === "marcus_consult"
+    ? "战场压缩摘要（BattleContextV2格式）"
+    : "当前战场摘要（DigestV1格式）";
+  const userContent = `${persona ? persona + "\n\n" : ""}USE STREAMING OUTPUT FORMAT.\n\n${digestLabel}：
 ${digest}
 
 指挥官风格参数：
@@ -390,7 +450,7 @@ ${styleNote}
   }
 
   const messages: ChatMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
     { role: "user", content: userContent },
   ];
 
@@ -440,6 +500,19 @@ ${styleNote}
 
     if (jsonStarted && jsonBuffer.trim()) {
       validated = sanitize(jsonBuffer.trim());
+      // Backward compatibility for Marcus V2 streams: if JSON omitted "brief",
+      // inject the streamed pre-delimiter text and re-validate.
+      if (!validated && mode === "marcus_consult") {
+        const parsed = safeParse(jsonBuffer.trim());
+        if (parsed && typeof parsed === "object") {
+          const obj = parsed as Record<string, unknown>;
+          const preludeText = fullText.split(JSON_DELIMITER)[0]?.trim() ?? "";
+          if (typeof obj.brief !== "string" && preludeText.length > 0) {
+            obj.brief = preludeText;
+          }
+          validated = validateAdvisorResponse(obj);
+        }
+      }
     }
 
     // Fallback: try to extract JSON from the full text if no delimiter was found
@@ -466,22 +539,31 @@ ${styleNote}
     }
 
     if (validated) {
-      const result = normalizeAdvisorForDay7(validated);
+      let result = normalizeAdvisorForDay7(validated);
+      if (mode === "marcus_consult") result = coerceMarcusConsult(result);
       const payload = result.warning ? { ...result.data, warning: result.warning } : result.data;
       yield { type: "options", content: payload };
     } else {
       // Degraded: return fallback response
       console.warn("Stream: failed to parse JSON, using fallback. Full text:", fullText.slice(0, 300));
-      const fallback = createFallbackResponse();
-      yield { type: "options", content: { ...fallback, warning: "参谋回复格式异常，已使用默认方案" } };
+      let fallback: AdvisorResult = {
+        data: createFallbackResponse(),
+        warning: "参谋回复格式异常，已使用默认方案",
+      };
+      if (mode === "marcus_consult") fallback = coerceMarcusConsult(fallback);
+      yield { type: "options", content: fallback.warning ? { ...fallback.data, warning: fallback.warning } : fallback.data };
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes("API密钥未配置")) throw err;
 
     console.error("Stream LLM call failed:", message);
-    const fallback = createFallbackResponse();
-    yield { type: "options", content: { ...fallback, warning: `参谋通讯中断: ${message.slice(0, 100)}` } };
+    let fallback: AdvisorResult = {
+      data: createFallbackResponse(),
+      warning: `参谋通讯中断: ${message.slice(0, 100)}`,
+    };
+    if (mode === "marcus_consult") fallback = coerceMarcusConsult(fallback);
+    yield { type: "options", content: fallback.warning ? { ...fallback.data, warning: fallback.warning } : fallback.data };
   }
 }
 

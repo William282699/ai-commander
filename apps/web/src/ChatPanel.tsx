@@ -17,8 +17,9 @@ declare global {
   }
 }
 import { OrgTree } from "./OrgTree";
-import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine } from "@ai-commander/core";
-import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, TaskCard, TaskPriority } from "@ai-commander/shared";
+import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine } from "@ai-commander/core";
+import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
+import { buildDigestForChannel } from "./digestHelper";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
 import { CHANNEL_LABELS } from "@ai-commander/shared";
 import {
@@ -404,6 +405,24 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   // Day 16B: per-channel context memory
   const channelContextRef = useRef<ChannelContext>(createEmptyChannelContext());
 
+  // Commander memory for battle context compression (consumed by buildBattleContextV2)
+  const MAX_COMMITMENTS = 4;
+  const commanderMemoryRef = useRef<Record<Channel, CommanderMemory>>({
+    ops: { playerIntent: "", openCommitments: [] },
+    logistics: { playerIntent: "", openCommitments: [] },
+    combat: { playerIntent: "", openCommitments: [] },
+  });
+  const pushCommitment = (ch: Channel, text: string) => {
+    const mem = commanderMemoryRef.current[ch];
+    if (mem.openCommitments.includes(text)) return;
+    mem.openCommitments.push(text);
+    if (mem.openCommitments.length > MAX_COMMITMENTS) mem.openCommitments.shift();
+  };
+  const removeCommitment = (ch: Channel, text: string) => {
+    const mem = commanderMemoryRef.current[ch];
+    mem.openCommitments = mem.openCommitments.filter(c => c !== text);
+  };
+
   // Phase 3: active staff threads
   const [activeThreads, setActiveThreads] = useState<StaffThread[]>([]);
 
@@ -638,7 +657,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             status: "active",
           };
           state.doctrines.push(newDoc);
-          addMessage("info", `持续命令已登记: ${soType} @ ${so.locationTag} [${soPriority.toUpperCase()}]`, state.time, ch, undefined, "command_ack");
+          const commitDesc = `${soType} @ ${so.locationTag}`;
+          pushCommitment(ch, commitDesc);
+          addMessage("info", `持续命令已登记: ${commitDesc} [${soPriority.toUpperCase()}]`, state.time, ch, undefined, "command_ack");
         }
       }
     }
@@ -647,6 +668,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
       const result = cancelDoctrine(state, data.cancelDoctrine);
       if (result.cancelled) {
+        removeCommitment(result.channel, `${result.type} @ ${result.locationTag}`);
         addMessage("info", `${result.locationTag} 的 ${result.type} 命令已取消，部队恢复自由调度。`, state.time, result.channel, undefined, "command_ack");
       }
     }
@@ -662,11 +684,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     latestRequestIdRef.current = null;
 
     const channels = selectedCommanders.map(c => COMMANDER_CHANNEL[c]);
-    const baseDigest = buildDigest(state, [], [], []);
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
     // Add player message to all channels
     for (const ch of channels) {
+      commanderMemoryRef.current[ch].playerIntent = userMsg;
       pushContext(channelContextRef.current, ch, { role: "user", text: userMsg, time: state.time });
     }
 
@@ -677,6 +699,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     const requests = selectedCommanders.map(async (cmd) => {
       const ch = COMMANDER_CHANNEL[cmd];
       const requestId = crypto.randomUUID();
+      const baseDigest = buildDigestForChannel(state, ch, commanderMemoryRef.current[ch]);
       const contextSuffix = formatContext(channelContextRef.current, ch);
       const digest = baseDigest + contextSuffix;
 
@@ -764,7 +787,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       ? `\n---ACTIVE_THREAD---\n[${activeThreadOnChannel.eventType}] ${activeThreadOnChannel.eventMessage}\nStaff brief: ${activeThreadOnChannel.brief}`
       : "";
 
-    const baseDigest = buildDigest(state, [], [], []);
+    commanderMemoryRef.current[ch].playerIntent = userMsg;
+    const baseDigest = buildDigestForChannel(state, ch, commanderMemoryRef.current[ch]);
     const contextSuffix = formatContext(channelContextRef.current, ch);
     const digest = baseDigest + contextSuffix + threadContext;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
