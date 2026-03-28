@@ -1540,6 +1540,22 @@ export function resolveRoute(
     }
   }
 
+  // Trim overshoot: walk from the end and drop any waypoints that are farther
+  // from target than their successor. This prevents the path from going past
+  // the target along the route and then doubling back.
+  while (waypoints.length > 1) {
+    const last = waypoints[waypoints.length - 1];
+    const prev = waypoints[waypoints.length - 2];
+    const lastD = (last.x - target.x) ** 2 + (last.y - target.y) ** 2;
+    const prevD = (prev.x - target.x) ** 2 + (prev.y - target.y) ** 2;
+    if (prevD <= lastD) {
+      // prev is closer to target than last — drop last (it overshoots)
+      waypoints.pop();
+    } else {
+      break;
+    }
+  }
+
   // Append final target
   waypoints.push({ ...target });
   return waypoints;
