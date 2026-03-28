@@ -508,7 +508,7 @@ export const EL_ALAMEIN_ROUTES: NamedRoute[] = [
     name: "Central Desert Track",
     waypoints: [
       { x: 450, y: 92 }, { x: 400, y: 92 }, { x: 350, y: 92 },
-      { x: 300, y: 95 }, { x: 250, y: 95 }, { x: 200, y: 92 },
+      { x: 300, y: 92 }, { x: 250, y: 92 }, { x: 200, y: 92 },
       { x: 140, y: 92 }, { x: 80, y: 92 },
     ],
     passableFor: ["ground"],
@@ -519,7 +519,7 @@ export const EL_ALAMEIN_ROUTES: NamedRoute[] = [
     name: "Southern Mountain Track",
     waypoints: [
       { x: 450, y: 195 }, { x: 400, y: 195 }, { x: 340, y: 195 },
-      { x: 280, y: 198 }, { x: 250, y: 200 }, { x: 200, y: 195 },
+      { x: 280, y: 195 }, { x: 250, y: 195 }, { x: 200, y: 195 },
       { x: 140, y: 195 }, { x: 80, y: 195 },
     ],
     passableFor: ["ground"],

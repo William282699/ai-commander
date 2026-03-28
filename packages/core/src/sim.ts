@@ -181,12 +181,19 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
       if (directDist < 3 && canUnitEnterTile(unit.type, tx, ty, state)) {
         moveTarget = unit.target;
       } else {
+        const posInfo = `pos(${unit.position.x.toFixed(1)},${unit.position.y.toFixed(1)})`;
+        const tgtInfo = `tgt(${unit.target.x.toFixed(1)},${unit.target.y.toFixed(1)})`;
+        const tgtTerrain = (ty >= 0 && ty < state.mapHeight && tx >= 0 && tx < state.mapWidth)
+          ? state.terrain[ty][tx] : "OOB";
+        const canEnter = canUnitEnterTile(unit.type, tx, ty, state);
+        const wpInfo = `wps=${unit.waypoints.length}`;
+        pushDiagnostic(state, "PATH_BLOCKED",
+          `${unit.type}#${unit.id} A*失败 ${posInfo} → ${tgtInfo} terrain=${tgtTerrain} canEnter=${canEnter} dist=${directDist.toFixed(1)} ${wpInfo}`);
         unit.target = null;
         unit.waypoints = [];
         unit.state = "idle";
         clearOneShotOrders(unit);
         clearPathCache(unit.id);
-        pushDiagnostic(state, "PATH_BLOCKED", `${unit.type}#${unit.id} A*寻路失败，目标不可达`);
         return;
       }
     }

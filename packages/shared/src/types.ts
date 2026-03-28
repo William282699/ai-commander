@@ -601,3 +601,11 @@ export interface LightAdvisorResponse {
   brief: string;
   urgency: number;
 }
+
+/** Per-channel memory for battle context compression. Fields are consumed by buildBattleContextV2. */
+export interface CommanderMemory {
+  /** Latest player intent (overwrite on each command) */
+  playerIntent: string;
+  /** Open commitments / standing orders — FIFO, max 4 */
+  openCommitments: string[];
+}

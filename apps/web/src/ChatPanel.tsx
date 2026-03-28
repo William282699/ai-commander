@@ -17,8 +17,9 @@ declare global {
   }
 }
 import { OrgTree } from "./OrgTree";
-import { buildDigest, resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine } from "@ai-commander/core";
-import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, TaskCard, TaskPriority } from "@ai-commander/shared";
+import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine } from "@ai-commander/core";
+import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
+import { buildDigestForChannel } from "./digestHelper";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
 import { CHANNEL_LABELS } from "@ai-commander/shared";
 import {
@@ -276,6 +277,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<DisplayResponse | null>(null);
+  const pendingGroupResponsesRef = useRef<{ data: DisplayResponse; channel: Channel; requestId: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [approvedIdx, setApprovedIdx] = useState<number | null>(null);
   const [clarification, setClarification] = useState<string | null>(null);
@@ -403,6 +405,24 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
   // Day 16B: per-channel context memory
   const channelContextRef = useRef<ChannelContext>(createEmptyChannelContext());
+
+  // Commander memory for battle context compression (consumed by buildBattleContextV2)
+  const MAX_COMMITMENTS = 4;
+  const commanderMemoryRef = useRef<Record<Channel, CommanderMemory>>({
+    ops: { playerIntent: "", openCommitments: [] },
+    logistics: { playerIntent: "", openCommitments: [] },
+    combat: { playerIntent: "", openCommitments: [] },
+  });
+  const pushCommitment = (ch: Channel, text: string) => {
+    const mem = commanderMemoryRef.current[ch];
+    if (mem.openCommitments.includes(text)) return;
+    mem.openCommitments.push(text);
+    if (mem.openCommitments.length > MAX_COMMITMENTS) mem.openCommitments.shift();
+  };
+  const removeCommitment = (ch: Channel, text: string) => {
+    const mem = commanderMemoryRef.current[ch];
+    mem.openCommitments = mem.openCommitments.filter(c => c !== text);
+  };
 
   // Phase 3: active staff threads
   const [activeThreads, setActiveThreads] = useState<StaffThread[]>([]);
@@ -638,7 +658,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             status: "active",
           };
           state.doctrines.push(newDoc);
-          addMessage("info", `持续命令已登记: ${soType} @ ${so.locationTag} [${soPriority.toUpperCase()}]`, state.time, ch, undefined, "command_ack");
+          const commitDesc = `${soType} @ ${so.locationTag}`;
+          pushCommitment(ch, commitDesc);
+          addMessage("info", `持续命令已登记: ${commitDesc} [${soPriority.toUpperCase()}]`, state.time, ch, undefined, "command_ack");
         }
       }
     }
@@ -647,12 +669,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
       const result = cancelDoctrine(state, data.cancelDoctrine);
       if (result.cancelled) {
+        removeCommitment(result.channel, `${result.type} @ ${result.locationTag}`);
         addMessage("info", `${result.locationTag} 的 ${result.type} 命令已取消，部队恢复自由调度。`, state.time, result.channel, undefined, "command_ack");
       }
     }
   };
 
-  // ── 0.5: Group chat — parallel requests (completion-order insertion) ──
+  // ── 0.5: Group chat — Marcus NOOP + single execution call ──
+  // ALL mode sends ONE execution call (combat/Chen handles all intent types)
+  // plus a separate Marcus NOOP call for strategic advice. One option card, one approval.
   const sendGroupChat = async (userMsg: string, state: GameState, selectedIds: number[]) => {
     // Clear stale response/error from previous command
     setResponse(null);
@@ -660,65 +685,90 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     setApprovedIdx(null);
     responseExecCtxRef.current = null;
     latestRequestIdRef.current = null;
+    pendingGroupResponsesRef.current = [];
 
     const channels = selectedCommanders.map(c => COMMANDER_CHANNEL[c]);
-    const baseDigest = buildDigest(state, [], [], []);
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
     // Add player message to all channels
     for (const ch of channels) {
+      commanderMemoryRef.current[ch].playerIntent = userMsg;
       pushContext(channelContextRef.current, ch, { role: "user", text: userMsg, time: state.time });
     }
 
-    // Track first response with options for display (completion order)
-    let firstOptionsShown = false;
+    // Split: Marcus → NOOP advisor call, execution → single combat call
+    const hasMarcus = selectedCommanders.includes("marcus");
+    const execChannel: Channel = "combat";
 
-    // Fire parallel requests — each resolves independently and inserts into chat on completion
-    const requests = selectedCommanders.map(async (cmd) => {
-      const ch = COMMANDER_CHANNEL[cmd];
-      const requestId = crypto.randomUUID();
-      const contextSuffix = formatContext(channelContextRef.current, ch);
-      const digest = baseDigest + contextSuffix;
+    const requests: Promise<void>[] = [];
 
+    // Marcus NOOP call (parallel, non-blocking)
+    if (hasMarcus) {
+      requests.push((async () => {
+        try {
+          const baseDigest = buildDigestForChannel(state, "ops", commanderMemoryRef.current.ops);
+          const contextSuffix = formatContext(channelContextRef.current, "ops");
+          const digest = baseDigest + contextSuffix;
+          const res = await fetch(`${API_URL}/api/command`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ digest, message: userMsg, styleNote, channel: "ops" }),
+          });
+          const data = await res.json();
+          if (data.brief) {
+            pushContext(channelContextRef.current, "ops", { role: "assistant", text: data.brief, time: state.time });
+            addMessage("info", data.brief, state.time, "ops", "marcus", "command_ack", true);
+          }
+          if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
+            processDoctrineFields({ cancelDoctrine: data.cancelDoctrine }, state, "ops");
+          }
+        } catch {
+          addMessage("urgent", `${COMMANDER_META.marcus.label}: 通信中断`, state.time, "ops", "marcus", "system", true);
+        }
+      })());
+    }
+
+    // Single execution call — Chen handles all intent types (combat + logistics)
+    requests.push((async () => {
       try {
+        const baseDigest = buildDigestForChannel(state, execChannel, commanderMemoryRef.current[execChannel]);
+        const contextSuffix = formatContext(channelContextRef.current, execChannel);
+        const digest = baseDigest + contextSuffix;
+        const requestId = crypto.randomUUID();
         const res = await fetch(`${API_URL}/api/command`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ digest, message: userMsg, styleNote, channel: ch }),
+          body: JSON.stringify({ digest, message: userMsg, styleNote, channel: execChannel }),
         });
         const data = await res.json();
 
-        // Insert into chat flow immediately on completion (not waiting for others)
         if (data.error) {
-          addMessage("urgent", `${COMMANDER_META[cmd].label}: ${data.error}`, state.time, ch, cmd, "command_ack", true);
+          addMessage("urgent", data.error, state.time, execChannel, "chen", "command_ack", true);
           return;
         }
 
         if (data.brief) {
-          pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief, time: state.time });
-          addMessage("info", data.brief, state.time, ch, cmd, "command_ack", true);
+          pushContext(channelContextRef.current, execChannel, { role: "assistant", text: data.brief, time: state.time });
+          addMessage("info", data.brief, state.time, execChannel, "chen", "command_ack", true);
         }
 
         if (data.responseType?.toUpperCase() === "NOOP") {
-          // NOOP can carry cancelDoctrine (natural language cancellation doesn't need approval)
           if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
-            processDoctrineFields({ cancelDoctrine: data.cancelDoctrine }, state, ch);
+            processDoctrineFields({ cancelDoctrine: data.cancelDoctrine }, state, execChannel);
           }
-          return; // Conversational — already added brief above
+          return;
         }
 
-        if (Array.isArray(data.options) && data.options.length > 0 && !firstOptionsShown) {
-          firstOptionsShown = true;
-          responseExecCtxRef.current = { channel: ch, requestId };
+        if (Array.isArray(data.options) && data.options.length > 0) {
+          responseExecCtxRef.current = { channel: execChannel, requestId };
           latestRequestIdRef.current = requestId;
           setResponse(data as DisplayResponse);
         }
       } catch {
-        addMessage("urgent", `${COMMANDER_META[cmd].label}: 通信中断`, state.time, ch, cmd, "system", true);
+        addMessage("urgent", `全体指令通信中断`, state.time, execChannel, "chen", "system", true);
       }
-    });
+    })());
 
-    // Wait for all to finish (loading spinner stays until all done)
     await Promise.all(requests);
   };
 
@@ -764,7 +814,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       ? `\n---ACTIVE_THREAD---\n[${activeThreadOnChannel.eventType}] ${activeThreadOnChannel.eventMessage}\nStaff brief: ${activeThreadOnChannel.brief}`
       : "";
 
-    const baseDigest = buildDigest(state, [], [], []);
+    commanderMemoryRef.current[ch].playerIntent = userMsg;
+    const baseDigest = buildDigestForChannel(state, ch, commanderMemoryRef.current[ch]);
     const contextSuffix = formatContext(channelContextRef.current, ch);
     const digest = baseDigest + contextSuffix + threadContext;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
@@ -1052,50 +1103,49 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         }
       }
       const squads = [...new Set(intentSquads)];
-      const primaryIntent = intents[0];
-      // Always create TaskCard if orders executed successfully.
-      // Even without resolved squads — the task tracker handles squadless tasks.
-      {
-      const locationHint = primaryIntent.toFront || primaryIntent.fromFront
-        || primaryIntent.targetRegion || "";
-      const titleMap: Record<string, string> = {
-        defend: `防守 ${locationHint || "阵地"}`,
-        attack: `进攻 ${locationHint || "目标"}`,
-        retreat: `撤退整补 ${locationHint}`,
-        recon: `侦察 ${locationHint || "区域"}`,
-        hold: `固守 ${locationHint || "阵地"}`,
-        patrol: `巡逻 ${locationHint || "区域"}`,
-        reinforce: `增援 ${locationHint || "前线"}`,
-        capture: `占领 ${primaryIntent.targetFacility || locationHint || "设施"}`,
-        sabotage: `破坏 ${primaryIntent.targetFacility || locationHint || "设施"}`,
-        produce: `生产 ${primaryIntent.produceType || "单位"}`,
-        trade: `交易 ${primaryIntent.tradeAction || "资源"}`,
-      };
-      const taskTitle = (titleMap[primaryIntent.type] || primaryIntent.type).trim();
-
+      // Create TaskCard for each distinct intent type (e.g. attack + produce → 2 cards)
+      const economyTypes = new Set(["produce", "trade"]);
       // Find associated doctrine if standingOrder was just created
       const linkedDoctrine = state.doctrines.find(
         d => d.status === "active" && d.commander === ch &&
         d.createdAt === state.time,
       );
 
-      const taskId = `task_${Date.now().toString(36)}_${state.tasks.length}`;
-      const economyTypes = new Set(["produce", "trade"]);
-      const taskKind = economyTypes.has(primaryIntent.type) ? "economy" as const : "combat" as const;
-      const newTask: TaskCard = {
-        id: taskId,
-        title: taskTitle,
-        commander: ch,
-        assignedSquads: squads,
-        status: "assigned",
-        priority: linkedDoctrine?.priority as TaskPriority ?? "normal",
-        kind: taskKind,
-        constraint: linkedDoctrine?.type,
-        createdAt: state.time,
-        statusChangedAt: state.time,
-        doctrineId: linkedDoctrine?.id,
-      };
-      state.tasks.push(newTask);
+      for (const intent of intents) {
+        const locationHint = intent.toFront || intent.fromFront
+          || intent.targetRegion || "";
+        const titleMap: Record<string, string> = {
+          defend: `防守 ${locationHint || "阵地"}`,
+          attack: `进攻 ${locationHint || "目标"}`,
+          retreat: `撤退整补 ${locationHint}`,
+          recon: `侦察 ${locationHint || "区域"}`,
+          hold: `固守 ${locationHint || "阵地"}`,
+          patrol: `巡逻 ${locationHint || "区域"}`,
+          reinforce: `增援 ${locationHint || "前线"}`,
+          capture: `占领 ${intent.targetFacility || locationHint || "设施"}`,
+          sabotage: `破坏 ${intent.targetFacility || locationHint || "设施"}`,
+          produce: `生产 ${intent.produceType || "单位"}`,
+          trade: `交易 ${intent.tradeAction || "资源"}`,
+        };
+        const taskTitle = (titleMap[intent.type] || intent.type).trim();
+        const taskId = `task_${Date.now().toString(36)}_${state.tasks.length}`;
+        const taskKind = economyTypes.has(intent.type) ? "economy" as const : "combat" as const;
+        // Combat tasks get squad assignments; economy tasks are squadless
+        const taskSquads = taskKind === "combat" ? squads : [];
+        const newTask: TaskCard = {
+          id: taskId,
+          title: taskTitle,
+          commander: ch,
+          assignedSquads: taskSquads,
+          status: "assigned",
+          priority: linkedDoctrine?.priority as TaskPriority ?? "normal",
+          kind: taskKind,
+          constraint: linkedDoctrine?.type,
+          createdAt: state.time,
+          statusChangedAt: state.time,
+          doctrineId: linkedDoctrine?.id,
+        };
+        state.tasks.push(newTask);
       }
 
       if (execCtx?.threadId) {
@@ -1118,13 +1168,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     setClarification(null);
     setApprovedIdx(idx);
 
-    // Brief flash then clear card
+    // Brief flash then clear card (or show next queued group response)
     setTimeout(() => {
-      setResponse(null);
+      const next = pendingGroupResponsesRef.current.shift();
+      if (next) {
+        setResponse(next.data);
+        responseExecCtxRef.current = { channel: next.channel, requestId: next.requestId };
+        latestRequestIdRef.current = next.requestId;
+      } else {
+        setResponse(null);
+        responseExecCtxRef.current = null;
+        latestRequestIdRef.current = null;
+      }
       setApprovedIdx(null);
       selectedIdsSnapshotRef.current = undefined;
-      responseExecCtxRef.current = null;
-      latestRequestIdRef.current = null;
     }, 400);
   };
 
@@ -1137,12 +1194,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   };
 
   const dismiss = () => {
-    setResponse(null);
+    const next = pendingGroupResponsesRef.current.shift();
+    if (next) {
+      setResponse(next.data);
+      responseExecCtxRef.current = { channel: next.channel, requestId: next.requestId };
+      latestRequestIdRef.current = next.requestId;
+    } else {
+      setResponse(null);
+      responseExecCtxRef.current = null;
+      latestRequestIdRef.current = null;
+    }
     setError(null);
     setApprovedIdx(null);
     selectedIdsSnapshotRef.current = undefined;
-    responseExecCtxRef.current = null;
-    latestRequestIdRef.current = null;
   };
 
   // ── Render ──
