@@ -8,7 +8,7 @@
 
 import type { GameState, ReportEvent, Channel } from "@ai-commander/shared";
 
-const TRIGGER_COOLDOWN_SEC = 60;
+const TRIGGER_COOLDOWN_SEC = 30;
 
 export type AdvisorTriggerType = "crisis_card" | "llm_advice";
 

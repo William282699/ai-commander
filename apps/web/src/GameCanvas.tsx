@@ -123,13 +123,17 @@ function resetStaffAskState(): void {
 
 // ── Day 16B: Heartbeat state ──
 
-const HEARTBEAT_INTERVAL_SEC = 50;
+const COMBAT_HEARTBEAT_INTERVAL_SEC = 20;
+const PEACE_HEARTBEAT_INTERVAL_SEC = 40;
+const COMBAT_WINDOW_SEC = 25;
 const API_URL = "http://localhost:3001";
 
 const heartbeatState = {
   lastTime: { ops: 0, logistics: 0, combat: 0 } as Record<Channel, number>,
   inFlight: { ops: false, logistics: false, combat: false } as Record<Channel, boolean>,
   session: 0, // incremented on restart; stale async responses compare against this
+  lastPeacePulse: 0,
+  combatWindowUntil: 0,
 };
 
 function resetHeartbeatState(): void {
@@ -138,6 +142,8 @@ function resetHeartbeatState(): void {
     heartbeatState.inFlight[ch] = false;
   }
   heartbeatState.session++;
+  heartbeatState.lastPeacePulse = 0;
+  heartbeatState.combatWindowUntil = 0;
 }
 
 /** Diagnostic codes suppressed from Staff Feed (still logged to state.diagnostics). */
@@ -1045,6 +1051,13 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       // --- AI & Auto-Behavior (Day 8) --- (guards: if gameOver return)
       processEnemyAI(state, dt);        // enemy strategic decisions (5s interval)
       processDefensiveAI(state, dt);    // El Alamein defensive AI (5s interval, no-op for other scenarios)
+      // DEBUG: check if defensiveAI diagnostics are being produced
+      if (state.tick % 300 === 0) {
+        const defDbg = state.diagnostics.filter(d => d.code === "DEFAI_DBG");
+        const enemyCount = Array.from(state.units.values()).filter(u => u.team === "enemy" && u.state !== "dead").length;
+        const aiMode = state.enemyAIMode;
+        addMessage("warning", `[DBG] mode=${aiMode} enemies=${enemyCount} defDiag=${defDbg.length} t=${state.time.toFixed(0)}`, state.time, "ops", undefined, "system");
+      }
       processAutoBehavior(state, dt);    // both teams micro-behavior (2s interval)
 
       // --- ENDGAME Pressure (Day 12) ---
@@ -1210,35 +1223,67 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
         expireStaleThreads(state.time);
       }
 
-      // --- Day 16B: Heartbeat LLM brief (async, non-blocking) ---
+      // --- Combat window detection (uses drain'd reportEvts, before heartbeat) ---
+      {
+        const hasCombatSignal =
+          reportEvts.some(e =>
+            e.type === "UNDER_ATTACK" || e.type === "HQ_DAMAGED" || e.type === "POSITION_CRITICAL"
+          ) ||
+          state.battleMarkers.some(m => m.type === "attack_zone");
+        if (hasCombatSignal) {
+          heartbeatState.combatWindowUntil = state.time + COMBAT_WINDOW_SEC;
+        }
+      }
+      const inCombat = state.time <= heartbeatState.combatWindowUntil;
+
+      // --- Heartbeat LLM brief (async, non-blocking) ---
       if (!state.gameOver) {
-        for (const ch of ["ops", "logistics", "combat"] as Channel[]) {
-          if (
-            state.time - heartbeatState.lastTime[ch] > HEARTBEAT_INTERVAL_SEC &&
-            !heartbeatState.inFlight[ch]
-          ) {
-            heartbeatState.lastTime[ch] = state.time;
-            heartbeatState.inFlight[ch] = true;
-            const digest = buildDigest(state, [], [], []);
-            const reqSession = heartbeatState.session; // capture session for stale-guard
-            fetch(`${API_URL}/api/brief`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ digest, channel: ch }),
+        const channels = ["ops", "logistics", "combat"] as Channel[];
+        const heartbeatInterval = inCombat ? COMBAT_HEARTBEAT_INTERVAL_SEC : PEACE_HEARTBEAT_INTERVAL_SEC;
+
+        const sendHeartbeat = (ch: Channel) => {
+          heartbeatState.lastTime[ch] = state.time;
+          heartbeatState.inFlight[ch] = true;
+          const digest = buildDigest(state, [], [], []);
+          const reqSession = heartbeatState.session;
+          fetch(`${API_URL}/api/brief`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ digest, channel: ch }),
+          })
+            .then((r) => r.json())
+            .then((data) => {
+              if (reqSession !== heartbeatState.session) return;
+              if (data?.brief) {
+                addMessage("info", data.brief, state.time, ch, undefined, "heartbeat");
+              }
             })
-              .then((r) => r.json())
-              .then((data) => {
-                if (reqSession !== heartbeatState.session) return; // stale: game restarted
-                if (data?.brief) {
-                  // Use arrival-time snapshot so downstream throttling keys off real message ingress time.
-                  addMessage("info", data.brief, state.time, ch, undefined, "heartbeat");
-                }
-              })
-              .catch(() => {}) // heartbeat failure is silent
-              .finally(() => {
-                if (reqSession !== heartbeatState.session) return; // stale: don't unlock new session
-                heartbeatState.inFlight[ch] = false;
-              });
+            .catch(() => {})
+            .finally(() => {
+              if (reqSession !== heartbeatState.session) return;
+              heartbeatState.inFlight[ch] = false;
+            });
+        };
+
+        if (inCombat) {
+          // Combat mode: all channels independently, 20s interval
+          for (const ch of channels) {
+            if (
+              state.time - heartbeatState.lastTime[ch] > heartbeatInterval &&
+              !heartbeatState.inFlight[ch]
+            ) {
+              sendHeartbeat(ch);
+            }
+          }
+        } else {
+          // Peace mode: one random channel every 40s
+          if (state.time - heartbeatState.lastPeacePulse > heartbeatInterval) {
+            const available = channels.filter(ch => !heartbeatState.inFlight[ch]);
+            if (available.length > 0) {
+              const ch = available[Math.floor(Math.random() * available.length)];
+              heartbeatState.lastPeacePulse = state.time;
+              sendHeartbeat(ch);
+            }
           }
         }
       }
