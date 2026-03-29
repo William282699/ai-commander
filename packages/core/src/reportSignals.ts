@@ -72,6 +72,22 @@ function findFrontForPosition(
   return null;
 }
 
+function circleIntersectsRect(
+  cx: number,
+  cy: number,
+  radius: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): boolean {
+  const nearestX = Math.max(x1, Math.min(cx, x2));
+  const nearestY = Math.max(y1, Math.min(cy, y2));
+  const dx = cx - nearestX;
+  const dy = cy - nearestY;
+  return dx * dx + dy * dy <= radius * radius;
+}
+
 // --- Main detection function ---
 
 export function processReportSignals(state: GameState, _dt: number): void {
@@ -163,7 +179,7 @@ function detectUnderAttack(state: GameState): void {
   });
 
   for (const frontId of damagedFronts) {
-    if (canFire(state, `UNDER_ATTACK:${frontId}`, 30)) {
+    if (canFire(state, `UNDER_ATTACK:${frontId}`, 15)) {
       const front = state.fronts.find((f) => f.id === frontId);
       const name = front?.name ?? frontId;
       emit(state, "UNDER_ATTACK", `${name} 遭到攻击！`, "warning", frontId);
@@ -261,23 +277,65 @@ function detectSquadHeavyLoss(state: GameState): void {
 }
 
 // --- Detection: POSITION_CRITICAL ---
-// Front where playerPower/enemyPower < 0.3 AND actively engaged (engagementIntensity > 0.3)
+// Front where local playerPower/enemyPower < 0.3 AND actively engaged
+// Engagement check: engagementIntensity > 0.3 OR attack_zone battleMarker within front bbox
 
 function detectPositionCritical(state: GameState): void {
+  const attackZones = state.battleMarkers.filter((m) => m.type === "attack_zone");
+
   for (const front of state.fronts) {
-    if (front.enemyPower <= 0 || front.engagementIntensity < 0.3) continue;
-    const ratio = front.playerPower / front.enemyPower;
-    if (ratio < 0.3) {
-      if (canFire(state, `POSITION_CRITICAL:${front.id}`, 60)) {
-        emit(
-          state,
-          "POSITION_CRITICAL",
-          `${front.name} about to collapse! Power ratio ${(ratio * 100).toFixed(0)}%, taking heavy fire!`,
-          "critical",
-          front.id,
-          true, // actionRequired
-        );
+    // Local realtime power stats (avoid stale front.playerPower/enemyPower from digest)
+    let localPlayerHp = 0;
+    let localEnemyHp = 0;
+    const counted = new Set<number>();
+    for (const regionId of front.regionIds) {
+      const region = state.regions.get(regionId);
+      if (!region) continue;
+      const [x1, y1, x2, y2] = region.bbox;
+      state.units.forEach(u => {
+        if (u.state === "dead" || u.hp <= 0) return;
+        if (counted.has(u.id)) return;
+        if (u.position.x >= x1 && u.position.x <= x2 &&
+            u.position.y >= y1 && u.position.y <= y2) {
+          counted.add(u.id);
+          if (u.team === "player") localPlayerHp += u.hp;
+          else if (u.team === "enemy") localEnemyHp += u.hp;
+        }
+      });
+    }
+
+    if (localEnemyHp <= 0) continue;
+    const ratio = localPlayerHp / localEnemyHp;
+    if (ratio >= 0.3) continue;
+
+    // Engagement check: engagementIntensity OR attack_zone circle intersects front bbox
+    let engaged = front.engagementIntensity > 0.3;
+    if (!engaged && attackZones.length > 0) {
+      for (const regionId of front.regionIds) {
+        const region = state.regions.get(regionId);
+        if (!region) continue;
+        const [x1, y1, x2, y2] = region.bbox;
+        for (const m of attackZones) {
+          const radius = Math.max(0, m.radius ?? 0);
+          if (circleIntersectsRect(m.x, m.y, radius, x1, y1, x2, y2)) {
+            engaged = true;
+            break;
+          }
+        }
+        if (engaged) break;
       }
+    }
+    if (!engaged) continue;
+
+    if (canFire(state, `POSITION_CRITICAL:${front.id}`, 30)) {
+      emit(
+        state,
+        "POSITION_CRITICAL",
+        `${front.name} about to collapse! Power ratio ${(ratio * 100).toFixed(0)}%, taking heavy fire!`,
+        "critical",
+        front.id,
+        true, // actionRequired
+      );
     }
   }
 }

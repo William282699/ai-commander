@@ -88,10 +88,10 @@ export function createElAlameinState(): GameState {
       })(),
       enemy: (() => {
         const eco = makeEconomy();
-        eco.resources.money = 2000; // Axis supply issues
-        eco.resources.fuel = 60;    // Rommel short on fuel
-        eco.resources.ammo = 80;
-        eco.baseIncome = { money: 80, fuel: 10, ammo: 15, intel: 10 }; // Reduced Axis supply
+        eco.resources.money = 2500;
+        eco.resources.fuel = 150;
+        eco.resources.ammo = 150;
+        eco.baseIncome = { money: 100, fuel: 20, ammo: 20, intel: 10 };
         return eco;
       })(),
     },

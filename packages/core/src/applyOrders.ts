@@ -126,20 +126,45 @@ export function releaseManualOverride(state: GameState, unitIds: number[]): void
  * Used by processEnemyAI for strategic decisions.
  * Mirrors applyOrders but filters for enemy team.
  */
-export function applyEnemyOrders(state: GameState, orders: Order[]): void {
-  for (const order of orders) {
+export interface EnemyOrderDispatchResult {
+  requestedUnits: number;
+  appliedUnits: number;
+  skippedUnits: number;
+  appliedPerOrder: number[]; // index-aligned with input orders
+}
+
+export function applyEnemyOrders(state: GameState, orders: Order[]): EnemyOrderDispatchResult {
+  const result: EnemyOrderDispatchResult = {
+    requestedUnits: 0,
+    appliedUnits: 0,
+    skippedUnits: 0,
+    appliedPerOrder: Array.from({ length: orders.length }, () => 0),
+  };
+
+  for (let orderIdx = 0; orderIdx < orders.length; orderIdx++) {
+    const order = orders[orderIdx];
     if (order.action === "produce" || order.action === "trade") {
       handleEconomyOrder(order, "enemy", state);
       continue;
     }
 
+    result.requestedUnits += order.unitIds.length;
     for (const unitId of order.unitIds) {
       const unit = state.units.get(unitId);
-      if (!unit) continue;
-      if (unit.team !== "enemy") continue;
+      if (!unit) {
+        result.skippedUnits++;
+        continue;
+      }
+      if (unit.team !== "enemy") {
+        result.skippedUnits++;
+        continue;
+      }
       applyOrderToUnit(unit, order, state);
+      result.appliedUnits++;
+      result.appliedPerOrder[orderIdx]++;
     }
   }
+  return result;
 }
 
 // ── Economy order dispatch (produce / trade) ──
