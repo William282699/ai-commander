@@ -32,7 +32,7 @@ export interface FeedMessage {
   groupChat?: boolean; // true = sent via ALL group chat, hidden in individual channel views
 }
 
-const MAX_MESSAGES = 50;
+const MAX_MESSAGES = 200;
 
 let nextId = 1;
 const messages: FeedMessage[] = [];
@@ -87,9 +87,9 @@ export function getGroupChatMessages(): readonly FeedMessage[] {
   return messages.filter((m) => m.groupChat);
 }
 
-/** Single-channel view: that channel's messages, excluding group-chat. */
+/** Single-channel view: that channel's messages + group-chat messages on same channel. */
 export function getMessagesByChannel(channel: Channel): readonly FeedMessage[] {
-  return messages.filter((m) => m.channel === channel && !m.groupChat);
+  return messages.filter((m) => m.channel === channel);
 }
 
 /** Return the game-time of the most recent message matching channel+source, or null. */
