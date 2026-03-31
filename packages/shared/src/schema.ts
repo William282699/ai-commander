@@ -82,11 +82,11 @@ export function sanitizeIntent(raw: unknown): Intent | null {
     }
   }
 
-  // Optional string fields
-  if (typeof obj.fromFront === "string") intent.fromFront = obj.fromFront;
-  if (typeof obj.toFront === "string") intent.toFront = obj.toFront;
-  if (typeof obj.targetFacility === "string") intent.targetFacility = obj.targetFacility;
-  if (typeof obj.targetRegion === "string") intent.targetRegion = obj.targetRegion;
+  // Optional string fields — strip empty strings to avoid downstream mis-matches
+  if (typeof obj.fromFront === "string" && obj.fromFront.trim().length > 0) intent.fromFront = obj.fromFront.trim();
+  if (typeof obj.toFront === "string" && obj.toFront.trim().length > 0) intent.toFront = obj.toFront.trim();
+  if (typeof obj.targetFacility === "string" && obj.targetFacility.trim().length > 0) intent.targetFacility = obj.targetFacility.trim();
+  if (typeof obj.targetRegion === "string" && obj.targetRegion.trim().length > 0) intent.targetRegion = obj.targetRegion.trim();
 
   // unitType
   if (VALID_UNIT_CATEGORY.includes(obj.unitType as UnitCategoryHint)) {

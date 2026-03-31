@@ -953,9 +953,15 @@ function resolveSourceUnits(
   }
 
   // Prefer idle units: avoid pulling units already on a mission (defending/attacking/etc.)
-  // Unless intent.quantity is "all"/"most" (e.g. "所有人撤退"), or not enough idle units.
+  // Skip busy-filter when:
+  //   - quantity is "all"/"most" (explicit full mobilization), OR
+  //   - fromSquad is set AND quantity is missing/undefined (user named a squad without
+  //     specifying a partial amount — intent is "everyone under this person, go").
+  // When fromSquad + quantity is "few"/"some"/number, keep busy-filter (partial dispatch).
   const busyStates = new Set(["defending", "attacking", "moving", "retreating"]);
-  if (intent.quantity !== "all" && intent.quantity !== "most") {
+  const isFullMobilization = intent.quantity === "all" || intent.quantity === "most";
+  const isSquadDefaultAll = !!intent.fromSquad && (intent.quantity == null || intent.quantity === undefined);
+  if (!isFullMobilization && !isSquadDefaultAll) {
     const idleUnits = units.filter((u) => !busyStates.has(u.state));
     // Only use idle pool if there are enough; otherwise fall back to full pool
     if (idleUnits.length >= 2) {
@@ -1611,7 +1617,9 @@ export function resolveRouteChain(
     if (segment) {
       allWaypoints.push(...segment.waypoints);
       currentPos = segment.waypoints[segment.waypoints.length - 1];
-      if (i === 0) totalEntry = segment.entryDist;
+      // Accumulate all segments' entryDist: segment 0's entry is unit→routeA,
+      // segment 1's entry is routeA exit→routeB entry (the inter-segment gap).
+      totalEntry += segment.entryDist;
       totalRoute += segment.routeLen;
       if (isLast) totalExit = segment.exitDist;
     }

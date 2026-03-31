@@ -124,6 +124,11 @@ RESPECT PLAYER NUMBERS — When the commander specifies exact quantities (e.g. "
     { "type": "recon", "toFront": "front_west", "unitType": "infantry", "quantity": 1 }
   ]
 
+QUANTITY KEYWORDS — Map these words to the exact quantity string:
+  "all"/"全部"/"所有"/"全军"/"everyone"/"everything"/"全部出动" → quantity: "all"
+  "most"/"大部分"/"大多数" → quantity: "most"
+  This is critical: "全部出动" MUST produce quantity: "all", not a number.
+
 MULTI-INTENT UNIT SEPARATION — When generating multiple intents in one option, each intent MUST use a DIFFERENT fromSquad, or you must split units by specifying different "quantity" values. Do not assign the same squad to multiple intents — the system processes intents sequentially and units claimed by the first intent become unavailable for subsequent ones.
 
 IMPORTANT:
