@@ -860,7 +860,7 @@ function resolveCapture(
 }
 
 /** Find a facility by id, type, name, or tag (returns full Facility or undefined). */
-function findFacilityById(
+export function findFacilityById(
   state: GameState,
   facilityHint: string,
 ): import("@ai-commander/shared").Facility | undefined {
@@ -1049,7 +1049,10 @@ function resolveSourceUnitsRaw(
         return { units: Array.from(byId.values()) };
       }
       if (matchedFrontCount > 0) {
-        // Soft fallback: front(s) found but 0 units → try global pool
+        // For retreat/defend: do NOT fallback to global pool
+        if (intent.type === "retreat" || intent.type === "defend") {
+          return { units: [], error: "指定来源战线暂无可用单位" };
+        }
         const all = getAllAvailablePlayerUnits(state);
         if (all.length > 0) return { units: all };
         return { units: [], error: "指定来源战线暂无可用单位" };
@@ -1063,7 +1066,12 @@ function resolveSourceUnitsRaw(
     }
     const frontUnits = getUnitsOnFront(state, sourceFront);
     if (frontUnits.length === 0) {
-      // Soft fallback: front found but 0 units → try global pool
+      // For retreat/defend: do NOT fallback to global pool — only retreat units
+      // actually on this front. Global fallback caused full-army mis-retreats.
+      if (intent.type === "retreat" || intent.type === "defend") {
+        return { units: [], error: `战线 "${sourceFront.name}" 暂无可用单位` };
+      }
+      // For other intent types (attack, etc.): soft fallback to global pool
       const all = getAllAvailablePlayerUnits(state);
       if (all.length > 0) return { units: all };
       return { units: [], error: `战线 "${sourceFront.name}" 暂无可用单位` };
@@ -1404,58 +1412,51 @@ function createOrdersWithSpread(
         : rIds.length === 1
           ? resolveRoute(state, unit.position, finalTarget, rIds[0])
           : null;
-      if (resolved && resolved.length > 0) {
-        waypoints = resolved;
+      if (resolved && resolved.waypoints.length > 0) {
+        waypoints = resolved.waypoints;
       }
     }
     // Auto-route: if no explicit route but scenario has routes and unit needs to cross
-    // far distance (>30 tiles), try to find a suitable route automatically
+    // far distance (>30 tiles), try to find a suitable route automatically.
+    // Score by total path cost (entry + route + exit), only accept if better than direct.
     if (!waypoints && state.namedRoutes.length > 0) {
-      const dist = Math.abs(unit.position.x - finalTarget.x) + Math.abs(unit.position.y - finalTarget.y);
-      if (dist > 30) {
+      const directDist = Math.abs(unit.position.x - finalTarget.x) + Math.abs(unit.position.y - finalTarget.y);
+      if (directDist > 30) {
         const cat = getUnitCategory(unit.type);
         const passableRoutes = state.namedRoutes.filter(nr => nr.passableFor.includes(cat));
 
-        // Try single routes first — pick the one whose exit is closest to target
-        let bestSingle: Position[] | null = null;
-        let bestSingleExitDist = Infinity;
+        let bestRoute: ResolvedRoute | null = null;
+        let bestCost = Infinity;
+
+        // Try single routes — score by totalCost (entry + route + exit)
         for (const nr of passableRoutes) {
           const resolved = resolveRoute(state, unit.position, finalTarget, nr.id);
-          if (resolved && resolved.length > 1) {
-            // Check how close the last route waypoint (before appended target) gets to target
-            const lastRouteWp = resolved[resolved.length - 2]; // second-to-last is last route wp
-            const exitDist = Math.abs(lastRouteWp.x - finalTarget.x) + Math.abs(lastRouteWp.y - finalTarget.y);
-            if (exitDist < bestSingleExitDist) {
-              bestSingleExitDist = exitDist;
-              bestSingle = resolved;
-            }
+          if (resolved && resolved.waypoints.length > 1 && resolved.totalCost < bestCost) {
+            bestCost = resolved.totalCost;
+            bestRoute = resolved;
           }
         }
 
-        // If best single route still leaves >20 tile gap to target, try 2-route chains
-        if (bestSingleExitDist > 20 && passableRoutes.length >= 2) {
+        // If best single route exit still >20 tiles from target, try 2-route chains
+        if ((!bestRoute || bestRoute.exitDist > 20) && passableRoutes.length >= 2) {
           for (let a = 0; a < passableRoutes.length; a++) {
             for (let b = 0; b < passableRoutes.length; b++) {
               if (a === b) continue;
               const chain = resolveRouteChain(
                 state, unit.position, finalTarget, [passableRoutes[a].id, passableRoutes[b].id],
               );
-              if (chain && chain.length > 0) {
-                const lastChainWp = chain[chain.length - 2];
-                const chainExitDist = lastChainWp
-                  ? Math.abs(lastChainWp.x - finalTarget.x) + Math.abs(lastChainWp.y - finalTarget.y)
-                  : Infinity;
-                if (chainExitDist < bestSingleExitDist) {
-                  bestSingleExitDist = chainExitDist;
-                  bestSingle = chain;
-                }
+              if (chain && chain.waypoints.length > 0 && chain.totalCost < bestCost) {
+                bestCost = chain.totalCost;
+                bestRoute = chain;
               }
             }
           }
         }
 
-        if (bestSingle) {
-          waypoints = bestSingle;
+        // Only use route if it's meaningfully better than direct distance.
+        // Route must save at least 20% vs going straight, otherwise just walk direct.
+        if (bestRoute && bestCost < directDist * 0.8) {
+          waypoints = bestRoute.waypoints;
         }
       }
     }
@@ -1501,31 +1502,43 @@ function ensurePassableTarget(
  * Build waypoints along a named route from a unit's position to a target.
  * Returns the route waypoints to inject into unit orders, or null if no route found.
  */
+export interface ResolvedRoute {
+  waypoints: Position[];
+  /** Manhattan distance from unit to route entry point */
+  entryDist: number;
+  /** Manhattan distance along route waypoints (entry → exit) */
+  routeLen: number;
+  /** Manhattan distance from route exit to final target */
+  exitDist: number;
+  /** Total estimated path cost: entryDist + routeLen + exitDist */
+  totalCost: number;
+}
+
 export function resolveRoute(
   state: GameState,
   unitPos: Position,
   target: Position,
   routeId: string,
-): Position[] | null {
+): ResolvedRoute | null {
   const route = state.namedRoutes.find(r => r.id === routeId);
   if (!route || route.waypoints.length === 0) return null;
 
   // Find closest route entry point (to unit)
   let entryIdx = 0;
-  let entryDist = Infinity;
+  let entryDistSq = Infinity;
   for (let i = 0; i < route.waypoints.length; i++) {
     const wp = route.waypoints[i];
     const d = (wp.x - unitPos.x) ** 2 + (wp.y - unitPos.y) ** 2;
-    if (d < entryDist) { entryDist = d; entryIdx = i; }
+    if (d < entryDistSq) { entryDistSq = d; entryIdx = i; }
   }
 
   // Find closest route exit point (to target)
   let exitIdx = 0;
-  let exitDist = Infinity;
+  let exitDistSq = Infinity;
   for (let i = 0; i < route.waypoints.length; i++) {
     const wp = route.waypoints[i];
     const d = (wp.x - target.x) ** 2 + (wp.y - target.y) ** 2;
-    if (d < exitDist) { exitDist = d; exitIdx = i; }
+    if (d < exitDistSq) { exitDistSq = d; exitIdx = i; }
   }
 
   // Extract waypoints between entry and exit (in correct order)
@@ -1549,16 +1562,27 @@ export function resolveRoute(
     const lastD = (last.x - target.x) ** 2 + (last.y - target.y) ** 2;
     const prevD = (prev.x - target.x) ** 2 + (prev.y - target.y) ** 2;
     if (prevD <= lastD) {
-      // prev is closer to target than last — drop last (it overshoots)
       waypoints.pop();
     } else {
       break;
     }
   }
 
+  // Compute Manhattan distances for scoring
+  const entryWp = route.waypoints[entryIdx];
+  const entryDist = Math.abs(entryWp.x - unitPos.x) + Math.abs(entryWp.y - unitPos.y);
+
+  const exitWp = waypoints[waypoints.length - 1]; // last route wp before appending target
+  const exitDist = Math.abs(exitWp.x - target.x) + Math.abs(exitWp.y - target.y);
+
+  let routeLen = 0;
+  for (let i = 1; i < waypoints.length; i++) {
+    routeLen += Math.abs(waypoints[i].x - waypoints[i - 1].x) + Math.abs(waypoints[i].y - waypoints[i - 1].y);
+  }
+
   // Append final target
   waypoints.push({ ...target });
-  return waypoints;
+  return { waypoints, entryDist, routeLen, exitDist, totalCost: entryDist + routeLen + exitDist };
 }
 
 /**
@@ -1569,26 +1593,38 @@ export function resolveRouteChain(
   unitPos: Position,
   target: Position,
   routeIds: string[],
-): Position[] | null {
+): ResolvedRoute | null {
   if (routeIds.length === 0) return null;
   if (routeIds.length === 1) return resolveRoute(state, unitPos, target, routeIds[0]);
 
   // Chain: resolve first route from unit to midpoint, then second from midpoint to target
   const allWaypoints: Position[] = [];
   let currentPos = unitPos;
+  let totalEntry = 0;
+  let totalRoute = 0;
+  let totalExit = 0;
 
   for (let i = 0; i < routeIds.length; i++) {
     const isLast = i === routeIds.length - 1;
     const routeTarget = isLast ? target : findRouteIntersection(state, routeIds[i], routeIds[i + 1]) ?? target;
     const segment = resolveRoute(state, currentPos, routeTarget, routeIds[i]);
     if (segment) {
-      allWaypoints.push(...segment);
-      currentPos = segment[segment.length - 1];
+      allWaypoints.push(...segment.waypoints);
+      currentPos = segment.waypoints[segment.waypoints.length - 1];
+      if (i === 0) totalEntry = segment.entryDist;
+      totalRoute += segment.routeLen;
+      if (isLast) totalExit = segment.exitDist;
     }
   }
 
   if (allWaypoints.length === 0) return null;
-  return allWaypoints;
+  return {
+    waypoints: allWaypoints,
+    entryDist: totalEntry,
+    routeLen: totalRoute,
+    exitDist: totalExit,
+    totalCost: totalEntry + totalRoute + totalExit,
+  };
 }
 
 function findRouteIntersection(state: GameState, routeId1: string, routeId2: string): Position | null {

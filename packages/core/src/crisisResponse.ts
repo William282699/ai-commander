@@ -166,36 +166,55 @@ export function generateCrisisCard(
 
   const options: AdvisorOption[] = [];
 
-  // Option A: Hold the line (defend)
-  const defendIntent: Intent = {
-    type: "defend",
-    fromFront: frontId,
-    urgency: "critical",
-    minimizeLosses: false,
-  };
+  // Option A: Hold the line (defend) — scoped to squads assigned to this doctrine
+  const defendSquads = doctrine.assignedSquads;
+  const defendIntents: Intent[] = defendSquads.length > 0
+    ? defendSquads.map((sqId) => ({
+        type: "defend" as const,
+        fromSquad: sqId,
+        fromFront: frontId,
+        urgency: "critical" as const,
+        minimizeLosses: false,
+      }))
+    : [{
+        type: "defend" as const,
+        fromFront: frontId,
+        urgency: "critical" as const,
+        minimizeLosses: false,
+      }];
   options.push({
     label: "A: 死守阵地",
     description: `全力防守${front?.name ?? crisis.locationTag}，不惜代价守住阵地`,
     risk: 0.7,
     reward: 0.8,
-    intent: defendIntent,
-    intents: [defendIntent],
+    intent: defendIntents[0],
+    intents: defendIntents,
   });
 
-  // Option B: Fighting retreat
-  const retreatIntent: Intent = {
-    type: "retreat",
-    fromFront: frontId,
-    urgency: "high",
-    minimizeLosses: true,
-  };
+  // Option B: Fighting retreat — scoped to squads assigned to this doctrine
+  // so only the units on this front retreat, not the entire army.
+  const retreatSquads = doctrine.assignedSquads;
+  const retreatIntents: Intent[] = retreatSquads.length > 0
+    ? retreatSquads.map((sqId) => ({
+        type: "retreat" as const,
+        fromSquad: sqId,
+        fromFront: frontId,
+        urgency: "high" as const,
+        minimizeLosses: true,
+      }))
+    : [{
+        type: "retreat" as const,
+        fromFront: frontId,
+        urgency: "high" as const,
+        minimizeLosses: true,
+      }];
   options.push({
     label: "B: 边打边撤",
     description: `有序后撤，保存${front?.name ?? crisis.locationTag}方向有生力量`,
     risk: 0.3,
     reward: 0.4,
-    intent: retreatIntent,
-    intents: [retreatIntent],
+    intent: retreatIntents[0],
+    intents: retreatIntents,
   });
 
   // Option C: Reinforce (only if >= 2 candidates), otherwise explain why

@@ -10,7 +10,7 @@ export { processMissions, createMission, resetMissionCounter } from "./missions"
 export type { CreateMissionOpts } from "./missions";
 export { createDefaultStyle, updateStyleParam } from "./styleEngine";
 export { updateGamePhase, checkGameOver, applyEndgamePressure, resetWarPhaseTimers } from "./warPhase";
-export { resolveIntent, isIntentSupported, findFront, resolveRoute, resolveRouteChain } from "./tacticalPlanner";
+export { resolveIntent, isIntentSupported, findFront, findFacilityById, resolveRoute, resolveRouteChain } from "./tacticalPlanner";
 export { getFormationOffset, computeHeading } from "./formation";
 export type { FormationStyle } from "./formation";
 export type { ResolveResult } from "./tacticalPlanner";

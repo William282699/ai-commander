@@ -99,7 +99,21 @@ function isKnownLocation(val: string, state: GameState): boolean {
 
 function isValidTarget(intent: Intent, state: GameState): boolean {
   if (intent.targetRegion && !isKnownLocation(intent.targetRegion, state)) return false;
-  if (intent.targetFacility && !state.facilities.has(intent.targetFacility)) return false;
+  if (intent.targetFacility) {
+    // Fuzzy match: accept facility ID, name, or tag (not just strict ID).
+    // This lets LLM output like "El Alamein" match facility ea_alamein_town.
+    const hint = intent.targetFacility.toLowerCase();
+    let found = state.facilities.has(intent.targetFacility);
+    if (!found) {
+      for (const [, f] of state.facilities) {
+        if (f.name.toLowerCase().includes(hint) || f.tags.some(t => t.toLowerCase().includes(hint))) {
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) return false;
+  }
   if (intent.toFront && !isKnownLocation(intent.toFront, state)) return false;
   if (intent.fromFront && !isKnownLocation(intent.fromFront, state)) return false;
   if (intent.fromSquad) {
