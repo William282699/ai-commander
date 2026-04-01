@@ -1510,13 +1510,17 @@ function ensurePassableTarget(
  */
 export interface ResolvedRoute {
   waypoints: Position[];
-  /** Manhattan distance from unit to route entry point */
+  /** Manhattan distance from unit to route entry point.
+   *  For chains: sum of all segments' entry gaps (includes inter-segment gaps). */
   entryDist: number;
-  /** Manhattan distance along route waypoints (entry → exit) */
+  /** Manhattan distance along route waypoints (entry → exit).
+   *  For chains: sum of all segments' on-route distances. */
   routeLen: number;
-  /** Manhattan distance from route exit to final target */
+  /** Manhattan distance from route exit to final target.
+   *  For chains: sum of all segments' exit gaps (includes intermediate exits). */
   exitDist: number;
-  /** Total estimated path cost: entryDist + routeLen + exitDist */
+  /** Total estimated path cost. Invariant: totalCost === entryDist + routeLen + exitDist.
+   *  Must equal waypointPathCost(startPos, waypoints) for correctness. */
   totalCost: number;
 }
 
@@ -1610,6 +1614,8 @@ export function resolveRouteChain(
   let totalRoute = 0;
   let totalExit = 0;
 
+  let totalCost = 0;
+
   for (let i = 0; i < routeIds.length; i++) {
     const isLast = i === routeIds.length - 1;
     const routeTarget = isLast ? target : findRouteIntersection(state, routeIds[i], routeIds[i + 1]) ?? target;
@@ -1617,11 +1623,12 @@ export function resolveRouteChain(
     if (segment) {
       allWaypoints.push(...segment.waypoints);
       currentPos = segment.waypoints[segment.waypoints.length - 1];
-      // Accumulate all segments' entryDist: segment 0's entry is unit→routeA,
-      // segment 1's entry is routeA exit→routeB entry (the inter-segment gap).
+      // Accumulate ALL cost components from every segment.
+      // This ensures totalCost matches the actual waypoint path cost.
       totalEntry += segment.entryDist;
       totalRoute += segment.routeLen;
-      if (isLast) totalExit = segment.exitDist;
+      totalExit += segment.exitDist;
+      totalCost += segment.totalCost;
     }
   }
 
@@ -1631,7 +1638,7 @@ export function resolveRouteChain(
     entryDist: totalEntry,
     routeLen: totalRoute,
     exitDist: totalExit,
-    totalCost: totalEntry + totalRoute + totalExit,
+    totalCost,
   };
 }
 
