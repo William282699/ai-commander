@@ -142,8 +142,17 @@ function normalizeIntentLocations(intent: Intent, state: GameState): Intent {
       // Move to targetRegion (resolveTarget handles tags/regions there)
       if (!normalized.targetRegion) normalized.targetRegion = val;
       normalized[field] = undefined;
+      continue;
     }
-    // If it's neither front/tag/region, leave it — isValidTarget will catch it
+    // Not a front/tag/region: check if it's a facility name/id
+    // LLM often puts facility names like "Himeimat Heights" in toFront — move to targetFacility
+    const matchedFac = findFacilityPosition(state, val);
+    if (matchedFac && !normalized.targetFacility) {
+      normalized.targetFacility = val;
+      normalized[field] = undefined;
+      continue;
+    }
+    // If it's none of the above, leave it — isValidTarget will catch it
   }
   return normalized;
 }
@@ -254,9 +263,12 @@ function resolveAttack(
   }
 
   // ── If targeting a facility, emit sabotage orders so damage is actually applied ──
+  // BUT: skip sabotage for capture objectives — combat.ts would instantly clear them.
+  // Capture objectives should be attacked with attack_move (kill defenders, then capture).
   if (intent.targetFacility) {
     const fac = findFacilityById(state, intent.targetFacility);
-    if (fac && fac.team !== "player") {
+    const isCaptureObj = fac && state.captureObjectives?.includes(fac.id);
+    if (fac && fac.team !== "player" && !isCaptureObj) {
       const spread = createOrdersWithSpread(
         units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
         undefined, intent.routeId, intent.routeIds,

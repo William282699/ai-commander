@@ -651,6 +651,14 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     stateRef.current = newState;
     gameOverDetectedRef.current = false;
     setGameOverInfo(null);
+    // Recompute fog for the fresh state so enemies are visible on first frame
+    updateFog(newState);
+    const urlParams2 = new URLSearchParams(window.location.search);
+    if (urlParams2.get("nofog") === "1") {
+      for (const row of newState.fog) {
+        for (let i = 0; i < row.length; i++) row[i] = "visible";
+      }
+    }
     // Reset module-level timers so new session starts clean
     resetEnemyAITimer();
     resetEnemyProdToggle();
@@ -960,6 +968,18 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
           const locationTag = trig.event.type === "FACILITY_LOST" && trig.event.entityId
             ? (state.facilities.get(trig.event.entityId)?.regionId ?? trig.event.entityId)
             : (trig.event.entityId ?? "unknown");
+          // Populate assignedSquads with squads already defending this location
+          // so findBestReinforcements considers other squads as candidates
+          const alreadyDefending: string[] = [];
+          if (state.squads && state.squads.length > 0) {
+            for (const sq of state.squads) {
+              if (sq.role !== "leader") continue;
+              // Check if squad is assigned to a mission at this location
+              if (sq.currentMission?.locationTag === locationTag) {
+                alreadyDefending.push(sq.id);
+              }
+            }
+          }
           const syntheticDoctrine = {
             id: `advisor_trig_${Date.now()}`,
             type: "must_hold" as const,
@@ -967,7 +987,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
             locationTag,
             priority: "high" as const,
             allowAutoReinforce: true,
-            assignedSquads: [] as string[],
+            assignedSquads: alreadyDefending,
             createdAt: state.time,
             status: "active" as const,
           };

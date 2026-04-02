@@ -144,6 +144,35 @@ export function findBestReinforcements(
     });
   }
 
+  // If no squad candidates, create a virtual "reserve" candidate from unassigned units
+  if (candidates.length === 0) {
+    const assignedUnitIds = new Set<number>();
+    for (const sq of state.squads) {
+      for (const id of collectUnitsUnder(state, sq.id)) assignedUnitIds.add(id);
+    }
+    const reserveIds: number[] = [];
+    state.units.forEach((u) => {
+      if (u.team === "player" && u.hp > 0 && u.state !== "dead" && !assignedUnitIds.has(u.id)
+          && !u.isPlayerControlled && u.type !== "commander") {
+        reserveIds.push(u.id);
+      }
+    });
+    if (reserveIds.length > 0) {
+      const reservePos = avgUnitPos(state, reserveIds);
+      if (reservePos) {
+        const distance = dist(reservePos, targetPos);
+        candidates.push({
+          squadId: "__reserve__",
+          leaderName: "预备队",
+          distance: Math.round(distance),
+          aliveCount: reserveIds.length,
+          missionPriority: 0,
+          score: (1 / (distance + 1)) * 100 + reserveIds.length * 5,
+        });
+      }
+    }
+  }
+
   // Sort by score descending, take top 3
   candidates.sort((a, b) => b.score - a.score);
   return candidates.slice(0, 3);
@@ -217,12 +246,12 @@ export function generateCrisisCard(
     intents: retreatIntents,
   });
 
-  // Option C: Reinforce (only if >= 2 candidates), otherwise explain why
-  if (candidates.length < 2) {
+  // Option C: Reinforce (only if >= 1 candidate), otherwise explain why
+  if (candidates.length === 0) {
     // Append notice to option A's description so player understands why no reinforce option
     options[0].description += "\n⚠ 当前无可调度增援部队——所有分队均在执行高优先级任务。";
   }
-  if (candidates.length >= 2) {
+  if (candidates.length >= 1) {
     const reinforceIntents: Intent[] = candidates.slice(0, 2).map((c) => ({
       type: "attack" as const,
       fromSquad: c.squadId,
