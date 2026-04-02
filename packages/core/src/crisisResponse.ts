@@ -222,6 +222,7 @@ export function generateCrisisCard(
 
   // Option B: Fighting retreat — scoped to squads assigned to this doctrine
   // so only the units on this front retreat, not the entire army.
+  // When no squads are assigned, use quantity:"few" to avoid pulling the whole front.
   const retreatSquads = doctrine.assignedSquads;
   const retreatIntents: Intent[] = retreatSquads.length > 0
     ? retreatSquads.map((sqId) => ({
@@ -234,6 +235,7 @@ export function generateCrisisCard(
     : [{
         type: "retreat" as const,
         fromFront: frontId,
+        quantity: "few" as const,
         urgency: "high" as const,
         minimizeLosses: true,
       }];

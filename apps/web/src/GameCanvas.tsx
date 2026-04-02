@@ -60,7 +60,7 @@ import {
 import type { AdvisorTriggerResult } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
 import { TILE_SIZE } from "@ai-commander/shared";
-import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
+import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander, collectUnitsUnder } from "@ai-commander/shared";
 import { ChatPanel } from "./ChatPanel";
 import { TaskBar } from "./TaskBar";
 import {
@@ -968,15 +968,44 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
           const locationTag = trig.event.type === "FACILITY_LOST" && trig.event.entityId
             ? (state.facilities.get(trig.event.entityId)?.regionId ?? trig.event.entityId)
             : (trig.event.entityId ?? "unknown");
-          // Populate assignedSquads with squads already defending this location
-          // so findBestReinforcements considers other squads as candidates
+          // Populate assignedSquads with squads whose units are physically near the crisis
+          // so findBestReinforcements considers OTHER squads as reinforcement candidates,
+          // and defend/retreat intents are scoped to only these squads (not all units in front).
           const alreadyDefending: string[] = [];
           if (state.squads && state.squads.length > 0) {
+            // Find the crisis front bbox to check proximity
+            const crisisFront = state.fronts.find(f => f.id === locationTag || f.regionIds.includes(locationTag));
+            let crisisCenter: { x: number; y: number } | null = null;
+            if (crisisFront) {
+              let cx = 0, cy = 0, cnt = 0;
+              for (const rid of crisisFront.regionIds) {
+                const r = state.regions.get(rid);
+                if (r) { cx += (r.bbox[0] + r.bbox[2]) / 2; cy += (r.bbox[1] + r.bbox[3]) / 2; cnt++; }
+              }
+              if (cnt > 0) crisisCenter = { x: cx / cnt, y: cy / cnt };
+            }
+            // Also try facility/region center as fallback
+            if (!crisisCenter) {
+              const fac = state.facilities.get(locationTag);
+              if (fac) crisisCenter = { ...fac.position };
+              else {
+                const reg = state.regions.get(locationTag);
+                if (reg) crisisCenter = { x: (reg.bbox[0] + reg.bbox[2]) / 2, y: (reg.bbox[1] + reg.bbox[3]) / 2 };
+              }
+            }
+            const PROXIMITY = 60; // tiles — squads within this range are "defending"
             for (const sq of state.squads) {
               if (sq.role !== "leader") continue;
-              // Check if squad is assigned to a mission at this location
-              if (sq.currentMission?.locationTag === locationTag) {
-                alreadyDefending.push(sq.id);
+              const uids = collectUnitsUnder(state, sq.id);
+              const alive = uids.filter(id => { const u = state.units.get(id); return u && u.hp > 0 && u.state !== "dead"; });
+              if (alive.length === 0) continue;
+              // Check if squad's average position is near the crisis
+              let sx = 0, sy = 0;
+              for (const id of alive) { const u = state.units.get(id)!; sx += u.position.x; sy += u.position.y; }
+              const avgX = sx / alive.length, avgY = sy / alive.length;
+              if (crisisCenter) {
+                const d = Math.abs(avgX - crisisCenter.x) + Math.abs(avgY - crisisCenter.y);
+                if (d <= PROXIMITY) alreadyDefending.push(sq.id);
               }
             }
           }
