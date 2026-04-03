@@ -58,4 +58,8 @@ export interface Intent {
   // Named route (El Alamein scenario)
   routeId?: string;       // "via_balbia" — single named route
   routeIds?: string[];    // multi-segment route chain
+
+  // Source filtering (internal, set by crisis card system).
+  // Units physically inside this front are excluded from dispatch.
+  excludeFront?: string;
 }

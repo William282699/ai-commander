@@ -120,6 +120,11 @@ export function sanitizeIntent(raw: unknown): Intent | null {
     intent.patrolRadius = Math.round(Math.max(3, Math.min(30, obj.patrolRadius)));
   }
 
+  // Source filtering (internal): exclude units inside a specific front
+  if (typeof obj.excludeFront === "string" && obj.excludeFront.trim().length > 0) {
+    intent.excludeFront = obj.excludeFront.trim();
+  }
+
   return intent;
 }
 

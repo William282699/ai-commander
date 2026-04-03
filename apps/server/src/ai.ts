@@ -160,9 +160,14 @@ RULES:
 - If target clearly doesn't exist (fictional place, nonexistent squad/facility ID), return brief explaining why, options:[], urgency:0. Do NOT set responseType:"NOOP" for this case.
 - urgency: 0=routine, 0.5=attention, 0.8=urgent, 1.0=critical
 - Adjust recommendations by style params: high risk→aggressive, high casualty_aversion→conservative.
-- When commander mentions buildings/facilities, prioritize matching targetFacility from ---FACILITIES--- IDs.
+- LOCATION MATCHING — when the commander mentions a place name, match it to game entities in this priority:
+  1. ---TAGS--- (custom map markers) → use targetRegion
+  2. ---FACILITIES--- (by ID, name, or tags) → use toFront (engine auto-resolves facility names to positions) or targetFacility
+  3. ---FRONTS--- (by ID or name) → use toFront/fromFront
+  The engine does fuzzy matching on facility names/tags, so "El Alamein" matches facility "ea_alamein_town" (name: "El Alamein"). You can put a facility name directly in toFront — the engine will resolve it. Do NOT return options:[] just because a place name doesn't exactly match a front ID. Always check FACILITIES names and tags too.
+- When commander mentions buildings/facilities explicitly (destroy, sabotage, capture), use targetFacility with the facility ID.
 - ROUTES: If ---ROUTES--- section exists, you may specify routeId to control which road/path units take. Use routeIds (array) for multi-leg journeys (e.g. desert_track then front_line_road). If omitted, engine auto-selects a route. If commander says "go via the coast" or "走沙漠小道", match to the closest route ID.
-- Commander can mark custom map points — see ---TAGS---. Match tag names first, then FACILITIES, then FRONTS. Use targetRegion for matched tag id (e.g. "tag_1"). If no match, target doesn't exist → return options:[].
+- Commander can mark custom map points — see ---TAGS---. Match tag names first, then FACILITIES, then FRONTS. Use targetRegion for matched tag id (e.g. "tag_1"). If no match in any category, target doesn't exist → return options:[].
 
 DOCTRINE SYSTEM (Standing Orders):
 - When commander's order contains a persistent constraint ("不能丢", "必须守住", "优先保护", "绝对不能撤", "死守"), include a "standingOrder" field at the response root (NOT inside options):

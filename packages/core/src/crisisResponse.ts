@@ -2,9 +2,16 @@
 // AI Commander — Crisis Response (Prompt 2)
 // Pure rule engine: zero-delay tactical card generation for
 // DOCTRINE_BREACH events. No LLM call, synchronous return.
+//
+// Root design: scan the battlefield directly.
+//   - "Defenders" = player units physically inside the crisis front
+//   - "Reinforcements" = player units outside the crisis front that
+//     are idle or on low-priority missions
+// No dependency on doctrine.assignedSquads — works with dynamic
+// squad creation (El Alamein) and pre-assigned doctrines alike.
 // ============================================================
 
-import type { GameState, Front, Position, AdvisorOption } from "@ai-commander/shared";
+import type { GameState, Front, Position, AdvisorOption, Unit } from "@ai-commander/shared";
 import type { Intent } from "@ai-commander/shared";
 import type { CrisisEvent, StandingOrder } from "@ai-commander/shared";
 import { collectUnitsUnder } from "@ai-commander/shared";
@@ -40,6 +47,17 @@ function frontCenterPos(state: GameState, front: Front): Position | null {
   return { x: Math.round(totalX / count), y: Math.round(totalY / count) };
 }
 
+/** Check if a position is inside a front's region bounding boxes. */
+function isInsideFront(state: GameState, front: Front, pos: Position): boolean {
+  for (const rid of front.regionIds) {
+    const r = state.regions.get(rid);
+    if (r && pos.x >= r.bbox[0] && pos.x <= r.bbox[2] && pos.y >= r.bbox[1] && pos.y <= r.bbox[3]) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Average position of alive units in a list of unit IDs. */
 function avgUnitPos(state: GameState, unitIds: number[]): Position | null {
   let sx = 0;
@@ -62,6 +80,11 @@ function dist(a: Position, b: Position): number {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
+function isAlivePlayerUnit(u: Unit): boolean {
+  return u.team === "player" && u.hp > 0 && u.state !== "dead"
+    && !u.isPlayerControlled && u.type !== "commander";
+}
+
 /** Deterministic mission priority: 0=idle, 1=low-priority, 2=high-priority. */
 function missionPri(currentMission: string | null): number {
   if (currentMission == null) return 0;
@@ -72,29 +95,79 @@ function missionPri(currentMission: string | null): number {
 // --- Resolve crisis target front ---
 
 function resolveCrisisFront(state: GameState, locationTag: string): Front | undefined {
-  // Try direct front match
   const front = findFront(state, locationTag);
   if (front) return front;
-
-  // Try region → parent front
   const region = state.regions.get(locationTag);
   if (region) {
     return state.fronts.find((f) => f.regionIds.includes(locationTag));
   }
-
   return undefined;
+}
+
+// --- Battlefield scan ---
+
+/**
+ * Scan the battlefield and partition player units into defenders (inside
+ * crisis front) and available reinforcements (outside, idle/low-priority).
+ */
+function scanBattlefield(state: GameState, front: Front, targetPos: Position) {
+  const defenderIds: number[] = [];
+  const outsideIds: number[] = [];
+
+  state.units.forEach((u) => {
+    if (!isAlivePlayerUnit(u)) return;
+    if (isInsideFront(state, front, u.position)) {
+      defenderIds.push(u.id);
+    } else {
+      outsideIds.push(u.id);
+    }
+  });
+
+  // Group outside units by squad membership
+  const assignedToSquad = new Set<number>();
+  const squadOutside = new Map<string, number[]>(); // squadId → unitIds outside
+  for (const sq of state.squads) {
+    if (sq.role !== "leader") continue;
+    const uids = collectUnitsUnder(state, sq.id);
+    const outsideAlive = uids.filter(id => {
+      const u = state.units.get(id);
+      return u && isAlivePlayerUnit(u) && !isInsideFront(state, front, u.position);
+    });
+    if (outsideAlive.length > 0) {
+      squadOutside.set(sq.id, outsideAlive);
+      for (const id of outsideAlive) assignedToSquad.add(id);
+    }
+  }
+
+  // Unassigned outside units
+  const unassignedOutside = outsideIds.filter(id => !assignedToSquad.has(id));
+
+  // Defenders by squad
+  const defenderSquads: string[] = [];
+  for (const sq of state.squads) {
+    if (sq.role !== "leader") continue;
+    const uids = collectUnitsUnder(state, sq.id);
+    const insideAlive = uids.filter(id => {
+      const u = state.units.get(id);
+      return u && isAlivePlayerUnit(u) && isInsideFront(state, front, u.position);
+    });
+    if (insideAlive.length > 0) defenderSquads.push(sq.id);
+  }
+
+  return { defenderIds, defenderSquads, squadOutside, unassignedOutside };
 }
 
 // --- Public API ---
 
 /**
  * Find best reinforcement candidates for a crisis.
+ * Scans the battlefield directly — no doctrine dependency.
  * Returns up to 3 candidates sorted by score (descending).
  */
 export function findBestReinforcements(
   state: GameState,
   crisis: CrisisEvent,
-  doctrine: StandingOrder,
+  _doctrine: StandingOrder,
 ): ReinforceCandidate[] {
   const front = resolveCrisisFront(state, crisis.locationTag);
   if (!front) return [];
@@ -102,103 +175,80 @@ export function findBestReinforcements(
   const targetPos = frontCenterPos(state, front);
   if (!targetPos) return [];
 
-  // Collect candidate squads: player squads not already assigned to this doctrine
+  const { squadOutside, unassignedOutside } = scanBattlefield(state, front, targetPos);
+
   const candidates: ReinforceCandidate[] = [];
 
-  for (const sq of state.squads) {
-    // Skip squads already assigned to this doctrine
-    if (doctrine.assignedSquads.includes(sq.id)) continue;
+  // 1. Squad-based candidates (squads with units OUTSIDE the crisis front)
+  for (const [sqId, unitIds] of squadOutside) {
+    const sq = state.squads.find(s => s.id === sqId);
+    if (!sq) continue;
 
-    // Only consider leader-role squads (they have actual units)
-    if (sq.role !== "leader") continue;
-
-    // Only player-owned squads
-    if (sq.ownerCommander !== "chen" && sq.ownerCommander !== "marcus" && sq.ownerCommander !== "emily") continue;
-
-    const unitIds = collectUnitsUnder(state, sq.id);
-    const aliveIds = unitIds.filter((id) => {
-      const u = state.units.get(id);
-      return u && u.team === "player" && u.state !== "dead";
-    });
-
-    if (aliveIds.length === 0) continue;
-
-    const squadPos = avgUnitPos(state, aliveIds);
+    const squadPos = avgUnitPos(state, unitIds);
     if (!squadPos) continue;
 
     const distance = dist(squadPos, targetPos);
     const mp = missionPri(sq.currentMission);
+    if (mp >= 2) continue; // never pull squads on high-priority missions
 
-    // Hard filter: never pull squads on high-priority missions
-    if (mp >= 2) continue;
-
-    const score = (1 / (distance + 1)) * 100 - mp * 50 + aliveIds.length * 10;
-
+    const score = (1 / (distance + 1)) * 100 - mp * 50 + unitIds.length * 10;
     candidates.push({
       squadId: sq.id,
       leaderName: sq.leaderName,
       distance: Math.round(distance),
-      aliveCount: aliveIds.length,
+      aliveCount: unitIds.length,
       missionPriority: mp,
       score,
     });
   }
 
-  // If no squad candidates, create a virtual "reserve" candidate from unassigned units
-  if (candidates.length === 0) {
-    const assignedUnitIds = new Set<number>();
-    for (const sq of state.squads) {
-      for (const id of collectUnitsUnder(state, sq.id)) assignedUnitIds.add(id);
-    }
-    const reserveIds: number[] = [];
-    state.units.forEach((u) => {
-      if (u.team === "player" && u.hp > 0 && u.state !== "dead" && !assignedUnitIds.has(u.id)
-          && !u.isPlayerControlled && u.type !== "commander") {
-        reserveIds.push(u.id);
-      }
-    });
-    if (reserveIds.length > 0) {
-      const reservePos = avgUnitPos(state, reserveIds);
-      if (reservePos) {
-        const distance = dist(reservePos, targetPos);
-        candidates.push({
-          squadId: "__reserve__",
-          leaderName: "预备队",
-          distance: Math.round(distance),
-          aliveCount: reserveIds.length,
-          missionPriority: 0,
-          score: (1 / (distance + 1)) * 100 + reserveIds.length * 5,
-        });
-      }
+  // 2. Unassigned reserve pool (units not in any squad, outside the crisis front)
+  if (unassignedOutside.length > 0) {
+    const reservePos = avgUnitPos(state, unassignedOutside);
+    if (reservePos) {
+      const distance = dist(reservePos, targetPos);
+      candidates.push({
+        squadId: "__reserve__",
+        leaderName: "预备队",
+        distance: Math.round(distance),
+        aliveCount: unassignedOutside.length,
+        missionPriority: 0,
+        score: (1 / (distance + 1)) * 100 + unassignedOutside.length * 5,
+      });
     }
   }
 
-  // Sort by score descending, take top 3
   candidates.sort((a, b) => b.score - a.score);
   return candidates.slice(0, 3);
 }
 
 /**
  * Generate 2-3 AdvisorOptions for a crisis card.
- * A: Defend (hold position)
- * B: Fighting retreat
- * C: Reinforce with top 2 candidates (only if >= 2 candidates)
+ * A: Defend — only units already inside the crisis front
+ * B: Fighting retreat — only units already inside the crisis front
+ * C: Reinforce — pull outside units/squads toward the front
  */
 export function generateCrisisCard(
   state: GameState,
   crisis: CrisisEvent,
   candidates: ReinforceCandidate[],
-  doctrine: StandingOrder,
+  _doctrine: StandingOrder,
 ): AdvisorOption[] {
   const front = resolveCrisisFront(state, crisis.locationTag);
   const frontId = front?.id ?? crisis.locationTag;
+  const targetPos = front ? frontCenterPos(state, front) : null;
+
+  // Scan battlefield for defenders
+  const scan = front && targetPos ? scanBattlefield(state, front, targetPos) : null;
+  const defenderSquads = scan?.defenderSquads ?? [];
 
   const options: AdvisorOption[] = [];
 
-  // Option A: Hold the line (defend) — scoped to squads assigned to this doctrine
-  const defendSquads = doctrine.assignedSquads;
-  const defendIntents: Intent[] = defendSquads.length > 0
-    ? defendSquads.map((sqId) => ({
+  // --- Option A: Hold the line ---
+  // Scoped to squads physically inside the crisis front.
+  // Fallback: defend by fromFront (targets units in-region, which IS correct for defend).
+  const defendIntents: Intent[] = defenderSquads.length > 0
+    ? defenderSquads.map((sqId) => ({
         type: "defend" as const,
         fromSquad: sqId,
         fromFront: frontId,
@@ -220,12 +270,11 @@ export function generateCrisisCard(
     intents: defendIntents,
   });
 
-  // Option B: Fighting retreat — scoped to squads assigned to this doctrine
-  // so only the units on this front retreat, not the entire army.
-  // When no squads are assigned, use quantity:"few" to avoid pulling the whole front.
-  const retreatSquads = doctrine.assignedSquads;
-  const retreatIntents: Intent[] = retreatSquads.length > 0
-    ? retreatSquads.map((sqId) => ({
+  // --- Option B: Fighting retreat ---
+  // ONLY retreat units physically inside the crisis front.
+  // Never retreat units outside (they're not part of this fight).
+  const retreatIntents: Intent[] = defenderSquads.length > 0
+    ? defenderSquads.map((sqId) => ({
         type: "retreat" as const,
         fromSquad: sqId,
         fromFront: frontId,
@@ -248,18 +297,43 @@ export function generateCrisisCard(
     intents: retreatIntents,
   });
 
-  // Option C: Reinforce (only if >= 1 candidate), otherwise explain why
+  // --- Option C: Reinforce ---
   if (candidates.length === 0) {
-    // Append notice to option A's description so player understands why no reinforce option
     options[0].description += "\n⚠ 当前无可调度增援部队——所有分队均在执行高优先级任务。";
   }
   if (candidates.length >= 1) {
-    const reinforceIntents: Intent[] = candidates.slice(0, 2).map((c) => ({
-      type: "attack" as const,
-      fromSquad: c.squadId,
-      toFront: frontId,
-      urgency: "critical" as const,
-    }));
+    // For reinforcement intents, we must ensure resolveSourceUnits picks
+    // units OUTSIDE the crisis front (not the defenders already inside).
+    // - Named squads: use fromSquad (resolveSourceUnitsRaw collects that
+    //   squad's units — they're already outside per scanBattlefield).
+    // - Reserve pool (__reserve__): avoid toFront here.
+    //   resolveSourceUnits detects excludeFront===toFront and skips the
+    //   toFront local-preference path, using global pool instead.
+    //   excludeFront then filters out units already inside the crisis front.
+    const reinforceIntents: Intent[] = candidates.slice(0, 2).map((c) => {
+      if (c.squadId === "__reserve__") {
+        // Reserve pool: no fromSquad. toFront provides correct target
+        // position (front center, not single region center).
+        // resolveSourceUnits sees excludeFront===toFront → skips local
+        // preference → global pool → excludeFront filters interior units.
+        return {
+          type: "attack" as const,
+          toFront: frontId,
+          quantity: Math.min(c.aliveCount, 6) as unknown as Intent["quantity"],
+          excludeFront: frontId,
+          urgency: "critical" as const,
+        };
+      }
+      // Named squad: fromSquad + excludeFront guarantees only the
+      // squad's units that are physically outside the crisis front.
+      return {
+        type: "attack" as const,
+        fromSquad: c.squadId,
+        toFront: frontId,
+        excludeFront: frontId,
+        urgency: "critical" as const,
+      };
+    });
 
     const names = candidates.slice(0, 2).map((c) => c.leaderName).join("、");
     options.push({

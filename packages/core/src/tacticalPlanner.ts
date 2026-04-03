@@ -921,6 +921,15 @@ function resolveTarget(intent: Intent, state: GameState): Position | null {
     const front = findFront(state, intent.fromFront);
     if (front) return getFrontCenterPos(state, front);
   }
+  // Last resort: try all location fields as facility name (fuzzy match).
+  // Catches cases where LLM puts a facility name in toFront/targetRegion
+  // and normalizeIntentLocations didn't move it (shouldn't happen, but defensive).
+  for (const val of [intent.toFront, intent.targetRegion, intent.fromFront]) {
+    if (val) {
+      const pos = findFacilityPosition(state, val);
+      if (pos) return pos;
+    }
+  }
   return null;
 }
 
@@ -940,7 +949,21 @@ function resolveSourceUnits(
   exclude?: ReadonlySet<number>,
   selectedUnitIds?: readonly number[],  // Day 10.5: hard constraint from player box-select
 ): SourceUnitsResult {
-  const raw = resolveSourceUnitsRaw(intent, state);
+  // When excludeFront matches toFront, the intent is "send units TO this
+  // front but NOT FROM this front" (crisis reinforcement). Skip the toFront
+  // local-preference path in source resolution so we get the global pool
+  // instead of units already at the front (which excludeFront would filter
+  // out anyway, leaving an empty set).
+  let sourceIntent = intent;
+  if (intent.excludeFront && intent.toFront) {
+    const exFront = findFront(state, intent.excludeFront);
+    const toFrontObj = findFront(state, intent.toFront);
+    if (exFront && toFrontObj && exFront.id === toFrontObj.id) {
+      sourceIntent = { ...intent, toFront: undefined };
+    }
+  }
+
+  const raw = resolveSourceUnitsRaw(sourceIntent, state);
 
   let units = raw.units;
   if (raw.error) return raw;
@@ -962,6 +985,30 @@ function resolveSourceUnits(
       return { units: [], error: "所有可用单位已被前序意图占用" };
     }
     units = filtered;
+  }
+
+  // excludeFront: filter out units physically inside a specific front.
+  // Used by crisis card reinforcement intents to ensure only units
+  // OUTSIDE the crisis front are dispatched — regardless of source path
+  // (fromSquad, toFront, global pool).
+  if (intent.excludeFront) {
+    const exFront = findFront(state, intent.excludeFront);
+    if (exFront) {
+      const bboxes = exFront.regionIds
+        .map((rid) => state.regions.get(rid))
+        .filter((r): r is NonNullable<typeof r> => r !== undefined)
+        .map((r) => r.bbox);
+      const outside = units.filter((u) =>
+        !bboxes.some(([x1, y1, x2, y2]) =>
+          u.position.x >= x1 && u.position.x <= x2 &&
+          u.position.y >= y1 && u.position.y <= y2,
+        ),
+      );
+      if (outside.length === 0) {
+        return { units: [], error: "危机前线外无可用增援单位" };
+      }
+      units = outside;
+    }
   }
 
   // Prefer idle units: avoid pulling units already on a mission (defending/attacking/etc.)
