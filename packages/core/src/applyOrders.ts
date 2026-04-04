@@ -265,6 +265,22 @@ function findOrCreatePatrolTask(
 }
 
 function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
+  // Phase C: idempotency check for crisis reinforcement orders.
+  // If the unit is already executing a reinforcement order for the same front
+  // with the same action and a nearby target, skip the re-dispatch.
+  // This prevents the "click C again, same troops restart" bug.
+  if (order.crisisFrontId) {
+    const current = unit.orders[0];
+    if (current && current.crisisFrontId === order.crisisFrontId
+        && current.action === order.action && current.target && order.target) {
+      const dx = current.target.x - order.target.x;
+      const dy = current.target.y - order.target.y;
+      if (dx * dx + dy * dy < 25) { // within 5 tiles
+        return; // already executing equivalent reinforcement — skip
+      }
+    }
+  }
+
   // Store order on unit
   unit.orders = [order];
   // CONTRACT: clear cached A* path before any target change

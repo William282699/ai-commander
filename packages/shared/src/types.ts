@@ -235,6 +235,7 @@ export interface Order {
     centerTileY: number;
     radius: number;
   };
+  crisisFrontId?: string;     // Tag: this order is a reinforcement for this front (dedup)
 }
 
 // --- Production ---

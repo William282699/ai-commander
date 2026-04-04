@@ -281,6 +281,8 @@ function resolveAttack(
       // Mark orders with targetFacilityId for combat layer facility damage
       for (const order of spread.orders) {
         order.targetFacilityId = fac.id;
+        // Phase C: crisis reinforcement dedup tag
+        if (intent.excludeFront) order.crisisFrontId = intent.excludeFront;
       }
       // Create sabotage mission for tracking
       const actualUnitIds = spread.orders.flatMap((o) => o.unitIds);
@@ -314,6 +316,15 @@ function resolveAttack(
     const msg = "目标地形不可达，无可用单位执行进攻";
     pushDiagnostic(state, "IMPASSABLE_TARGET", msg);
     return { orders: [], log: msg, degraded: true };
+  }
+
+  // Phase C: tag orders with crisisFrontId for reinforcement dedup.
+  // When excludeFront is set, this is a crisis reinforcement — mark orders
+  // so scanBattlefield can skip units already en-route to this front.
+  if (intent.excludeFront) {
+    for (const order of spread.orders) {
+      order.crisisFrontId = intent.excludeFront;
+    }
   }
 
   let log = `调度 ${spread.orders.length} 个单位向 (${Math.round(target.x)},${Math.round(target.y)}) 发起进攻`;
@@ -898,6 +909,11 @@ export function findFacilityById(
 
 /** Resolve attack/defend/recon target position from intent fields. */
 function resolveTarget(intent: Intent, state: GameState): Position | null {
+  // Internal override: crisis card system provides exact coordinates
+  // (enemy centroid) to avoid region/front center inaccuracy.
+  if (intent._targetPos) {
+    return { x: intent._targetPos.x, y: intent._targetPos.y };
+  }
   if (intent.targetFacility) {
     const pos = findFacilityPosition(state, intent.targetFacility);
     if (pos) return pos;
@@ -1022,9 +1038,19 @@ function resolveSourceUnits(
   const isSquadDefaultAll = !!intent.fromSquad && (intent.quantity == null || intent.quantity === undefined);
   if (!isFullMobilization && !isSquadDefaultAll) {
     const idleUnits = units.filter((u) => !busyStates.has(u.state));
-    // Only use idle pool if there are enough; otherwise fall back to full pool
-    if (idleUnits.length >= 2) {
+    // Crisis reinforcement (excludeFront set): strict idle-only, never fall back
+    // to the full pool. Falling back would re-dispatch units already moving to
+    // reinforce, causing the "click C again, same troops re-ordered" bug.
+    if (intent.excludeFront) {
       units = idleUnits;
+      if (units.length === 0) {
+        return { units: [], error: "无空闲增援单位可调度（其余部队正在移动中）" };
+      }
+    } else {
+      // Normal dispatch: use idle pool if there are enough; otherwise fall back to full pool
+      if (idleUnits.length >= 2) {
+        units = idleUnits;
+      }
     }
   }
 

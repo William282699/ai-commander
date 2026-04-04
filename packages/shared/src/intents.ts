@@ -62,4 +62,10 @@ export interface Intent {
   // Source filtering (internal, set by crisis card system).
   // Units physically inside this front are excluded from dispatch.
   excludeFront?: string;
+
+  // Internal: override target position (raw coordinates).
+  // Set by crisis card system to direct reinforcements to the enemy
+  // centroid instead of region/front geometric center.
+  // resolveTarget checks this FIRST, before targetRegion/toFront.
+  _targetPos?: { x: number; y: number };
 }

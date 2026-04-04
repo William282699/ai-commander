@@ -961,6 +961,9 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       updateBattleMarkers(state, dt);
 
       // --- Advisor Triggers (Prompt 6) ---
+      // Track which topics got a rule-based crisis card this tick,
+      // so the staff-ask LLM path skips them (avoids duplicate cards).
+      const crisisCardTopics = new Set<string>();
       const advisorTriggers = processAdvisorTriggers(state);
       for (const trig of advisorTriggers) {
         if (trig.type === "crisis_card") {
@@ -1002,6 +1005,8 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
               crisisOptions,
               state.time,
             );
+            // Mark this topic so staff-ask LLM path won't create a duplicate card
+            crisisCardTopics.add(`${trig.event.type}:${trig.event.entityId ?? "global"}`);
           }
         } else if (trig.type === "llm_advice") {
           // Fire-and-forget /api/brief call
@@ -1045,6 +1050,8 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
             crisisOptions,
             state.time,
           );
+          // Mark so staff-ask LLM path won't duplicate
+          crisisCardTopics.add(`UNDER_ATTACK:${crisis.locationTag}`);
         }
       }
 
@@ -1184,9 +1191,13 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
         }
 
         // Phase 3: actionRequired events should always surface and eventually produce a decision thread.
+        // Skip staff-ask if a rule-based crisis card was already generated for this topic
+        // (avoids duplicate English LLM card + Chinese rule card for the same event).
         if (ENABLE_STAFF_ASK && evt.actionRequired) {
           const topicKey = `${evt.type}:${evt.entityId ?? "global"}`;
           addMessage(level, evt.message, state.time, channel, undefined, "event_report");
+
+          if (crisisCardTopics.has(topicKey)) continue; // rule-based card already covers this
 
           const started = tryStartStaffAsk(
             { type: evt.type, message: evt.message, entityId: evt.entityId },
