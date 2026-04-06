@@ -1458,35 +1458,28 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       {/* Day 13: Facility context menu */}
       {facilityMenu && (
         <div
+          className="hud-context-menu"
           style={{
             position: "absolute",
             left: facilityMenu.screenX + 10,
             top: facilityMenu.screenY - 10,
-            background: "rgba(15, 23, 42, 0.95)",
-            border: "1px solid #475569",
-            borderRadius: 6,
-            padding: 6,
-            fontFamily: "monospace",
-            fontSize: 12,
-            zIndex: 150,
-            pointerEvents: "auto",
-            minWidth: 100,
           }}
         >
-          <div style={{ color: "#fbbf24", fontWeight: "bold", fontSize: 11, marginBottom: 4, padding: "0 4px" }}>
+          <div className="hud-context-menu__title">
             {facilityMenu.facility.name}
           </div>
           {facilityMenu.canCapture && (
-            <button onClick={handleFacilityCapture} style={facilityMenuBtnStyle}>
+            <button onClick={handleFacilityCapture} className="hud-context-menu__item">
               占领
             </button>
           )}
-          <button onClick={handleFacilitySabotage} style={facilityMenuBtnStyle}>
+          <button onClick={handleFacilitySabotage} className="hud-context-menu__item">
             破坏
           </button>
           <button
             onClick={() => setFacilityMenu(null)}
-            style={{ ...facilityMenuBtnStyle, color: "#64748b" }}
+            className="hud-context-menu__item"
+            style={{ color: "var(--hud-text-dim)" }}
           >
             取消
           </button>
@@ -1495,23 +1488,15 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       {/* Day 15: Tag naming dialog */}
       {tagNaming && (
         <div
+          className="hud-dialog"
           style={{
             position: "absolute",
             left: "50%",
             top: "40%",
             transform: "translate(-50%, -50%)",
-            background: "rgba(15, 23, 42, 0.95)",
-            border: "1px solid #f59e0b",
-            borderRadius: 8,
-            padding: 16,
-            fontFamily: "monospace",
-            fontSize: 12,
-            zIndex: 200,
-            pointerEvents: "auto",
-            minWidth: 200,
           }}
         >
-          <div style={{ color: "#f59e0b", fontWeight: "bold", marginBottom: 8 }}>标记地点</div>
+          <div className="hud-dialog__title">标记地点</div>
           <input
             type="text"
             value={tagNameInput}
@@ -1546,20 +1531,9 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
             }}
             placeholder="输入名称..."
             autoFocus
-            style={{
-              width: "100%",
-              background: "#0f172a",
-              border: "1px solid #334155",
-              borderRadius: 4,
-              padding: "6px 8px",
-              color: "#e2e8f0",
-              fontSize: 12,
-              fontFamily: "monospace",
-              outline: "none",
-              boxSizing: "border-box",
-            }}
+            className="hud-dialog__input"
           />
-          <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+          <div className="hud-dialog__hint">
             Enter 确认 / Escape 取消
           </div>
         </div>
@@ -1567,22 +1541,15 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       {/* Day 15: Tag right-click context menu */}
       {tagMenu && (
         <div
+          className="hud-context-menu"
           style={{
             position: "absolute",
             left: tagMenu.screenX + 10,
             top: tagMenu.screenY - 10,
-            background: "rgba(15, 23, 42, 0.95)",
-            border: "1px solid #f59e0b",
-            borderRadius: 6,
-            padding: 6,
-            fontFamily: "monospace",
-            fontSize: 12,
-            zIndex: 150,
-            pointerEvents: "auto",
-            minWidth: 100,
+            borderColor: "var(--hud-accent-amber)",
           }}
         >
-          <div style={{ color: "#f59e0b", fontWeight: "bold", fontSize: 11, marginBottom: 4, padding: "0 4px" }}>
+          <div className="hud-context-menu__title">
             {tagMenu.tag.name}
           </div>
           <button
@@ -1591,7 +1558,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
               setTagRenameInput(tagMenu.tag.name);
               setTagMenu(null);
             }}
-            style={facilityMenuBtnStyle}
+            className="hud-context-menu__item"
           >
             重命名
           </button>
@@ -1604,13 +1571,15 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
               }
               setTagMenu(null);
             }}
-            style={{ ...facilityMenuBtnStyle, color: "#ef4444" }}
+            className="hud-context-menu__item"
+            style={{ color: "var(--hud-accent-red)" }}
           >
             删除
           </button>
           <button
             onClick={() => setTagMenu(null)}
-            style={{ ...facilityMenuBtnStyle, color: "#64748b" }}
+            className="hud-context-menu__item"
+            style={{ color: "var(--hud-text-dim)" }}
           >
             取消
           </button>
@@ -1619,23 +1588,15 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       {/* Day 15: Tag rename dialog */}
       {tagRenaming && (
         <div
+          className="hud-dialog"
           style={{
             position: "absolute",
             left: "50%",
             top: "40%",
             transform: "translate(-50%, -50%)",
-            background: "rgba(15, 23, 42, 0.95)",
-            border: "1px solid #f59e0b",
-            borderRadius: 8,
-            padding: 16,
-            fontFamily: "monospace",
-            fontSize: 12,
-            zIndex: 200,
-            pointerEvents: "auto",
-            minWidth: 200,
           }}
         >
-          <div style={{ color: "#f59e0b", fontWeight: "bold", marginBottom: 8 }}>重命名标记</div>
+          <div className="hud-dialog__title">重命名标记</div>
           <input
             type="text"
             value={tagRenameInput}
@@ -1658,86 +1619,45 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
               }
             }}
             autoFocus
-            style={{
-              width: "100%",
-              background: "#0f172a",
-              border: "1px solid #334155",
-              borderRadius: 4,
-              padding: "6px 8px",
-              color: "#e2e8f0",
-              fontSize: 12,
-              fontFamily: "monospace",
-              outline: "none",
-              boxSizing: "border-box",
-            }}
+            className="hud-dialog__input"
           />
-          <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+          <div className="hud-dialog__hint">
             Enter 确认 / Escape 取消
           </div>
         </div>
       )}
       {/* Day 15: Tag mode indicator */}
       {isTagMode && (
-        <div
-          style={{
-            position: "absolute",
-            top: 12,
-            left: "50%",
-            transform: "translateX(-50%)",
-            background: "rgba(245, 158, 11, 0.9)",
-            color: "#000",
-            padding: "6px 16px",
-            borderRadius: 6,
-            fontFamily: "monospace",
-            fontSize: 13,
-            fontWeight: "bold",
-            zIndex: 150,
-            pointerEvents: "none",
-          }}
-        >
+        <div className="hud-mode-indicator">
           标记模式 — 点击地图放置标记 (ESC 退出)
         </div>
       )}
       {gameOverInfo && (
-        <div style={gameOverOverlayStyle}>
-          <div style={gameOverBoxStyle}>
-            <div style={{
-              fontSize: 42,
-              fontWeight: "bold",
-              color: gameOverInfo.isVictory ? "#FFD700" : "#ef4444",
-              textShadow: gameOverInfo.isVictory
-                ? "0 0 20px rgba(255,215,0,0.5)"
-                : "0 0 20px rgba(239,68,68,0.5)",
-              letterSpacing: 4,
-            }}>
+        <div className="hud-gameover-overlay">
+          <div className="hud-gameover-box hud-scanline">
+            <div className={`hud-gameover-title ${gameOverInfo.isVictory ? "hud-gameover-title--victory" : "hud-gameover-title--defeat"}`}>
               {gameOverInfo.winner}
             </div>
-            <div style={{ fontSize: 16, color: "#e2e8f0", marginTop: 12 }}>
+            <div className="hud-gameover-reason">
               {gameOverInfo.reason}
             </div>
-            <div style={{
-              display: "flex",
-              gap: 32,
-              marginTop: 20,
-              fontSize: 13,
-              color: "#94a3b8",
-            }}>
+            <div className="hud-gameover-stats">
               <div>
-                <div style={{ color: "#64748b", fontSize: 11 }}>存活单位</div>
-                <div style={{ color: "#4ade80", fontSize: 18, fontWeight: "bold" }}>{gameOverInfo.playerUnits}</div>
+                <div className="hud-gameover-stat__label">存活单位</div>
+                <div className="hud-gameover-stat__value" style={{ color: "var(--hud-accent-green)" }}>{gameOverInfo.playerUnits}</div>
               </div>
               <div>
-                <div style={{ color: "#64748b", fontSize: 11 }}>敌方存活</div>
-                <div style={{ color: "#ef4444", fontSize: 18, fontWeight: "bold" }}>{gameOverInfo.enemyUnits}</div>
+                <div className="hud-gameover-stat__label">敌方存活</div>
+                <div className="hud-gameover-stat__value" style={{ color: "var(--hud-accent-red)" }}>{gameOverInfo.enemyUnits}</div>
               </div>
               <div>
-                <div style={{ color: "#64748b", fontSize: 11 }}>用时</div>
-                <div style={{ color: "#e2e8f0", fontSize: 18, fontWeight: "bold" }}>
+                <div className="hud-gameover-stat__label">用时</div>
+                <div className="hud-gameover-stat__value" style={{ color: "var(--hud-text-primary)" }}>
                   {Math.floor(gameOverInfo.time / 60)}:{String(Math.floor(gameOverInfo.time % 60)).padStart(2, "0")}
                 </div>
               </div>
             </div>
-            <button onClick={handleRestart} style={restartBtnStyle}>
+            <button onClick={handleRestart} className="hud-btn hud-btn-primary hud-btn-lg" style={{ marginTop: 20 }}>
               再来一局
             </button>
           </div>
@@ -1747,51 +1667,4 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
   );
 }
 
-// ── Day 12: Game-over overlay styles ──
-
-const gameOverOverlayStyle: React.CSSProperties = {
-  position: "absolute",
-  inset: 0,
-  background: "rgba(0, 0, 0, 0.7)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 200,
-};
-
-const gameOverBoxStyle: React.CSSProperties = {
-  background: "rgba(15, 23, 42, 0.95)",
-  border: "1px solid #334155",
-  borderRadius: 12,
-  padding: "32px 48px",
-  textAlign: "center",
-  fontFamily: "monospace",
-};
-
-const facilityMenuBtnStyle: React.CSSProperties = {
-  display: "block",
-  width: "100%",
-  padding: "4px 8px",
-  fontSize: 12,
-  fontFamily: "monospace",
-  background: "transparent",
-  color: "#e2e8f0",
-  border: "none",
-  borderRadius: 3,
-  cursor: "pointer",
-  textAlign: "left",
-};
-
-const restartBtnStyle: React.CSSProperties = {
-  marginTop: 20,
-  padding: "10px 32px",
-  fontSize: 16,
-  fontWeight: "bold",
-  fontFamily: "monospace",
-  background: "#1e40af",
-  color: "#e2e8f0",
-  border: "none",
-  borderRadius: 6,
-  cursor: "pointer",
-  letterSpacing: 2,
-};
+// ── Styles (now mostly handled by CSS classes in game-ui.css) ──

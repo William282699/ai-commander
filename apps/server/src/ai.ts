@@ -335,7 +335,7 @@ async function callDeepSeek(
   ];
   return provider.chat(messages, {
     temperature: options?.temperature ?? 0.4,
-    maxTokens: options?.maxTokens ?? 800,
+    maxTokens: options?.maxTokens ?? 1200,
     jsonMode: true,
   });
 }
@@ -424,6 +424,146 @@ ${styleNote}
   }
 }
 
+// ── Group Chat advisor call (ALL mode — one LLM call, 3 personas) ──
+
+const GROUP_SYSTEM_PROMPT = `You are the FULL STAFF TEAM of a modern warfare commander (the player).
+You respond as THREE separate officers IN CHARACTER — each with their own perspective:
+
+1. SGT Chen (combat): 28yo street-smart NCO, blunt, dark humor, swears when stressed ("damn", "hell"). Focuses on tactical situation, threats, combat readiness. Short punchy sentences.
+2. CPT Marcus (ops): Strategic, measured, by-the-book. Focuses on big picture, operational priorities, risk assessment. Professional tone.
+3. LT Emily (logistics): Precise, resource-focused, efficient but personable. Focuses on supply, fuel, ammo, production capacity. Warm but concise.
+
+RULES:
+- Each officer speaks from their OWN expertise. Don't overlap — Chen talks combat, Marcus talks strategy, Emily talks logistics.
+- They CAN reference or build on each other's points ("Marcus is right about the north, but we're burning ammo fast" — Emily).
+- They CAN disagree ("Chen wants to push but we don't have the fuel for that" — Emily).
+- Keep each person's response to 1-3 sentences. This is a war room, not an essay.
+- VARY your style every time. Never open the same way twice. Mix up who speaks first.
+- If the commander asks a question, everyone answers from their domain. If it's clearly one person's domain (e.g. "how much fuel?"), that person gives the main answer, others can add brief commentary or stay silent.
+- If the commander gives an ORDER, Chen proposes tactical options, Marcus assesses risk, Emily checks logistics feasibility.
+
+CRITICAL — This is a DISCUSSION channel only. You NEVER return executable orders here.
+- If the commander gives an order, acknowledge it and suggest which officer's channel to use ("Switch to my channel for that order, sir" — Chen, or "Route that through logistics, Commander" — Emily).
+- responseType is ALWAYS "NOOP". options is ALWAYS [].
+- This channel is for situational awareness, discussion, questions, banter, and coordination.
+
+RESPONSE FORMAT — always valid JSON:
+{
+  "responses": [
+    { "from": "chen", "brief": "Chen's in-character response" },
+    { "from": "marcus", "brief": "Marcus's in-character response" },
+    { "from": "emily", "brief": "Emily's in-character response" }
+  ],
+  "responseType": "NOOP",
+  "options": [],
+  "recommended": "A",
+  "urgency": 0.0-1.0
+}
+
+IMPORTANT:
+- You may omit a person from responses[] if they have nothing relevant to add.
+- fromSquad must be an exact squad ID from SQUADS section. Do NOT invent IDs.
+- When commander specifies exact quantities, use those exact numbers.
+`;
+
+export interface GroupAdvisorResult {
+  responses: Array<{ from: string; brief: string }>;
+  data: AdvisorResponse;
+  executor?: string;
+  warning?: string;
+}
+
+export async function callGroupAdvisor(
+  digest: string,
+  playerMessage: string,
+  styleNote: string,
+  channelContext?: string,
+): Promise<GroupAdvisorResult> {
+  const userContent = `${channelContext ? channelContext + "\n\n" : ""}当前战场摘要（DigestV1格式）：
+${digest}
+
+指挥官风格参数：
+${styleNote}
+
+指挥官命令：${playerMessage}`;
+
+  try {
+    const raw = await callDeepSeek(GROUP_SYSTEM_PROMPT, userContent, {
+      temperature: 0.5,  // slightly higher for more varied multi-persona output
+      maxTokens: 1200,   // more room for 3 personas
+    });
+
+    const rawParsed = safeParse(raw);
+    if (!rawParsed) {
+      console.warn("Group LLM returned invalid JSON, using fallback. Raw:", raw.slice(0, 300));
+      return {
+        responses: [
+          { from: "chen", brief: "通信干扰，收不到完整信号。" },
+          { from: "marcus", brief: "Commander, comms are spotty. Stand by." },
+          { from: "emily", brief: "通信系统有点问题，稍等。" },
+        ],
+        data: createFallbackResponse(),
+        warning: "参谋回复格式异常，已使用默认方案",
+      };
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parsed = rawParsed as Record<string, any>;
+
+    // Extract per-persona responses
+    const responses: Array<{ from: string; brief: string }> = Array.isArray(parsed.responses)
+      ? parsed.responses.filter((r: { from?: string; brief?: string }) => r && typeof r.from === "string" && typeof r.brief === "string")
+      : [];
+
+    // Build a combined brief for the AdvisorResponse (for backward compat)
+    const combinedBrief = responses.map(r => `[${r.from}] ${r.brief}`).join("\n");
+
+    // Build AdvisorResponse from parsed data
+    const advisorData: AdvisorResponse = {
+      brief: combinedBrief,
+      options: Array.isArray(parsed.options) ? parsed.options : [],
+      recommended: parsed.recommended || "A",
+      urgency: typeof parsed.urgency === "number" ? parsed.urgency : 0.3,
+      responseType: parsed.responseType || "NOOP",
+      ...(parsed.standingOrder ? { standingOrder: parsed.standingOrder } : {}),
+      ...(parsed.cancelDoctrine ? { cancelDoctrine: parsed.cancelDoctrine } : {}),
+      ...(parsed.suggestProduction ? { suggestProduction: parsed.suggestProduction } : {}),
+    };
+
+    // Validate & normalize options
+    const validated = validateAdvisorResponse(advisorData);
+    if (validated) {
+      const normalized = normalizeAdvisorForDay7(validated);
+      return {
+        responses,
+        data: normalized.data,
+        executor: parsed.executor || "chen",
+        warning: normalized.warning,
+      };
+    }
+
+    // Options didn't validate but we still have briefs
+    return {
+      responses,
+      data: { ...advisorData, options: [], responseType: "NOOP" as const },
+      executor: parsed.executor,
+    };
+
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("API密钥未配置")) throw err;
+
+    console.error("Group LLM call failed:", message);
+    return {
+      responses: [
+        { from: "marcus", brief: `通信中断: ${message.slice(0, 60)}` },
+      ],
+      data: createFallbackResponse(),
+      warning: `参谋通讯中断: ${message.slice(0, 100)}`,
+    };
+  }
+}
+
 // ── Streaming advisor call ──
 
 /**
@@ -479,7 +619,7 @@ ${styleNote}
 
     for await (const token of provider.chatStream(messages, {
       temperature: 0.4,
-      maxTokens: 800,
+      maxTokens: 1500,  // streaming needs more room: briefing text + full JSON after ---JSON---
     })) {
       fullText += token;
 

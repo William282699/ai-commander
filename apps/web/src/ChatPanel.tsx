@@ -57,6 +57,13 @@ const COMMANDER_META: Record<Commander, { label: string; role: string; avatar: s
   emily: { label: "艾米莉中尉", role: "后勤", avatar: "📦" },
 };
 
+/** Map LLM "from" field back to Commander key */
+const FROM_TO_COMMANDER: Record<string, Commander> = {
+  chen: "chen",
+  marcus: "marcus",
+  emily: "emily",
+};
+
 // ── Voice confirmations per commander personality ──
 const VOICE_CONFIRMS: Record<Commander, string[]> = {
   chen: [
@@ -224,6 +231,29 @@ function formatContext(ctx: ChannelContext, channel: Channel): string {
   if (arr.length === 0) return "";
   const lines = arr.map((e) => `[${e.role === "user" ? "指挥官" : "参谋"}] ${e.text}`);
   return "\n---CONTEXT---\n" + lines.join("\n");
+}
+
+const CHANNEL_LABEL: Record<Channel, string> = {
+  combat: "Chen/combat",
+  ops: "Marcus/ops",
+  logistics: "Emily/logistics",
+};
+
+/** Merge all channel histories into a compressed summary for group chat */
+function formatGroupContext(ctx: ChannelContext): string {
+  const lines: string[] = [];
+  for (const ch of ["ops", "combat", "logistics"] as Channel[]) {
+    const arr = ctx[ch];
+    if (arr.length === 0) continue;
+    for (const e of arr) {
+      const speaker = e.role === "user" ? "指挥官" : CHANNEL_LABEL[ch];
+      // Truncate long entries to keep prompt compact
+      const text = e.text.length > 120 ? e.text.slice(0, 117) + "..." : e.text;
+      lines.push(`[${speaker}] ${text}`);
+    }
+  }
+  if (lines.length === 0) return "";
+  return "---各频道近期通信---\n" + lines.join("\n");
 }
 
 // ── Helpers ──
@@ -696,10 +726,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     }
   };
 
-  // ── 0.5: Group chat — Marcus NOOP + single execution call ──
-  // ALL mode sends ONE execution call (combat/Chen handles all intent types)
-  // plus a separate Marcus NOOP call for strategic advice. One option card, one approval.
-  const sendGroupChat = async (userMsg: string, state: GameState, selectedIds: number[]) => {
+  // ── 0.5: Group chat — single LLM call, 3 personas ──
+  // ALL mode sends ONE request to /api/command-group.
+  // LLM responds as all 3 officers in one shot — feels like a real war room.
+  const sendGroupChat = async (userMsg: string, state: GameState, _selectedIds: number[]) => {
     // Clear stale response/error from previous command
     setResponse(null);
     setError(null);
@@ -711,86 +741,50 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     const channels = selectedCommanders.map(c => COMMANDER_CHANNEL[c]);
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
-    // Add player message to all channels
+    // Add player message to all channels' context
     for (const ch of channels) {
       commanderMemoryRef.current[ch].playerIntent = userMsg;
       pushContext(channelContextRef.current, ch, { role: "user", text: userMsg, time: state.time });
     }
 
-    // Split: Marcus → NOOP advisor call, execution → single combat call
-    const hasMarcus = selectedCommanders.includes("marcus");
-    const execChannel: Channel = "combat";
+    // Build digest from combat channel (most complete battlefield view)
+    const baseDigest = buildDigestForChannel(state, "combat", commanderMemoryRef.current.combat);
+    // Compressed cross-channel context so LLM knows what was discussed before
+    const groupCtx = formatGroupContext(channelContextRef.current);
 
-    const requests: Promise<void>[] = [];
+    try {
+      const res = await fetch(`${API_URL}/api/command-group`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          digest: baseDigest,
+          message: userMsg,
+          styleNote,
+          channelContext: groupCtx,
+        }),
+      });
+      const data = await res.json();
 
-    // Marcus NOOP call (parallel, non-blocking)
-    if (hasMarcus) {
-      requests.push((async () => {
-        try {
-          const baseDigest = buildDigestForChannel(state, "ops", commanderMemoryRef.current.ops);
-          const contextSuffix = formatContext(channelContextRef.current, "ops");
-          const digest = baseDigest + contextSuffix;
-          const res = await fetch(`${API_URL}/api/command`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ digest, message: userMsg, styleNote, channel: "ops" }),
-          });
-          const data = await res.json();
-          if (data.brief) {
-            pushContext(channelContextRef.current, "ops", { role: "assistant", text: data.brief, time: state.time });
-            addMessage("info", data.brief, state.time, "ops", "marcus", "command_ack", true);
-          }
-          if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
-            processDoctrineFields({ cancelDoctrine: data.cancelDoctrine }, state, "ops");
-          }
-        } catch {
-          addMessage("urgent", `${COMMANDER_META.marcus.label}: 通信中断`, state.time, "ops", "marcus", "system", true);
-        }
-      })());
-    }
-
-    // Single execution call — Chen handles all intent types (combat + logistics)
-    requests.push((async () => {
-      try {
-        const baseDigest = buildDigestForChannel(state, execChannel, commanderMemoryRef.current[execChannel]);
-        const contextSuffix = formatContext(channelContextRef.current, execChannel);
-        const digest = baseDigest + contextSuffix;
-        const requestId = crypto.randomUUID();
-        const res = await fetch(`${API_URL}/api/command`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ digest, message: userMsg, styleNote, channel: execChannel }),
-        });
-        const data = await res.json();
-
-        if (data.error) {
-          addMessage("urgent", data.error, state.time, execChannel, "chen", "command_ack", true);
-          return;
-        }
-
-        if (data.brief) {
-          pushContext(channelContextRef.current, execChannel, { role: "assistant", text: data.brief, time: state.time });
-          addMessage("info", data.brief, state.time, execChannel, "chen", "command_ack", true);
-        }
-
-        if (data.responseType?.toUpperCase() === "NOOP") {
-          if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
-            processDoctrineFields({ cancelDoctrine: data.cancelDoctrine }, state, execChannel);
-          }
-          return;
-        }
-
-        if (Array.isArray(data.options) && data.options.length > 0) {
-          responseExecCtxRef.current = { channel: execChannel, requestId };
-          latestRequestIdRef.current = requestId;
-          setResponse(data as DisplayResponse);
-        }
-      } catch {
-        addMessage("urgent", `全体指令通信中断`, state.time, execChannel, "chen", "system", true);
+      if (data.error) {
+        addMessage("urgent", data.error, state.time, "combat", "chen", "command_ack", true);
+        return;
       }
-    })());
 
-    await Promise.all(requests);
+      // Dispatch each persona's brief to their respective channel
+      const responses: Array<{ from: string; brief: string }> = data.responses || [];
+      for (const r of responses) {
+        const commander = FROM_TO_COMMANDER[r.from];
+        if (!commander) continue;
+        const ch = COMMANDER_CHANNEL[commander];
+        pushContext(channelContextRef.current, ch, { role: "assistant", text: r.brief, time: state.time });
+        addMessage("info", r.brief, state.time, ch, commander, "command_ack", true);
+      }
+
+      // ALL channel is discussion-only — no options/execution handling
+
+    } catch {
+      addMessage("urgent", "全体指令通信中断", state.time, "combat", "chen", "system", true);
+    }
   };
 
   // ── sendCommand (0.4: migrated from CommandPanel) ──
@@ -1236,7 +1230,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const approveSnapshotCtx = responseExecCtxRef.current ? { ...responseExecCtxRef.current } : undefined;
 
   const detachedPanelStyle: React.CSSProperties = isDetached
-    ? { position: "relative", width: "100%", height: "100%", background: "#0f172a", fontFamily: "monospace", fontSize: 12, color: "#a0c4ff", display: "flex", flexDirection: "column" as const }
+    ? { position: "relative", width: "100%", height: "100%", background: "var(--hud-bg-secondary)", fontFamily: "var(--hud-font-mono)", fontSize: 12, color: "var(--hud-text-primary)", display: "flex", flexDirection: "column" as const }
     : { ...panelStyle, display: collapsed ? "none" : "flex" };
 
   return (
@@ -1245,23 +1239,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       {!isDetached && (
         <button
           onClick={() => setCollapsed((c) => !c)}
+          className="hud-panel-toggle"
           style={{
-            position: "absolute",
             top: 8,
             right: collapsed ? 8 : 468,
-            zIndex: 110,
-            background: "rgba(15, 23, 42, 0.9)",
-            border: "1px solid #334155",
-            borderRadius: 4,
-            color: "#94a3b8",
-            fontSize: 14,
             width: 28,
             height: 28,
-            cursor: "pointer",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            transition: "right 0.2s ease",
           }}
           title={collapsed ? "展开面板" : "收起面板"}
         >
@@ -1274,6 +1260,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         {COMMANDERS.map((cmd) => {
           const meta = COMMANDER_META[cmd];
           const isSelected = selectedCommanders.includes(cmd);
+          const cmdColor = FROM_COLORS[cmd];
           return (
             <button
               key={cmd}
@@ -1281,13 +1268,25 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
               onContextMenu={(e) => { e.preventDefault(); toggleCommander(cmd); }}
               style={{
                 ...commanderBtnStyle,
-                opacity: isSelected ? 1 : 0.4,
-                borderColor: isSelected ? FROM_COLORS[cmd] : "transparent",
+                opacity: isSelected ? 1 : 0.35,
+                borderColor: isSelected ? cmdColor : "rgba(255,255,255,0.06)",
+                boxShadow: isSelected ? `0 0 15px ${cmdColor}40, inset 0 0 20px ${cmdColor}10` : "none",
+                background: isSelected
+                  ? `linear-gradient(180deg, ${cmdColor}18 0%, rgba(10, 14, 26, 1) 100%)`
+                  : "linear-gradient(180deg, rgba(25, 38, 65, 1) 0%, rgba(16, 24, 42, 1) 100%)",
               }}
               title={`${meta.label} (${meta.role}) — 右键多选`}
             >
-              <span style={{ fontSize: 16 }}>{meta.avatar}</span>
-              <span style={{ fontSize: 10 }}>{meta.role}</span>
+              <span style={{
+                width: 28, height: 28, borderRadius: "50%",
+                background: isSelected ? `${cmdColor}25` : "rgba(255,255,255,0.06)",
+                border: `2px solid ${isSelected ? cmdColor : "rgba(255,255,255,0.1)"}`,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 14, flexShrink: 0,
+                boxShadow: isSelected ? `0 0 8px ${cmdColor}40` : "none",
+              }}>{meta.avatar}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.5px", textTransform: "uppercase" as const }}>{meta.label}</span>
+              <span style={{ fontSize: 8, color: "var(--hud-text-dim)", textTransform: "uppercase" as const, letterSpacing: "1px" }}>{meta.role}</span>
             </button>
           );
         })}
@@ -1295,13 +1294,24 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           onClick={selectAll}
           style={{
             ...commanderBtnStyle,
-            opacity: selectedCommanders.length === 3 ? 1 : 0.4,
-            borderColor: selectedCommanders.length === 3 ? "#fbbf24" : "transparent",
+            opacity: selectedCommanders.length === 3 ? 1 : 0.35,
+            borderColor: selectedCommanders.length === 3 ? "#fbbf24" : "rgba(255,255,255,0.06)",
+            boxShadow: selectedCommanders.length === 3 ? "0 0 15px rgba(251, 191, 36, 0.25), inset 0 0 20px rgba(251, 191, 36, 0.08)" : "none",
+            background: selectedCommanders.length === 3
+              ? "linear-gradient(180deg, rgba(251, 191, 36, 0.1) 0%, rgba(10, 14, 26, 1) 100%)"
+              : "linear-gradient(180deg, rgba(25, 38, 65, 1) 0%, rgba(16, 24, 42, 1) 100%)",
           }}
           title="全体指挥官"
         >
-          <span style={{ fontSize: 14 }}>ALL</span>
-          <span style={{ fontSize: 10 }}>全体</span>
+          <span style={{
+            width: 28, height: 28, borderRadius: "50%",
+            background: selectedCommanders.length === 3 ? "rgba(251, 191, 36, 0.15)" : "rgba(255,255,255,0.06)",
+            border: `2px solid ${selectedCommanders.length === 3 ? "#fbbf24" : "rgba(255,255,255,0.1)"}`,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 12, fontWeight: 700, flexShrink: 0,
+          }}>ALL</span>
+          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.5px", textTransform: "uppercase" as const }}>全体</span>
+          <span style={{ fontSize: 7, opacity: 0.5, letterSpacing: "0.5px", textTransform: "uppercase" as const }}>COMMS ONLY</span>
         </button>
       </div>
 
@@ -1312,8 +1322,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             onClick={() => setActiveTab("chat")}
             style={{
               ...tabBtnStyle,
-              borderBottomColor: activeTab === "chat" ? "#3b82f6" : "transparent",
-              color: activeTab === "chat" ? "#e2e8f0" : "#64748b",
+              borderBottomColor: activeTab === "chat" ? "var(--hud-accent-cyan)" : "transparent",
+              color: activeTab === "chat" ? "var(--hud-accent-cyan)" : undefined,
             }}
           >
             聊天 💬
@@ -1322,8 +1332,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             onClick={() => setActiveTab("org")}
             style={{
               ...tabBtnStyle,
-              borderBottomColor: activeTab === "org" ? "#3b82f6" : "transparent",
-              color: activeTab === "org" ? "#e2e8f0" : "#64748b",
+              borderBottomColor: activeTab === "org" ? "var(--hud-accent-cyan)" : "transparent",
+              color: activeTab === "org" ? "var(--hud-accent-cyan)" : undefined,
             }}
           >
             编制 🏗️
@@ -1338,7 +1348,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       {isDetached && (() => {
         const st = getState();
         return (
-          <div style={{ borderRight: "1px solid #1e293b", overflow: "auto", width: "40%", minWidth: 300, flexShrink: 0 }}>
+          <div style={{ borderRight: "1px solid var(--hud-border-dim)", overflow: "auto", width: "40%", minWidth: 300, flexShrink: 0 }}>
             {st ? (
               <OrgTree
                 squads={st.squads}
@@ -1351,7 +1361,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
                 onTransferSquad={onTransferSquad ?? (() => {})}
               />
             ) : (
-              <div style={{ color: "#475569", textAlign: "center", padding: 12 }}>加载中...</div>
+              <div style={{ color: "var(--hud-text-dim)", textAlign: "center", padding: 12 }}>加载中...</div>
             )}
           </div>
         );
@@ -1364,7 +1374,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       {!isDetached && activeTab === "org" ? (
         (() => {
           const st = getState();
-          if (!st) return <div style={{ flex: 1, color: "#475569", textAlign: "center", padding: 20 }}>加载中...</div>;
+          if (!st) return <div style={{ flex: 1, color: "var(--hud-text-dim)", textAlign: "center", padding: 20 }}>加载中...</div>;
           return (
             <OrgTree
               squads={st.squads}
@@ -1382,7 +1392,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       <>
       <div ref={scrollRef} style={chatFlowStyle}>
         {displayMessages.length === 0 && (
-          <div style={{ color: "#475569", fontSize: 11, padding: "12px 0", textAlign: "center" }}>
+          <div className="hud-empty-state">
             等待指令...
           </div>
         )}
@@ -1401,12 +1411,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
               )}
               <div style={{
                 ...bubbleStyle,
-                background: isPlayer ? "rgba(30, 64, 175, 0.6)" : "rgba(15, 23, 42, 0.8)",
-                borderColor: isPlayer ? "#2563eb" : "#334155",
+                background: isPlayer ? "rgba(0, 212, 255, 0.08)" : "var(--hud-bg-tertiary)",
+                borderLeft: isPlayer ? undefined : `2px solid ${FROM_COLORS[msg.from ?? "system"] ?? "var(--hud-text-dim)"}`,
+                borderRight: isPlayer ? "2px solid var(--hud-accent-cyan)" : undefined,
                 alignSelf: isPlayer ? "flex-end" : "flex-start",
                 maxWidth: "85%",
               }}>
-                <span style={{ color: isPlayer ? "#e2e8f0" : "#cbd5e1", fontSize: 12 }}>{msg.text}</span>
+                <span style={{ color: "var(--hud-text-primary)", fontSize: 12 }}>{msg.text}</span>
               </div>
               {isPlayer && (
                 <span style={{ ...timeTagStyle, alignSelf: "flex-end" }}>{formatTime(msg.time)}</span>
@@ -1418,7 +1429,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         {/* Inline staff threads with ⚠ */}
         {activeThreads.length > 0 && !response && activeThreads.map((thread) => (
           <div key={thread.id} style={threadBubbleStyle}>
-            <div style={{ fontSize: 10, color: "#f59e0b", marginBottom: 4, fontWeight: "bold" }}>
+            <div className="hud-thread-header">
               ⚠ {thread.eventType} — {thread.brief}
             </div>
             {thread.options && thread.options.length > 0 && (
@@ -1436,13 +1447,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
                       }}
                     >
                       <span style={{ fontWeight: "bold" }}>{letter}:</span> {opt.label.replace(/^[ABC]:\s*/, '')}
-                      <div style={{ fontSize: 9, color: "#94a3b8", marginTop: 2 }}>{opt.description}</div>
+                      <div style={{ fontSize: 9, color: "var(--hud-text-secondary)", marginTop: 2 }}>{opt.description}</div>
                     </button>
                   );
                 })}
               </div>
             )}
-            <div style={{ fontSize: 9, color: "#475569", marginTop: 4 }}>
+            <div style={{ fontSize: 9, color: "var(--hud-text-dim)", marginTop: 4 }}>
               Expires in {Math.max(0, Math.floor(thread.expiresAt - (getState()?.time ?? 0)))}s
             </div>
           </div>
@@ -1450,16 +1461,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
         {/* Streaming text bubble */}
         {streamingText !== null && (
-          <div style={{ padding: "6px 10px", margin: "4px 0", background: "rgba(30, 41, 59, 0.9)", borderRadius: 6, border: "1px solid #334155", fontSize: 11, color: "#94a3b8", fontStyle: "italic" }}>
+          <div className="hud-streaming-text">
             {streamingText || "…"}
-            <span style={{ display: "inline-block", width: 4, height: 12, background: "#fbbf24", marginLeft: 2, animation: "blink 1s step-end infinite" }} />
+            <span className="hud-cursor-blink" style={{ marginLeft: 2 }} />
           </div>
         )}
 
         {/* Inline A/B/C option cards */}
         {response && (
           <div style={optionsInlineStyle}>
-            <div style={{ color: "#fbbf24", fontWeight: "bold", fontSize: 12, marginBottom: 6 }}>
+            <div className="hud-options-header" style={{ marginBottom: 6 }}>
               {response.brief}
               <button onClick={dismiss} style={dismissBtn} title="关闭">×</button>
             </div>
@@ -1473,27 +1484,27 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
                   key={i}
                   style={{
                     ...optionCardStyle,
-                    borderColor: isApproved ? "#22c55e" : isRecommended ? "#4ade80" : "#334155",
-                    background: isApproved ? "rgba(34, 197, 94, 0.15)" : "rgba(15, 23, 42, 0.8)",
+                    borderColor: isApproved ? "var(--hud-accent-green)" : isRecommended ? "var(--hud-accent-green)" : undefined,
+                    background: isApproved ? "var(--hud-accent-green-dim)" : undefined,
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ fontWeight: "bold", color: "#e2e8f0", fontSize: 11 }}>{opt.label}</span>
-                    {isRecommended && <span style={recommendedBadge}>推荐</span>}
+                    <span className="hud-option-label">{opt.label}</span>
+                    {isRecommended && <span className="hud-recommended-badge">推荐</span>}
                   </div>
-                  <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 3 }}>{opt.description}</div>
-                  <div style={{ display: "flex", gap: 8, marginTop: 3, fontSize: 9, color: "#64748b" }}>
+                  <div className="hud-option-desc">{opt.description}</div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 3, fontSize: 9, color: "var(--hud-text-dim)" }}>
                     <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
                       风险
-                      <span style={barBg}><span style={{ ...barFill, width: `${opt.risk * 100}%`, background: opt.risk > 0.6 ? "#ef4444" : "#f59e0b" }} /></span>
+                      <span style={barBg}><span style={{ ...barFill, width: `${opt.risk * 100}%`, background: opt.risk > 0.6 ? "var(--hud-accent-red)" : "var(--hud-accent-amber)" }} /></span>
                     </span>
                     <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
                       收益
-                      <span style={barBg}><span style={{ ...barFill, width: `${opt.reward * 100}%`, background: "#22c55e" }} /></span>
+                      <span style={barBg}><span style={{ ...barFill, width: `${opt.reward * 100}%`, background: "var(--hud-accent-green)" }} /></span>
                     </span>
                   </div>
                   {(opt.intents ?? [opt.intent]).map((it, j) => (
-                    <div key={j} style={{ fontSize: 9, color: "#475569", marginTop: 2 }}>
+                    <div key={j} style={{ fontSize: 9, color: "var(--hud-text-dim)", marginTop: 2 }}>
                       [{it.type}]{it.unitType ? ` ${it.unitType}` : ""}{it.urgency ? ` ${it.urgency}` : ""}
                     </div>
                   ))}
@@ -1573,7 +1584,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
                 <div key={label} style={styleBarItem}>
                   <span style={styleLabel}>{label}</span>
                   <span style={barBg}>
-                    <span style={{ ...barFill, width: `${val * 100}%`, background: "#60a5fa" }} />
+                    <span style={{ ...barFill, width: `${val * 100}%`, background: "var(--hud-accent-cyan)" }} />
                   </span>
                   <span style={styleVal}>{(val * 100).toFixed(0)}</span>
                 </div>
@@ -1615,7 +1626,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={isGroupChat ? "全体指令..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`}
+          placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`}
           disabled={loading}
           style={inputStyle}
         />
@@ -1628,7 +1639,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           disabled={pttStatus === "unsupported" || loading}
           style={{
             ...pttBtnStyle,
-            background: pttStatus === "listening" ? "#dc2626" : pttStatus === "error" ? "#7f1d1d" : "#1e3a5f",
+            background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined,
             opacity: pttStatus === "unsupported" || loading ? 0.35 : 1,
             cursor: pttStatus === "unsupported" || loading ? "default" : "pointer",
           }}
@@ -1647,7 +1658,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) ttsCancel(); }}
             style={{
               ...pttBtnStyle,
-              background: ttsEnabled ? "#1d4ed8" : "#1e3a5f",
+              background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined,
               opacity: 1,
               cursor: "pointer",
               fontSize: 14,
@@ -1695,7 +1706,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   );
 }
 
-// ── Styles ──
+// ── Styles (HUD theme) ──
 
 const panelStyle: React.CSSProperties = {
   position: "absolute",
@@ -1703,22 +1714,25 @@ const panelStyle: React.CSSProperties = {
   right: 0,
   width: 460,
   height: "100%",
-  background: "rgba(15, 23, 42, 0.96)",
-  borderLeft: "1px solid #0f3460",
-  fontFamily: "monospace",
+  background: "radial-gradient(ellipse at 50% 0%, rgba(0, 212, 255, 0.06) 0%, transparent 60%), linear-gradient(180deg, rgba(20, 30, 55, 1) 0%, rgba(12, 18, 35, 1) 15%, rgba(10, 14, 26, 1) 50%, rgba(8, 11, 22, 1) 100%)",
+  borderLeft: "2px solid rgba(0, 212, 255, 0.25)",
+  fontFamily: "var(--hud-font-mono)",
   fontSize: 12,
-  color: "#a0c4ff",
+  color: "var(--hud-text-primary)",
   zIndex: 100,
   pointerEvents: "auto",
   display: "flex",
   flexDirection: "column",
+  boxShadow: "-6px 0 30px rgba(0, 0, 0, 0.7), inset 3px 0 15px rgba(0, 212, 255, 0.06), inset 0 0 60px rgba(0, 0, 0, 0.3)",
 };
 
 const tabBarStyle: React.CSSProperties = {
   display: "flex",
   gap: 0,
-  borderBottom: "1px solid #1e293b",
+  borderBottom: "1px solid rgba(0, 212, 255, 0.1)",
   flexShrink: 0,
+  background: "linear-gradient(180deg, rgba(12, 18, 32, 1) 0%, rgba(8, 12, 22, 1) 100%)",
+  boxShadow: "inset 0 -1px 0 rgba(0, 212, 255, 0.05)",
 };
 
 const tabBtnStyle: React.CSSProperties = {
@@ -1726,9 +1740,12 @@ const tabBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
   borderBottom: "2px solid transparent",
-  color: "#64748b",
+  color: "var(--hud-text-dim)",
   fontSize: 12,
-  fontFamily: "monospace",
+  fontFamily: "var(--hud-font-display)",
+  fontWeight: 600,
+  letterSpacing: 1,
+  textTransform: "uppercase",
   padding: "6px 0",
   cursor: "pointer",
   transition: "color 0.15s, border-color 0.15s",
@@ -1736,10 +1753,12 @@ const tabBtnStyle: React.CSSProperties = {
 
 const commanderBarStyle: React.CSSProperties = {
   display: "flex",
-  gap: 4,
-  padding: "8px 10px",
-  borderBottom: "1px solid #0f3460",
+  gap: 6,
+  padding: "10px 12px",
+  borderBottom: "2px solid rgba(0, 212, 255, 0.15)",
   flexShrink: 0,
+  background: "linear-gradient(180deg, rgba(16, 24, 45, 1) 0%, rgba(10, 14, 28, 1) 100%)",
+  boxShadow: "inset 0 -1px 0 rgba(0, 212, 255, 0.1), 0 2px 8px rgba(0, 0, 0, 0.3)",
 };
 
 const commanderBtnStyle: React.CSSProperties = {
@@ -1748,14 +1767,14 @@ const commanderBtnStyle: React.CSSProperties = {
   flexDirection: "column",
   alignItems: "center",
   gap: 2,
-  padding: "6px 4px",
-  background: "rgba(15, 23, 42, 0.6)",
-  border: "2px solid transparent",
-  borderRadius: 6,
+  padding: "8px 4px",
+  background: "linear-gradient(180deg, rgba(25, 38, 65, 1) 0%, rgba(16, 24, 42, 1) 100%)",
+  border: "2px solid rgba(255, 255, 255, 0.06)",
+  borderRadius: 0,
   cursor: "pointer",
-  fontFamily: "monospace",
-  color: "#e2e8f0",
-  transition: "opacity 0.15s",
+  fontFamily: "var(--hud-font-mono)",
+  color: "var(--hud-text-primary)",
+  transition: "all 0.2s ease",
 };
 
 const chatFlowStyle: React.CSSProperties = {
@@ -1781,66 +1800,74 @@ const bubbleMetaStyle: React.CSSProperties = {
 };
 
 const bubbleStyle: React.CSSProperties = {
-  padding: "6px 10px",
-  borderRadius: 8,
-  border: "1px solid #334155",
+  padding: "10px 14px",
+  border: "1px solid var(--hud-border-dim)",
   wordBreak: "break-word",
+  clipPath: "var(--hud-chamfer-sm)",
 };
 
 const timeTagStyle: React.CSSProperties = {
   fontSize: 9,
-  color: "#475569",
+  color: "var(--hud-text-dim)",
 };
 
 const threadBubbleStyle: React.CSSProperties = {
-  padding: "8px 10px",
-  background: "rgba(245, 158, 11, 0.08)",
-  border: "1px solid rgba(245, 158, 11, 0.3)",
-  borderRadius: 8,
+  padding: "10px 12px",
+  background: "linear-gradient(180deg, rgba(240, 160, 48, 0.15) 0%, rgba(240, 160, 48, 0.05) 100%)",
+  border: "1px solid rgba(240, 160, 48, 0.35)",
+  borderLeft: "4px solid #f0a030",
+  boxShadow: "0 3px 15px rgba(0, 0, 0, 0.35), 0 0 15px rgba(240, 160, 48, 0.08), inset 0 0 30px rgba(240, 160, 48, 0.05)",
 };
 
 const threadOptionBtnStyle: React.CSSProperties = {
   display: "block",
   width: "100%",
   textAlign: "left",
-  background: "rgba(15, 23, 42, 0.6)",
-  border: "1px solid #334155",
-  borderRadius: 4,
+  background: "var(--hud-bg-secondary)",
+  border: "1px solid var(--hud-border-dim)",
   padding: "6px 8px",
   fontSize: 11,
-  fontFamily: "monospace",
-  color: "#e2e8f0",
+  fontFamily: "var(--hud-font-mono)",
+  color: "var(--hud-text-primary)",
   cursor: "pointer",
+  transition: "border-color 0.15s, background 0.15s",
 };
 
 const optionsInlineStyle: React.CSSProperties = {
-  padding: "8px 10px",
-  background: "rgba(15, 23, 42, 0.6)",
-  border: "1px solid #334155",
-  borderRadius: 8,
+  padding: "12px 14px",
+  background: "linear-gradient(180deg, rgba(15, 22, 40, 0.97) 0%, rgba(10, 14, 26, 0.99) 100%)",
+  border: "1px solid rgba(0, 212, 255, 0.2)",
+  boxShadow: "0 4px 20px rgba(0, 0, 0, 0.5), 0 0 20px rgba(0, 212, 255, 0.06), inset 0 1px 0 rgba(0, 212, 255, 0.08)",
+  clipPath: "var(--hud-chamfer-sm)",
+  backdropFilter: "blur(8px)",
 };
 
 const optionCardStyle: React.CSSProperties = {
-  background: "rgba(15, 23, 42, 0.8)",
-  border: "1px solid #334155",
-  borderRadius: 4,
-  padding: "6px 8px",
-  marginBottom: 4,
+  background: "linear-gradient(180deg, rgba(21, 32, 54, 0.9) 0%, rgba(15, 22, 40, 0.7) 100%)",
+  border: "1px solid var(--hud-border-base)",
+  padding: "10px 12px",
+  marginBottom: 6,
+  transition: "all 0.2s ease",
+  boxShadow: "0 2px 10px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.03)",
+  clipPath: "var(--hud-chamfer-sm)",
+  cursor: "pointer",
 };
 
 const recommendedBadge: React.CSSProperties = {
   fontSize: 9,
-  background: "#166534",
-  color: "#4ade80",
+  background: "rgba(0, 224, 112, 0.2)",
+  color: "var(--hud-accent-green)",
   padding: "1px 5px",
-  borderRadius: 3,
   fontWeight: "bold",
+  fontFamily: "var(--hud-font-display)",
+  letterSpacing: 0.5,
+  textTransform: "uppercase",
 };
 
 const dismissBtn: React.CSSProperties = {
   background: "none",
   border: "none",
-  color: "#64748b",
+  color: "var(--hud-text-dim)",
   cursor: "pointer",
   fontSize: 14,
   padding: "0 4px",
@@ -1850,96 +1877,109 @@ const dismissBtn: React.CSSProperties = {
 const barBg: React.CSSProperties = {
   display: "inline-block",
   width: 40,
-  height: 4,
-  background: "#1e293b",
-  borderRadius: 2,
+  height: 6,
+  background: "var(--hud-bg-primary)",
+  border: "1px solid var(--hud-border-dim)",
   overflow: "hidden",
   verticalAlign: "middle",
+  position: "relative",
 };
 
 const barFill: React.CSSProperties = {
   display: "block",
   height: "100%",
-  borderRadius: 2,
 };
 
 const approveBtnStyle: React.CSSProperties = {
-  marginTop: 4,
+  marginTop: 6,
   width: "100%",
-  background: "#1e3a5f",
-  color: "#60a5fa",
-  border: "1px solid #2563eb",
-  borderRadius: 3,
-  padding: "4px 0",
-  fontSize: 11,
-  fontFamily: "monospace",
+  background: "linear-gradient(180deg, rgba(0, 212, 255, 0.25) 0%, rgba(0, 212, 255, 0.1) 100%)",
+  color: "#00d4ff",
+  border: "2px solid rgba(0, 212, 255, 0.7)",
+  padding: "8px 0",
+  fontSize: 12,
+  fontFamily: "var(--hud-font-display)",
   fontWeight: "bold",
   cursor: "pointer",
-  letterSpacing: 1,
+  letterSpacing: 2,
+  transition: "all 0.2s ease",
+  boxShadow: "0 0 15px rgba(0, 212, 255, 0.35), 0 0 30px rgba(0, 212, 255, 0.12), inset 0 1px 0 rgba(0, 212, 255, 0.2)",
+  textShadow: "0 0 10px rgba(0, 212, 255, 0.7)",
+  textTransform: "uppercase",
+  clipPath: "var(--hud-chamfer-sm)",
 };
 
 const cancelBtnStyle: React.CSSProperties = {
   flex: 1,
-  padding: "4px 0",
+  padding: "6px 0",
   fontSize: 10,
-  border: "1px solid #475569",
-  borderRadius: 4,
-  background: "rgba(71, 85, 105, 0.2)",
-  color: "#94a3b8",
+  border: "1px solid rgba(255, 48, 64, 0.5)",
+  background: "linear-gradient(180deg, rgba(255, 48, 64, 0.12) 0%, rgba(255, 48, 64, 0.04) 100%)",
+  color: "var(--hud-accent-red)",
   cursor: "pointer",
+  fontFamily: "var(--hud-font-display)",
+  fontWeight: 700,
+  letterSpacing: 1,
+  textTransform: "uppercase",
+  transition: "all 0.2s ease",
+  boxShadow: "0 0 8px rgba(255, 48, 64, 0.1)",
+  clipPath: "var(--hud-chamfer-sm)",
 };
 
 const supplementBtnStyle: React.CSSProperties = {
   flex: 1,
-  padding: "4px 0",
+  padding: "5px 0",
   fontSize: 10,
-  border: "1px solid #3b82f6",
-  borderRadius: 4,
-  background: "rgba(59, 130, 246, 0.1)",
-  color: "#60a5fa",
+  border: "1px solid var(--hud-accent-cyan)",
+  background: "linear-gradient(180deg, rgba(0, 212, 255, 0.12) 0%, rgba(0, 212, 255, 0.04) 100%)",
+  color: "var(--hud-accent-cyan)",
   cursor: "pointer",
+  fontFamily: "var(--hud-font-display)",
+  fontWeight: 600,
+  letterSpacing: 0.5,
+  textTransform: "uppercase",
+  transition: "all 0.2s ease",
+  boxShadow: "0 0 6px rgba(0, 212, 255, 0.1)",
+  textShadow: "0 0 4px rgba(0, 212, 255, 0.3)",
 };
 
 const warningStyle: React.CSSProperties = {
-  color: "#f59e0b",
+  color: "var(--hud-accent-amber)",
   fontSize: 10,
   marginTop: 4,
   padding: "4px 6px",
-  background: "rgba(245, 158, 11, 0.1)",
-  borderRadius: 3,
+  background: "var(--hud-accent-amber-dim)",
 };
 
 const errorBubbleStyle: React.CSSProperties = {
-  color: "#ef4444",
+  color: "var(--hud-accent-red)",
   fontSize: 11,
   padding: "6px 8px",
-  background: "rgba(239, 68, 68, 0.1)",
-  border: "1px solid rgba(239, 68, 68, 0.3)",
-  borderRadius: 6,
+  background: "var(--hud-accent-red-dim)",
+  border: "1px solid rgba(255, 48, 64, 0.3)",
 };
 
 const clarificationStyle: React.CSSProperties = {
-  color: "#fbbf24",
+  color: "var(--hud-accent-amber)",
   fontSize: 11,
   padding: "6px 8px",
-  background: "rgba(251, 191, 36, 0.12)",
-  border: "1px solid rgba(251, 191, 36, 0.3)",
-  borderRadius: 6,
+  background: "var(--hud-accent-amber-dim)",
+  border: "1px solid rgba(240, 160, 48, 0.3)",
 };
 
 const styleRowStyle: React.CSSProperties = {
   padding: "4px 10px",
-  borderTop: "1px solid #0f3460",
+  borderTop: "1px solid var(--hud-border-base)",
   flexShrink: 0,
 };
 
 const styleToggleBtn: React.CSSProperties = {
   background: "none",
   border: "none",
-  color: "#64748b",
+  color: "var(--hud-text-dim)",
   cursor: "pointer",
   fontSize: 10,
-  fontFamily: "monospace",
+  fontFamily: "var(--hud-font-mono)",
   padding: "2px 0",
 };
 
@@ -1949,7 +1989,7 @@ const styleBarContainer: React.CSSProperties = {
   gap: 2,
   marginTop: 3,
   padding: "4px 6px",
-  background: "rgba(15, 23, 42, 0.6)",
+  background: "var(--hud-bg-tertiary)",
   borderRadius: 3,
 };
 
@@ -1961,13 +2001,13 @@ const styleBarItem: React.CSSProperties = {
 
 const styleLabel: React.CSSProperties = {
   width: 24,
-  color: "#94a3b8",
+  color: "var(--hud-text-secondary)",
   fontSize: 9,
 };
 
 const styleVal: React.CSSProperties = {
   width: 20,
-  color: "#64748b",
+  color: "var(--hud-text-dim)",
   fontSize: 9,
   textAlign: "right",
 };
@@ -1975,81 +2015,95 @@ const styleVal: React.CSSProperties = {
 const inputContainerStyle: React.CSSProperties = {
   display: "flex",
   gap: 6,
-  padding: "8px 10px",
-  borderTop: "1px solid #0f3460",
+  padding: "10px 12px",
+  borderTop: "2px solid rgba(0, 212, 255, 0.2)",
   flexShrink: 0,
+  background: "linear-gradient(180deg, rgba(14, 20, 38, 0.98) 0%, rgba(8, 12, 24, 1) 100%)",
+  boxShadow: "inset 0 2px 8px rgba(0, 0, 0, 0.3), 0 -2px 15px rgba(0, 0, 0, 0.4)",
 };
 
 const inputStyle: React.CSSProperties = {
   flex: 1,
-  background: "#0f172a",
-  border: "1px solid #334155",
-  borderRadius: 4,
+  background: "linear-gradient(180deg, rgba(8, 12, 24, 0.95) 0%, rgba(6, 8, 18, 0.98) 100%)",
+  border: "1px solid var(--hud-border-base)",
   padding: "8px 10px",
-  color: "#e2e8f0",
+  color: "var(--hud-text-primary)",
   fontSize: 12,
-  fontFamily: "monospace",
+  fontFamily: "var(--hud-font-mono)",
   outline: "none",
+  caretColor: "var(--hud-accent-cyan)",
+  transition: "border-color 0.2s, box-shadow 0.2s",
+  boxShadow: "inset 0 2px 4px rgba(0, 0, 0, 0.3)",
 };
 
 const prodBtnStyle: React.CSSProperties = {
-  background: "#1a3a2a",
-  color: "#4ade80",
-  border: "1px solid #166534",
-  borderRadius: 4,
+  background: "var(--hud-accent-green-dim)",
+  color: "var(--hud-accent-green)",
+  border: "1px solid rgba(0, 224, 112, 0.4)",
   padding: "6px 6px",
   fontSize: 10,
-  fontFamily: "monospace",
+  fontFamily: "var(--hud-font-mono)",
   cursor: "pointer",
   whiteSpace: "nowrap",
+  transition: "background 0.15s",
 };
 
 const actionBtnStyle: React.CSSProperties = {
-  background: "#1e3a5f",
-  color: "#60a5fa",
-  border: "1px solid #2563eb",
-  borderRadius: 4,
+  background: "var(--hud-accent-cyan-dim)",
+  color: "var(--hud-accent-cyan)",
+  border: "1px solid var(--hud-accent-cyan)",
   padding: "6px 8px",
   fontSize: 11,
-  fontFamily: "monospace",
+  fontFamily: "var(--hud-font-display)",
+  fontWeight: 600,
+  letterSpacing: 0.5,
   cursor: "pointer",
   whiteSpace: "nowrap",
+  transition: "background 0.15s, box-shadow 0.15s",
 };
 
 const warBtnStyle: React.CSSProperties = {
-  background: "#7f1d1d",
-  color: "#fca5a5",
-  border: "1px solid #dc2626",
-  borderRadius: 4,
+  background: "var(--hud-accent-red-dim)",
+  color: "var(--hud-accent-red)",
+  border: "1px solid var(--hud-accent-red)",
   padding: "6px 8px",
   fontSize: 11,
-  fontFamily: "monospace",
+  fontFamily: "var(--hud-font-display)",
   fontWeight: "bold",
+  letterSpacing: 1,
+  textTransform: "uppercase",
   cursor: "pointer",
   whiteSpace: "nowrap",
+  transition: "background 0.15s, box-shadow 0.15s",
 };
 
 const pttBtnStyle: React.CSSProperties = {
-  background: "#1e3a5f",
-  color: "#e2e8f0",
-  border: "1px solid #2563eb",
-  borderRadius: 4,
+  background: "var(--hud-bg-elevated)",
+  color: "var(--hud-text-primary)",
+  border: "1px solid var(--hud-border-bright)",
   padding: "6px 8px",
   fontSize: 11,
-  fontFamily: "monospace",
+  fontFamily: "var(--hud-font-mono)",
   cursor: "pointer",
   whiteSpace: "nowrap",
   userSelect: "none",
   touchAction: "none",
+  transition: "background 0.15s, border-color 0.15s",
 };
 
 const sendBtnStyle: React.CSSProperties = {
-  background: "#1e40af",
-  color: "#e2e8f0",
-  border: "none",
-  borderRadius: 4,
-  padding: "6px 14px",
+  background: "linear-gradient(180deg, rgba(0, 212, 255, 0.3) 0%, rgba(0, 212, 255, 0.12) 100%)",
+  color: "#00d4ff",
+  border: "2px solid rgba(0, 212, 255, 0.6)",
+  padding: "6px 16px",
   fontSize: 12,
-  fontFamily: "monospace",
+  fontFamily: "var(--hud-font-display)",
+  fontWeight: 700,
+  letterSpacing: 2,
   cursor: "pointer",
+  transition: "all 0.2s ease",
+  boxShadow: "0 0 12px rgba(0, 212, 255, 0.3), 0 0 25px rgba(0, 212, 255, 0.08)",
+  textShadow: "0 0 10px rgba(0, 212, 255, 0.6)",
+  textTransform: "uppercase",
+  clipPath: "var(--hud-chamfer-sm)",
 };

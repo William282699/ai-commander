@@ -5,9 +5,10 @@ import type { GameState } from "@ai-commander/shared";
 import type { GameBridge } from "./GameCanvas";
 
 function formatTime(sec: number): string {
-  const m = Math.floor(sec / 60);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
   const s = Math.floor(sec % 60);
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
 // ── Panel-only mode (pop-out window) ──
@@ -32,7 +33,7 @@ function PanelApp() {
 
   if (!bridge) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100vw", height: "100vh", color: "#a0c4ff", fontFamily: "monospace" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100vw", height: "100vh", color: "var(--hud-text-primary)", fontFamily: "var(--hud-font-mono)" }}>
         连接主窗口中...
       </div>
     );
@@ -112,50 +113,72 @@ export default function App() {
 
   const rdPct = Math.round(topBar.readiness * 100);
 
+  // Resource gauge helper — percentage clamped 0..100
+  const moneyPct = Math.min(100, (topBar.money / 5000) * 100);
+  const fuelPct = Math.min(100, topBar.fuel);
+  const ammoPct = Math.min(100, topBar.ammo);
+  const intelPct = Math.min(100, (topBar.intel / 100) * 100);
+
   return (
     <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column" }}>
-      {/* Top status bar */}
-      <div
-        style={{
-          height: 36,
-          background: "#16213e",
-          borderBottom: "1px solid #0f3460",
-          display: "flex",
-          alignItems: "center",
-          padding: "0 16px",
-          gap: 24,
-          fontSize: 13,
-          color: "#a0c4ff",
-          fontFamily: "monospace",
-        }}
-      >
-        <span style={{ fontWeight: "bold" }}>AI COMMANDER</span>
-        <span style={{ color: "#fbbf24" }}>${topBar.money}</span>
-        <span style={{ color: topBar.fuel <= 20 ? "#ef4444" : "#a0c4ff" }}>
-          Fu:{topBar.fuel}
+      {/* Top HUD bar */}
+      <div className="hud-topbar">
+        <span className="hud-topbar__title">AI COMMANDER</span>
+        <span className="hud-status-badge">
+          <span className="hud-status-badge__dot" />
+          OPERATIONAL
         </span>
-        <span style={{ color: topBar.ammo <= 20 ? "#ef4444" : "#a0c4ff" }}>
-          Am:{topBar.ammo}
-        </span>
-        <span>In:{topBar.intel}</span>
-        <span style={{ color: "#60a5fa" }}>Rd:{rdPct}%</span>
+
+        <div className="hud-topbar__resources">
+          {/* Money */}
+          <div className={`hud-resource-chip hud-resource-chip--success`}>
+            <span className="hud-resource-chip__label">MONEY</span>
+            <span className="hud-resource-chip__value">${topBar.money.toLocaleString()}</span>
+          </div>
+
+          {/* Fuel */}
+          <div className={`hud-resource-chip ${topBar.fuel <= 20 ? "hud-resource-chip--danger" : "hud-resource-chip--warning"}`}>
+            <span className="hud-resource-chip__label">FUEL</span>
+            <span className="hud-resource-chip__value">{topBar.fuel}%</span>
+          </div>
+
+          {/* Ammo */}
+          <div className={`hud-resource-chip ${topBar.ammo <= 20 ? "hud-resource-chip--danger" : "hud-resource-chip--warning"}`}>
+            <span className="hud-resource-chip__label">AMMO</span>
+            <span className="hud-resource-chip__value">{topBar.ammo}%</span>
+          </div>
+
+          {/* Intel */}
+          <div className="hud-resource-chip hud-resource-chip--success">
+            <span className="hud-resource-chip__label">INTEL</span>
+            <span className="hud-resource-chip__value">{topBar.intel}</span>
+          </div>
+
+          {/* Readiness */}
+          <div className="hud-resource-chip hud-resource-chip--info">
+            <span className="hud-resource-chip__label">READINESS</span>
+            <span className="hud-resource-chip__value">{rdPct}%</span>
+          </div>
+        </div>
+
         {panelDetached && (
           <button
+            className="hud-btn hud-btn-ghost hud-btn-sm"
             onClick={() => setPanelDetached(false)}
-            style={{ background: "none", border: "1px solid #475569", color: "#a0c4ff", borderRadius: 4, padding: "2px 8px", cursor: "pointer", fontSize: 11 }}
           >
             收回面板
           </button>
         )}
         {!panelDetached && (
           <button
+            className="hud-btn hud-btn-ghost hud-btn-sm"
             onClick={handlePopOut}
-            style={{ background: "none", border: "1px solid #475569", color: "#a0c4ff", borderRadius: 4, padding: "2px 8px", cursor: "pointer", fontSize: 11 }}
           >
             弹出面板 ↗
           </button>
         )}
-        <span style={{ marginLeft: "auto" }}>T:{formatTime(topBar.time)}</span>
+
+        <span className="hud-topbar__clock">{formatTime(topBar.time)}</span>
       </div>
 
       {/* Main canvas area */}

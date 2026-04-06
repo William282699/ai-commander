@@ -90,7 +90,7 @@ function isSquadWiped(squad: Squad, squads: Squad[], units: Map<number, Unit>): 
 
 // ── Constants ──
 
-const LINE_COLOR = "#334155";
+const LINE_COLOR = "rgba(0, 212, 255, 0.15)";
 const VERT_GAP = 20;
 
 // ── Component ──
@@ -138,16 +138,16 @@ export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRe
               <div style={columnHeaderStyle}>
                 <span style={{ fontSize: 14 }}>{cmd.avatar}</span>
                 <span style={{ fontWeight: "bold", fontSize: 11 }}>{cmd.label}</span>
-                <span style={{ color: "#64748b", fontSize: 9 }}>({aliveCount})</span>
+                <span style={{ color: "var(--hud-text-dim)", fontSize: 9 }}>({aliveCount})</span>
               </div>
 
               {/* Divider line */}
-              <div style={{ height: 1, background: "#1e293b", margin: "2px 0" }} />
+              <div style={{ height: 1, background: "var(--hud-border-dim)", margin: "2px 0" }} />
 
               {/* Tree content — auto-scaled to fit column */}
               <AutoScaleColumn>
                 {rootSquads.length === 0 ? (
-                  <div style={{ color: "#475569", fontSize: 10, padding: "8px 0" }}>(empty)</div>
+                  <div style={{ color: "var(--hud-text-dim)", fontSize: 10, padding: "8px 0" }}>(empty)</div>
                 ) : (
                   <>
                     <div style={{ width: 1, height: VERT_GAP / 2, background: LINE_COLOR }} />
@@ -208,13 +208,13 @@ export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRe
         const allFallen = squads.filter(s => !s.parentSquadId && isSquadWiped(s, squads, units));
         if (allFallen.length === 0) return null;
         return (
-          <div style={{ borderTop: "1px solid #7f1d1d", padding: "8px 12px", background: "rgba(127, 29, 29, 0.1)" }}>
-            <div style={{ fontSize: 10, color: "#b91c1c", marginBottom: 4, fontWeight: "bold" }}>
+          <div className="hud-org-kia">
+            <div className="hud-org-kia__header" style={{ marginBottom: 4 }}>
               ✝ K.I.A. ({allFallen.length})
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
               {allFallen.map(sq => (
-                <span key={sq.id} style={{ fontSize: 10, color: "#dc2626" }}>
+                <span key={sq.id} style={{ fontSize: 10, color: "var(--hud-accent-red)" }}>
                   {sq.leaderName} ({sq.id})
                 </span>
               ))}
@@ -418,7 +418,7 @@ function TreeNode({
             : flash ? "#fbbf24" : statusColor,
           background: isDropTarget
             ? (willPromote ? "rgba(139, 92, 246, 0.15)" : "rgba(59, 130, 246, 0.15)")
-            : flash ? "rgba(251, 191, 36, 0.2)" : "rgba(15, 23, 42, 0.7)",
+            : flash ? "rgba(251, 191, 36, 0.2)" : undefined,
           boxShadow: flash ? "0 0 8px rgba(251, 191, 36, 0.5)" : "none",
         }}
       >
@@ -432,7 +432,7 @@ function TreeNode({
             onBlur={editing ? handleEditBlur : undefined}
             style={{
               fontWeight: "bold",
-              color: editing ? "#fbbf24" : "#e2e8f0",
+              color: editing ? "#fbbf24" : "var(--hud-text-primary)",
               fontSize: 10,
               outline: editing ? "1px solid #fbbf24" : "none",
               padding: editing ? "0 2px" : 0,
@@ -444,7 +444,7 @@ function TreeNode({
           </span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 2, justifyContent: "center", fontSize: 8 }}>
-          <span style={{ color: "#64748b" }}>{squad.id}</span>
+          <span style={{ color: "var(--hud-text-dim)" }}>{squad.id}</span>
           <span style={{ color: statusColor, fontWeight: "bold" }}>{totalUnits}</span>
           {squad.role === "commander" && <span style={{ color: "#8b5cf6", fontWeight: "bold" }}>CMD</span>}
           {isDropTarget && willPromote && <span style={{ color: "#fbbf24", fontWeight: "bold" }}>⬆</span>}
@@ -567,6 +567,7 @@ const treeContainerStyle: React.CSSProperties = {
   flex: 1,
   overflow: "auto",
   padding: "4px 2px",
+  fontFamily: "var(--hud-font-mono)",
 };
 
 const columnsRowStyle: React.CSSProperties = {
@@ -582,7 +583,7 @@ const columnStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   alignItems: "center",
-  borderRight: "1px solid #1e293b",
+  borderRight: "1px solid var(--hud-border-dim)",
   padding: "4px 2px",
   overflow: "hidden",
 };
@@ -591,13 +592,16 @@ const columnHeaderStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 4,
-  padding: "3px 8px",
+  padding: "4px 10px",
   fontSize: 11,
-  color: "#e2e8f0",
-  background: "rgba(15, 23, 42, 0.8)",
-  border: "1px solid #1e293b",
-  borderRadius: 4,
+  letterSpacing: 1,
+  textTransform: "uppercase",
+  color: "var(--hud-text-primary)",
+  background: "var(--hud-bg-tertiary)",
+  border: "1px solid var(--hud-border-dim)",
   whiteSpace: "nowrap",
+  fontFamily: "var(--hud-font-display)",
+  fontWeight: 600,
 };
 
 const childrenRowStyle: React.CSSProperties = {
@@ -619,13 +623,14 @@ const nodeBoxStyle: React.CSSProperties = {
   flexDirection: "column",
   alignItems: "center",
   gap: 1,
-  padding: "2px 4px",
-  borderRadius: 3,
+  padding: "3px 6px",
   border: "1px solid",
   cursor: "pointer",
   userSelect: "none",
-  transition: "background 0.15s, border-color 0.15s",
-  minWidth: 44,
+  transition: "background 0.15s, border-color 0.15s, box-shadow 0.15s",
+  minWidth: 48,
   maxWidth: 80,
   whiteSpace: "nowrap",
+  background: "var(--hud-bg-secondary)",
+  fontFamily: "var(--hud-font-mono)",
 };

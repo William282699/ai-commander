@@ -5,7 +5,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { callAdvisor, callAdvisorStream, callLightBrief, isProviderConfigured } from "./ai.js";
+import { callAdvisor, callAdvisorStream, callGroupAdvisor, callLightBrief, isProviderConfigured } from "./ai.js";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -81,6 +81,28 @@ app.post("/api/command-stream", async (req, res) => {
     res.write(`data: ${JSON.stringify({ type: "error", content: msg })}\n\n`);
     res.write("data: [DONE]\n\n");
     res.end();
+  }
+});
+
+// Group chat advisor call (ALL mode — one LLM call, 3 personas)
+app.post("/api/command-group", async (req, res) => {
+  const { digest, message, styleNote, channelContext } = req.body;
+
+  if (!digest || typeof digest !== "string") {
+    res.status(400).json({ error: "digest (string) 必填" });
+    return;
+  }
+  if (!message || typeof message !== "string") {
+    res.status(400).json({ error: "message (string) 必填" });
+    return;
+  }
+
+  try {
+    const result = await callGroupAdvisor(digest, message, styleNote || "", channelContext || "");
+    res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "服务器内部错误";
+    res.status(503).json({ error: msg });
   }
 });
 

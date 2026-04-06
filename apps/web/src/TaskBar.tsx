@@ -57,32 +57,10 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
   const displayTasks = expanded ? activeTasks : activeTasks.slice(0, 5);
 
   return (
-    <div style={{
-      position: "absolute",
-      bottom: 8,
-      left: 8,
-      width: 220,
-      maxHeight: expanded ? 400 : 260,
-      overflow: "hidden",
-      fontFamily: "monospace",
-      fontSize: 11,
-      zIndex: 120,
-      pointerEvents: "auto",
-    }}>
-      <div style={{
-        background: "rgba(15, 23, 42, 0.9)",
-        border: "1px solid #334155",
-        borderRadius: 6,
-        padding: 6,
-      }}>
-        <div style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 4,
-          padding: "0 2px",
-        }}>
-          <span style={{ color: "#e2e8f0", fontWeight: "bold", fontSize: 11 }}>
+    <div className="hud-taskbar" style={{ maxHeight: expanded ? 400 : 260, overflow: "hidden" }}>
+      <div className="hud-taskbar__inner">
+        <div className="hud-taskbar__header">
+          <span className="hud-taskbar__title">
             TASKS ({activeTasks.length})
           </span>
           {activeTasks.length > 5 && (
@@ -91,10 +69,11 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
               style={{
                 background: "none",
                 border: "none",
-                color: "#64748b",
+                color: "var(--hud-text-dim)",
                 cursor: "pointer",
                 fontSize: 10,
                 padding: 0,
+                fontFamily: "var(--hud-font-mono)",
               }}
             >
               {expanded ? "收起" : `+${activeTasks.length - 5}`}
@@ -102,29 +81,22 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
           )}
         </div>
 
-        <div style={{ maxHeight: expanded ? 360 : 220, overflowY: "auto" }}>
+        <div className="hud-taskbar__scroll hud-scroll" style={{ maxHeight: expanded ? 360 : 220 }}>
           {activeTasks.length === 0 && (
-            <div style={{ color: "#475569", fontSize: 10, padding: "4px 2px", textAlign: "center" }}>
+            <div className="hud-empty-state" style={{ fontSize: 10, padding: "4px 2px" }}>
               暂无任务
             </div>
           )}
           {displayTasks.map((task) => (
             <div
               key={task.id}
-              style={{
-                background: task.priority === "critical"
-                  ? "rgba(239, 68, 68, 0.15)"
-                  : "rgba(30, 41, 59, 0.8)",
-                border: `1px solid ${task.priority === "critical" ? "#dc2626" : "#1e293b"}`,
-                borderRadius: 4,
-                padding: "4px 6px",
-                marginBottom: 3,
-              }}
+              className={`hud-task-card${task.priority === "critical" ? " hud-task-card--critical" : ""}`}
+              style={{ borderLeftColor: STATUS_COLORS[task.status] ?? "var(--hud-text-dim)" }}
             >
               {/* Title + Commander */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span style={{
-                  color: "#e2e8f0",
+                  color: "var(--hud-text-primary)",
                   fontWeight: task.priority === "critical" ? "bold" : "normal",
                   fontSize: 11,
                   overflow: "hidden",
@@ -134,7 +106,7 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
                 }}>
                   {task.title}
                 </span>
-                <span style={{ color: "#64748b", fontSize: 9 }}>
+                <span style={{ color: "var(--hud-text-dim)", fontSize: 9 }}>
                   {CMD_LABELS[task.commander] ?? task.commander}
                 </span>
               </div>
@@ -142,7 +114,7 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
               {/* Status + Priority + Squads */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
                 <span style={{
-                  color: STATUS_COLORS[task.status] ?? "#94a3b8",
+                  color: STATUS_COLORS[task.status] ?? "var(--hud-text-secondary)",
                   fontSize: 10,
                   fontWeight: task.status === "failing" ? "bold" : "normal",
                 }}>
@@ -150,7 +122,7 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
                 </span>
                 <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   {task.assignedSquads.length > 0 && (
-                    <span style={{ color: "#64748b", fontSize: 9 }}>
+                    <span style={{ color: "var(--hud-text-dim)", fontSize: 9 }}>
                       {task.assignedSquads.join(",")}
                     </span>
                   )}
@@ -160,12 +132,10 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
                       const next = PRIORITY_CYCLE[(idx + 1) % PRIORITY_CYCLE.length];
                       onChangePriority(task.id, next);
                     }}
+                    className={`hud-badge hud-badge--${task.priority}`}
                     style={{
                       background: "none",
                       border: "none",
-                      color: PRIORITY_COLORS[task.priority] ?? "#94a3b8",
-                      fontSize: 9,
-                      fontWeight: "bold",
                       cursor: "pointer",
                       padding: 0,
                     }}
@@ -178,13 +148,7 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
               {/* Constraint badge */}
               {task.constraint && (
                 <div style={{ marginTop: 2 }}>
-                  <span style={{
-                    background: "rgba(239, 68, 68, 0.2)",
-                    color: "#fca5a5",
-                    fontSize: 9,
-                    padding: "1px 4px",
-                    borderRadius: 2,
-                  }}>
+                  <span className="hud-badge hud-badge--critical" style={{ animation: "none" }}>
                     {task.constraint}
                   </span>
                 </div>
@@ -195,16 +159,17 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
                 <div style={{ marginTop: 3, textAlign: "right" }}>
                   {confirmCancel === task.id ? (
                     <span style={{ fontSize: 9 }}>
-                      <span style={{ color: "#94a3b8" }}>确认取消？</span>
+                      <span style={{ color: "var(--hud-text-secondary)" }}>确认取消？</span>
                       <button
                         onClick={() => { onCancel(task.id); setConfirmCancel(null); }}
                         style={{
                           background: "none",
                           border: "none",
-                          color: "#ef4444",
+                          color: "var(--hud-accent-red)",
                           cursor: "pointer",
                           fontSize: 9,
                           padding: "0 4px",
+                          fontFamily: "var(--hud-font-mono)",
                         }}
                       >
                         是
@@ -214,10 +179,11 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
                         style={{
                           background: "none",
                           border: "none",
-                          color: "#64748b",
+                          color: "var(--hud-text-dim)",
                           cursor: "pointer",
                           fontSize: 9,
                           padding: "0 4px",
+                          fontFamily: "var(--hud-font-mono)",
                         }}
                       >
                         否
@@ -229,10 +195,11 @@ export function TaskBar({ tasks, onChangePriority, onCancel }: Props) {
                       style={{
                         background: "none",
                         border: "none",
-                        color: "#64748b",
+                        color: "var(--hud-text-dim)",
                         cursor: "pointer",
                         fontSize: 9,
                         padding: 0,
+                        fontFamily: "var(--hud-font-mono)",
                       }}
                     >
                       取消任务
