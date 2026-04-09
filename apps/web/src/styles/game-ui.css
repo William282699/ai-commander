@@ -1672,3 +1672,444 @@ div[style*="overflowY: auto"]::-webkit-scrollbar-thumb:hover,
 div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
   background: var(--hud-accent-cyan);
 }
+
+/* ============================================================
+   Detached Panel Layout (3-column + top strip + bottom dock)
+   ============================================================ */
+
+.dp-root {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, #0d1526, #0a0e1a, #0d1526);
+  font-family: var(--hud-font-mono);
+  font-size: 12px;
+  color: var(--hud-text-primary);
+}
+
+/* ── Top Strip ── */
+
+.dp-top-strip {
+  height: 56px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  background: linear-gradient(180deg, rgba(26, 36, 56, 0.8) 0%, transparent 100%);
+  border-bottom: 1px solid rgba(6, 182, 212, 0.2);
+  position: relative;
+}
+
+.dp-top-strip::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgba(6, 182, 212, 0.05) 0%, transparent 50%);
+  pointer-events: none;
+}
+
+.dp-title {
+  font-family: var(--hud-font-display);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 4px;
+  color: var(--hud-accent-cyan);
+  text-shadow: 0 0 8px rgba(6, 182, 212, 0.5);
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.dp-mode-label {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--hud-text-dim);
+  letter-spacing: 0.5px;
+}
+
+/* ── Body: 3-column grid ── */
+
+.dp-body {
+  flex: 1;
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── Left Column (28%) ── */
+
+.dp-col-left {
+  width: 28%;
+  min-width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ── Center Column (38%) ── */
+
+.dp-col-center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Right Column (34%) ── */
+
+.dp-col-right {
+  width: 34%;
+  min-width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Section Panel (shared card pattern) ── */
+
+.dp-section {
+  background: linear-gradient(180deg, rgba(26, 36, 56, 0.6) 0%, rgba(15, 24, 37, 0.6) 100%);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  border-radius: 2px;
+  padding: 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.dp-section-header {
+  font-family: var(--hud-font-display);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--hud-accent-cyan);
+  margin-bottom: 8px;
+}
+
+/* ── Nested card (items within sections) ── */
+
+.dp-card {
+  background: rgba(10, 14, 26, 0.8);
+  border: 1px solid rgba(6, 182, 212, 0.1);
+  border-radius: 2px;
+  padding: 6px 8px;
+  transition: border-color 0.15s;
+}
+
+.dp-card:hover {
+  border-color: rgba(6, 182, 212, 0.3);
+}
+
+.dp-card + .dp-card {
+  margin-top: 4px;
+}
+
+/* ── Mission card progress bar ── */
+
+.dp-progress-track {
+  height: 3px;
+  background: rgba(26, 36, 56, 1);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.dp-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--hud-accent-cyan), rgba(6, 182, 212, 0.7));
+  box-shadow: 0 0 4px rgba(6, 182, 212, 0.5);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* ── Logistics Grid ── */
+
+.dp-logistics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.dp-resource-cell {
+  background: rgba(10, 14, 26, 0.8);
+  border: 1px solid rgba(6, 182, 212, 0.1);
+  border-radius: 2px;
+  padding: 5px 7px;
+}
+
+.dp-resource-cell__label {
+  font-size: 9px;
+  color: var(--hud-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.dp-resource-cell__value {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 1px;
+}
+
+.dp-resource-cell__value--good { color: var(--hud-accent-cyan); }
+.dp-resource-cell__value--warn { color: var(--hud-accent-amber); }
+.dp-resource-cell__value--crit { color: var(--hud-accent-red); }
+.dp-resource-cell__value--ok   { color: var(--hud-accent-green); }
+
+/* ── Unit Pool ── */
+
+.dp-unit-pool {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.dp-unit-pool::-webkit-scrollbar { width: 3px; }
+.dp-unit-pool::-webkit-scrollbar-track { background: var(--hud-bg-primary); }
+.dp-unit-pool::-webkit-scrollbar-thumb { background: var(--hud-border-bright); border-radius: 2px; }
+
+.dp-unit-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.dp-unit-row + .dp-unit-row {
+  border-top: 1px solid rgba(6, 182, 212, 0.05);
+}
+
+.dp-unit-row__type {
+  color: var(--hud-text-secondary);
+}
+
+.dp-unit-row__count {
+  color: var(--hud-accent-cyan);
+  font-weight: 600;
+}
+
+/* ── Center: Channel Rail + Conversation ── */
+
+.dp-comms {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  border-radius: 2px;
+  background: linear-gradient(180deg, rgba(26, 36, 56, 0.6) 0%, rgba(15, 24, 37, 0.6) 100%);
+}
+
+.dp-channel-rail {
+  width: 72px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid rgba(6, 182, 212, 0.1);
+  background: rgba(10, 14, 26, 0.4);
+}
+
+.dp-channel-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 4px;
+  border: none;
+  border-bottom: 1px solid rgba(6, 182, 212, 0.1);
+  border-left: 2px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--hud-font-mono);
+  color: var(--hud-text-dim);
+  transition: all 0.15s;
+}
+
+.dp-channel-btn:hover {
+  background: rgba(6, 182, 212, 0.08);
+}
+
+.dp-channel-btn--active {
+  background: rgba(6, 182, 212, 0.15);
+  border-left-color: var(--hud-accent-cyan);
+  color: var(--hud-text-primary);
+}
+
+.dp-channel-btn__avatar {
+  font-size: 16px;
+}
+
+.dp-channel-btn__name {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.dp-channel-btn__role {
+  font-size: 8px;
+  color: var(--hud-text-dim);
+}
+
+/* ── Conversation Pane ── */
+
+.dp-conv-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.dp-conv-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(6, 182, 212, 0.1);
+  background: linear-gradient(90deg, rgba(6, 182, 212, 0.05) 0%, transparent 100%);
+  font-family: var(--hud-font-display);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dp-chat-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dp-chat-scroll::-webkit-scrollbar { width: 4px; }
+.dp-chat-scroll::-webkit-scrollbar-track { background: var(--hud-bg-primary); }
+.dp-chat-scroll::-webkit-scrollbar-thumb { background: var(--hud-border-bright); border-radius: 2px; }
+.dp-chat-scroll::-webkit-scrollbar-thumb:hover { background: var(--hud-accent-cyan); }
+
+/* ── Right Column: Org Tree container ── */
+
+.dp-org-container {
+  flex: 1;
+  overflow: auto;
+  background: linear-gradient(180deg, rgba(26, 36, 56, 0.6) 0%, rgba(15, 24, 37, 0.6) 100%);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  border-radius: 2px;
+}
+
+.dp-org-container::-webkit-scrollbar { width: 4px; }
+.dp-org-container::-webkit-scrollbar-track { background: var(--hud-bg-primary); }
+.dp-org-container::-webkit-scrollbar-thumb { background: var(--hud-border-bright); border-radius: 2px; }
+
+/* ── Bottom Dock ── */
+
+.dp-bottom-dock {
+  height: 72px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  background: linear-gradient(0deg, rgba(26, 36, 56, 0.8) 0%, transparent 100%);
+  border-top: 1px solid rgba(6, 182, 212, 0.2);
+}
+
+.dp-dock-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dp-dock-input {
+  flex: 1;
+  background: rgba(10, 14, 26, 0.8);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  border-radius: 2px;
+  padding: 8px 12px;
+  color: var(--hud-text-primary);
+  font-size: 12px;
+  font-family: var(--hud-font-mono);
+  outline: none;
+  caret-color: var(--hud-accent-cyan);
+  transition: border-color 0.2s;
+}
+
+.dp-dock-input:focus {
+  border-color: var(--hud-accent-cyan);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.2);
+}
+
+.dp-dock-input::placeholder {
+  color: var(--hud-text-dim);
+}
+
+.dp-dock-btn {
+  padding: 6px 10px;
+  font-size: 10px;
+  font-family: var(--hud-font-display);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+  border: 1px solid;
+  border-radius: 2px;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.dp-dock-btn:active { transform: scale(0.97); }
+
+.dp-dock-btn--prod {
+  background: var(--hud-accent-green-dim);
+  border-color: rgba(0, 224, 112, 0.4);
+  color: var(--hud-accent-green);
+}
+.dp-dock-btn--prod:hover { box-shadow: 0 0 8px var(--hud-accent-green-glow); }
+
+.dp-dock-btn--action {
+  background: var(--hud-accent-cyan-dim);
+  border-color: var(--hud-accent-cyan);
+  color: var(--hud-accent-cyan);
+}
+.dp-dock-btn--action:hover { box-shadow: 0 0 8px var(--hud-accent-cyan-glow); }
+
+.dp-dock-btn--war {
+  background: rgba(127, 29, 29, 0.3);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #ef4444;
+}
+.dp-dock-btn--war:hover { box-shadow: 0 0 8px var(--hud-accent-red-glow); }
+
+.dp-dock-btn--ptt {
+  background: var(--hud-bg-elevated);
+  border-color: var(--hud-border-bright);
+  color: var(--hud-text-primary);
+  font-size: 14px;
+  padding: 5px 8px;
+}
+
+.dp-dock-btn--send {
+  background: linear-gradient(180deg, rgba(6, 182, 212, 0.35) 0%, rgba(6, 182, 212, 0.15) 100%);
+  border-color: rgba(6, 182, 212, 0.7);
+  color: var(--hud-accent-cyan);
+  font-weight: 700;
+  letter-spacing: 2px;
+  padding: 6px 16px;
+  box-shadow: 0 0 10px rgba(6, 182, 212, 0.25);
+  text-shadow: 0 0 8px rgba(6, 182, 212, 0.5);
+}
+.dp-dock-btn--send:hover { box-shadow: 0 0 16px rgba(6, 182, 212, 0.4); }
+
+/* ── Left Column Scrollbar ── */
+
+.dp-col-left::-webkit-scrollbar { width: 3px; }
+.dp-col-left::-webkit-scrollbar-track { background: transparent; }
+.dp-col-left::-webkit-scrollbar-thumb { background: var(--hud-border-bright); border-radius: 2px; }

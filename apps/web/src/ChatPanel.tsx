@@ -1229,168 +1229,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   // not the (potentially stale or updated) ref value at click time.
   const approveSnapshotCtx = responseExecCtxRef.current ? { ...responseExecCtxRef.current } : undefined;
 
-  const detachedPanelStyle: React.CSSProperties = isDetached
-    ? { position: "relative", width: "100%", height: "100%", background: "var(--hud-bg-secondary)", fontFamily: "var(--hud-font-mono)", fontSize: 12, color: "var(--hud-text-primary)", display: "flex", flexDirection: "column" as const }
-    : { ...panelStyle, display: collapsed ? "none" : "flex" };
-
-  return (
+  // ── Shared chat content fragment (used in both detached and embedded) ──
+  const chatContentFragment = (
     <>
-      {/* ── Toggle button (only in embedded mode) ── */}
-      {!isDetached && (
-        <button
-          onClick={() => setCollapsed((c) => !c)}
-          className="hud-panel-toggle"
-          style={{
-            top: 8,
-            right: collapsed ? 8 : 468,
-            width: 28,
-            height: 28,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-          title={collapsed ? "展开面板" : "收起面板"}
-        >
-          {collapsed ? "◀" : "▶"}
-        </button>
-      )}
-    <div style={detachedPanelStyle}>
-      {/* ── Top: Commander selection bar ── */}
-      <div style={commanderBarStyle}>
-        {COMMANDERS.map((cmd) => {
-          const meta = COMMANDER_META[cmd];
-          const isSelected = selectedCommanders.includes(cmd);
-          const cmdColor = FROM_COLORS[cmd];
-          return (
-            <button
-              key={cmd}
-              onClick={() => selectSingleCommander(cmd)}
-              onContextMenu={(e) => { e.preventDefault(); toggleCommander(cmd); }}
-              style={{
-                ...commanderBtnStyle,
-                opacity: isSelected ? 1 : 0.35,
-                borderColor: isSelected ? cmdColor : "rgba(255,255,255,0.06)",
-                boxShadow: isSelected ? `0 0 15px ${cmdColor}40, inset 0 0 20px ${cmdColor}10` : "none",
-                background: isSelected
-                  ? `linear-gradient(180deg, ${cmdColor}18 0%, rgba(10, 14, 26, 1) 100%)`
-                  : "linear-gradient(180deg, rgba(25, 38, 65, 1) 0%, rgba(16, 24, 42, 1) 100%)",
-              }}
-              title={`${meta.label} (${meta.role}) — 右键多选`}
-            >
-              <span style={{
-                width: 28, height: 28, borderRadius: "50%",
-                background: isSelected ? `${cmdColor}25` : "rgba(255,255,255,0.06)",
-                border: `2px solid ${isSelected ? cmdColor : "rgba(255,255,255,0.1)"}`,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 14, flexShrink: 0,
-                boxShadow: isSelected ? `0 0 8px ${cmdColor}40` : "none",
-              }}>{meta.avatar}</span>
-              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.5px", textTransform: "uppercase" as const }}>{meta.label}</span>
-              <span style={{ fontSize: 8, color: "var(--hud-text-dim)", textTransform: "uppercase" as const, letterSpacing: "1px" }}>{meta.role}</span>
-            </button>
-          );
-        })}
-        <button
-          onClick={selectAll}
-          style={{
-            ...commanderBtnStyle,
-            opacity: selectedCommanders.length === 3 ? 1 : 0.35,
-            borderColor: selectedCommanders.length === 3 ? "#fbbf24" : "rgba(255,255,255,0.06)",
-            boxShadow: selectedCommanders.length === 3 ? "0 0 15px rgba(251, 191, 36, 0.25), inset 0 0 20px rgba(251, 191, 36, 0.08)" : "none",
-            background: selectedCommanders.length === 3
-              ? "linear-gradient(180deg, rgba(251, 191, 36, 0.1) 0%, rgba(10, 14, 26, 1) 100%)"
-              : "linear-gradient(180deg, rgba(25, 38, 65, 1) 0%, rgba(16, 24, 42, 1) 100%)",
-          }}
-          title="全体指挥官"
-        >
-          <span style={{
-            width: 28, height: 28, borderRadius: "50%",
-            background: selectedCommanders.length === 3 ? "rgba(251, 191, 36, 0.15)" : "rgba(255,255,255,0.06)",
-            border: `2px solid ${selectedCommanders.length === 3 ? "#fbbf24" : "rgba(255,255,255,0.1)"}`,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            fontSize: 12, fontWeight: 700, flexShrink: 0,
-          }}>ALL</span>
-          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.5px", textTransform: "uppercase" as const }}>全体</span>
-          <span style={{ fontSize: 7, opacity: 0.5, letterSpacing: "0.5px", textTransform: "uppercase" as const }}>COMMS ONLY</span>
-        </button>
-      </div>
-
-      {/* ── Tab switcher: Chat / Org (hidden in detached mode — both shown) ── */}
-      {!isDetached && (
-        <div style={tabBarStyle}>
-          <button
-            onClick={() => setActiveTab("chat")}
-            style={{
-              ...tabBtnStyle,
-              borderBottomColor: activeTab === "chat" ? "var(--hud-accent-cyan)" : "transparent",
-              color: activeTab === "chat" ? "var(--hud-accent-cyan)" : undefined,
-            }}
-          >
-            聊天 💬
-          </button>
-          <button
-            onClick={() => setActiveTab("org")}
-            style={{
-              ...tabBtnStyle,
-              borderBottomColor: activeTab === "org" ? "var(--hud-accent-cyan)" : "transparent",
-              color: activeTab === "org" ? "var(--hud-accent-cyan)" : undefined,
-            }}
-          >
-            编制 🏗️
-          </button>
-        </div>
-      )}
-
-      {/* ── Content area: left-right in detached, column in embedded ── */}
-      <div style={isDetached ? { display: "flex", flex: 1, flexDirection: "row" as const, overflow: "hidden" } : { display: "flex", flex: 1, flexDirection: "column" as const, overflow: "hidden" }}>
-
-      {/* ── Detached mode: OrgTree on left ── */}
-      {isDetached && (() => {
-        const st = getState();
-        return (
-          <div style={{ borderRight: "1px solid var(--hud-border-dim)", overflow: "auto", width: "40%", minWidth: 300, flexShrink: 0 }}>
-            {st ? (
-              <OrgTree
-                squads={st.squads}
-                units={st.units}
-                state={st}
-                onSelectUnits={onSelectUnits ?? (() => {})}
-                onMoveSquad={onMoveSquad ?? (() => {})}
-                onRemoveFromParent={onRemoveFromParent ?? (() => {})}
-                onRenameLeader={onRenameLeader ?? (() => {})}
-                onTransferSquad={onTransferSquad ?? (() => {})}
-              />
-            ) : (
-              <div style={{ color: "var(--hud-text-dim)", textAlign: "center", padding: 12 }}>加载中...</div>
-            )}
-          </div>
-        );
-      })()}
-
-      {/* ── Chat column (right side in detached, full area in embedded) ── */}
-      <div style={{ display: "flex", flexDirection: "column" as const, flex: 1, overflow: "hidden" }}>
-
-      {/* ── Embedded: tab-switched OrgTree or Chat ── */}
-      {!isDetached && activeTab === "org" ? (
-        (() => {
-          const st = getState();
-          if (!st) return <div style={{ flex: 1, color: "var(--hud-text-dim)", textAlign: "center", padding: 20 }}>加载中...</div>;
-          return (
-            <OrgTree
-              squads={st.squads}
-              units={st.units}
-              state={st}
-              onSelectUnits={onSelectUnits ?? (() => {})}
-              onMoveSquad={onMoveSquad ?? (() => {})}
-              onRemoveFromParent={onRemoveFromParent ?? (() => {})}
-              onRenameLeader={onRenameLeader ?? (() => {})}
-              onTransferSquad={onTransferSquad ?? (() => {})}
-            />
-          );
-        })()
-      ) : (
-      <>
-      <div ref={scrollRef} style={chatFlowStyle}>
+      <div ref={scrollRef} className={isDetached ? "dp-chat-scroll" : undefined} style={isDetached ? undefined : chatFlowStyle}>
         {displayMessages.length === 0 && (
           <div className="hud-empty-state">
             等待指令...
@@ -1426,7 +1268,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           );
         })}
 
-        {/* Inline staff threads with ⚠ */}
+        {/* Inline staff threads */}
         {activeThreads.length > 0 && !response && activeThreads.map((thread) => (
           <div key={thread.id} style={threadBubbleStyle}>
             <div className="hud-thread-header">
@@ -1544,7 +1386,6 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
               </button>
               <button
                 onClick={() => {
-                  // Save current proposal context for next command
                   const summary = response.brief + " | " + response.options.map((o, i) => `${["A","B","C"][i]}:${o.label}`).join("; ");
                   setDeclinedContext(summary);
                   setResponse(null);
@@ -1566,7 +1407,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         {clarification && <div style={clarificationStyle}>{clarification}</div>}
       </div>
 
-      {/* ── Style indicator ── */}
+      {/* Style indicator */}
       {styleSnapshot && (
         <div style={styleRowStyle}>
           <button onClick={() => setShowStyle(!showStyle)} style={styleToggleBtn}>
@@ -1593,111 +1434,448 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           )}
         </div>
       )}
-      </>
+    </>
+  );
+
+  // ── Detached panel: 3-column layout ──
+  if (isDetached) {
+    const st = getState();
+    const activeMissions = st?.missions.filter(m => m.status === "active") ?? [];
+    const activeTasks = st?.tasks.filter(t => t.status !== "completed" && t.status !== "cancelled") ?? [];
+    const res = st?.economy.player.resources;
+    const readiness = st ? Math.round(st.economy.player.readiness * 100) : 0;
+
+    // Unit pool: count alive units by type
+    const unitCounts = new Map<string, number>();
+    if (st) {
+      for (const [, u] of st.units) {
+        if (u.state === "dead" || u.team !== "player") continue;
+        unitCounts.set(u.type, (unitCounts.get(u.type) || 0) + 1);
+      }
+    }
+    const UNIT_TYPE_LABELS: Record<string, string> = {
+      infantry: "Infantry", main_tank: "Main Tank", light_tank: "Light Tank",
+      artillery: "Artillery", patrol_boat: "Patrol Boat", destroyer: "Destroyer",
+      cruiser: "Cruiser", carrier: "Carrier", fighter: "Fighter",
+      bomber: "Bomber", recon_plane: "Recon Plane",
+    };
+    const CMD_LABELS_SHORT: Record<string, string> = { combat: "Chen", ops: "Marcus", logistics: "Emily" };
+    const MISSION_STATUS_COLOR: Record<string, string> = { active: "var(--hud-accent-cyan)", completed: "var(--hud-accent-green)", failed: "var(--hud-accent-red)", cancelled: "var(--hud-text-dim)" };
+    const TASK_STATUS_COLOR: Record<string, string> = { assigned: "#94a3b8", moving: "#38bdf8", engaged: "#f97316", holding: "#22c55e", failing: "#ef4444" };
+
+    return (
+      <div className="dp-root">
+        {/* Top Strip */}
+        <div className="dp-top-strip">
+          <span className="dp-title">BATTLE BOARD</span>
+          <span className="hud-status-badge">
+            <span className="hud-status-badge__dot" />
+            OPERATIONAL
+          </span>
+          <span className="dp-mode-label">Detached Comms Mode</span>
+        </div>
+
+        {/* Body: 3-column grid */}
+        <div className="dp-body">
+
+          {/* LEFT COLUMN: Missions / Tasks / Logistics / Unit Pool */}
+          <div className="dp-col-left">
+            {/* Active Missions */}
+            <div className="dp-section">
+              <div className="dp-section-header">ACTIVE MISSIONS ({activeMissions.length})</div>
+              {activeMissions.length === 0 && (
+                <div style={{ fontSize: 10, color: "var(--hud-text-dim)" }}>No active missions</div>
+              )}
+              {activeMissions.slice(0, 6).map(m => (
+                <div key={m.id} className="dp-card">
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ color: "var(--hud-accent-cyan)", fontSize: 10, fontWeight: 600 }}>{m.id}</span>
+                    <span style={{ color: "var(--hud-accent-amber)", fontSize: 9 }}>{m.type}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--hud-text-primary)", marginTop: 2 }}>{m.name}</div>
+                  <div className="dp-progress-track">
+                    <div className="dp-progress-fill" style={{ width: `${Math.round(m.progress * 100)}%` }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
+                    <span style={{ fontSize: 9, color: MISSION_STATUS_COLOR[m.status] ?? "var(--hud-text-dim)" }}>{m.status}</span>
+                    {m.etaSec > 0 && <span style={{ fontSize: 9, color: "var(--hud-text-dim)" }}>ETA {Math.round(m.etaSec)}s</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Task Queue */}
+            <div className="dp-section">
+              <div className="dp-section-header">TASKS ({activeTasks.length})</div>
+              {activeTasks.length === 0 && (
+                <div style={{ fontSize: 10, color: "var(--hud-text-dim)" }}>No active tasks</div>
+              )}
+              {activeTasks.slice(0, 6).map(t => (
+                <div key={t.id} className="dp-card" style={{ borderLeft: `2px solid ${TASK_STATUS_COLOR[t.status] ?? "var(--hud-text-dim)"}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 11, color: "var(--hud-text-primary)", fontWeight: t.priority === "critical" ? "bold" : "normal", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 140 }}>
+                      {t.title}
+                    </span>
+                    <span style={{ fontSize: 9, color: "var(--hud-text-dim)" }}>{CMD_LABELS_SHORT[t.commander] ?? t.commander}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
+                    <span style={{ fontSize: 10, color: TASK_STATUS_COLOR[t.status] ?? "var(--hud-text-secondary)" }}>{t.status}</span>
+                    <span className={`hud-badge hud-badge--${t.priority}`} style={{ fontSize: 8 }}>{t.priority.toUpperCase()}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Logistics Snapshot */}
+            <div className="dp-section">
+              <div className="dp-section-header">LOGISTICS</div>
+              <div className="dp-logistics-grid">
+                <div className="dp-resource-cell">
+                  <div className="dp-resource-cell__label">Money</div>
+                  <div className={`dp-resource-cell__value ${(res?.money ?? 0) < 500 ? "dp-resource-cell__value--crit" : "dp-resource-cell__value--good"}`}>
+                    ${Math.floor(res?.money ?? 0).toLocaleString()}
+                  </div>
+                </div>
+                <div className="dp-resource-cell">
+                  <div className="dp-resource-cell__label">Fuel</div>
+                  <div className={`dp-resource-cell__value ${(res?.fuel ?? 0) <= 20 ? "dp-resource-cell__value--crit" : (res?.fuel ?? 0) <= 50 ? "dp-resource-cell__value--warn" : "dp-resource-cell__value--good"}`}>
+                    {Math.floor(res?.fuel ?? 0)}%
+                  </div>
+                </div>
+                <div className="dp-resource-cell">
+                  <div className="dp-resource-cell__label">Ammo</div>
+                  <div className={`dp-resource-cell__value ${(res?.ammo ?? 0) <= 20 ? "dp-resource-cell__value--crit" : (res?.ammo ?? 0) <= 50 ? "dp-resource-cell__value--warn" : "dp-resource-cell__value--good"}`}>
+                    {Math.floor(res?.ammo ?? 0)}%
+                  </div>
+                </div>
+                <div className="dp-resource-cell">
+                  <div className="dp-resource-cell__label">Intel</div>
+                  <div className="dp-resource-cell__value dp-resource-cell__value--good">
+                    {Math.floor(res?.intel ?? 0)}
+                  </div>
+                </div>
+                <div className="dp-resource-cell" style={{ gridColumn: "span 2" }}>
+                  <div className="dp-resource-cell__label">Readiness</div>
+                  <div className={`dp-resource-cell__value ${readiness < 30 ? "dp-resource-cell__value--crit" : readiness < 60 ? "dp-resource-cell__value--warn" : "dp-resource-cell__value--ok"}`}>
+                    {readiness}%
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Unit Pool */}
+            <div className="dp-section">
+              <div className="dp-section-header">UNIT POOL</div>
+              <div className="dp-unit-pool">
+                {unitCounts.size === 0 && (
+                  <div style={{ fontSize: 10, color: "var(--hud-text-dim)", padding: "2px 8px" }}>No units</div>
+                )}
+                {Array.from(unitCounts.entries())
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([type, count]) => (
+                    <div key={type} className="dp-unit-row">
+                      <span className="dp-unit-row__type">{UNIT_TYPE_LABELS[type] ?? type}</span>
+                      <span className="dp-unit-row__count">{count}</span>
+                    </div>
+                  ))
+                }
+              </div>
+            </div>
+          </div>
+
+          {/* CENTER COLUMN: Commander Comms */}
+          <div className="dp-col-center">
+            <div className="dp-comms">
+              {/* Channel Rail */}
+              <div className="dp-channel-rail">
+                {COMMANDERS.map((cmd) => {
+                  const meta = COMMANDER_META[cmd];
+                  const isActive = selectedCommanders.length === 1 && selectedCommanders[0] === cmd;
+                  const cmdColor = FROM_COLORS[cmd];
+                  return (
+                    <button
+                      key={cmd}
+                      className={`dp-channel-btn${isActive ? " dp-channel-btn--active" : ""}`}
+                      onClick={() => selectSingleCommander(cmd)}
+                      style={{ borderLeftColor: isActive ? cmdColor : "transparent" }}
+                      title={`${meta.label} (${meta.role})`}
+                    >
+                      <span className="dp-channel-btn__avatar">{meta.avatar}</span>
+                      <span className="dp-channel-btn__name" style={{ color: isActive ? cmdColor : undefined }}>{meta.label}</span>
+                      <span className="dp-channel-btn__role">{meta.role}</span>
+                    </button>
+                  );
+                })}
+                <button
+                  className={`dp-channel-btn${selectedCommanders.length === 3 ? " dp-channel-btn--active" : ""}`}
+                  onClick={selectAll}
+                  style={{ borderLeftColor: selectedCommanders.length === 3 ? "#fbbf24" : "transparent" }}
+                  title="全体指挥官"
+                >
+                  <span className="dp-channel-btn__avatar" style={{ fontSize: 11, fontWeight: 700 }}>ALL</span>
+                  <span className="dp-channel-btn__name" style={{ color: selectedCommanders.length === 3 ? "#fbbf24" : undefined }}>全体</span>
+                  <span className="dp-channel-btn__role">comms</span>
+                </button>
+              </div>
+
+              {/* Conversation Pane */}
+              <div className="dp-conv-pane">
+                <div className="dp-conv-header">
+                  <span style={{ color: isGroupChat ? "#fbbf24" : FROM_COLORS[selectedCommanders[0]] }}>
+                    {isGroupChat ? "📡" : FROM_AVATARS[selectedCommanders[0]]}
+                  </span>
+                  <span>
+                    {isGroupChat ? "全体通信" : `${COMMANDER_META[selectedCommanders[0]].label} — ${COMMANDER_META[selectedCommanders[0]].role}`}
+                  </span>
+                  {isGroupChat && <span style={{ fontSize: 9, color: "var(--hud-text-dim)", marginLeft: "auto" }}>COMMS ONLY</span>}
+                </div>
+                {chatContentFragment}
+              </div>
+            </div>
+          </div>
+
+          {/* RIGHT COLUMN: Org Tree */}
+          <div className="dp-col-right">
+            <div className="dp-section-header" style={{ padding: "0 0 6px 0" }}>BATTLEGROUP ORG TREE</div>
+            <div className="dp-org-container">
+              {st ? (
+                <OrgTree
+                  squads={st.squads}
+                  units={st.units}
+                  state={st}
+                  onSelectUnits={onSelectUnits ?? (() => {})}
+                  onMoveSquad={onMoveSquad ?? (() => {})}
+                  onRemoveFromParent={onRemoveFromParent ?? (() => {})}
+                  onRenameLeader={onRenameLeader ?? (() => {})}
+                  onTransferSquad={onTransferSquad ?? (() => {})}
+                />
+              ) : (
+                <div style={{ color: "var(--hud-text-dim)", textAlign: "center", padding: 12 }}>加载中...</div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Bottom Dock */}
+        <div className="dp-bottom-dock">
+          <button
+            className="dp-dock-btn dp-dock-btn--prod"
+            onClick={() => handleProduce("infantry")}
+            disabled={playerMoney < 100 || playerQueueLen >= 3}
+            style={{ opacity: playerMoney >= 100 && playerQueueLen < 3 ? 1 : 0.35 }}
+            title={`生产步兵 ($100)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
+          >+兵$100</button>
+          <button
+            className="dp-dock-btn dp-dock-btn--prod"
+            onClick={() => handleProduce("light_tank")}
+            disabled={playerMoney < 250 || playerQueueLen >= 3}
+            style={{ opacity: playerMoney >= 250 && playerQueueLen < 3 ? 1 : 0.35 }}
+            title={`生产轻坦 ($250)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
+          >+坦$250</button>
+          <input
+            ref={inputRef}
+            type="text"
+            className="dp-dock-input"
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`}
+            disabled={loading}
+          />
+          <button
+            className="dp-dock-btn dp-dock-btn--ptt"
+            onPointerDown={(e) => { e.preventDefault(); startPTT(); }}
+            onPointerUp={stopPTT}
+            onPointerCancel={stopPTT}
+            onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }}
+            disabled={pttStatus === "unsupported" || loading}
+            style={{
+              background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined,
+              opacity: pttStatus === "unsupported" || loading ? 0.35 : 1,
+            }}
+            title={
+              pttStatus === "unsupported" ? "浏览器不支持语音识别"
+              : pttStatus === "error" ? "麦克风权限被拒绝，请在浏览器设置中允许"
+              : pttStatus === "listening" ? "松开结束录音并发送"
+              : "按住说话"
+            }
+          >{pttStatus === "listening" ? "🔴" : "🎤"}</button>
+          {hasTTS && (
+            <button
+              className="dp-dock-btn dp-dock-btn--ptt"
+              onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) ttsCancel(); }}
+              style={{ background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined }}
+              title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}
+            >{ttsEnabled ? "🔊" : "🔇"}</button>
+          )}
+          {onCreateSquad && (
+            <button
+              className="dp-dock-btn dp-dock-btn--action"
+              onClick={() => onCreateSquad(selectedCommanders[0])}
+              disabled={!squadBtnEnabled}
+              style={{ opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }}
+              title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}
+            >编队</button>
+          )}
+          {onDeclareWar && canDeclareWar && (
+            <button className="dp-dock-btn dp-dock-btn--war" onClick={onDeclareWar} title="向敌方宣战">宣战</button>
+          )}
+          <button
+            data-send-btn
+            className="dp-dock-btn dp-dock-btn--send"
+            onClick={sendCommand}
+            disabled={loading || !message.trim()}
+            style={{ opacity: loading || !message.trim() ? 0.5 : 1 }}
+          >{loading ? "..." : "发送"}</button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Embedded panel (original layout, unchanged) ──
+  const embeddedPanelStyle: React.CSSProperties = { ...panelStyle, display: collapsed ? "none" : "flex" };
+
+  return (
+    <>
+      {/* ── Toggle button (only in embedded mode) ── */}
+      {!isDetached && (
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          className="hud-panel-toggle"
+          style={{
+            top: 8,
+            right: collapsed ? 8 : 468,
+            width: 28,
+            height: 28,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          title={collapsed ? "展开面板" : "收起面板"}
+        >
+          {collapsed ? "◀" : "▶"}
+        </button>
+      )}
+    <div style={embeddedPanelStyle}>
+      {/* ── Top: Commander selection bar ── */}
+      <div style={commanderBarStyle}>
+        {COMMANDERS.map((cmd) => {
+          const meta = COMMANDER_META[cmd];
+          const isSelected = selectedCommanders.includes(cmd);
+          const cmdColor = FROM_COLORS[cmd];
+          return (
+            <button
+              key={cmd}
+              onClick={() => selectSingleCommander(cmd)}
+              onContextMenu={(e) => { e.preventDefault(); toggleCommander(cmd); }}
+              style={{
+                ...commanderBtnStyle,
+                opacity: isSelected ? 1 : 0.35,
+                borderColor: isSelected ? cmdColor : "rgba(255,255,255,0.06)",
+                boxShadow: isSelected ? `0 0 15px ${cmdColor}40, inset 0 0 20px ${cmdColor}10` : "none",
+                background: isSelected
+                  ? `linear-gradient(180deg, ${cmdColor}18 0%, rgba(10, 14, 26, 1) 100%)`
+                  : "linear-gradient(180deg, rgba(25, 38, 65, 1) 0%, rgba(16, 24, 42, 1) 100%)",
+              }}
+              title={`${meta.label} (${meta.role}) — 右键多选`}
+            >
+              <span style={{
+                width: 28, height: 28, borderRadius: "50%",
+                background: isSelected ? `${cmdColor}25` : "rgba(255,255,255,0.06)",
+                border: `2px solid ${isSelected ? cmdColor : "rgba(255,255,255,0.1)"}`,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 14, flexShrink: 0,
+                boxShadow: isSelected ? `0 0 8px ${cmdColor}40` : "none",
+              }}>{meta.avatar}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.5px", textTransform: "uppercase" as const }}>{meta.label}</span>
+              <span style={{ fontSize: 8, color: "var(--hud-text-dim)", textTransform: "uppercase" as const, letterSpacing: "1px" }}>{meta.role}</span>
+            </button>
+          );
+        })}
+        <button
+          onClick={selectAll}
+          style={{
+            ...commanderBtnStyle,
+            opacity: selectedCommanders.length === 3 ? 1 : 0.35,
+            borderColor: selectedCommanders.length === 3 ? "#fbbf24" : "rgba(255,255,255,0.06)",
+            boxShadow: selectedCommanders.length === 3 ? "0 0 15px rgba(251, 191, 36, 0.25), inset 0 0 20px rgba(251, 191, 36, 0.08)" : "none",
+            background: selectedCommanders.length === 3
+              ? "linear-gradient(180deg, rgba(251, 191, 36, 0.1) 0%, rgba(10, 14, 26, 1) 100%)"
+              : "linear-gradient(180deg, rgba(25, 38, 65, 1) 0%, rgba(16, 24, 42, 1) 100%)",
+          }}
+          title="全体指挥官"
+        >
+          <span style={{
+            width: 28, height: 28, borderRadius: "50%",
+            background: selectedCommanders.length === 3 ? "rgba(251, 191, 36, 0.15)" : "rgba(255,255,255,0.06)",
+            border: `2px solid ${selectedCommanders.length === 3 ? "#fbbf24" : "rgba(255,255,255,0.1)"}`,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 12, fontWeight: 700, flexShrink: 0,
+          }}>ALL</span>
+          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.5px", textTransform: "uppercase" as const }}>全体</span>
+          <span style={{ fontSize: 7, opacity: 0.5, letterSpacing: "0.5px", textTransform: "uppercase" as const }}>COMMS ONLY</span>
+        </button>
+      </div>
+
+      {/* ── Tab switcher: Chat / Org ── */}
+      <div style={tabBarStyle}>
+          <button
+            onClick={() => setActiveTab("chat")}
+            style={{
+              ...tabBtnStyle,
+              borderBottomColor: activeTab === "chat" ? "var(--hud-accent-cyan)" : "transparent",
+              color: activeTab === "chat" ? "var(--hud-accent-cyan)" : undefined,
+            }}
+          >
+            聊天 💬
+          </button>
+          <button
+            onClick={() => setActiveTab("org")}
+            style={{
+              ...tabBtnStyle,
+              borderBottomColor: activeTab === "org" ? "var(--hud-accent-cyan)" : "transparent",
+              color: activeTab === "org" ? "var(--hud-accent-cyan)" : undefined,
+            }}
+          >
+            编制 🏗️
+          </button>
+        </div>
+
+      {/* ── Content area ── */}
+      <div style={{ display: "flex", flex: 1, flexDirection: "column" as const, overflow: "hidden" }}>
+      <div style={{ display: "flex", flexDirection: "column" as const, flex: 1, overflow: "hidden" }}>
+
+      {activeTab === "org" ? (
+        (() => {
+          const st = getState();
+          if (!st) return <div style={{ flex: 1, color: "var(--hud-text-dim)", textAlign: "center", padding: 20 }}>加载中...</div>;
+          return (
+            <OrgTree
+              squads={st.squads}
+              units={st.units}
+              state={st}
+              onSelectUnits={onSelectUnits ?? (() => {})}
+              onMoveSquad={onMoveSquad ?? (() => {})}
+              onRemoveFromParent={onRemoveFromParent ?? (() => {})}
+              onRenameLeader={onRenameLeader ?? (() => {})}
+              onTransferSquad={onTransferSquad ?? (() => {})}
+            />
+          );
+        })()
+      ) : (
+        chatContentFragment
       )}
 
       {/* ── Bottom: Input area ── */}
       <div style={inputContainerStyle}>
-        <button
-          onClick={() => handleProduce("infantry")}
-          disabled={playerMoney < 100 || playerQueueLen >= 3}
-          style={{
-            ...prodBtnStyle,
-            opacity: playerMoney >= 100 && playerQueueLen < 3 ? 1 : 0.35,
-          }}
-          title={`生产步兵 ($100)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
-        >
-          +兵$100
-        </button>
-        <button
-          onClick={() => handleProduce("light_tank")}
-          disabled={playerMoney < 250 || playerQueueLen >= 3}
-          style={{
-            ...prodBtnStyle,
-            opacity: playerMoney >= 250 && playerQueueLen < 3 ? 1 : 0.35,
-          }}
-          title={`生产轻坦 ($250)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
-        >
-          +坦$250
-        </button>
-        <input
-          ref={inputRef}
-          type="text"
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`}
-          disabled={loading}
-          style={inputStyle}
-        />
-        {/* Push-to-Talk button */}
-        <button
-          onPointerDown={(e) => { e.preventDefault(); startPTT(); }}
-          onPointerUp={stopPTT}
-          onPointerCancel={stopPTT}
-          onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }}
-          disabled={pttStatus === "unsupported" || loading}
-          style={{
-            ...pttBtnStyle,
-            background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined,
-            opacity: pttStatus === "unsupported" || loading ? 0.35 : 1,
-            cursor: pttStatus === "unsupported" || loading ? "default" : "pointer",
-          }}
-          title={
-            pttStatus === "unsupported" ? "浏览器不支持语音识别"
-            : pttStatus === "error" ? "麦克风权限被拒绝，请在浏览器设置中允许"
-            : pttStatus === "listening" ? "松开结束录音并发送"
-            : "按住说话"
-          }
-        >
-          {pttStatus === "listening" ? "🔴" : "🎤"}
-        </button>
-        {/* TTS toggle */}
-        {hasTTS && (
-          <button
-            onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) ttsCancel(); }}
-            style={{
-              ...pttBtnStyle,
-              background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined,
-              opacity: 1,
-              cursor: "pointer",
-              fontSize: 14,
-            }}
-            title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}
-          >
-            {ttsEnabled ? "🔊" : "🔇"}
-          </button>
-        )}
-        {onCreateSquad && (
-          <button
-            onClick={() => onCreateSquad(selectedCommanders[0])}
-            disabled={!squadBtnEnabled}
-            style={{
-              ...actionBtnStyle,
-              opacity: squadBtnEnabled ? 1 : 0.35,
-              cursor: squadBtnEnabled ? "pointer" : "default",
-            }}
-            title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}
-          >
-            编队
-          </button>
-        )}
-        {onDeclareWar && canDeclareWar && (
-          <button onClick={onDeclareWar} style={warBtnStyle} title="向敌方宣战">
-            宣战
-          </button>
-        )}
-        <button
-          data-send-btn
-          onClick={sendCommand}
-          disabled={loading || !message.trim()}
-          style={{
-            ...sendBtnStyle,
-            opacity: loading || !message.trim() ? 0.5 : 1,
-          }}
-        >
-          {loading ? "..." : "发送"}
-        </button>
+        <button onClick={() => handleProduce("infantry")} disabled={playerMoney < 100 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 100 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产步兵 ($100)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+兵$100</button>
+        <button onClick={() => handleProduce("light_tank")} disabled={playerMoney < 250 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 250 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产轻坦 ($250)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+坦$250</button>
+        <input ref={inputRef} type="text" value={message} onChange={(e) => setMessage(e.target.value)} onKeyDown={handleKeyDown} placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`} disabled={loading} style={inputStyle} />
+        <button onPointerDown={(e) => { e.preventDefault(); startPTT(); }} onPointerUp={stopPTT} onPointerCancel={stopPTT} onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined, opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttStatus === "listening" ? "🔴" : "🎤"}</button>
+        {hasTTS && (<button onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) ttsCancel(); }} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}>{ttsEnabled ? "🔊" : "🔇"}</button>)}
+        {onCreateSquad && (<button onClick={() => onCreateSquad(selectedCommanders[0])} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
+        {onDeclareWar && canDeclareWar && (<button onClick={onDeclareWar} style={warBtnStyle} title="向敌方宣战">宣战</button>)}
+        <button data-send-btn onClick={sendCommand} disabled={loading || !message.trim()} style={{ ...sendBtnStyle, opacity: loading || !message.trim() ? 0.5 : 1 }}>{loading ? "..." : "发送"}</button>
       </div>
       </div>
       </div>

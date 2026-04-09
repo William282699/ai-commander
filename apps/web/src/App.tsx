@@ -100,7 +100,7 @@ export default function App() {
     const panelWin = window.open(
       `${window.location.origin}?mode=panel`,
       "ai-commander-panel",
-      "width=520,height=900",
+      "width=1280,height=900",
     );
     if (panelWin) {
       setPanelDetached(true);
