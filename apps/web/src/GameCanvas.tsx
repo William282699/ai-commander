@@ -63,6 +63,7 @@ import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import { ChatPanel } from "./ChatPanel";
 import { TaskBar } from "./TaskBar";
+import * as messageStoreModule from "./messageStore";
 import {
   addMessage,
   clearMessages,
@@ -147,7 +148,13 @@ function resetHeartbeatState(): void {
 }
 
 /** Diagnostic codes suppressed from Staff Feed (still logged to state.diagnostics). */
-const SUPPRESSED_DIAG_CODES = new Set(["PATH_BLOCKED", "IMPASSABLE_TERRAIN"]);
+const SUPPRESSED_DIAG_CODES = new Set([
+  "PATH_BLOCKED",
+  "IMPASSABLE_TERRAIN",
+  // El Alamein defensive-AI debug diagnostics — useful in dev tooling, too noisy for the feed.
+  "DEFAI_ROLES",
+  "DEFAI_DBG",
+]);
 
 /** Map diagnostic code → feed message level */
 const DIAG_LEVEL: Record<string, MessageLevel> = {
@@ -309,6 +316,8 @@ export interface GameBridge {
   onRemoveFromParent: (squadId: string) => void;
   onRenameLeader: (squadId: string, newName: string) => void;
   onTransferSquad: (squadId: string, newOwner: "chen" | "marcus" | "emily") => void;
+  // Shared messageStore (so detached panel sees same threads/messages as main window)
+  messageStore: typeof import("./messageStore");
 }
 
 declare global {
@@ -600,6 +609,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       onRemoveFromParent: handleRemoveFromParent,
       onRenameLeader: handleRenameLeader,
       onTransferSquad: handleTransferSquad,
+      messageStore: messageStoreModule,
     };
     return () => { delete window.__GAME_BRIDGE__; };
   }, [getSelectedUnitIds, handleCreateSquad, canCreateSquad, handleDeclareWar, handleSelectUnits, handleMoveSquad, handleRemoveFromParent, handleRenameLeader, handleTransferSquad]);
@@ -1068,13 +1078,6 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       // --- AI & Auto-Behavior (Day 8) --- (guards: if gameOver return)
       processEnemyAI(state, dt);        // enemy strategic decisions (5s interval)
       processDefensiveAI(state, dt);    // El Alamein defensive AI (5s interval, no-op for other scenarios)
-      // DEBUG: check if defensiveAI diagnostics are being produced
-      if (state.tick % 300 === 0) {
-        const defDbg = state.diagnostics.filter(d => d.code === "DEFAI_DBG");
-        const enemyCount = Array.from(state.units.values()).filter(u => u.team === "enemy" && u.state !== "dead").length;
-        const aiMode = state.enemyAIMode;
-        addMessage("warning", `[DBG] mode=${aiMode} enemies=${enemyCount} defDiag=${defDbg.length} t=${state.time.toFixed(0)}`, state.time, "ops", undefined, "system");
-      }
       processAutoBehavior(state, dt);    // both teams micro-behavior (2s interval)
 
       // --- ENDGAME Pressure (Day 12) ---

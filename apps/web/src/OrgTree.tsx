@@ -24,11 +24,28 @@ export interface OrgTreeProps {
 }
 
 // ── Root commander config ──
+//
+// Each commander has an identity color used for the column header card and
+// any per-commander accent in the tree:
+//   Chen   (combat)    → red
+//   Marcus (ops)       → cyan/blue
+//   Emily  (logistics) → green
+// These match the channel/role coloring used elsewhere in the HUD.
 
-const ROOT_COMMANDERS: { key: CommanderKey; label: string; avatar: string }[] = [
-  { key: "chen", label: "Chen", avatar: "⚔️" },
-  { key: "marcus", label: "Marcus", avatar: "🎖️" },
-  { key: "emily", label: "Emily", avatar: "📦" },
+interface RootCommanderConfig {
+  key: CommanderKey;
+  label: string;
+  role: string;
+  avatar: string;
+  accent: string;     // solid hex
+  accentSoft: string; // translucent for backgrounds
+  accentLine: string; // translucent for tree connecting lines
+}
+
+const ROOT_COMMANDERS: RootCommanderConfig[] = [
+  { key: "chen",   label: "Chen",   role: "COMBAT",    avatar: "⚔️", accent: "#ff3040", accentSoft: "rgba(255, 48, 64, 0.14)",  accentLine: "rgba(255, 48, 64, 0.35)" },
+  { key: "marcus", label: "Marcus", role: "OPS",       avatar: "🎖️", accent: "#00d4ff", accentSoft: "rgba(0, 212, 255, 0.14)",  accentLine: "rgba(0, 212, 255, 0.35)" },
+  { key: "emily",  label: "Emily",  role: "LOGISTICS", avatar: "📦", accent: "#00e070", accentSoft: "rgba(0, 224, 112, 0.14)",  accentLine: "rgba(0, 224, 112, 0.35)" },
 ];
 
 // ── Helpers ──
@@ -90,7 +107,7 @@ function isSquadWiped(squad: Squad, squads: Squad[], units: Map<number, Unit>): 
 
 // ── Constants ──
 
-const LINE_COLOR = "rgba(0, 212, 255, 0.15)";
+const LINE_COLOR = "rgba(0, 212, 255, 0.15)"; // fallback when no commander accent in scope
 const VERT_GAP = 20;
 
 // ── Component ──
@@ -134,11 +151,19 @@ export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRe
                 setDropTargetId(null);
               }}
             >
-              {/* Commander header */}
-              <div style={columnHeaderStyle}>
+              {/* Commander header — squircle card with the commander's identity color */}
+              <div
+                style={{
+                  ...columnHeaderStyle,
+                  borderColor: cmd.accentLine,
+                  background: `linear-gradient(180deg, ${cmd.accentSoft} 0%, rgba(15, 24, 37, 0.6) 100%)`,
+                  boxShadow: `inset 3px 0 0 ${cmd.accent}, 0 2px 6px rgba(0,0,0,0.3)`,
+                }}
+              >
                 <span style={{ fontSize: 14 }}>{cmd.avatar}</span>
-                <span style={{ fontWeight: "bold", fontSize: 11 }}>{cmd.label}</span>
+                <span style={{ fontWeight: "bold", fontSize: 11, color: cmd.accent, letterSpacing: 1 }}>{cmd.label}</span>
                 <span style={{ color: "var(--hud-text-dim)", fontSize: 9 }}>({aliveCount})</span>
+                <span style={{ marginLeft: "auto", fontSize: 8, color: cmd.accent, opacity: 0.75, letterSpacing: 1 }}>{cmd.role}</span>
               </div>
 
               {/* Divider line */}
@@ -591,17 +616,20 @@ const columnStyle: React.CSSProperties = {
 const columnHeaderStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 4,
-  padding: "4px 10px",
+  gap: 6,
+  width: "100%",
+  padding: "6px 12px",
   fontSize: 11,
   letterSpacing: 1,
   textTransform: "uppercase",
   color: "var(--hud-text-primary)",
   background: "var(--hud-bg-tertiary)",
   border: "1px solid var(--hud-border-dim)",
+  borderRadius: 10,
   whiteSpace: "nowrap",
   fontFamily: "var(--hud-font-display)",
   fontWeight: 600,
+  marginBottom: 4,
 };
 
 const childrenRowStyle: React.CSSProperties = {
@@ -623,8 +651,9 @@ const nodeBoxStyle: React.CSSProperties = {
   flexDirection: "column",
   alignItems: "center",
   gap: 1,
-  padding: "3px 6px",
+  padding: "4px 8px",
   border: "1px solid",
+  borderRadius: 8,
   cursor: "pointer",
   userSelect: "none",
   transition: "background 0.15s, border-color 0.15s, box-shadow 0.15s",

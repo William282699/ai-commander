@@ -1778,9 +1778,22 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 .dp-section {
   background: linear-gradient(180deg, rgba(26, 36, 56, 0.6) 0%, rgba(15, 24, 37, 0.6) 100%);
   border: 1px solid rgba(6, 182, 212, 0.2);
-  border-radius: 2px;
+  border-radius: 10px;
   padding: 10px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Amber accent variant — used by Unit Pool to break up the all-blue sidebar.
+   Logistics keeps the default cyan; Unit Pool gets warm amber so the two
+   neighbouring sections are visually distinct without going Christmas-tree. */
+.dp-section--amber {
+  border-color: rgba(240, 160, 48, 0.28);
+  background: linear-gradient(180deg, rgba(46, 34, 18, 0.55) 0%, rgba(28, 20, 10, 0.6) 100%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(240, 160, 48, 0.05);
+}
+
+.dp-section--amber .dp-section-header {
+  color: var(--hud-accent-amber);
 }
 
 .dp-section-header {
@@ -1798,7 +1811,7 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 .dp-card {
   background: rgba(10, 14, 26, 0.8);
   border: 1px solid rgba(6, 182, 212, 0.1);
-  border-radius: 2px;
+  border-radius: 8px;
   padding: 6px 8px;
   transition: border-color 0.15s;
 }
@@ -1840,7 +1853,7 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 .dp-resource-cell {
   background: rgba(10, 14, 26, 0.8);
   border: 1px solid rgba(6, 182, 212, 0.1);
-  border-radius: 2px;
+  border-radius: 8px;
   padding: 5px 7px;
 }
 
@@ -1857,10 +1870,13 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
   margin-top: 1px;
 }
 
-.dp-resource-cell__value--good { color: var(--hud-accent-cyan); }
-.dp-resource-cell__value--warn { color: var(--hud-accent-amber); }
-.dp-resource-cell__value--crit { color: var(--hud-accent-red); }
+/* Threshold ramp: healthy → green, warning → amber, critical → red.
+   --good and --ok are aliases (both = healthy green) so logistics values
+   visibly switch color as resources drop, instead of staying cyan-on-blue. */
+.dp-resource-cell__value--good { color: var(--hud-accent-green); }
 .dp-resource-cell__value--ok   { color: var(--hud-accent-green); }
+.dp-resource-cell__value--warn { color: var(--hud-accent-amber); }
+.dp-resource-cell__value--crit { color: var(--hud-accent-red); animation: hud-pulse 1.4s infinite; }
 
 /* ── Unit Pool ── */
 
@@ -1882,7 +1898,7 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 }
 
 .dp-unit-row + .dp-unit-row {
-  border-top: 1px solid rgba(6, 182, 212, 0.05);
+  border-top: 1px solid rgba(240, 160, 48, 0.08);
 }
 
 .dp-unit-row__type {
@@ -1890,7 +1906,7 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 }
 
 .dp-unit-row__count {
-  color: var(--hud-accent-cyan);
+  color: var(--hud-accent-amber);
   font-weight: 600;
 }
 

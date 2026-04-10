@@ -1563,8 +1563,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
               </div>
             </div>
 
-            {/* Unit Pool */}
-            <div className="dp-section">
+            {/* Unit Pool — amber accent to break up the all-blue sidebar */}
+            <div className="dp-section dp-section--amber">
               <div className="dp-section-header">UNIT POOL</div>
               <div className="dp-unit-pool">
                 {unitCounts.size === 0 && (
