@@ -115,6 +115,7 @@ export const SPRITE_MANIFEST: SpriteManifest = {
         name: "body",
         orientationMode: "rotate",
         rotatesWith: "movement",
+        spriteFrontAngle: Math.PI / 2, // soldier sprites face DOWN in source PNG
         frames: [
           { url: "/sprites/tds/infantry/soldier_idle.png" },
           { url: "/sprites/tds/infantry/soldier_shot.png" },
@@ -130,7 +131,7 @@ export const SPRITE_MANIFEST: SpriteManifest = {
   },
 
   main_tank: {
-    drawScale: 2.0,
+    drawScale: 2.7,
     layers: [
       {
         name: "body",
@@ -162,7 +163,7 @@ export const SPRITE_MANIFEST: SpriteManifest = {
   },
 
   light_tank: {
-    drawScale: 2.0,
+    drawScale: 2.7,
     layers: [
       {
         name: "body",
@@ -192,7 +193,7 @@ export const SPRITE_MANIFEST: SpriteManifest = {
   },
 
   artillery: {
-    drawScale: 2.0,
+    drawScale: 2.7,
     layers: [
       {
         name: "body",
@@ -235,6 +236,7 @@ export const SPRITE_MANIFEST: SpriteManifest = {
         name: "body",
         orientationMode: "rotate",
         rotatesWith: "movement",
+        spriteFrontAngle: Math.PI / 2, // commander sprites face DOWN in source PNG
         frames: [{ url: "/sprites/tds/infantry/commander_idle.png" }],
       },
       // Walk-cycle legs overlay (same convention as infantry: faces DOWN)
@@ -269,6 +271,7 @@ export const SPRITE_MANIFEST: SpriteManifest = {
         name: "body",
         orientationMode: "rotate",
         rotatesWith: "movement",
+        spriteFrontAngle: Math.PI / 2, // elite sprites face DOWN in source PNG
         frames: [
           { url: "/sprites/tds/infantry/elite_idle.png" },
           { url: "/sprites/tds/infantry/elite_fire_01.png" },
@@ -288,6 +291,7 @@ export const SPRITE_MANIFEST: SpriteManifest = {
         name: "accessory",
         orientationMode: "rotate",
         rotatesWith: "movement",
+        spriteFrontAngle: Math.PI / 2, // bazooka sprite faces DOWN in source PNG
         frames: [{ url: "/sprites/tds/infantry/elite_bazooka.png" }],
       },
     ],
