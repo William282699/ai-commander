@@ -65,6 +65,7 @@ import { ChatPanel } from "./ChatPanel";
 import { TaskBar } from "./TaskBar";
 import * as messageStoreModule from "./messageStore";
 import { preloadSprites, spriteCount } from "./rendering/spriteLoader";
+import { preloadTerrainTiles, terrainBitmapCount } from "./rendering/terrain/terrainTileLoader";
 import {
   addMessage,
   clearMessages,
@@ -370,6 +371,9 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
   useEffect(() => {
     preloadSprites().then(() => {
       console.log(`[sprites] loaded ${spriteCount()} bitmaps`);
+    });
+    preloadTerrainTiles().then(() => {
+      console.log(`[terrain] loaded ${terrainBitmapCount()} bitmaps`);
     });
   }, []);
 

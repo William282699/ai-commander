@@ -24,6 +24,11 @@ import {
   updateDeathSmoke,
   drawDeathSmoke,
 } from "./rendering/juice/deathSmokeLayer";
+import { renderTerrainTiles } from "./rendering/terrain/terrainRenderer";
+import { renderDecorations } from "./rendering/terrain/decorationLayer";
+import { FACILITY_SPRITE_MAP } from "./rendering/terrain/terrainManifest";
+import { renderFacilitySprite } from "./rendering/terrain/facilityRenderer";
+import { TERRAIN_MINIMAP_COLORS } from "./rendering/terrain/minimapColors";
 
 // --- Terrain colors ---
 
@@ -163,7 +168,7 @@ function buildMinimapCache(
   for (let row = 0; row < terrainH; row++) {
     for (let col = 0; col < terrainW; col++) {
       const t = terrain[row]?.[col] ?? "plains";
-      octx.fillStyle = TERRAIN_COLORS[t];
+      octx.fillStyle = TERRAIN_MINIMAP_COLORS[t] ?? TERRAIN_COLORS[t];
       octx.fillRect(
         col * pixelW,
         row * pixelH,
@@ -187,36 +192,29 @@ export function renderTerrain(
   canvasWidth: number,
   canvasHeight: number,
 ): void {
-  const tileScreenSize = TILE_SIZE * camera.zoom;
+  // Base terrain tiles (pixel-art textures with tint overlays)
+  renderTerrainTiles(ctx, terrain, camera, canvasWidth, canvasHeight);
 
-  // Visible tile range (derive bounds from terrain array, not constants)
-  const mapCols = terrain[0]?.length ?? MAP_WIDTH;
-  const mapRows = terrain.length;
-  const startCol = Math.max(0, Math.floor(camera.x / TILE_SIZE));
-  const startRow = Math.max(0, Math.floor(camera.y / TILE_SIZE));
-  const endCol = Math.min(
-    mapCols,
-    Math.ceil((camera.x + canvasWidth / camera.zoom) / TILE_SIZE),
-  );
-  const endRow = Math.min(
-    mapRows,
-    Math.ceil((camera.y + canvasHeight / camera.zoom) / TILE_SIZE),
-  );
+  // Decoration sprites (rocks, bushes, trees, crates) — LOD-gated
+  renderDecorations(ctx, terrain, camera, canvasWidth, canvasHeight);
 
-  for (let row = startRow; row < endRow; row++) {
-    for (let col = startCol; col < endCol; col++) {
-      const t = terrain[row]?.[col] ?? "plains";
-      const screenX = (col * TILE_SIZE - camera.x) * camera.zoom;
-      const screenY = (row * TILE_SIZE - camera.y) * camera.zoom;
-
-      ctx.fillStyle = TERRAIN_COLORS[t];
-      ctx.fillRect(screenX, screenY, tileScreenSize + 0.5, tileScreenSize + 0.5);
-    }
-  }
-
-  // Grid lines (when zoomed in)
+  // Grid lines (when zoomed in, subtle so they don't overpower textures)
   if (camera.zoom >= 1.0) {
-    ctx.strokeStyle = "rgba(0,0,0,0.1)";
+    const tileScreenSize = TILE_SIZE * camera.zoom;
+    const mapCols = terrain[0]?.length ?? MAP_WIDTH;
+    const mapRows = terrain.length;
+    const startCol = Math.max(0, Math.floor(camera.x / TILE_SIZE));
+    const startRow = Math.max(0, Math.floor(camera.y / TILE_SIZE));
+    const endCol = Math.min(
+      mapCols,
+      Math.ceil((camera.x + canvasWidth / camera.zoom) / TILE_SIZE),
+    );
+    const endRow = Math.min(
+      mapRows,
+      Math.ceil((camera.y + canvasHeight / camera.zoom) / TILE_SIZE),
+    );
+
+    ctx.strokeStyle = "rgba(0,0,0,0.05)";
     ctx.lineWidth = 0.5;
     for (let row = startRow; row <= endRow; row++) {
       const y = (row * TILE_SIZE - camera.y) * camera.zoom;
@@ -257,42 +255,53 @@ export function renderFacilities(
     const cx = screenX + tileScreenSize / 2;
     const cy = screenY + tileScreenSize / 2;
 
-    // Background circle
-    const color = FACILITY_COLORS[fac.type] || "#ffffff";
-    ctx.beginPath();
-    ctx.arc(cx, cy, iconSize / 2, 0, Math.PI * 2);
+    // Try building sprite first; fall back to colored-circle icon
+    const spriteEntry = FACILITY_SPRITE_MAP[fac.type];
+    const drewSprite =
+      spriteEntry != null &&
+      renderFacilitySprite(ctx, fac, spriteEntry, cx, cy, tileScreenSize);
 
-    // Team border color
-    if (fac.team === "player") {
-      ctx.fillStyle = "rgba(0,100,255,0.6)";
-    } else if (fac.team === "enemy") {
-      ctx.fillStyle = "rgba(255,50,50,0.6)";
-    } else {
-      ctx.fillStyle = "rgba(180,180,180,0.5)";
+    if (!drewSprite) {
+      // ---- Original icon rendering (unchanged) ----
+      // Background circle
+      const color = FACILITY_COLORS[fac.type] || "#ffffff";
+      ctx.beginPath();
+      ctx.arc(cx, cy, iconSize / 2, 0, Math.PI * 2);
+
+      // Team border color
+      if (fac.team === "player") {
+        ctx.fillStyle = "rgba(0,100,255,0.6)";
+      } else if (fac.team === "enemy") {
+        ctx.fillStyle = "rgba(255,50,50,0.6)";
+      } else {
+        ctx.fillStyle = "rgba(180,180,180,0.5)";
+      }
+      ctx.fill();
+
+      // Inner icon
+      ctx.beginPath();
+      ctx.arc(cx, cy, iconSize / 2 - 2, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.85;
+      ctx.fill();
+      ctx.globalAlpha = 1.0;
+
+      // Symbol text
+      const symbol = FACILITY_SYMBOLS[fac.type] || "?";
+      const fontSize = Math.max(8, iconSize * 0.5);
+      ctx.font = `bold ${fontSize}px monospace`;
+      ctx.fillStyle = "#000";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(symbol, cx, cy);
     }
-    ctx.fill();
 
-    // Inner icon
-    ctx.beginPath();
-    ctx.arc(cx, cy, iconSize / 2 - 2, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.85;
-    ctx.fill();
-    ctx.globalAlpha = 1.0;
-
-    // Symbol text
-    const symbol = FACILITY_SYMBOLS[fac.type] || "?";
-    const fontSize = Math.max(8, iconSize * 0.5);
-    ctx.font = `bold ${fontSize}px monospace`;
-    ctx.fillStyle = "#000";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(symbol, cx, cy);
-
-    // Label (when zoomed in enough)
+    // Label (when zoomed in enough) — shared by both sprite and icon paths
     if (camera.zoom >= 0.8) {
       ctx.font = `${Math.max(9, 10 * camera.zoom)}px sans-serif`;
       ctx.fillStyle = "#fff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
       ctx.strokeStyle = "#000";
       ctx.lineWidth = 2;
       ctx.strokeText(fac.name, cx, cy + iconSize / 2 + 8);
