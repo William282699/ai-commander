@@ -1,0 +1,308 @@
+<svg width="1600" height="980" viewBox="0 0 1600 980" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="980" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#060B14"/>
+      <stop offset="0.5" stop-color="#09111F"/>
+      <stop offset="1" stop-color="#04070F"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#16243A"/>
+      <stop offset="1" stop-color="#0A101B"/>
+    </linearGradient>
+    <linearGradient id="panelWarm" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#2A2016"/>
+      <stop offset="1" stop-color="#10151F"/>
+    </linearGradient>
+    <linearGradient id="cyanLine" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#00D4FF" stop-opacity="0"/>
+      <stop offset="0.2" stop-color="#00D4FF"/>
+      <stop offset="0.8" stop-color="#27F0FF"/>
+      <stop offset="1" stop-color="#00D4FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="amberLine" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#FF9F1A" stop-opacity="0"/>
+      <stop offset="0.2" stop-color="#FF9F1A"/>
+      <stop offset="0.8" stop-color="#FFCB6B"/>
+      <stop offset="1" stop-color="#FF9F1A" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="redLine" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#FF3B30" stop-opacity="0"/>
+      <stop offset="0.2" stop-color="#FF3B30"/>
+      <stop offset="0.8" stop-color="#FF746B"/>
+      <stop offset="1" stop-color="#FF3B30" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glowCyan" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glowAmber" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000814" flood-opacity="0.6"/>
+    </filter>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M 28 0 L 0 0 0 28" stroke="#11314A" stroke-width="1" opacity="0.4"/>
+    </pattern>
+    <style>
+      .title { font: 700 20px 'Rajdhani', 'Arial'; letter-spacing: 2px; fill: #EAF8FF; }
+      .tiny { font: 600 10px 'Share Tech Mono', monospace; letter-spacing: 1px; fill: #7FA6BD; }
+      .label { font: 700 14px 'Rajdhani', 'Arial'; letter-spacing: 1.6px; fill: #BFEFFF; }
+      .value { font: 700 14px 'Share Tech Mono', monospace; fill: #EAF8FF; }
+      .small { font: 400 12px 'Share Tech Mono', monospace; fill: #B8CBD8; }
+      .dim { font: 400 11px 'Share Tech Mono', monospace; fill: #6F88A0; }
+      .accent { fill: #00D4FF; }
+      .warn { fill: #FFB347; }
+      .danger { fill: #FF6A60; }
+      .ok { fill: #7FFFD4; }
+      .dock { font: 700 12px 'Rajdhani', 'Arial'; letter-spacing: 1.2px; fill: #DDF7FF; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1600" height="980" fill="url(#grid)" opacity="0.22"/>
+  <rect x="22" y="18" width="1556" height="944" rx="18" fill="#060B14" stroke="#163049" stroke-width="2" filter="url(#shadow)"/>
+
+  <text x="48" y="56" class="title" fill="#00D4FF">AI COMMANDER // DETACHED PANEL V2</text>
+  <text x="48" y="82" class="tiny">目标：让 commander 前后文更清楚，让兵种池和编制树都能真正在 detached mode 里操作</text>
+
+  <rect x="42" y="106" width="1516" height="64" fill="url(#panel)" stroke="#254763"/>
+  <rect x="42" y="167" width="1516" height="2" fill="url(#cyanLine)" filter="url(#glowCyan)"/>
+  <text x="62" y="145" class="title" font-size="18">BATTLE BOARD</text>
+
+  <rect x="236" y="121" width="110" height="34" fill="#10293A" stroke="#20E2FF"/>
+  <text x="262" y="143" class="dock">OPERATIONAL</text>
+
+  <rect x="628" y="121" width="118" height="34" fill="#0D1827" stroke="#2F5371"/>
+  <text x="644" y="143" class="tiny">MONEY</text>
+  <text x="695" y="143" class="value" fill="#7CFFD7">$53,100</text>
+
+  <rect x="758" y="121" width="108" height="34" fill="#161720" stroke="#7A5324"/>
+  <text x="775" y="143" class="tiny">FUEL</text>
+  <text x="818" y="143" class="value warn">170%</text>
+
+  <rect x="878" y="121" width="108" height="34" fill="#1B1620" stroke="#6C2D32"/>
+  <text x="894" y="143" class="tiny">AMMO</text>
+  <text x="940" y="143" class="value danger">170%</text>
+
+  <rect x="998" y="121" width="108" height="34" fill="#0D1827" stroke="#2F5371"/>
+  <text x="1016" y="143" class="tiny">INTEL</text>
+  <text x="1062" y="143" class="value accent">40</text>
+
+  <rect x="1118" y="121" width="120" height="34" fill="#0D1827" stroke="#2F5371"/>
+  <text x="1130" y="143" class="tiny">READINESS</text>
+  <text x="1210" y="143" class="value ok">95%</text>
+
+  <text x="1435" y="146" class="title" font-size="24" fill="#00D4FF">00:00:46</text>
+
+  <g>
+    <rect x="46" y="192" width="204" height="64" fill="#111A28" stroke="#6C2D32" stroke-width="2"/>
+    <text x="64" y="216" class="label danger">CRITICAL ALERT</text>
+    <text x="64" y="240" class="small">Southern line unstable, reserve commitment window shrinking.</text>
+
+    <rect x="262" y="192" width="160" height="64" fill="#111A28" stroke="#234966"/>
+    <text x="280" y="216" class="label accent">PHASE</text>
+    <text x="280" y="240" class="small">Counter-assault prep</text>
+
+    <rect x="434" y="192" width="164" height="64" fill="#111A28" stroke="#7A5324"/>
+    <text x="452" y="216" class="label warn">THREAT</text>
+    <text x="452" y="240" class="small">Enemy armor massing east</text>
+
+    <rect x="610" y="192" width="176" height="64" fill="#111A28" stroke="#234966"/>
+    <text x="628" y="216" class="label accent">OBJECTIVE</text>
+    <text x="628" y="240" class="small">Hold ridge + secure depot</text>
+  </g>
+
+  <!-- Left column -->
+  <g>
+    <rect x="46" y="282" width="372" height="566" fill="url(#panelWarm)" stroke="#2A4C63" stroke-width="2"/>
+    <text x="68" y="314" class="title" font-size="18" fill="#FFB347">MISSION + LOGISTICS</text>
+    <rect x="68" y="326" width="328" height="2" fill="url(#amberLine)" filter="url(#glowAmber)"/>
+
+    <rect x="68" y="346" width="328" height="120" fill="#0C121C" stroke="#355268"/>
+    <text x="86" y="372" class="label">ACTIVE MISSIONS</text>
+    <rect x="86" y="389" width="292" height="28" fill="#151B24" stroke="#6C2D32"/>
+    <text x="98" y="408" class="small">1. Hold supply depot</text>
+    <text x="344" y="408" class="small warn">CRITICAL</text>
+    <rect x="86" y="424" width="220" height="4" fill="#3A1014"/>
+    <rect x="86" y="424" width="176" height="4" fill="#FF4A3E"/>
+    <rect x="86" y="438" width="292" height="28" fill="#151B24" stroke="#7A5324"/>
+    <text x="98" y="457" class="small">2. Reinforce triangle</text>
+    <text x="339" y="457" class="small warn">73%</text>
+
+    <rect x="68" y="486" width="328" height="132" fill="#0C121C" stroke="#355268"/>
+    <text x="86" y="512" class="label">LOGISTICS SNAPSHOT</text>
+    <text x="86" y="540" class="small">Fuel reserve</text>
+    <rect x="194" y="528" width="168" height="10" fill="#151B24" stroke="#3B5469"/>
+    <rect x="196" y="530" width="112" height="6" fill="#FFB347"/>
+    <text x="86" y="567" class="small">Ammo reserve</text>
+    <rect x="194" y="555" width="168" height="10" fill="#151B24" stroke="#3B5469"/>
+    <rect x="196" y="557" width="90" height="6" fill="#FF6A60"/>
+    <text x="86" y="594" class="small">Intel confidence</text>
+    <rect x="194" y="582" width="168" height="10" fill="#151B24" stroke="#3B5469"/>
+    <rect x="196" y="584" width="136" height="6" fill="#27F0FF"/>
+
+    <rect x="68" y="638" width="328" height="188" fill="#0C121C" stroke="#355268"/>
+    <text x="86" y="664" class="title" font-size="18" fill="#00D4FF">CURRENT UNIT POOL</text>
+    <text x="86" y="684" class="dim">这个区支持上下滑动，兵种多时可继续往下看</text>
+    <rect x="376" y="688" width="6" height="118" fill="#111A28" stroke="#1F3850"/>
+    <rect x="377" y="718" width="4" height="42" fill="#20E2FF"/>
+
+    <g>
+      <rect x="86" y="700" width="276" height="24" fill="#121926" stroke="#2E516D"/>
+      <text x="102" y="717" class="small">Infantry</text>
+      <text x="314" y="717" class="small accent">450 / 40 units</text>
+
+      <rect x="86" y="732" width="276" height="24" fill="#121926" stroke="#2E516D"/>
+      <text x="102" y="749" class="small">Armor</text>
+      <text x="314" y="749" class="small warn">60</text>
+
+      <rect x="86" y="764" width="276" height="24" fill="#121926" stroke="#2E516D"/>
+      <text x="102" y="781" class="small">Artillery</text>
+      <text x="314" y="781" class="small">30</text>
+
+      <rect x="86" y="796" width="276" height="24" fill="#121926" stroke="#2E516D"/>
+      <text x="102" y="813" class="small">Recon</text>
+      <text x="314" y="813" class="small">18</text>
+    </g>
+  </g>
+
+  <!-- Center column -->
+  <g>
+    <rect x="436" y="282" width="692" height="566" fill="url(#panel)" stroke="#2A4C63" stroke-width="2"/>
+    <text x="460" y="314" class="title" font-size="18" fill="#00D4FF">COMMANDER COMMS</text>
+    <rect x="460" y="326" width="644" height="2" fill="url(#cyanLine)" filter="url(#glowCyan)"/>
+    <text x="460" y="346" class="dim">这里放大到能看见前后文，每位指挥官至少保留 2-3 条对话内容</text>
+
+    <!-- Commander cards -->
+    <rect x="460" y="364" width="644" height="124" fill="#0C121C" stroke="#355268"/>
+    <rect x="478" y="380" width="608" height="28" fill="#111827" stroke="#6C2D32"/>
+    <circle cx="495" cy="394" r="7" fill="#FF4A3E"/>
+    <text x="510" y="399" class="label danger">CHEN / COMBAT</text>
+    <text x="478" y="427" class="small">"Enemy armor on the move, north ridge. We can hold if I get one more squad."</text>
+    <text x="478" y="449" class="small">"Last exchange burned ammo fast. If we push now, I need support queued behind me."</text>
+    <text x="478" y="471" class="dim">08:41 - latest combat thread still open</text>
+
+    <rect x="460" y="500" width="644" height="124" fill="#0C121C" stroke="#355268"/>
+    <rect x="478" y="516" width="608" height="28" fill="#111827" stroke="#2E69A0"/>
+    <circle cx="495" cy="530" r="7" fill="#34A4FF"/>
+    <text x="510" y="535" class="label accent">MARCUS / OPS</text>
+    <text x="478" y="563" class="small">"Bridge sector is still the hinge. If we lose Delta, the whole front line bends backward."</text>
+    <text x="478" y="585" class="small">"Recommend triangle first, then use the road net to re-stabilize the center."</text>
+    <text x="478" y="607" class="dim">08:42 - operational recommendation updated</text>
+
+    <rect x="460" y="636" width="644" height="124" fill="#0C121C" stroke="#355268"/>
+    <rect x="478" y="652" width="608" height="28" fill="#111827" stroke="#3A8B5B"/>
+    <circle cx="495" cy="666" r="7" fill="#45D77A"/>
+    <text x="510" y="671" class="label ok">EMILY / LOGISTICS</text>
+    <text x="478" y="699" class="small">"Fuel is still workable for a local counter. Ammo is the tighter constraint on Chen's side."</text>
+    <text x="478" y="721" class="small">"I can support a reinforcement wave, but not a long pursuit without resupply."</text>
+    <text x="478" y="743" class="dim">08:42 - logistics confirms limited offensive window</text>
+
+    <!-- Decision board -->
+    <rect x="460" y="778" width="644" height="50" fill="#0C121C" stroke="#355268"/>
+    <text x="478" y="804" class="label">DECISION BOARD</text>
+    <rect x="650" y="790" width="150" height="24" fill="#15233A" stroke="#7A5324"/>
+    <text x="668" y="806" class="small">Reinforce Triangle</text>
+    <rect x="816" y="790" width="132" height="24" fill="#163021" stroke="#2F9D58"/>
+    <text x="853" y="806" class="dock">APPROVE</text>
+    <rect x="962" y="790" width="124" height="24" fill="#311317" stroke="#9A313A"/>
+    <text x="999" y="806" class="dock">DECLINE</text>
+  </g>
+
+  <!-- Right column -->
+  <g>
+    <rect x="1146" y="282" width="410" height="566" fill="url(#panel)" stroke="#2A4C63" stroke-width="2"/>
+    <text x="1170" y="314" class="title" font-size="18" fill="#00D4FF">ORG TREE / BATTLEGROUP BOARD</text>
+    <rect x="1170" y="326" width="362" height="2" fill="url(#cyanLine)" filter="url(#glowCyan)"/>
+    <text x="1170" y="346" class="dim">最右侧完整留给编制树，拖拽/调拨/看层级都会更顺手</text>
+
+    <rect x="1170" y="366" width="362" height="58" fill="#0C121C" stroke="#355268"/>
+    <rect x="1186" y="380" width="104" height="28" fill="#1A2232" stroke="#7A3138"/>
+    <text x="1209" y="398" class="small">CHEN (4)</text>
+    <rect x="1298" y="380" width="104" height="28" fill="#1A2232" stroke="#2E69A0"/>
+    <text x="1314" y="398" class="small">MARCUS (6)</text>
+    <rect x="1410" y="380" width="104" height="28" fill="#1A2232" stroke="#3A8B5B"/>
+    <text x="1435" y="398" class="small">EMILY (3)</text>
+
+    <!-- Tree nodes -->
+    <g>
+      <line x1="1350" y1="438" x2="1350" y2="476" stroke="#245A78" stroke-width="2"/>
+      <rect x="1272" y="476" width="156" height="38" fill="#121926" stroke="#355268"/>
+      <text x="1290" y="500" class="small">Marcus HQ</text>
+
+      <line x1="1350" y1="514" x2="1350" y2="546" stroke="#245A78" stroke-width="2"/>
+      <line x1="1232" y1="546" x2="1468" y2="546" stroke="#245A78" stroke-width="2"/>
+      <line x1="1232" y1="546" x2="1232" y2="576" stroke="#245A78" stroke-width="2"/>
+      <line x1="1350" y1="546" x2="1350" y2="576" stroke="#245A78" stroke-width="2"/>
+      <line x1="1468" y1="546" x2="1468" y2="576" stroke="#245A78" stroke-width="2"/>
+
+      <rect x="1178" y="576" width="108" height="46" fill="#121926" stroke="#355268"/>
+      <text x="1192" y="599" class="small">Alpha Sq.</text>
+      <text x="1192" y="614" class="dim">8 units / moving</text>
+
+      <rect x="1296" y="576" width="108" height="46" fill="#121926" stroke="#355268"/>
+      <text x="1310" y="599" class="small">Bravo Sq.</text>
+      <text x="1310" y="614" class="dim">6 units / engaged</text>
+
+      <rect x="1414" y="576" width="108" height="46" fill="#121926" stroke="#355268"/>
+      <text x="1428" y="599" class="small">Delta Sq.</text>
+      <text x="1428" y="614" class="dim">2 units / reserve</text>
+
+      <line x1="1232" y1="622" x2="1232" y2="652" stroke="#245A78" stroke-width="2"/>
+      <line x1="1232" y1="652" x2="1200" y2="652" stroke="#245A78" stroke-width="2"/>
+      <line x1="1200" y1="652" x2="1200" y2="682" stroke="#245A78" stroke-width="2"/>
+      <rect x="1158" y="682" width="86" height="40" fill="#121926" stroke="#355268"/>
+      <text x="1172" y="706" class="dim">A-1 Fireteam</text>
+
+      <line x1="1350" y1="622" x2="1350" y2="652" stroke="#245A78" stroke-width="2"/>
+      <line x1="1350" y1="652" x2="1382" y2="652" stroke="#245A78" stroke-width="2"/>
+      <line x1="1382" y1="652" x2="1382" y2="682" stroke="#245A78" stroke-width="2"/>
+      <rect x="1338" y="682" width="92" height="40" fill="#121926" stroke="#355268"/>
+      <text x="1354" y="706" class="dim">B-2 Armor</text>
+
+      <rect x="1170" y="748" width="362" height="78" fill="#0C121C" stroke="#355268"/>
+      <text x="1188" y="774" class="label warn">KIA / WIPED SUMMARY</text>
+      <text x="1188" y="800" class="small danger">KIA: 12</text>
+      <text x="1280" y="800" class="small">Fallen squads archived below command tree</text>
+    </g>
+  </g>
+
+  <!-- Command dock -->
+  <g>
+    <rect x="46" y="868" width="1510" height="72" fill="url(#panel)" stroke="#294C63" stroke-width="2"/>
+    <rect x="46" y="867" width="1510" height="2" fill="url(#cyanLine)" filter="url(#glowCyan)"/>
+    <text x="72" y="898" class="title" font-size="18">COMMAND DOCK</text>
+
+    <rect x="228" y="884" width="112" height="34" fill="#132132" stroke="#2E69A0"/>
+    <text x="250" y="905" class="dock">CREATE SQUAD</text>
+
+    <rect x="350" y="884" width="74" height="34" fill="#132132" stroke="#355268"/>
+    <text x="375" y="905" class="dock">MOVE</text>
+
+    <rect x="434" y="884" width="94" height="34" fill="#132132" stroke="#355268"/>
+    <text x="458" y="905" class="dock">DOCTRINE</text>
+
+    <rect x="538" y="884" width="94" height="34" fill="#132132" stroke="#355268"/>
+    <text x="563" y="905" class="dock">TRANSFER</text>
+
+    <rect x="650" y="884" width="640" height="34" fill="#090D16" stroke="#355268"/>
+    <text x="670" y="906" class="small">对 Marcus 上尉下令... 或让 3 位 commander 继续会商</text>
+
+    <rect x="1310" y="884" width="88" height="34" fill="#123226" stroke="#2F9D58"/>
+    <text x="1334" y="905" class="dock">SEND</text>
+
+    <rect x="1410" y="884" width="56" height="34" fill="#142435" stroke="#2E69A0"/>
+    <text x="1431" y="905" class="dock">PTT</text>
+
+    <rect x="1478" y="884" width="54" height="34" fill="#2B1718" stroke="#8D313A"/>
+    <text x="1498" y="905" class="dock">X</text>
+  </g>
+</svg>

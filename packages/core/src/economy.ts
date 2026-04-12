@@ -25,6 +25,7 @@ import {
   PRODUCTION_FACILITY,
   TERRAIN_MOVE_MULT,
   getUnitCategory,
+  isFootUnit,
   type UnitCategory,
 } from "@ai-commander/shared";
 
@@ -40,18 +41,28 @@ const NON_CAPTURABLE: readonly FacilityType[] = [
 
 // ── Helper: is a unit "mechanized" (consumes fuel to move)? ──
 
+/**
+ * "Mechanized" = any unit that burns fuel to move. The negative form of
+ * `isFootUnit` (shared/types.ts): infantry, commander, and elite_guard are
+ * human infantry and do not burn fuel — everything else (tanks, artillery,
+ * ships, aircraft) does.
+ *
+ * Previously this was a direct `type !== "infantry"` comparison which
+ * silently charged commander and elite_guard tank-level fuel (0.1/tile),
+ * causing a shared-pool drain that stalled entire squads mid-march once
+ * the player's fuel hit zero.
+ */
 export function isMechanized(type: UnitType): boolean {
-  // Infantry doesn't consume fuel. All others do.
-  return type !== "infantry";
+  return !isFootUnit(type);
 }
 
 /** Fuel cost per tile for a given unit type */
 export function fuelPerTile(type: UnitType): number {
+  if (!isMechanized(type)) return 0;
   const cat = getUnitCategory(type);
   if (cat === "naval") return FUEL_PER_TILE_SHIP;
   if (cat === "air") return FUEL_PER_SORTIE_AIR; // air: per-tile simplified
-  // Ground mechanized
-  if (type === "infantry") return 0;
+  // Ground mechanized (tanks, artillery)
   return FUEL_PER_TILE_TANK;
 }
 

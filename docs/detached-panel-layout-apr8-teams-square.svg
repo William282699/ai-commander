@@ -1,0 +1,294 @@
+<svg width="1600" height="1600" viewBox="0 0 1600 1600" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="1600" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#050A13"/>
+      <stop offset="0.55" stop-color="#0B1321"/>
+      <stop offset="1" stop-color="#060A12"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#172338"/>
+      <stop offset="1" stop-color="#0B1018"/>
+    </linearGradient>
+    <linearGradient id="cyanBorder" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#00D4FF" stop-opacity="0"/>
+      <stop offset="0.18" stop-color="#00D4FF"/>
+      <stop offset="0.82" stop-color="#20E7FF"/>
+      <stop offset="1" stop-color="#00D4FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="amberBorder" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#FF9F1A" stop-opacity="0"/>
+      <stop offset="0.18" stop-color="#FF9F1A"/>
+      <stop offset="0.82" stop-color="#FFC25B"/>
+      <stop offset="1" stop-color="#FF9F1A" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M 28 0 L 0 0 0 28" stroke="#14314A" stroke-width="1" opacity="0.35"/>
+    </pattern>
+    <style>
+      .h1 { font: 700 26px 'Rajdhani', Arial; letter-spacing: 2px; fill: #EAF8FF; }
+      .h2 { font: 700 18px 'Rajdhani', Arial; letter-spacing: 1.2px; fill: #D8F7FF; }
+      .h3 { font: 700 14px 'Rajdhani', Arial; letter-spacing: 1px; fill: #DDF4FF; }
+      .mono { font: 400 13px 'Share Tech Mono', monospace; fill: #C7D7E5; }
+      .monoDim { font: 400 11px 'Share Tech Mono', monospace; fill: #7993AB; }
+      .cyan { fill: #00D4FF; }
+      .amber { fill: #FFB347; }
+      .red { fill: #FF6A60; }
+      .green { fill: #79F2A7; }
+      .dock { font: 700 12px 'Rajdhani', Arial; letter-spacing: 1px; fill: #EAF8FF; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1600" fill="url(#bg)"/>
+  <rect width="1600" height="1600" fill="url(#grid)" opacity="0.18"/>
+
+  <text x="96" y="98" class="h1" fill="#00D4FF">DETACHED PANEL V3 // TEAMS-STYLE COMMS</text>
+  <text x="96" y="132" class="monoDim">只保留当前系统里真实存在的内容：会话入口、历史聊天、任务/后勤、兵种池、编制树、底部命令区</text>
+  <text x="96" y="158" class="monoDim">说明：按你刚才的要求，这张概念图里暂时按 Marcus=logistics / Emily=ops 展示</text>
+
+  <g transform="translate(88 196)">
+    <rect x="0" y="0" width="1424" height="1188" rx="20" fill="#060B14" stroke="#1C3650" stroke-width="2"/>
+
+    <!-- Top bar -->
+    <rect x="24" y="24" width="1376" height="86" fill="url(#panel)" stroke="#264764" stroke-width="2"/>
+    <rect x="24" y="108" width="1376" height="2" fill="url(#cyanBorder)" filter="url(#glow)"/>
+    <text x="46" y="76" class="h1">BATTLE BOARD</text>
+
+    <rect x="224" y="40" width="122" height="38" fill="#112C3E" stroke="#22E0FF"/>
+    <text x="253" y="65" class="dock">OPERATIONAL</text>
+
+    <rect x="1140" y="38" width="226" height="42" fill="#0B1523" stroke="#355A77"/>
+    <text x="1162" y="65" class="mono">DETACHED COMMS MODE</text>
+
+    <!-- Commander selector only -->
+    <rect x="24" y="132" width="1376" height="84" fill="url(#panel)" stroke="#264764" stroke-width="2"/>
+    <text x="46" y="164" class="h2" fill="#00D4FF">COMM CHANNELS</text>
+    <text x="46" y="188" class="monoDim">像 Teams 那样：点头像切频道，右侧只显示当前选中的历史会话</text>
+
+    <rect x="364" y="146" width="190" height="52" fill="#101A28" stroke="#6C3138" stroke-width="2"/>
+    <circle cx="392" cy="172" r="13" fill="#7A2128"/>
+    <text x="415" y="178" class="h3 red">CHEN</text>
+    <text x="415" y="194" class="monoDim">combat</text>
+
+    <rect x="572" y="146" width="190" height="52" fill="#0F2130" stroke="#22E0FF" stroke-width="2"/>
+    <circle cx="600" cy="172" r="13" fill="#1D6FA0"/>
+    <text x="623" y="178" class="h3 cyan">MARCUS</text>
+    <text x="623" y="194" class="monoDim">logistics</text>
+
+    <rect x="780" y="146" width="190" height="52" fill="#101A28" stroke="#3A8B5B" stroke-width="2"/>
+    <circle cx="808" cy="172" r="13" fill="#2E754B"/>
+    <text x="831" y="178" class="h3 green">EMILY</text>
+    <text x="831" y="194" class="monoDim">ops</text>
+
+    <rect x="988" y="146" width="190" height="52" fill="#101A28" stroke="#42556C" stroke-width="2"/>
+    <circle cx="1016" cy="172" r="13" fill="#1A2432"/>
+    <text x="1038" y="178" class="h3">ALL</text>
+    <text x="1038" y="194" class="monoDim">group chat</text>
+
+    <!-- Main 3-column layout -->
+    <!-- Left column -->
+    <rect x="24" y="240" width="340" height="842" fill="url(#panel)" stroke="#2A4C63" stroke-width="2"/>
+    <text x="46" y="276" class="h2 amber">MISSION + LOGISTICS</text>
+    <rect x="46" y="286" width="296" height="2" fill="url(#amberBorder)" filter="url(#glow)"/>
+
+    <rect x="46" y="306" width="296" height="190" fill="#0D121C" stroke="#355268"/>
+    <text x="64" y="340" class="h2">ACTIVE MISSIONS</text>
+    <rect x="64" y="356" width="260" height="34" fill="#151B24" stroke="#6E2E34"/>
+    <text x="78" y="379" class="mono">1. Hold supply depot</text>
+    <text x="232" y="379" class="mono red">critical</text>
+    <rect x="64" y="400" width="260" height="34" fill="#151B24" stroke="#7A5324"/>
+    <text x="78" y="423" class="mono">2. Reinforce triangle</text>
+    <text x="265" y="423" class="mono amber">73%</text>
+    <rect x="64" y="444" width="260" height="34" fill="#151B24" stroke="#355268"/>
+    <text x="78" y="467" class="mono">3. Patrol central road</text>
+
+    <rect x="46" y="518" width="296" height="166" fill="#0D121C" stroke="#355268"/>
+    <text x="64" y="552" class="h2">LOGISTICS SNAPSHOT</text>
+    <text x="64" y="588" class="mono">Fuel reserve</text>
+    <rect x="180" y="576" width="126" height="10" fill="#151C27" stroke="#37556D"/>
+    <rect x="182" y="578" width="84" height="6" fill="#FFB347"/>
+    <text x="64" y="624" class="mono">Ammo reserve</text>
+    <rect x="180" y="612" width="126" height="10" fill="#151C27" stroke="#37556D"/>
+    <rect x="182" y="614" width="70" height="6" fill="#FF6A60"/>
+    <text x="64" y="660" class="mono">Intel confidence</text>
+    <rect x="180" y="648" width="126" height="10" fill="#151C27" stroke="#37556D"/>
+    <rect x="182" y="650" width="96" height="6" fill="#20E7FF"/>
+
+    <rect x="46" y="706" width="296" height="354" fill="#0D121C" stroke="#355268"/>
+    <text x="64" y="740" class="h2 cyan">CURRENT UNIT POOL</text>
+    <text x="64" y="764" class="monoDim">这里明确做成可滚动列表，兵种多了仍然能看全</text>
+    <rect x="314" y="780" width="6" height="246" fill="#131C28" stroke="#27455E"/>
+    <rect x="315" y="828" width="4" height="86" fill="#20E7FF"/>
+
+    <rect x="64" y="786" width="228" height="32" fill="#121926" stroke="#2F516B"/>
+    <text x="82" y="808" class="mono">Infantry</text>
+    <text x="214" y="808" class="mono cyan">450 / 40</text>
+    <rect x="64" y="826" width="228" height="32" fill="#121926" stroke="#2F516B"/>
+    <text x="82" y="848" class="mono">Armor</text>
+    <text x="248" y="848" class="mono amber">60</text>
+    <rect x="64" y="866" width="228" height="32" fill="#121926" stroke="#2F516B"/>
+    <text x="82" y="888" class="mono">Artillery</text>
+    <text x="248" y="888" class="mono">30</text>
+    <rect x="64" y="906" width="228" height="32" fill="#121926" stroke="#2F516B"/>
+    <text x="82" y="928" class="mono">Recon</text>
+    <text x="248" y="928" class="mono">18</text>
+    <rect x="64" y="946" width="228" height="32" fill="#121926" stroke="#2F516B"/>
+    <text x="82" y="968" class="mono">Engineers</text>
+    <text x="248" y="968" class="mono">12</text>
+    <rect x="64" y="986" width="228" height="32" fill="#121926" stroke="#2F516B"/>
+    <text x="82" y="1008" class="mono">AA Teams</text>
+    <text x="248" y="1008" class="mono">9</text>
+
+    <!-- Center column -->
+    <rect x="388" y="240" width="552" height="842" fill="url(#panel)" stroke="#2A4C63" stroke-width="2"/>
+    <text x="410" y="276" class="h2 cyan">COMMANDER COMMS</text>
+    <text x="410" y="300" class="monoDim">改成 Teams 风格：左边头像 / 频道列表，右边单一历史会话，不再并排 3 条细长框</text>
+    <rect x="410" y="310" width="508" height="2" fill="url(#cyanBorder)" filter="url(#glow)"/>
+
+    <!-- Teams-like rail -->
+    <rect x="410" y="332" width="108" height="662" fill="#0D121C" stroke="#355268"/>
+    <text x="430" y="362" class="h3">CHANNELS</text>
+
+    <rect x="426" y="388" width="76" height="92" fill="#151C27" stroke="#6C3138"/>
+    <circle cx="464" cy="420" r="18" fill="#7A2128"/>
+    <text x="448" y="455" class="mono">Chen</text>
+    <text x="438" y="472" class="monoDim">combat</text>
+
+    <rect x="426" y="494" width="76" height="92" fill="#0F2333" stroke="#22E0FF" stroke-width="2"/>
+    <circle cx="464" cy="526" r="18" fill="#1D6FA0"/>
+    <text x="438" y="561" class="mono cyan">Marcus</text>
+    <text x="432" y="578" class="monoDim">selected</text>
+
+    <rect x="426" y="600" width="76" height="92" fill="#151C27" stroke="#3A8B5B"/>
+    <circle cx="464" cy="632" r="18" fill="#2E754B"/>
+    <text x="447" y="667" class="mono">Emily</text>
+    <text x="444" y="684" class="monoDim">ops</text>
+
+    <rect x="426" y="706" width="76" height="92" fill="#151C27" stroke="#42556C"/>
+    <circle cx="464" cy="738" r="18" fill="#1B2432"/>
+    <text x="454" y="773" class="mono">All</text>
+    <text x="436" y="790" class="monoDim">group</text>
+
+    <!-- Active conversation -->
+    <rect x="536" y="332" width="382" height="662" fill="#0D121C" stroke="#355268"/>
+    <rect x="556" y="352" width="342" height="42" fill="#132132" stroke="#22E0FF"/>
+    <circle cx="580" cy="373" r="12" fill="#1D6FA0"/>
+    <text x="602" y="379" class="h3 cyan">Marcus // Logistics Channel</text>
+    <text x="602" y="394" class="monoDim">历史会话窗口：和 Teams 一样，只显示当前点开的那个 commander</text>
+
+    <rect x="560" y="420" width="226" height="76" fill="#161D28" stroke="#2F516B"/>
+    <text x="576" y="444" class="monoDim">YOU 08:39</text>
+    <text x="576" y="468" class="mono">Marcus, Delta 还能撑多久？</text>
+
+    <rect x="646" y="512" width="236" height="110" fill="#102331" stroke="#2E69A0"/>
+    <text x="664" y="536" class="monoDim">MARCUS 08:40</text>
+    <text x="664" y="562" class="mono">If Delta stays unsupported,</text>
+    <text x="664" y="586" class="mono">the center starts bending in</text>
+    <text x="664" y="610" class="mono">about 3 to 4 minutes.</text>
+
+    <rect x="560" y="640" width="226" height="92" fill="#161D28" stroke="#2F516B"/>
+    <text x="576" y="664" class="monoDim">YOU 08:41</text>
+    <text x="576" y="688" class="mono">如果先保 Supply Depot 呢？</text>
+    <text x="576" y="712" class="mono">还来得及吗？</text>
+
+    <rect x="646" y="748" width="236" height="140" fill="#102331" stroke="#2E69A0"/>
+    <text x="664" y="772" class="monoDim">MARCUS 08:42</text>
+    <text x="664" y="798" class="mono">We can still do it, but only if</text>
+    <text x="664" y="822" class="mono">Chen gets local reinforcement and</text>
+    <text x="664" y="846" class="mono">Emily keeps the resupply short.</text>
+    <text x="664" y="870" class="mono">Triangle first, depot second is</text>
+    <text x="664" y="894" class="mono">the safer sequence.</text>
+
+    <rect x="556" y="918" width="342" height="54" fill="#10161F" stroke="#355268"/>
+    <text x="572" y="941" class="h3">QUICK ACTION</text>
+    <rect x="698" y="932" width="86" height="24" fill="#132132" stroke="#7A5324"/>
+    <text x="718" y="949" class="mono">Triangle</text>
+    <rect x="794" y="932" width="86" height="24" fill="#143020" stroke="#2F9D58"/>
+    <text x="816" y="949" class="mono">Approve</text>
+
+    <!-- Right column -->
+    <rect x="964" y="240" width="436" height="842" fill="url(#panel)" stroke="#2A4C63" stroke-width="2"/>
+    <text x="986" y="276" class="h2 cyan">ORG TREE / BATTLEGROUP BOARD</text>
+    <text x="986" y="300" class="monoDim">最右侧整列全给编制树，保证 detached mode 下编组操作仍然顺手</text>
+    <rect x="986" y="310" width="392" height="2" fill="url(#cyanBorder)" filter="url(#glow)"/>
+
+    <rect x="986" y="332" width="392" height="74" fill="#0D121C" stroke="#355268"/>
+    <rect x="1004" y="352" width="102" height="32" fill="#1A2232" stroke="#6C3138"/>
+    <text x="1030" y="373" class="mono">Chen (4)</text>
+    <rect x="1116" y="352" width="114" height="32" fill="#1A2232" stroke="#2E69A0"/>
+    <text x="1142" y="373" class="mono">Marcus (6)</text>
+    <rect x="1240" y="352" width="112" height="32" fill="#1A2232" stroke="#3A8B5B"/>
+    <text x="1268" y="373" class="mono">Emily (3)</text>
+
+    <line x1="1182" y1="430" x2="1182" y2="474" stroke="#245A78" stroke-width="2"/>
+    <rect x="1108" y="474" width="148" height="42" fill="#121926" stroke="#355268"/>
+    <text x="1142" y="501" class="mono">Marcus HQ</text>
+
+    <line x1="1182" y1="516" x2="1182" y2="558" stroke="#245A78" stroke-width="2"/>
+    <line x1="1074" y1="558" x2="1290" y2="558" stroke="#245A78" stroke-width="2"/>
+    <line x1="1074" y1="558" x2="1074" y2="592" stroke="#245A78" stroke-width="2"/>
+    <line x1="1182" y1="558" x2="1182" y2="592" stroke="#245A78" stroke-width="2"/>
+    <line x1="1290" y1="558" x2="1290" y2="592" stroke="#245A78" stroke-width="2"/>
+
+    <rect x="1028" y="592" width="92" height="52" fill="#121926" stroke="#355268"/>
+    <text x="1044" y="620" class="mono">Alpha Sq.</text>
+    <text x="1044" y="638" class="monoDim">8 units</text>
+
+    <rect x="1136" y="592" width="92" height="52" fill="#121926" stroke="#355268"/>
+    <text x="1152" y="620" class="mono">Bravo Sq.</text>
+    <text x="1152" y="638" class="monoDim">6 units</text>
+
+    <rect x="1244" y="592" width="92" height="52" fill="#121926" stroke="#355268"/>
+    <text x="1260" y="620" class="mono">Delta Sq.</text>
+    <text x="1260" y="638" class="monoDim">2 units</text>
+
+    <line x1="1074" y1="644" x2="1074" y2="686" stroke="#245A78" stroke-width="2"/>
+    <line x1="1074" y1="686" x2="1048" y2="686" stroke="#245A78" stroke-width="2"/>
+    <line x1="1048" y1="686" x2="1048" y2="718" stroke="#245A78" stroke-width="2"/>
+    <rect x="1008" y="718" width="82" height="40" fill="#121926" stroke="#355268"/>
+    <text x="1022" y="742" class="monoDim">A-1 Team</text>
+
+    <line x1="1182" y1="644" x2="1182" y2="686" stroke="#245A78" stroke-width="2"/>
+    <line x1="1182" y1="686" x2="1214" y2="686" stroke="#245A78" stroke-width="2"/>
+    <line x1="1214" y1="686" x2="1214" y2="718" stroke="#245A78" stroke-width="2"/>
+    <rect x="1170" y="718" width="90" height="40" fill="#121926" stroke="#355268"/>
+    <text x="1184" y="742" class="monoDim">B-2 Armor</text>
+
+    <rect x="986" y="794" width="392" height="122" fill="#0D121C" stroke="#355268"/>
+    <text x="1004" y="826" class="h2 amber">COMMANDER BUCKETS</text>
+    <text x="1004" y="860" class="mono">Chen battalion      [4 squads]</text>
+    <text x="1004" y="892" class="mono">Marcus battalion    [6 squads]</text>
+    <text x="1004" y="924" class="mono">Emily battalion     [3 squads]</text>
+
+    <rect x="986" y="940" width="392" height="120" fill="#0D121C" stroke="#355268"/>
+    <text x="1004" y="972" class="h2 red">KIA / WIPED SUMMARY</text>
+    <text x="1004" y="1006" class="mono red">KIA: 12</text>
+    <text x="1088" y="1006" class="mono">Fallen squads archived below command tree</text>
+
+    <!-- Bottom command dock -->
+    <rect x="24" y="1106" width="1376" height="58" fill="url(#panel)" stroke="#294C63" stroke-width="2"/>
+    <rect x="24" y="1104" width="1376" height="2" fill="url(#cyanBorder)" filter="url(#glow)"/>
+    <text x="46" y="1141" class="h2">COMMAND DOCK</text>
+
+    <rect x="210" y="1120" width="92" height="30" fill="#132132" stroke="#2E69A0"/>
+    <text x="226" y="1140" class="dock">CREATE SQUAD</text>
+    <rect x="312" y="1120" width="64" height="30" fill="#132132" stroke="#355268"/>
+    <text x="331" y="1140" class="dock">MOVE</text>
+    <rect x="386" y="1120" width="86" height="30" fill="#132132" stroke="#355268"/>
+    <text x="408" y="1140" class="dock">DOCTRINE</text>
+    <rect x="482" y="1120" width="86" height="30" fill="#132132" stroke="#355268"/>
+    <text x="504" y="1140" class="dock">TRANSFER</text>
+    <rect x="586" y="1120" width="630" height="30" fill="#090D16" stroke="#355268"/>
+    <text x="604" y="1140" class="mono">对 Marcus 下令... / 或切到 Chen、Emily、All 查看对应历史会话</text>
+    <rect x="1232" y="1120" width="86" height="30" fill="#143020" stroke="#2F9D58"/>
+    <text x="1258" y="1140" class="dock">SEND</text>
+    <rect x="1330" y="1120" width="64" height="30" fill="#142435" stroke="#2E69A0"/>
+    <text x="1350" y="1140" class="dock">PTT</text>
+  </g>
+</svg>

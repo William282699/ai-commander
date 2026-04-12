@@ -7,3 +7,8 @@ dist/
 apps/*/src/*.js
 packages/*/src/*.js
 apps/web/vite.config.js
+
+# Raw sprite assets (licensed, not for redistribution via git history)
+/tds-modern-pixel-game-kit/
+/tds-modern-pixel-game-kit.zip
+apps/web/public/sprites/tds/**/*.psd

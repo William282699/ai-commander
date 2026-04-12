@@ -56,6 +56,21 @@ export function getUnitCategory(type: UnitType): UnitCategory {
   return "air";
 }
 
+/**
+ * Foot / biological-infantry unit types. These share gameplay rules with
+ * regular infantry: they do NOT consume fuel to move, they DO benefit from
+ * urban/forest cover, they can entrench, and they can capture facilities in
+ * scenarios that allow infantry capture.
+ *
+ * Previously there was no single source of truth for this and each subsystem
+ * did its own ad-hoc check like `type !== "infantry"`, which incorrectly
+ * treated commander and elite_guard as mechanized — causing a silent shared-
+ * pool fuel drain that stalled entire squads.
+ */
+export function isFootUnit(type: UnitType): boolean {
+  return type === "infantry" || type === "commander" || type === "elite_guard";
+}
+
 // --- Unit State ---
 
 export type UnitState =

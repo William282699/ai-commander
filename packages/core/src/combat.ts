@@ -11,6 +11,7 @@ import {
   AMMO_EMPTY_FIRE_MULT,
   TERRAIN_DEFENSE_BONUS,
   getUnitCategory,
+  isFootUnit,
 } from "@ai-commander/shared";
 import { clearPathCache } from "./pathfinding";
 
@@ -43,8 +44,11 @@ function getTerrainDefenseMult(
   const t = terrain[ty][tx];
   const cat = getUnitCategory(defender.type);
 
-  // Infantry-only cover rules for urban/forest.
-  if ((t === "urban" || t === "forest") && defender.type !== "infantry") {
+  // Foot-infantry cover rules for urban/forest. Commander and elite_guard
+  // are biological infantry and benefit from the same cover as regular
+  // infantry — previously a direct `type !== "infantry"` check silently
+  // excluded them, even though they fight on foot identically.
+  if ((t === "urban" || t === "forest") && !isFootUnit(defender.type)) {
     return 1.0;
   }
 

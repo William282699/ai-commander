@@ -14,6 +14,16 @@ import type {
   BattleMarker,
 } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
+import { renderUnit, hasSpriteEntry } from "./rendering/unitRenderer";
+import { SPRITE_MANIFEST } from "./rendering/spriteManifest";
+import {
+  updateMuzzleFlashes,
+  drawMuzzleFlashes,
+} from "./rendering/juice/muzzleFlashLayer";
+import {
+  updateDeathSmoke,
+  drawDeathSmoke,
+} from "./rendering/juice/deathSmokeLayer";
 
 // --- Terrain colors ---
 
@@ -123,17 +133,24 @@ function buildMinimapCache(
   mmWidth: number,
   mmHeight: number,
 ): ImageData {
-  const surface: OffscreenCanvas | HTMLCanvasElement =
-    typeof OffscreenCanvas !== "undefined"
-      ? new OffscreenCanvas(mmWidth, mmHeight)
-      : (() => {
-          const canvas = document.createElement("canvas");
-          canvas.width = mmWidth;
-          canvas.height = mmHeight;
-          return canvas;
-        })();
-
-  const octx = surface.getContext("2d");
+  // Prefer OffscreenCanvas when available (no DOM cost) but fall back to
+  // HTMLCanvasElement for older browsers. Typed explicitly as the 2D context
+  // shared by both — OffscreenCanvasRenderingContext2D and
+  // CanvasRenderingContext2D have identical surface API for our usage
+  // (fillStyle/fillRect/getImageData). Keeping the two branches separate
+  // lets TS pick the correct `.getContext("2d")` overload instead of
+  // collapsing to the useless `RenderingContext` union.
+  type Ctx2D = OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
+  let octx: Ctx2D | null;
+  if (typeof OffscreenCanvas !== "undefined") {
+    const surface = new OffscreenCanvas(mmWidth, mmHeight);
+    octx = surface.getContext("2d");
+  } else {
+    const surface = document.createElement("canvas");
+    surface.width = mmWidth;
+    surface.height = mmHeight;
+    octx = surface.getContext("2d");
+  }
   if (!octx) {
     return new ImageData(mmWidth, mmHeight);
   }
@@ -337,11 +354,21 @@ export function renderUnits(
   selectedUnitIds?: Set<number>,
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
+  const baseUnitSize = Math.max(8, tileScreenSize * 0.7);
 
+  // Build id → unit lookup once per frame so sprite turrets can resolve their
+  // attackTarget. Out-of-view targets just won't be in the map and the turret
+  // falls back to body heading.
+  const allUnitsById = new Map<number, Unit>();
+  for (const u of units) allUnitsById.set(u.id, u);
+
+  // Pre-filter to units the player can actually see (alive + not fog-obscured).
+  // Drives both the draw loop below and muzzle-flash spawning — fogged enemies
+  // still run their attack logic in sim, so we must NOT leak flashes through
+  // the fog of war.
+  const visibleUnits: Unit[] = [];
   for (const unit of units) {
     if (unit.state === "dead") continue;
-
-    // Enemy units: only render if tile is "visible"
     if (unit.team === "enemy") {
       const tx = Math.floor(unit.position.x);
       const ty = Math.floor(unit.position.y);
@@ -350,7 +377,20 @@ export function renderUnits(
       if (tx < 0 || ty < 0 || tx >= fogW || ty >= fogH) continue;
       if (fog[ty]?.[tx] !== "visible") continue;
     }
+    visibleUnits.push(unit);
+  }
 
+  // Muzzle flash juice: spawn flashes for units that just fired. Must run
+  // BEFORE the draw loop so a flash spawned this frame also renders this frame.
+  updateMuzzleFlashes(visibleUnits, allUnitsById, gameTime, baseUnitSize);
+
+  // Death smoke juice: spawn a one-shot smoke puff the first frame a unit
+  // transitions to state="dead". Passes the FULL unit list (not visibleUnits)
+  // because the puff position is captured at spawn time and the draw call
+  // self-culls off-screen particles.
+  updateDeathSmoke(units, gameTime, baseUnitSize);
+
+  for (const unit of visibleUnits) {
     const screenX = (unit.position.x * TILE_SIZE - camera.x) * camera.zoom;
     const screenY = (unit.position.y * TILE_SIZE - camera.y) * camera.zoom;
 
@@ -365,7 +405,6 @@ export function renderUnits(
     }
 
     // MVP2: commander is 1.5x size
-    const baseUnitSize = Math.max(8, tileScreenSize * 0.7);
     const unitSize = unit.type === "commander" ? baseUnitSize * 1.5 : baseUnitSize;
     const cx = screenX + tileScreenSize / 2;
     const cy = screenY + tileScreenSize / 2;
@@ -401,34 +440,51 @@ export function renderUnits(
       borderColor = isPlayer ? "#1a5ab8" : "#a02020";
     }
 
-    // --- Attack flash: briefly brighten unit when it fires ---
-    const timeSinceAttack = gameTime - unit.lastAttackTime;
-    if (unit.state === "attacking" && timeSinceAttack < 0.12) {
-      if (unit.type === "commander") {
-        fillColor = "#FFEC80";
-      } else if (unit.type === "elite_guard") {
-        fillColor = "#FFFFAA";
-      } else {
-        fillColor = isPlayer
-          ? "rgba(120,200,255,1.0)"
-          : "rgba(255,150,100,1.0)";
+    // --- Attack flash (placeholder units only): briefly brighten body when firing ---
+    // Sprite-backed units get combat feedback from the muzzle flash juice layer
+    // and from the attacking-frame animation, so this only runs for fallback shapes.
+    if (!hasSpriteEntry(unit)) {
+      const timeSinceAttack = gameTime - unit.lastAttackTime;
+      if (unit.state === "attacking" && timeSinceAttack < 0.12) {
+        if (unit.type === "commander") {
+          fillColor = "#FFEC80";
+        } else if (unit.type === "elite_guard") {
+          fillColor = "#FFFFAA";
+        } else {
+          fillColor = isPlayer
+            ? "rgba(120,200,255,1.0)"
+            : "rgba(255,150,100,1.0)";
+        }
       }
     }
 
-    // --- Draw unit body ---
-    if (unit.type === "commander") {
-      drawStar(ctx, cx, cy, unitSize / 2);
-    } else if (unit.type === "elite_guard") {
-      drawHexagon(ctx, cx, cy, unitSize / 2);
-    } else {
+    // --- Draw unit body (sprite or procedural placeholder) ---
+    renderUnit(ctx, unit, cx, cy, baseUnitSize, gameTime, allUnitsById, fillColor, borderColor);
+
+    // --- Faction indicator (sprite units only) ---
+    // Sprite-backed units all share the same TDS art, so without a faction
+    // marker you can't tell player tanks from enemy tanks at a glance. Draw a
+    // small filled chevron above the unit: blue = player, red = enemy.
+    // (Placeholder units already encode team via fillColor, no marker needed.)
+    if (hasSpriteEntry(unit) && unit.type !== "commander") {
+      const drawScale = SPRITE_MANIFEST[unit.type]?.drawScale ?? 1;
+      const spriteHalf = (baseUnitSize * drawScale) / 2;
+      const markerSize = Math.max(4, baseUnitSize * 0.35);
+      const my = cy - spriteHalf - markerSize * 0.3;
+      ctx.save();
+      ctx.fillStyle = isPlayer ? "#3ea0ff" : "#ff3e3e";
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = Math.max(1, markerSize * 0.12);
       ctx.beginPath();
-      ctx.arc(cx, cy, unitSize / 2, 0, Math.PI * 2);
+      // Downward-pointing triangle (chevron)
+      ctx.moveTo(cx - markerSize * 0.5, my - markerSize * 0.5);
+      ctx.lineTo(cx + markerSize * 0.5, my - markerSize * 0.5);
+      ctx.lineTo(cx, my + markerSize * 0.25);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
     }
-    ctx.fillStyle = fillColor;
-    ctx.fill();
-    ctx.strokeStyle = borderColor;
-    ctx.lineWidth = 2;
-    ctx.stroke();
 
     // --- Entrench visual (trench arcs around infantry) ---
     const entrench = unit.entrenchLevel ?? 0;
@@ -465,14 +521,18 @@ export function renderUnits(
       ctx.restore();
     }
 
-    // --- Unit type symbol ---
-    const symbol = UNIT_SYMBOLS[unit.type] || "?";
-    const fontSize = Math.max(7, unitSize * 0.55);
-    ctx.font = `bold ${fontSize}px monospace`;
-    ctx.fillStyle = "#fff";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(symbol, cx, cy);
+    // --- Unit type symbol (placeholder units only) ---
+    // Sprite-backed units don't get a letter overlay — their silhouette is
+    // the identifier. Still drawn for any UnitType not in SPRITE_MANIFEST.
+    if (!hasSpriteEntry(unit)) {
+      const symbol = UNIT_SYMBOLS[unit.type] || "?";
+      const fontSize = Math.max(7, unitSize * 0.55);
+      ctx.font = `bold ${fontSize}px monospace`;
+      ctx.fillStyle = "#fff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(symbol, cx, cy);
+    }
 
     // --- Manual override indicator ---
     if (unit.manualOverride && isPlayer) {
@@ -525,6 +585,19 @@ export function renderUnits(
       ctx.fillRect(barX, barY, barWidth * hpRatio, barHeight);
     }
   }
+
+  // Draw juice LAST so it sits on top of unit bodies and HP bars. The
+  // world→screen transform must match the one used above for unit centers
+  // (note the +tileScreenSize/2 half-tile offset) so a flash spawned at
+  // unit.position lines up with the muzzle tip of the rendered sprite.
+  // Smoke draws first, flash draws second — flash should be on top of smoke
+  // if (in the rare case) a unit dies the same frame a nearby unit fires.
+  const worldToScreen = (wx: number, wy: number) => ({
+    sx: (wx * TILE_SIZE - camera.x) * camera.zoom + tileScreenSize / 2,
+    sy: (wy * TILE_SIZE - camera.y) * camera.zoom + tileScreenSize / 2,
+  });
+  drawDeathSmoke(ctx, gameTime, worldToScreen);
+  drawMuzzleFlashes(ctx, gameTime, worldToScreen);
 
   ctx.textAlign = "start";
   ctx.textBaseline = "alphabetic";

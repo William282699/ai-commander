@@ -22,7 +22,7 @@ import type {
   QuantityHint,
   UnitCategoryHint,
 } from "@ai-commander/shared";
-import { getUnitCategory, UNIT_STATS, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit } from "@ai-commander/shared";
+import { getUnitCategory, UNIT_STATS, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit, isFootUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { createMission } from "./missions";
 import { getFormationOffset, computeHeading, type FormationStyle } from "./formation";
@@ -1338,7 +1338,9 @@ function matchesUnitTypeHint(unit: Unit, hint: UnitCategoryHint): boolean {
         unit.type === "artillery"
       );
     case "infantry":
-      return unit.type === "infantry";
+      // "infantry" hint covers all biological foot units, including commander
+      // and elite_guard — they share infantry movement/cover/capture rules.
+      return isFootUnit(unit.type);
     case "air":
       return getUnitCategory(unit.type) === "air";
     case "naval":

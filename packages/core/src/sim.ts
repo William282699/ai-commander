@@ -7,6 +7,7 @@ import type { GameState, Unit, OrderAction } from "@ai-commander/shared";
 import {
   TERRAIN_MOVE_MULT,
   getUnitCategory,
+  isFootUnit,
 } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./movementRules";
 export { canUnitEnterTile };
@@ -83,11 +84,12 @@ export function tick(state: GameState, dt: number): void {
   // 2.5. Regen: commander HP regen + HQ repair (after combat)
   processRegen(state, dt);
 
-  // 2.6. Entrench timer: infantry in defend state accumulate trench level
+  // 2.6. Entrench timer: foot infantry in defend state accumulate trench level
   state.units.forEach((unit) => {
     if (unit.hp <= 0 || unit.state === "dead") return;
-    // Only infantry / elite_guard can entrench
-    if (unit.type !== "infantry" && unit.type !== "elite_guard") return;
+    // Only foot-infantry (infantry / commander / elite_guard) can entrench —
+    // vehicles and aircraft have no dug-in animation and gain no trench bonus.
+    if (!isFootUnit(unit.type)) return;
 
     if (unit.state === "defending" && unit.target === null) {
       // Stationary defending — accumulate entrench time
@@ -127,7 +129,17 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
   if (!canUnitMove(unit, state)) {
     clearOneShotOrders(unit);
     if (unit.team === "player") {
-      pushDiagnostic(state, "NO_FUEL", `${unit.type}#${unit.id} 燃油耗尽，无法移动`);
+      // Include fuel reading + order context so the player can instantly
+      // diagnose "是油不够还是卡住了" without inspecting state.
+      const fuel = state.economy.player.resources.fuel;
+      const hadOrder = unit.orders[0]?.action ?? "none";
+      const tx = unit.target?.x?.toFixed(0) ?? "-";
+      const ty = unit.target?.y?.toFixed(0) ?? "-";
+      pushDiagnostic(
+        state,
+        "NO_FUEL",
+        `⛽ ${unit.type}#${unit.id} 燃油耗尽 (库存${fuel.toFixed(0)}) — ${hadOrder}→(${tx},${ty}) 中止`,
+      );
     }
     return;
   }

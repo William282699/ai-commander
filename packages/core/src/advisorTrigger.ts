@@ -20,12 +20,63 @@ export interface AdvisorTriggerResult {
 
 /**
  * Compute pressure ratio for a front (enemyPower / playerPower).
- * Returns 0 if front not found or playerPower is 0.
+ *
+ * IMPORTANT: Computes power live from state.units instead of reading the cached
+ * front.playerPower / front.enemyPower fields. Those cached fields are ONLY
+ * refreshed inside buildDigest() → updateFrontPower(), which runs on LLM calls
+ * (heartbeat, staff-ask) — NOT in the main game tick. So at game start the
+ * cached values are 0 and UNDER_ATTACK → crisis_card never fires until the
+ * first LLM call incidentally refreshes them.
+ *
+ * This mirrors the precedent in reportSignals.ts::detectPositionCritical which
+ * also computes local realtime stats to avoid the same staleness bug. We use
+ * the same power formula as intelDigest.ts::updateFrontPower so that pressure
+ * is consistent with what the LLM digest later reports.
+ *
+ * Returns 0 if front not found or no live player power. Returns Infinity when
+ * player power is 0 but enemy power exists (total collapse — always fires).
  */
 function getFrontPressure(state: GameState, frontId: string): number {
   const front = state.fronts.find(f => f.id === frontId);
-  if (!front || front.playerPower <= 0) return 0;
-  return front.enemyPower / front.playerPower;
+  if (!front) return 0;
+
+  const regionBboxes: [number, number, number, number][] = [];
+  for (const rid of front.regionIds) {
+    const region = state.regions.get(rid);
+    if (region) regionBboxes.push(region.bbox);
+  }
+  if (regionBboxes.length === 0) return 0;
+
+  let playerPower = 0;
+  let enemyPower = 0;
+
+  state.units.forEach((unit) => {
+    if (unit.state === "dead" || unit.hp <= 0) return;
+    const inFront = regionBboxes.some(
+      ([x1, y1, x2, y2]) =>
+        unit.position.x >= x1 &&
+        unit.position.x <= x2 &&
+        unit.position.y >= y1 &&
+        unit.position.y <= y2,
+    );
+    if (!inFront) return;
+
+    const interval = unit.attackInterval > 0 ? unit.attackInterval : 1;
+    const power = (unit.hp / unit.maxHp) * unit.attackDamage / interval * 10;
+
+    if (unit.team === "player") {
+      playerPower += power;
+    } else if (unit.team === "enemy") {
+      // Note: do NOT gate by fog here. An UNDER_ATTACK event implies the
+      // player unit is actively taking damage, so adjacent enemies are by
+      // definition visible — fog gating would only hide pressure from
+      // legitimate crisis scenarios.
+      enemyPower += power;
+    }
+  });
+
+  if (playerPower <= 0) return enemyPower > 0 ? Infinity : 0;
+  return enemyPower / playerPower;
 }
 
 /**

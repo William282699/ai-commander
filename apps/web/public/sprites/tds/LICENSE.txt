@@ -1,0 +1,8 @@
+Sprites in this directory are derived from the CraftPix "Top Down Shooter: Modern Pixel Game Kit"
+asset pack, purchased under the CraftPix standard commercial license.
+
+Full license: https://craftpix.net/file-licenses/
+
+Source .psd files and the raw unorganized asset pack are NOT redistributed here.
+Only the PNG frames actually used at runtime are checked in, under the renaming scheme
+documented in SPRITE_INTEGRATION_PLAN.md §2.

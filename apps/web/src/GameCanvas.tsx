@@ -64,6 +64,7 @@ import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, remove
 import { ChatPanel } from "./ChatPanel";
 import { TaskBar } from "./TaskBar";
 import * as messageStoreModule from "./messageStore";
+import { preloadSprites, spriteCount } from "./rendering/spriteLoader";
 import {
   addMessage,
   clearMessages,
@@ -147,9 +148,15 @@ function resetHeartbeatState(): void {
   heartbeatState.combatWindowUntil = 0;
 }
 
-/** Diagnostic codes suppressed from Staff Feed (still logged to state.diagnostics). */
+/** Diagnostic codes suppressed from Staff Feed (still logged to state.diagnostics).
+ *
+ * PATH_BLOCKED and NO_FUEL are intentionally NOT suppressed — when a player
+ * squad silently halts mid-march, the player has no way to tell whether it's
+ * a fuel issue, a pathfinding failure, or a combat engagement. Both codes
+ * already have a 30s dedup at source (DIAG_LOW_VALUE_DEDUP_SEC in sim.ts),
+ * so they won't flood the feed.
+ */
 const SUPPRESSED_DIAG_CODES = new Set([
-  "PATH_BLOCKED",
   "IMPASSABLE_TERRAIN",
   // El Alamein defensive-AI debug diagnostics — useful in dev tooling, too noisy for the feed.
   "DEFAI_ROLES",
@@ -159,6 +166,7 @@ const SUPPRESSED_DIAG_CODES = new Set([
 /** Map diagnostic code → feed message level */
 const DIAG_LEVEL: Record<string, MessageLevel> = {
   NO_FUEL: "warning",
+  PATH_BLOCKED: "warning",
   PRODUCE_FAIL: "warning",
   TRADE_FAIL: "warning",
   NO_VISIBLE_TARGET: "warning",
@@ -355,6 +363,15 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     screenY: number;
     canCapture: boolean;
   } | null>(null);
+
+  // Preload sprite atlas PNGs once on mount. The renderer silently falls back
+  // to a procedural placeholder for any bitmap that hasn't finished loading,
+  // so the game can start immediately and sprites pop in as they arrive.
+  useEffect(() => {
+    preloadSprites().then(() => {
+      console.log(`[sprites] loaded ${spriteCount()} bitmaps`);
+    });
+  }, []);
 
   // Day 15: poll tag mode from input ref for React-driven banner
   const [isTagMode, setIsTagMode] = useState(false);
