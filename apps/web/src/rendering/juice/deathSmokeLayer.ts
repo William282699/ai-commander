@@ -71,6 +71,13 @@ const alreadySmoked = new WeakMap<Unit, true>();
 /** All active puffs. Finished ones are filtered out on each draw pass. */
 const puffs: Puff[] = [];
 
+// --- Sound callback (injected by combatSounds.ts) ---
+let deathSoundCallback: ((unit: Unit, gameTime: number) => void) | null = null;
+
+export function setDeathSoundCallback(cb: (unit: Unit, gameTime: number) => void): void {
+  deathSoundCallback = cb;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -92,6 +99,7 @@ export function updateDeathSmoke(
     if (unit.state !== "dead") continue;
     if (alreadySmoked.has(unit)) continue;
     alreadySmoked.set(unit, true);
+    deathSoundCallback?.(unit, gameTime);
     puffs.push({
       worldX: unit.position.x,
       worldY: unit.position.y,

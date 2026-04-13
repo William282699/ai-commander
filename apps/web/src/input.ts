@@ -11,7 +11,14 @@ import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 
 const SCROLL_SPEED = 400; // pixels per second
 const ZOOM_SPEED = 0.1;
-const MIN_ZOOM = 0.3;
+/** Dynamic min zoom: small enough to see the full map without blank edges */
+function getMinZoom(canvasW: number, canvasH: number, mapW: number, mapH: number): number {
+  const fitW = canvasW / (mapW * TILE_SIZE);
+  const fitH = canvasH / (mapH * TILE_SIZE);
+  // Use max so the map fills the viewport completely (no blank strips);
+  // the user can still scroll to see the shorter-axis edges.
+  return Math.max(fitW, fitH);
+}
 const MAX_ZOOM = 2.0;
 const EDGE_SCROLL_MARGIN = 20; // pixels from screen edge
 const EDGE_SCROLL_SPEED = 300;
@@ -164,7 +171,8 @@ export function setupInputListeners(
     e.preventDefault();
     const dir = e.deltaY < 0 ? 1 : -1;
     const oldZoom = camera.zoom;
-    camera.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, camera.zoom + dir * ZOOM_SPEED));
+    const minZoom = getMinZoom(canvas.width, canvas.height, input.mapWidth, input.mapHeight);
+    camera.zoom = Math.max(minZoom, Math.min(MAX_ZOOM, camera.zoom + dir * ZOOM_SPEED));
 
     // Zoom toward mouse position
     const rect = canvas.getBoundingClientRect();

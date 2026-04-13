@@ -66,6 +66,9 @@ import { TaskBar } from "./TaskBar";
 import * as messageStoreModule from "./messageStore";
 import { preloadSprites, spriteCount } from "./rendering/spriteLoader";
 import { preloadTerrainTiles, terrainBitmapCount } from "./rendering/terrain/terrainTileLoader";
+import { soundManager } from "./rendering/audio/soundManager";
+import { initCombatSounds } from "./rendering/audio/combatSounds";
+import { startAmbientSounds, stopAmbientSounds } from "./rendering/audio/ambientSounds";
 import {
   addMessage,
   clearMessages,
@@ -375,6 +378,12 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     preloadTerrainTiles().then(() => {
       console.log(`[terrain] loaded ${terrainBitmapCount()} bitmaps`);
     });
+    // Sound system init
+    soundManager.init();
+    initCombatSounds();
+    return () => {
+      stopAmbientSounds();
+    };
   }, []);
 
   // Day 15: poll tag mode from input ref for React-driven banner
@@ -492,6 +501,35 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  // ── Sound: ambient start on first user gesture + M to mute ──
+  useEffect(() => {
+    let ambientTriggered = false;
+    const triggerAmbient = () => {
+      if (ambientTriggered) return;
+      ambientTriggered = true;
+      startAmbientSounds();
+      document.removeEventListener("click", triggerAmbient);
+      document.removeEventListener("keydown", triggerAmbient);
+    };
+    document.addEventListener("click", triggerAmbient);
+    document.addEventListener("keydown", triggerAmbient);
+
+    const muteHandler = (e: KeyboardEvent) => {
+      if (e.key !== "m" && e.key !== "M") return;
+      if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = e.target as HTMLElement;
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) return;
+      soundManager.toggleMute();
+    };
+    window.addEventListener("keydown", muteHandler);
+
+    return () => {
+      document.removeEventListener("click", triggerAmbient);
+      document.removeEventListener("keydown", triggerAmbient);
+      window.removeEventListener("keydown", muteHandler);
+    };
   }, []);
 
   // Stable callback: returns current box-selected unit IDs
@@ -839,6 +877,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
             input.selectionEndScreenY,
           );
           input.selectedUnitIds = ids;
+          if (ids.length > 0) soundManager.play("select");
         } else {
           // Single click: check if clicked on "Return to AI" button first
           const clickX = input.selectionEndScreenX;
@@ -859,6 +898,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
             const unitId = findUnitAtClick(state, camera, clickX, clickY);
             if (unitId !== null) {
               input.selectedUnitIds = [unitId];
+              soundManager.play("select");
             } else {
               // Clicked empty ground — deselect
               input.selectedUnitIds = [];
@@ -874,6 +914,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
           // Release manual override on all selected units
           releaseManualOverride(state, input.selectedUnitIds);
           input.selectedUnitIds = [];
+          soundManager.play("deselect");
         }
       }
 
@@ -951,6 +992,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
                 priority: "high",
               };
               applyPlayerCommands(state, [order]);
+              soundManager.play("order");
             } else {
               // Day 13: Check if clicking on a facility → show context menu
               const facTarget = findFacilityAtPosition(state, cmd.worldX, cmd.worldY);
@@ -973,6 +1015,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
                   priority: "medium",
                 };
                 applyPlayerCommands(state, [order]);
+                soundManager.play("order");
               }
             }
           }

@@ -136,7 +136,8 @@ apps/web/public/sfx/
 │   ├── explosion_01.ogg    ← Unit death (small)
 │   ├── explosion_02.ogg    ← Unit death variant
 │   ├── explosion_03.ogg    ← Unit death (large, for tanks)
-│   └── artillery_01.ogg    ← Artillery fire (deep boom)
+│   ├── artillery_01.ogg    ← Artillery fire (deep boom)
+│   └── death_scream_01.ogg ← Infantry death scream (short 0.5-1s, only for infantry units, NOT tanks)
 ├── ambient/
 │   ├── desert_wind.ogg     ← Looping desert wind
 │   └── distant_battle.ogg  ← Optional: faint distant gunfire loop
@@ -144,7 +145,9 @@ apps/web/public/sfx/
     ├── click.ogg           ← Button/menu click
     ├── select.ogg          ← Unit selection
     ├── order.ogg           ← Move/attack order issued
-    └── deselect.ogg        ← ESC / deselect
+    ├── deselect.ogg        ← ESC / deselect
+    ├── roger.ogg           ← "Roger that" / "Yes sir" military radio acknowledgement (plays when unit receives order)
+    └── warning.ogg         ← Alert/alarm beep (plays when critical_front battle marker appears — red pulsing circle)
 ```
 
 **File format**: `.ogg` (Vorbis) preferred — small size, good quality, supported everywhere except Safari. For Safari fallback, Howler can auto-switch to `.mp3` if we provide both. For MVP, `.ogg` only is fine (Safari 17+ supports it). If the user provides `.mp3` or `.wav` files instead, adjust the manifest paths accordingly.
@@ -190,11 +193,16 @@ export const SOUND_MANIFEST: SoundEntry[] = [
   { id: "desert_wind",    src: "/sfx/ambient/desert_wind.ogg",   volume: 0.15, category: "ambient", loop: true, maxInstances: 1 },
   { id: "distant_battle", src: "/sfx/ambient/distant_battle.ogg",volume: 0.08, category: "ambient", loop: true, maxInstances: 1 },
 
+  // --- Combat (voice) ---
+  { id: "death_scream_01", src: "/sfx/combat/death_scream_01.ogg", volume: 0.30, category: "combat", loop: false, maxInstances: 3 },
+
   // --- UI ---
   { id: "click",          src: "/sfx/ui/click.ogg",              volume: 0.30, category: "ui", loop: false, maxInstances: 2 },
   { id: "select",         src: "/sfx/ui/select.ogg",             volume: 0.25, category: "ui", loop: false, maxInstances: 2 },
   { id: "order",          src: "/sfx/ui/order.ogg",              volume: 0.30, category: "ui", loop: false, maxInstances: 2 },
   { id: "deselect",       src: "/sfx/ui/deselect.ogg",           volume: 0.20, category: "ui", loop: false, maxInstances: 2 },
+  { id: "roger",          src: "/sfx/ui/roger.ogg",              volume: 0.35, category: "ui", loop: false, maxInstances: 2 },
+  { id: "warning",        src: "/sfx/ui/warning.ogg",            volume: 0.40, category: "ui", loop: false, maxInstances: 1 },
 ];
 
 // Unit type → attack sound ID mapping
@@ -213,10 +221,23 @@ export const ATTACK_SOUND_BY_UNIT_TYPE: Record<string, string[]> = {
 };
 
 // Unit category → death sound ID mapping
+// Infantry deaths play BOTH an explosion AND a scream (layered)
+// Vehicle/air deaths play only explosion (no scream — they're in a tank)
 export const DEATH_SOUND_BY_CATEGORY: Record<string, string[]> = {
   ground_vehicle: ["explosion_03"],           // big explosion for tanks
   ground_infantry: ["explosion_01", "explosion_02"],  // smaller explosion for infantry
   air: ["explosion_03"],                      // big explosion for aircraft
+};
+
+// Infantry types that also play a death scream on top of the explosion
+export const INFANTRY_SCREAM_TYPES: Set<string> = new Set([
+  "infantry", "elite_guard", "commander",
+]);
+
+// Battle marker type → alert sound mapping
+// When a new critical_front marker appears, play the warning sound
+export const BATTLE_MARKER_ALERT_SOUNDS: Partial<Record<string, string>> = {
+  critical_front: "warning",   // red pulsing circle = danger alert
 };
 ```
 
@@ -477,7 +498,7 @@ if (curr > prev) {
 import { setAttackSoundCallback } from "../juice/muzzleFlashLayer";
 import { setDeathSoundCallback } from "../juice/deathSmokeLayer";
 import { soundManager } from "./soundManager";
-import { ATTACK_SOUND_BY_UNIT_TYPE, DEATH_SOUND_BY_CATEGORY } from "./soundManifest";
+import { ATTACK_SOUND_BY_UNIT_TYPE, DEATH_SOUND_BY_CATEGORY, INFANTRY_SCREAM_TYPES } from "./soundManifest";
 import type { Unit } from "@ai-commander/shared";
 
 function getUnitCategory(unitType: string): string {
@@ -504,6 +525,11 @@ export function initCombatSounds(): void {
     const soundIds = DEATH_SOUND_BY_CATEGORY[category];
     if (soundIds) {
       soundManager.playRandom(soundIds);
+    }
+
+    // Infantry units also play a death scream on top of the explosion
+    if (INFANTRY_SCREAM_TYPES.has(unit.type)) {
+      soundManager.play("death_scream_01");
     }
   });
 }
@@ -624,6 +650,7 @@ if (input.selectionComplete) {
 if (input.rightClickCommand) {
   // ... existing order logic ...
   soundManager.play("order");
+  soundManager.play("roger");  // "Roger that" / "Yes sir" radio acknowledgement
 }
 
 // After ESC deselect (around line 876):
@@ -634,6 +661,51 @@ if (input.escPressed) {
 ```
 
 These are tiny 1-line additions at existing code points. No structural changes to the input handling flow.
+
+### 8.1 Warning sound — Hook into battle markers
+
+The warning alert plays when a new `critical_front` battle marker appears (the red pulsing circle that indicates a dangerous situation). This is detected in the render loop where battle markers are drawn.
+
+**In `combatSounds.ts`, add a battle marker sound detector:**
+
+```typescript
+import { BATTLE_MARKER_ALERT_SOUNDS } from "./soundManifest";
+import type { BattleMarker } from "@ai-commander/shared";
+
+// Track which battle markers we've already alerted on (by marker ID)
+const alertedMarkers = new Set<string>();
+
+/**
+ * Call this each frame with the current battle markers array.
+ * Detects NEW critical_front markers and plays the warning sound.
+ */
+export function updateBattleMarkerSounds(markers: BattleMarker[]): void {
+  for (const m of markers) {
+    if (alertedMarkers.has(m.id)) continue;  // already alerted
+    const soundId = BATTLE_MARKER_ALERT_SOUNDS[m.type];
+    if (soundId) {
+      soundManager.play(soundId);
+      alertedMarkers.add(m.id);
+    }
+  }
+  // Cleanup expired markers from the set (prevent memory leak)
+  if (alertedMarkers.size > 100) {
+    const activeIds = new Set(markers.map(m => m.id));
+    for (const id of alertedMarkers) {
+      if (!activeIds.has(id)) alertedMarkers.delete(id);
+    }
+  }
+}
+```
+
+**In `GameCanvas.tsx` render loop, after `drawBattleMarkers()` call:**
+
+```typescript
+// After drawBattleMarkers (around line 1373):
+updateBattleMarkerSounds(state.battleMarkers);
+```
+
+This triggers the warning alert exactly once per new critical_front marker. The player hears "⚠️ beep" when a critical front appears on the map.
 
 ---
 
@@ -687,10 +759,11 @@ This is a nice-to-have. The user can also control volume via `soundManager.setMa
 - **Does NOT change any existing smoke logic**
 
 ### 10.3 `GameCanvas.tsx`
-- Add imports (3 lines)
+- Add imports (4 lines — soundManager, initCombatSounds, ambientSounds, updateBattleMarkerSounds)
 - Add `soundManager.init()` + `initCombatSounds()` in useEffect (3 lines)
 - Add ambient sound start on first user gesture (~8 lines)
-- Add UI sound triggers at 3 existing input points (3 lines)
+- Add UI sound triggers at 3 existing input points (4 lines — select, order+roger, deselect)
+- Add `updateBattleMarkerSounds(state.battleMarkers)` after drawBattleMarkers call (1 line)
 - Add mute toggle on `M` key (3 lines)
 - **Does NOT change any existing game logic or rendering**
 
@@ -711,9 +784,12 @@ This is a nice-to-have. The user can also control volume via `soundManager.setMa
 8. ☐ Edit `GameCanvas.tsx` — add initialization + ambient start + UI triggers + mute toggle (§9)
 9. ☐ Create `apps/web/public/sfx/` directory structure and check if user has placed audio files
 10. ☐ Run `pnpm dev` — smoke test:
-    - Console: `[audio] initialized 16 sounds`
-    - Click on canvas → ambient wind starts (if `desert_wind.ogg` exists)
+    - Console: `[audio] initialized 19 sounds` (16 original + death_scream + roger + warning)
+    - Click on canvas → ambient wind starts (if `desert_wind` file exists)
     - Trigger combat → attack sounds play (if combat audio files exist)
+    - Infantry dies → explosion + scream layered together
+    - Right-click to issue order → "order" + "roger that" plays
+    - Critical front appears → warning alert beep
     - Press `M` → mute toggle
     - If audio files are missing, Howler logs warnings but game runs fine
 11. ☐ Type-check: `pnpm -C apps/web tsc --noEmit` — zero errors

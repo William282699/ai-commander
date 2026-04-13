@@ -101,6 +101,13 @@ const lastSeenAttackTime = new WeakMap<Unit, number>();
 /** All active flashes. Finished ones are filtered out on each draw pass. */
 const flashes: Flash[] = [];
 
+// --- Sound callback (injected by combatSounds.ts) ---
+let attackSoundCallback: ((unit: Unit, gameTime: number) => void) | null = null;
+
+export function setAttackSoundCallback(cb: (unit: Unit, gameTime: number) => void): void {
+  attackSoundCallback = cb;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -118,9 +125,6 @@ export function updateMuzzleFlashes(
   baseUnitSize: number,
 ): void {
   for (const unit of visibleUnits) {
-    const set = FLASH_SET_BY_TYPE[unit.type];
-    if (!set) continue;
-
     const prev = lastSeenAttackTime.get(unit);
     const curr = unit.lastAttackTime;
 
@@ -132,32 +136,27 @@ export function updateMuzzleFlashes(
     }
 
     if (curr > prev) {
-      // Unit just fired. Spawn a flash at the muzzle tip.
+      // Unit just fired.
       lastSeenAttackTime.set(unit, curr);
+      // Sound callback fires for ALL unit types (infantry, tanks, etc.)
+      attackSoundCallback?.(unit, gameTime);
 
-      // Only render if the unit actually has a meaningful attackTarget — the
-      // turret rotation depends on it. If there's no target we skip (no visible
-      // aim direction).
-      const rot = getTurretHeading(unit, gameTime, allUnitsById);
-      const offsetScale = MUZZLE_OFFSET_BY_TYPE[unit.type] ?? 0.5;
-      // Convert the forward offset from "fraction of rendered sprite size" to
-      // world-tile units. The rendered sprite is baseUnitSize * drawScale px
-      // across, and baseUnitSize ≈ TILE_SIZE * zoom * 0.7, so converting to
-      // world tiles cancels the zoom:
-      //   screen offset = offsetScale * baseUnitSize * drawScale
-      //   world offset  = screen offset / (TILE_SIZE * zoom)
-      //                 = offsetScale * drawScale * 0.7
-      // This keeps the flash anchored at the barrel tip regardless of camera zoom.
-      const drawScale = SPRITE_MANIFEST[unit.type]?.drawScale ?? 1;
-      const worldOffset = offsetScale * drawScale * 0.7;
-      flashes.push({
-        worldX: unit.position.x + Math.cos(rot) * worldOffset,
-        worldY: unit.position.y + Math.sin(rot) * worldOffset,
-        rot,
-        startTime: gameTime,
-        set,
-        baseUnitSize,
-      });
+      // Muzzle flash visual — only for unit types with a flash set
+      const set = FLASH_SET_BY_TYPE[unit.type];
+      if (set) {
+        const rot = getTurretHeading(unit, gameTime, allUnitsById);
+        const offsetScale = MUZZLE_OFFSET_BY_TYPE[unit.type] ?? 0.5;
+        const drawScale = SPRITE_MANIFEST[unit.type]?.drawScale ?? 1;
+        const worldOffset = offsetScale * drawScale * 0.7;
+        flashes.push({
+          worldX: unit.position.x + Math.cos(rot) * worldOffset,
+          worldY: unit.position.y + Math.sin(rot) * worldOffset,
+          rot,
+          startTime: gameTime,
+          set,
+          baseUnitSize,
+        });
+      }
     }
   }
 }
