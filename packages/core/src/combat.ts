@@ -234,6 +234,7 @@ export function processCombat(state: GameState, dt: number): void {
 
     // MVP2: record last damage time for regen delay
     target.lastDamagedAt = now;
+    target.lastDamagedById = unit.id;
 
     // Consume ammo
     const ecoKey = unit.team === "player" ? "player" : "enemy" as const;

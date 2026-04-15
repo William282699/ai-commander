@@ -31,6 +31,9 @@ const LOW_HP_THRESHOLD = 0.25;   // 25% maxHP
 const ENGAGE_RANGE = 8;          // tiles
 // PATROL_RANGE removed (Day 9.5 Batch A: idle auto-patrol disabled)
 
+const RECENTLY_DAMAGED_WINDOW = 3.0;  // seconds — "recently damaged" for chase response
+const ALLY_ASSIST_RANGE = 15;          // tiles — scan radius for fighting allies
+
 // ── Main entry ──
 
 export function processAutoBehavior(state: GameState, dt: number): void {
@@ -114,7 +117,33 @@ function runAutoBehavior(state: GameState): void {
       }
     }
 
-    // 4b: Idle patrol — DISABLED (Day 9.5 Batch A)
+    // 4b: Chase outranging attacker — recently damaged idle unit closes distance
+    if (unit.state === "idle" || unit.state === "defending") {
+      const chaseTarget = findOutrangingAttacker(unit, state);
+      if (chaseTarget) {
+        unit.state = "moving";
+        clearPathCache(unit.id);
+        unit.target = { x: chaseTarget.position.x, y: chaseTarget.position.y };
+        unit.waypoints = [{ x: chaseTarget.position.x, y: chaseTarget.position.y }];
+        unit.attackTarget = null;
+        return;
+      }
+    }
+
+    // 4c: Assist nearby fighting ally — idle unit joins nearby combat
+    if (unit.state === "idle" || unit.state === "defending") {
+      const allyTarget = findAllyBattleTarget(unit, state);
+      if (allyTarget) {
+        unit.state = "moving";
+        clearPathCache(unit.id);
+        unit.target = { x: allyTarget.position.x, y: allyTarget.position.y };
+        unit.waypoints = [{ x: allyTarget.position.x, y: allyTarget.position.y }];
+        unit.attackTarget = null;
+        return;
+      }
+    }
+
+    // 4d: Idle patrol — DISABLED (Day 9.5 Batch A)
     // Idle units stay idle until player issues a patrol command.
     // PatrolTask system (Batch B) will replace this.
   });
@@ -153,6 +182,108 @@ function findNearestEnemy(unit: Unit, state: GameState, maxRange: number): Unit 
   });
 
   return best;
+}
+
+/**
+ * 4b helper: Chase outranging attacker.
+ * If unit was recently damaged and is idle, find a visible enemy within
+ * visionRange to close distance on. Prioritizes the unit that last attacked us.
+ */
+function findOutrangingAttacker(unit: Unit, state: GameState): Unit | null {
+  const now = state.time;
+  const lastDamaged = unit.lastDamagedAt ?? 0;
+  if (now - lastDamaged > RECENTLY_DAMAGED_WINDOW) return null;
+
+  // Helper: check if target is visible to this unit's team
+  const isVisible = (target: Unit): boolean => {
+    if (unit.team === "player") {
+      const tx = Math.floor(target.position.x);
+      const ty = Math.floor(target.position.y);
+      return state.fog[ty]?.[tx] === "visible";
+    }
+    return true; // enemy has local omniscience (consistent with findNearestEnemy)
+  };
+
+  // First: try the specific attacker that hit us
+  if (unit.lastDamagedById !== undefined) {
+    const attacker = state.units.get(unit.lastDamagedById);
+    if (attacker && attacker.hp > 0 && attacker.state !== "dead"
+        && attacker.team !== unit.team && isVisible(attacker)) {
+      const dx = attacker.position.x - unit.position.x;
+      const dy = attacker.position.y - unit.position.y;
+      const dist2 = dx * dx + dy * dy;
+      if (dist2 <= unit.visionRange * unit.visionRange) {
+        return attacker;
+      }
+    }
+  }
+
+  // Fallback: nearest visible enemy within visionRange but beyond attackRange
+  let best: Unit | null = null;
+  let bestDist = unit.visionRange * unit.visionRange;
+
+  state.units.forEach((other) => {
+    if (other.team === unit.team) return;
+    if (other.hp <= 0 || other.state === "dead") return;
+    if (!isVisible(other)) return;
+
+    const dx = other.position.x - unit.position.x;
+    const dy = other.position.y - unit.position.y;
+    const d2 = dx * dx + dy * dy;
+
+    // Only targets beyond attackRange (within-range handled by 4a/findTarget)
+    if (d2 <= unit.attackRange * unit.attackRange) return;
+    if (d2 < bestDist) {
+      bestDist = d2;
+      best = other;
+    }
+  });
+
+  return best;
+}
+
+/**
+ * 4c helper: Find enemy to engage near a fighting ally.
+ * Scans for friendly units within ALLY_ASSIST_RANGE in "attacking" state,
+ * then returns their attack target if visible to this unit.
+ */
+function findAllyBattleTarget(unit: Unit, state: GameState): Unit | null {
+  let bestAllyDist = ALLY_ASSIST_RANGE * ALLY_ASSIST_RANGE;
+  let bestEnemy: Unit | null = null;
+
+  state.units.forEach((ally) => {
+    if (ally.id === unit.id) return;
+    if (ally.team !== unit.team) return;
+    if (ally.hp <= 0 || ally.state === "dead") return;
+    if (ally.state !== "attacking") return;
+
+    // Is ally within assist range?
+    const adx = ally.position.x - unit.position.x;
+    const ady = ally.position.y - unit.position.y;
+    const allyDist2 = adx * adx + ady * ady;
+    if (allyDist2 > ALLY_ASSIST_RANGE * ALLY_ASSIST_RANGE) return;
+
+    // Find ally's combat target
+    if (ally.attackTarget === null) return;
+    const allyEnemy = state.units.get(ally.attackTarget);
+    if (!allyEnemy || allyEnemy.hp <= 0 || allyEnemy.state === "dead") return;
+    if (allyEnemy.team === unit.team) return;
+
+    // Visibility check — consistent with findNearestEnemy
+    if (unit.team === "player") {
+      const tx = Math.floor(allyEnemy.position.x);
+      const ty = Math.floor(allyEnemy.position.y);
+      if (state.fog[ty]?.[tx] !== "visible") return;
+    }
+
+    // Prefer closest fighting ally's target
+    if (allyDist2 < bestAllyDist) {
+      bestAllyDist = allyDist2;
+      bestEnemy = allyEnemy;
+    }
+  });
+
+  return bestEnemy;
 }
 
 /**

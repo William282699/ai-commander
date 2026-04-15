@@ -88,10 +88,10 @@ export function createElAlameinState(): GameState {
       })(),
       enemy: (() => {
         const eco = makeEconomy();
-        eco.resources.money = 2500;
-        eco.resources.fuel = 150;
-        eco.resources.ammo = 150;
-        eco.baseIncome = { money: 100, fuel: 20, ammo: 20, intel: 10 };
+        eco.resources.money = 4000;   // Axis well-stocked at start
+        eco.resources.fuel = 250;     // Enough for sustained early ops
+        eco.resources.ammo = 250;     // Ample ammo reserves
+        eco.baseIncome = { money: 150, fuel: 35, ammo: 30, intel: 10 };
         return eco;
       })(),
     },

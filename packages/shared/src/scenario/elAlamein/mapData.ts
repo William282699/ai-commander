@@ -568,5 +568,4 @@ export const EL_ALAMEIN_OBJECTIVES: string[] = [
   "ea_kidney_ridge",
   "ea_miteirya_ridge",
   "ea_himeimat",
-  "ea_rommel_hq",
 ];

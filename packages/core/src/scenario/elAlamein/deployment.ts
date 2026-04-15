@@ -201,6 +201,14 @@ export function deployElAlameinUnits(): { units: Map<number, Unit>; nextUnitId: 
   placeGroup("infantry", "enemy", blockFormation(110, 108, 3, 2));
   placeGroup("light_tank", "enemy", [[105, 115], [115, 115]]);
 
+  // §8: Forward Screening Force (190, 50) — between objectives and player
+  placeGroup("infantry", "enemy", blockFormation(190, 48, 4, 2));   // 8 infantry
+  placeGroup("light_tank", "enemy", lineFormation(190, 55, 2, 3));  // 2 light_tank
+
+  // §8: Southern Reserve (150, 180) — backup for Himeimat
+  placeGroup("infantry", "enemy", blockFormation(148, 178, 3, 2));  // 6 infantry
+  placeGroup("light_tank", "enemy", [[145, 185], [155, 185]]);      // 2 light_tank
+
   // ── Air Wing (58, 128) ──
   placeGroup("fighter", "enemy", lineFormation(58, 128, 3, 3));
   placeGroup("bomber", "enemy", [[56, 134], [64, 134]]);

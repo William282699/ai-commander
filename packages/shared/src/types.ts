@@ -108,6 +108,7 @@ export interface Unit {
   patrolTaskId: number | null; // Day 9.5: active PatrolTask id, null if not in a task
   isPlayerControlled?: boolean; // MVP2: commander + elite_guard can receive mouse commands
   lastDamagedAt?: number;       // MVP2: game time of last damage taken (for regen delay)
+  lastDamagedById?: number;     // unit id of last attacker (for chase/response logic)
   entrenchLevel?: 0 | 1 | 2;   // El Alamein: infantry trench level (0=none, 1=shallow, 2=deep)
 }
 
