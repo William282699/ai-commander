@@ -148,51 +148,78 @@ function canAutoExecute(
   selectedIds?: readonly number[],
   isGroupChat?: boolean,
 ): { auto: boolean; reason?: string } {
-  // 0.5: group chat forces manual approval
+  // Group chat forces manual approval
   if (isGroupChat) return { auto: false, reason: "group_chat" };
 
   const intents = option.intents ?? [option.intent];
+  if (intents.length === 0) return { auto: false, reason: "no_intents" };
 
-  if (intents.length !== 1) return { auto: false, reason: "multi_intent" };
-  const intent = intents[0];
+  // Parse user text for anchors: squad IDs (T3, I1, ...) and selected-units keywords
+  const squadIdsInText = new Set(
+    (userMessage.match(/\b[TIANF]\d+\b/gi) ?? []).map(s => s.toUpperCase()),
+  );
+  const hasSelectedKeyword =
+    /\bselected\b/i.test(userMessage) || /选中|圈起来|这队|这支/.test(userMessage);
 
-  const squadIdsInText = (userMessage.match(/\b[TIANF]\d+\b/gi) ?? []).map(s => s.toUpperCase());
-  const hasSelectedAnchor = /\bselected\b/i.test(userMessage) || /选中|圈起来|这队|这支/.test(userMessage);
-  const hasSquadAnchor = squadIdsInText.length > 0;
+  // Collect anchor names (active squad leaders + commander keys) present in the user's text.
+  // ASCII names use \b word boundary; CJK names fall back to substring match.
+  const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const mentionedAnchors = new Set<string>();
+  const anchorCandidates: string[] = [];
+  for (const sq of state.squads ?? []) {
+    if (sq.leaderName) anchorCandidates.push(sq.leaderName);
+  }
+  for (const c of ["chen", "marcus", "emily"]) anchorCandidates.push(c);
+  for (const name of anchorCandidates) {
+    const lower = name.toLowerCase();
+    const isAscii = /^[\x00-\x7f]+$/.test(name);
+    const pattern = isAscii ? `\\b${escapeRegex(name)}\\b` : escapeRegex(name);
+    if (new RegExp(pattern, "i").test(userMessage)) mentionedAnchors.add(lower);
+  }
 
-  // Phase 2: leaderName anchor — if fromSquad matches a leaderName (not a squad ID format),
-  // force manual confirm since human names are less precise
-  if (intent.fromSquad && typeof intent.fromSquad === "string") {
-    const isSquadIdFormat = /^[A-Z]\d+$/i.test(intent.fromSquad);
-    if (!isSquadIdFormat) {
-      // leaderName reference → always confirm
-      return { auto: false, reason: "leader_name_anchor" };
+  // Validate each intent independently — multi-intent is fine as long as every
+  // intent clears the same safety bar a single intent would.
+  for (const intent of intents) {
+    if (!isValidTarget(intent, state)) return { auto: false, reason: "invalid_intent_fields" };
+
+    // high_impact only fires when the intent has NO explicit scope (no fromSquad).
+    // With fromSquad set (squad ID / leader name / commander key), resolveIntent
+    // restricts "all" to units under that squad/commander — not global conscription,
+    // so it's safe to auto-execute. Unscoped "all" IS a global draft → force confirm.
+    const qty = intent.quantity;
+    const isHighImpact = !intent.fromSquad &&
+      (qty === "all" || qty === "most") &&
+      (intent.type === "attack" || intent.type === "sabotage");
+    if (isHighImpact) return { auto: false, reason: "high_impact" };
+
+    if (intent.fromSquad) {
+      const fs = intent.fromSquad.toLowerCase();
+      const isSquadId = /^[A-Z]\d+$/i.test(intent.fromSquad);
+      const squad = state.squads?.find(s =>
+        s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs,
+      );
+
+      // Accept anchor if user's text mentions this intent's source in any form:
+      // the exact squad ID, the intent's leaderName/commander, or (if fromSquad is
+      // a squad ID) the squad's leaderName. Covers "Aiden去..." (leader name) and
+      // "T3 attack" (squad ID) and LLM-translated cross-refs between them.
+      let anchored = false;
+      if (isSquadId && squadIdsInText.has(intent.fromSquad.toUpperCase())) anchored = true;
+      if (!anchored && mentionedAnchors.has(fs)) anchored = true;
+      if (!anchored && squad) {
+        if (squad.id && squadIdsInText.has(squad.id.toUpperCase())) anchored = true;
+        if (squad.leaderName && mentionedAnchors.has(squad.leaderName.toLowerCase())) anchored = true;
+      }
+      if (!anchored) return { auto: false, reason: "anchor_mismatch" };
+
+      if (squad && squad.currentMission !== null) {
+        return { auto: false, reason: "mission_conflict" };
+      }
+    } else {
+      // No fromSquad — auto only if player has selected units AND used a selected keyword
+      if (!hasSelectedKeyword) return { auto: false, reason: "no_anchor" };
+      if (!selectedIds || selectedIds.length === 0) return { auto: false, reason: "no_selected_units" };
     }
-  }
-
-  if (!hasSquadAnchor && !hasSelectedAnchor) return { auto: false, reason: "no_anchor" };
-
-  if (hasSquadAnchor) {
-    if (!intent.fromSquad || !squadIdsInText.includes(intent.fromSquad.toUpperCase())) {
-      return { auto: false, reason: "anchor_mismatch" };
-    }
-  }
-  if (hasSelectedAnchor && !hasSquadAnchor) {
-    if (!selectedIds || selectedIds.length === 0) return { auto: false, reason: "no_selected_units" };
-    if (intent.fromSquad) return { auto: false, reason: "anchor_mismatch" };
-  }
-
-
-  if (!isValidTarget(intent, state)) return { auto: false, reason: "invalid_intent_fields" };
-
-  const qty = intent.quantity;
-  const isHighImpact = (qty === "all" || qty === "most") &&
-    (intent.type === "attack" || intent.type === "sabotage");
-  if (isHighImpact) return { auto: false, reason: "high_impact" };
-
-  if (intent.fromSquad) {
-    const squad = state.squads?.find(s => s.id === intent.fromSquad);
-    if (squad?.currentMission !== null) return { auto: false, reason: "mission_conflict" };
   }
 
   return { auto: true };
@@ -888,7 +915,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           setTimeout(() => handleApprove(autoData.options[0], 0, "auto", execCtx, autoData), 0);
         } else {
           if (!gate.auto && gate.reason) {
-            console.debug(`[P1 gate] no-auto: ${gate.reason}`);
+            const opt0 = (data.options as AdvisorOption[])[0];
+            const intent0 = opt0?.intents?.[0] ?? opt0?.intent;
+            console.log(`[P1 gate] no-auto reason=${gate.reason}`, {
+              numIntents: opt0?.intents?.length ?? (opt0?.intent ? 1 : 0),
+              fromSquad: intent0?.fromSquad,
+              quantity: intent0?.quantity,
+              type: intent0?.type,
+              toFront: intent0?.toFront,
+            });
           }
           responseExecCtxRef.current = execCtx;
           setResponse(data as DisplayResponse);
