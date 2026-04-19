@@ -735,11 +735,16 @@ export async function callLightBrief(
     const prompt = (channel && CHANNEL_PROMPTS[channel]) || LIGHT_SYSTEM_PROMPT;
     const raw = await callDeepSeek(prompt, digest, {
       temperature: 0.5,
-      maxTokens: 120,
+      maxTokens: 250,
     });
     const parsed = safeParse(raw);
-    return parsed ? validateLightResponse(parsed) : null;
-  } catch {
+    const validated = parsed ? validateLightResponse(parsed) : null;
+    if (!validated) {
+      console.warn(`[lightBrief] channel=${channel} validation_failed. raw=`, raw?.slice(0, 300));
+    }
+    return validated;
+  } catch (err) {
+    console.warn(`[lightBrief] channel=${channel} exception=`, err instanceof Error ? err.message : err);
     return null;
   }
 }
