@@ -255,7 +255,15 @@ function resolveAttack(
     }
   }
 
-  const count = resolveQuantity(intent.quantity, units.length, style);
+  // Scope-aware quantity default: without fromSquad or a player selection the
+  // source pool is the full global list. An LLM-omitted quantity in that case
+  // would otherwise send every dispatchable unit into one attack. With a scope,
+  // "undefined" honestly means "all of that squad" and stays as-is.
+  const isScoped = !!intent.fromSquad || (selectedUnitIds !== undefined && selectedUnitIds.length > 0);
+  const count = resolveQuantity(
+    isScoped ? intent.quantity : (intent.quantity ?? "some"),
+    units.length, style,
+  );
   units = sortByDistance(units, target).slice(0, count);
 
   if (units.length === 0) {
@@ -364,7 +372,16 @@ function resolveDefend(
     }
   }
 
-  const count = resolveQuantity(intent.quantity, units.length, style);
+  // Scope-aware quantity default — same shape as resolveAttack, but "few" by
+  // default. The prompt already asks the LLM for 3-6 units on a defensive
+  // position; this is the code-level safety net when the LLM omits quantity
+  // on an unscoped defend, which would otherwise freeze every dispatchable
+  // unit and starve subsequent intents in the same option.
+  const isScoped = !!intent.fromSquad || (selectedUnitIds !== undefined && selectedUnitIds.length > 0);
+  const count = resolveQuantity(
+    isScoped ? intent.quantity : (intent.quantity ?? "few"),
+    units.length, style,
+  );
 
   if (target) {
     units = sortByDistance(units, target).slice(0, count);
