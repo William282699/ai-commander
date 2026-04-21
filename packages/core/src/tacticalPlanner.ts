@@ -852,9 +852,22 @@ function resolveCapture(
   }
 
   let units = source.units;
-  // Prefer infantry for captures
-  const infantry = units.filter((u) => u.type === "infantry");
-  units = infantry.length > 0 ? infantry : units;
+  // Scenario-aware capture doctrine. Must match economy.ts::tickFacilityCapture
+  // line 118-126 — the *actual* game-engine rule that decides who can capture:
+  //   - El Alamein: any GROUND unit (infantry + armor + commanders)
+  //   - Default:   infantry only
+  // Previously this resolver hard-preferred infantry in ALL scenarios, which on
+  // El Alamein shrank a tank-heavy squad (e.g. Blake) to 0-2 lone infantry and
+  // effectively made "Blake capture X" dispatch a single token soldier while
+  // the real combat force sat idle.
+  const isElAlamein = state.scenarioId === "el_alamein";
+  if (isElAlamein) {
+    // Air/naval can't stand on a facility — filter to ground only.
+    units = units.filter((u) => getUnitCategory(u.type) === "ground");
+  } else {
+    const infantry = units.filter((u) => u.type === "infantry");
+    units = infantry.length > 0 ? infantry : units;
+  }
 
   const count = resolveQuantity(intent.quantity ?? "some", units.length, style);
   units = sortByDistance(units, target).slice(0, count);
