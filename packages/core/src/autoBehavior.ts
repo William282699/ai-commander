@@ -32,7 +32,11 @@ const ENGAGE_RANGE = 8;          // tiles
 // PATROL_RANGE removed (Day 9.5 Batch A: idle auto-patrol disabled)
 
 const RECENTLY_DAMAGED_WINDOW = 3.0;  // seconds — "recently damaged" for chase response
-const ALLY_ASSIST_RANGE = 15;          // tiles — scan radius for fighting allies
+const ALLY_ASSIST_RANGE = 15;          // tiles — scan radius for fighting allies (non-defending units)
+// Defending units use a tighter assist radius — they must stay within cluster
+// cohesion of their defensive posture. A 15-tile scan would pull a HQ defender
+// halfway across the map to help a front-line squad, breaking the defensive line.
+const DEFENDING_ASSIST_RANGE = 8;      // tiles — assist radius when state="defending"
 
 // ── Main entry ──
 
@@ -100,7 +104,15 @@ function runAutoBehavior(state: GameState): void {
     // ── Priority 3: active orders skip (C1 PRIMARY check) ──
     // unit.orders.length > 0 is the primary check.
     // State checks are advisory only, never override C1/C5.
-    if (unit.orders.length > 0) return;
+    //
+    // EXCEPTION: a persistent `defend` order means "hold this zone," not
+    // "ignore the zone being attacked." Defending units fall through to
+    // 4a/4b/4c so they can engage incoming threats and assist neighbors.
+    // combat.ts sends them back to their defend post when the engagement
+    // ends — see the `defend` branch in the no-target block of processCombat.
+    const currentAction = unit.orders[0]?.action;
+    const inDefendPosture = unit.orders.length > 0 && currentAction === "defend";
+    if (unit.orders.length > 0 && !inDefendPosture) return;
 
     // ── Priority 4: engage / patrol ──
 
@@ -132,7 +144,10 @@ function runAutoBehavior(state: GameState): void {
 
     // 4c: Assist nearby fighting ally — idle unit joins nearby combat
     if (unit.state === "idle" || unit.state === "defending") {
-      const allyTarget = findAllyBattleTarget(unit, state);
+      // Narrow the assist radius when defending so the cluster doesn't
+      // dissolve across the map chasing distant allies.
+      const assistRange = unit.state === "defending" ? DEFENDING_ASSIST_RANGE : ALLY_ASSIST_RANGE;
+      const allyTarget = findAllyBattleTarget(unit, state, assistRange);
       if (allyTarget) {
         unit.state = "moving";
         clearPathCache(unit.id);
@@ -247,8 +262,12 @@ function findOutrangingAttacker(unit: Unit, state: GameState): Unit | null {
  * Scans for friendly units within ALLY_ASSIST_RANGE in "attacking" state,
  * then returns their attack target if visible to this unit.
  */
-function findAllyBattleTarget(unit: Unit, state: GameState): Unit | null {
-  let bestAllyDist = ALLY_ASSIST_RANGE * ALLY_ASSIST_RANGE;
+function findAllyBattleTarget(
+  unit: Unit,
+  state: GameState,
+  maxRange: number = ALLY_ASSIST_RANGE,
+): Unit | null {
+  let bestAllyDist = maxRange * maxRange;
   let bestEnemy: Unit | null = null;
 
   state.units.forEach((ally) => {
@@ -261,7 +280,7 @@ function findAllyBattleTarget(unit: Unit, state: GameState): Unit | null {
     const adx = ally.position.x - unit.position.x;
     const ady = ally.position.y - unit.position.y;
     const allyDist2 = adx * adx + ady * ady;
-    if (allyDist2 > ALLY_ASSIST_RANGE * ALLY_ASSIST_RANGE) return;
+    if (allyDist2 > maxRange * maxRange) return;
 
     // Find ally's combat target
     if (ally.attackTarget === null) return;
