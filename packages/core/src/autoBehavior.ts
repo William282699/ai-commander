@@ -36,7 +36,10 @@ const ALLY_ASSIST_RANGE = 15;          // tiles — scan radius for fighting all
 // Defending units use a tighter assist radius — they must stay within cluster
 // cohesion of their defensive posture. A 15-tile scan would pull a HQ defender
 // halfway across the map to help a front-line squad, breaking the defensive line.
-const DEFENDING_ASSIST_RANGE = 8;      // tiles — assist radius when state="defending"
+// 12 tiles tuned from 8 based on playtest: 8 left far-side defenders in a ~5-tile
+// wide cluster out of reach when the fight was at the near edge; 12 pulls the
+// whole cluster in without scatter.
+const DEFENDING_ASSIST_RANGE = 12;     // tiles — assist radius when state="defending"
 
 // ── Main entry ──
 
