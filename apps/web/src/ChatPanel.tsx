@@ -67,19 +67,16 @@ const FROM_TO_COMMANDER: Record<string, Commander> = {
 // ── Voice confirmations per commander personality ──
 const VOICE_CONFIRMS: Record<Commander, string[]> = {
   chen: [
-    "Yes sir!", "Copy that!", "On it!", "Got it, moving out!",
-    "Roger that, let's go!", "Hell yeah, consider it done!",
-    "Loud and clear!", "You got it, boss!",
+    "收到。", "明白。", "执行。", "这就办。",
+    "照办，长官。", "是，长官。", "依令。", "动手。",
   ],
   marcus: [
-    "Roger, executing now.", "Understood, sir.", "Copy that, General.",
-    "Affirmative. Orders received.", "Yes sir, proceeding as planned.",
-    "Acknowledged. Moving to execute.", "Will do, Commander.",
+    "领会，长官。", "明白，即刻协调。", "方案已记录。",
+    "按您的指示办。", "参谋部已备案。", "这就去安排。",
   ],
   emily: [
-    "Got it!", "Copy that, on my way.", "Understood, I'll handle it.",
-    "Roger, coordinating now.", "Affirmative, resources allocated.",
-    "Right away, Commander.", "Consider it done, sir.",
+    "收到，安排。", "已记录，马上办。", "资源调配中。",
+    "依令调度。", "物资已准备。", "这就处理。",
   ],
 };
 function pickVoiceConfirm(commander: Commander): string {
@@ -928,7 +925,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           responseExecCtxRef.current = execCtx;
           setResponse(data as DisplayResponse);
           setError(null);
-          addMessage("info", "Advisor briefing received", state.time, ch, undefined, "command_ack");
+          addMessage("info", "参谋简报送达。", state.time, ch, undefined, "command_ack");
         }
       }
     };
