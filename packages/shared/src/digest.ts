@@ -23,11 +23,15 @@ export function generateDigestV1(
   const res = state.economy.player.resources;
 
   let digest = `T=${t} Ph=${ph} Rd=${rd} $=${res.money} Fu=${res.fuel} Am=${res.ammo} In=${res.intel}\n`;
-  digest += `---FRONTS--- (CombatPwr=DPS-based strength, NOT headcount)\n`;
+  digest += `---FRONTS--- (CombatPwr=DPS-based strength, NOT headcount; Comp=unit-type breakdown)\n`;
 
   for (const front of state.fronts) {
     const ep = front.enemyPowerKnown ? Math.round(front.enemyPower) : "?";
-    digest += `${front.id}:${front.name} OurPwr=${Math.round(front.playerPower)} EnemyPwr=${ep} Engagement=${front.engagementIntensity.toFixed(1)} Supply=${front.supplyStatus}`;
+    const { ourComp, enemyComp } = computeFrontComposition(state, front);
+    digest += `${front.id}:${front.name} OurPwr=${Math.round(front.playerPower)} EnemyPwr=${ep}`;
+    if (ourComp) digest += ` OurComp=[${ourComp}]`;
+    if (enemyComp) digest += ` EnemyComp=[${enemyComp}]`;
+    digest += ` Engagement=${front.engagementIntensity.toFixed(1)} Supply=${front.supplyStatus}`;
     if (front.keyEvents.length > 0) {
       digest += ` key=[${front.keyEvents.join(", ")}]`;
     }
@@ -292,4 +296,63 @@ function unitsAvgPos(units: Unit[]): { x: number; y: number } {
   const sx = units.reduce((sum, u) => sum + u.position.x, 0);
   const sy = units.reduce((sum, u) => sum + u.position.y, 0);
   return { x: Math.round(sx / units.length), y: Math.round(sy / units.length) };
+}
+
+/**
+ * Per-front unit-type composition for LLM tactical briefings.
+ * Returns "3×main_tank,8×infantry" style strings so Chen can report
+ * "敌军3辆重甲+8步兵" instead of the abstract "power 1198".
+ *
+ * Enemy units respect fog — only visible ones are counted, mirroring
+ * updateFrontPower's fog-gated enemy power sum in intelDigest.ts. This
+ * keeps OurPwr/EnemyPwr and OurComp/EnemyComp semantically aligned:
+ * what the digest reports is what the player can actually see.
+ *
+ * Returns empty strings (not rendered by caller) when no units occupy
+ * the front on that side.
+ */
+function computeFrontComposition(
+  state: GameState,
+  front: Front,
+): { ourComp: string; enemyComp: string } {
+  const regionBboxes: [number, number, number, number][] = [];
+  for (const rid of front.regionIds) {
+    const region = state.regions.get(rid);
+    if (region) regionBboxes.push(region.bbox);
+  }
+  if (regionBboxes.length === 0) return { ourComp: "", enemyComp: "" };
+
+  const ourCounts = new Map<string, number>();
+  const enemyCounts = new Map<string, number>();
+
+  state.units.forEach((unit) => {
+    if (unit.hp <= 0 || unit.state === "dead") return;
+    const inFront = regionBboxes.some(
+      ([x1, y1, x2, y2]) =>
+        unit.position.x >= x1 &&
+        unit.position.x <= x2 &&
+        unit.position.y >= y1 &&
+        unit.position.y <= y2,
+    );
+    if (!inFront) return;
+
+    if (unit.team === "player") {
+      ourCounts.set(unit.type, (ourCounts.get(unit.type) || 0) + 1);
+    } else if (unit.team === "enemy") {
+      // Fog gate — match updateFrontPower's rule
+      const tx = Math.floor(unit.position.x);
+      const ty = Math.floor(unit.position.y);
+      if (state.fog[ty]?.[tx] === "visible") {
+        enemyCounts.set(unit.type, (enemyCounts.get(unit.type) || 0) + 1);
+      }
+    }
+  });
+
+  const fmt = (m: Map<string, number>): string =>
+    Array.from(m.entries())
+      .sort((a, b) => b[1] - a[1]) // heaviest first — headline tactical detail
+      .map(([t, c]) => `${c}×${t}`)
+      .join(",");
+
+  return { ourComp: fmt(ourCounts), enemyComp: fmt(enemyCounts) };
 }
