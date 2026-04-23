@@ -21,7 +21,7 @@ import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduct
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
-import { CHANNEL_LABELS } from "@ai-commander/shared";
+import { CHANNEL_LABELS, collectUnitsUnder } from "@ai-commander/shared";
 import {
   addMessage,
   getActiveChannel,
@@ -215,13 +215,34 @@ function detectStaleSquadRefs(
   for (const intent of intents) {
     if (!intent?.fromSquad) continue;
     const fs = intent.fromSquad.toLowerCase();
-    const isSquad = state.squads?.some(s =>
+
+    // Commander key → always treat as alive (aggregates many squads;
+    // we don't flag it stale unless the player specifically named a dead one)
+    if (COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!))) {
+      continue;
+    }
+
+    // Leader-name or squad-ID → find the squad entity
+    const squad = state.squads?.find(s =>
       s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs,
     );
-    const isCommander = COMMANDERS.some(c =>
-      c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!),
-    );
-    if (!isSquad && !isCommander) stale.add(intent.fromSquad);
+    if (!squad) {
+      // Entity doesn't exist at all — clearly stale
+      stale.add(intent.fromSquad);
+      continue;
+    }
+
+    // Entity exists, but it may be "KIA-but-lingering": the squad shell
+    // persists in state.squads while all its units are dead. resolveSourceUnits
+    // rejects this downstream with "分队 X 无可用单位", but by that point the
+    // player has already read the advisor brief claiming the squad will do
+    // things. Treat any squad with zero living dispatchable units as stale.
+    const unitIds = collectUnitsUnder(state, squad.id);
+    const hasLiving = unitIds.some(id => {
+      const u = state.units.get(id);
+      return u && u.state !== "dead" && u.hp > 0;
+    });
+    if (!hasLiving) stale.add(intent.fromSquad);
   }
   return [...stale];
 }
