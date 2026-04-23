@@ -191,6 +191,41 @@ function softFixTargetFields(
   }
 }
 
+/**
+ * LLM responses can reference squads that died while the request was in flight
+ * (the digest sent ~5-10s ago named them alive; by the time the response comes
+ * back, they're KIA). The engine-layer soft-fix in handleApprove catches this
+ * when the player approves the option, but the advisor's *spoken* brief is
+ * already on screen saying things like "长官，Aiden 带兵撤回总部…" — a false
+ * narrative about a dead squad.
+ *
+ * This returns the list of fromSquad references in the response that no longer
+ * resolve to a living squad (or a commander key). Caller can surface a warning
+ * after the brief so the player immediately sees that the response is stale
+ * without tearing down the streaming brief itself.
+ */
+function detectStaleSquadRefs(
+  options: AdvisorOption[] | undefined,
+  state: GameState,
+): string[] {
+  if (!options || options.length === 0) return [];
+  const opt = options[0];
+  const intents = opt.intents ?? (opt.intent ? [opt.intent] : []);
+  const stale = new Set<string>();
+  for (const intent of intents) {
+    if (!intent?.fromSquad) continue;
+    const fs = intent.fromSquad.toLowerCase();
+    const isSquad = state.squads?.some(s =>
+      s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs,
+    );
+    const isCommander = COMMANDERS.some(c =>
+      c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!),
+    );
+    if (!isSquad && !isCommander) stale.add(intent.fromSquad);
+  }
+  return [...stale];
+}
+
 // ── Phase 1: Deterministic auto-execute gate (from CommandPanel) ──
 
 function canAutoExecute(
@@ -986,6 +1021,18 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           responseExecCtxRef.current = execCtx;
           setResponse(data as DisplayResponse);
           setError(null);
+          // Stale-state post-check: surface a warning when the advisor's brief
+          // references squads that died while the LLM request was in flight.
+          // The message lands right under the streamed brief so the player sees
+          // the dissonance immediately rather than discovering it only on approve.
+          const staleRefs = detectStaleSquadRefs(data.options as AdvisorOption[] | undefined, state);
+          if (staleRefs.length > 0) {
+            addMessage(
+              "warning",
+              `⚠ 参谋回复引用 ${staleRefs.join(", ")} 已阵亡或不存在，以下方案基于过时战况`,
+              state.time, ch, undefined, "command_ack",
+            );
+          }
           addMessage("info", "参谋简报送达。", state.time, ch, undefined, "command_ack");
         }
       }
