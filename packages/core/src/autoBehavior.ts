@@ -64,7 +64,12 @@ function runAutoBehavior(state: GameState): void {
 
     // ── Priority 2: lowHP emergency retreat ──
     // Overrides C1 (active orders), but NOT player-controlled units (already filtered above)
-    if (unit.hp / unit.maxHp < LOW_HP_THRESHOLD && unit.state !== "retreating") {
+    // EXCEPTION: units under an active `no_retreat` or `must_hold` doctrine must
+    // not auto-retreat — the commander explicitly ordered them to hold the line.
+    // Doctrine is a player directive at priority ABOVE system self-preservation.
+    if (unit.hp / unit.maxHp < LOW_HP_THRESHOLD
+        && unit.state !== "retreating"
+        && !isUnitUnderHoldDoctrine(unit, state)) {
       const hqPos = findTeamHQ(state, unit.team);
       const dx = hqPos.x - unit.position.x;
       const dy = hqPos.y - unit.position.y;
@@ -581,4 +586,96 @@ function randomPassableInRadius(
     if (canUnitEnterTile(unit.type, x, y, state)) return { x, y };
   }
   return null;
+}
+
+// ── Doctrine gate for priority 2 (lowHP retreat) ──
+
+/** Find the direct (leader) squad this unit belongs to. CMD squads don't hold
+ * unitIds directly (see squadHierarchy.ts invariant), so this returns the
+ * leaf leader squad, which is also what doctrine.assignedSquads references. */
+function findLeaderSquadIdForUnit(state: GameState, unitId: number): string | null {
+  for (const sq of state.squads) {
+    if (sq.unitIds.includes(unitId)) return sq.id;
+  }
+  return null;
+}
+
+/** Resolve a doctrine.locationTag (region id | front id | tag id | facility id)
+ * and test whether the unit is inside that location's area. Returns false for
+ * unresolvable tags so an unknown locationTag never accidentally locks a unit
+ * into hold behavior. */
+function isUnitInLocationTag(
+  state: GameState,
+  unit: Unit,
+  locationTag: string,
+): boolean {
+  const { x: ux, y: uy } = unit.position;
+
+  // Try region
+  const region = state.regions.get(locationTag);
+  if (region) {
+    const [x1, y1, x2, y2] = region.bbox;
+    return ux >= x1 && ux <= x2 && uy >= y1 && uy <= y2;
+  }
+
+  // Try front (union of its regions' bboxes)
+  const front = state.fronts.find(f => f.id === locationTag);
+  if (front) {
+    for (const rid of front.regionIds) {
+      const r = state.regions.get(rid);
+      if (!r) continue;
+      const [x1, y1, x2, y2] = r.bbox;
+      if (ux >= x1 && ux <= x2 && uy >= y1 && uy <= y2) return true;
+    }
+    return false;
+  }
+
+  // Try player-placed tag (point → 10-tile radius)
+  const tag = state.tags?.find(t => t.id === locationTag);
+  if (tag) {
+    const dx = ux - tag.position.x;
+    const dy = uy - tag.position.y;
+    return dx * dx + dy * dy <= 10 * 10;
+  }
+
+  // Try facility (point → 10-tile radius, e.g. ea_kidney_ridge)
+  const facility = state.facilities.get(locationTag);
+  if (facility) {
+    const dx = ux - facility.position.x;
+    const dy = uy - facility.position.y;
+    return dx * dx + dy * dy <= 10 * 10;
+  }
+
+  return false;
+}
+
+/** Is this unit covered by an active `no_retreat` or `must_hold` doctrine?
+ * Matches by EITHER assignedSquads (direct tie) OR locationTag (spatial tie).
+ * Either match is sufficient — doctrines are player directives and should
+ * apply whenever the unit is implicated, not only when both criteria hit. */
+function isUnitUnderHoldDoctrine(unit: Unit, state: GameState): boolean {
+  if (!state.doctrines || state.doctrines.length === 0) return false;
+
+  let cachedSquadId: string | null | undefined;
+
+  for (const d of state.doctrines) {
+    if (d.status !== "active") continue;
+    // Only doctrines that semantically forbid retreat count here.
+    // `preserve_force` means "minimize casualties" — it does NOT forbid
+    // retreat, so we let priority 2 fire for units under that doctrine.
+    if (d.type !== "no_retreat" && d.type !== "must_hold") continue;
+
+    // Squad tie — cheap and definitive
+    if (d.assignedSquads.length > 0) {
+      if (cachedSquadId === undefined) {
+        cachedSquadId = findLeaderSquadIdForUnit(state, unit.id);
+      }
+      if (cachedSquadId && d.assignedSquads.includes(cachedSquadId)) return true;
+    }
+
+    // Location tie — fallback for doctrines defined purely by area
+    if (d.locationTag && isUnitInLocationTag(state, unit, d.locationTag)) return true;
+  }
+
+  return false;
 }

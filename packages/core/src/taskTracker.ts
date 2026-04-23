@@ -9,6 +9,11 @@ import { collectUnitsUnder } from "@ai-commander/shared";
 
 const CLEANUP_DELAY_SEC = 30;
 const HOLD_COMPLETE_SEC = 15;
+// Tasks whose assigned units are all dead/missing land in "failing" state. Without
+// a terminating condition they sit there forever — the failing squad can't
+// recover, but "failing" is not eligible for cleanup. Grace period lets the
+// state breathe (maybe reinforcements arrive) before we force-terminate.
+const FAIL_GRACE_SEC = 20;
 
 /**
  * Compute a numeric priority score for sorting.
@@ -133,6 +138,16 @@ export function updateTasks(state: GameState): void {
     if (task.status === "holding" && !task.constraint &&
         state.time - task.statusChangedAt >= HOLD_COMPLETE_SEC) {
       task.status = "completed";
+      task.statusChangedAt = state.time;
+    }
+
+    // Terminate tasks stuck in "failing" — all assigned units are dead or
+    // retreated, and the doctrine/order can't be rescued from this state.
+    // Transition to "cancelled" so the existing cleanup filter can drop it
+    // instead of letting it hang in the UI forever.
+    if (task.status === "failing" &&
+        state.time - task.statusChangedAt >= FAIL_GRACE_SEC) {
+      task.status = "cancelled";
       task.statusChangedAt = state.time;
     }
   }
