@@ -12,7 +12,7 @@
 // Constraints enforced: C1, C2, C3, C4, C5
 // ============================================================
 
-import type { GameState, Unit, Position, Team, PatrolTask } from "@ai-commander/shared";
+import type { GameState, Unit, Position, Team, PatrolTask, Squad } from "@ai-commander/shared";
 import { getUnitCategory, isManualOnlyUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { clearPathCache } from "./pathfinding";
@@ -593,11 +593,28 @@ function randomPassableInRadius(
 /** Find the direct (leader) squad this unit belongs to. CMD squads don't hold
  * unitIds directly (see squadHierarchy.ts invariant), so this returns the
  * leaf leader squad, which is also what doctrine.assignedSquads references. */
-function findLeaderSquadIdForUnit(state: GameState, unitId: number): string | null {
+function findLeaderSquadForUnit(state: GameState, unitId: number): Squad | null {
   for (const sq of state.squads) {
-    if (sq.unitIds.includes(unitId)) return sq.id;
+    if (sq.unitIds.includes(unitId)) return sq;
   }
   return null;
+}
+
+/** Test whether a doctrine.assignedSquads entry (which may be a squad ID like
+ * "I1", a leader name like "Aiden", or a commander key like "chen") refers
+ * to this unit's leader squad. Matching is liberal because the LLM populates
+ * assignedSquads from intent.fromSquad, which can be any of the three forms —
+ * see ChatPanel.tsx:838 processDoctrineFields. */
+function squadRefMatchesUnit(ref: string, unit: Unit, squad: Squad): boolean {
+  const refLower = ref.toLowerCase();
+  if (ref === squad.id) return true;
+  if (squad.leaderName && squad.leaderName.toLowerCase() === refLower) return true;
+  // Commander key — match if this squad is owned by that commander
+  if ((refLower === "chen" || refLower === "marcus" || refLower === "emily")
+      && squad.ownerCommander === refLower) {
+    return true;
+  }
+  return false;
 }
 
 /** Resolve a doctrine.locationTag (region id | front id | tag id | facility id)
@@ -650,13 +667,15 @@ function isUnitInLocationTag(
 }
 
 /** Is this unit covered by an active `no_retreat` or `must_hold` doctrine?
- * Matches by EITHER assignedSquads (direct tie) OR locationTag (spatial tie).
+ * Matches by EITHER assignedSquads (squad tie, accepts squad ID / leader
+ * name / commander key — whatever the LLM passed through intent.fromSquad)
+ * OR locationTag (spatial tie, resolving region / front / tag / facility IDs).
  * Either match is sufficient — doctrines are player directives and should
  * apply whenever the unit is implicated, not only when both criteria hit. */
 function isUnitUnderHoldDoctrine(unit: Unit, state: GameState): boolean {
   if (!state.doctrines || state.doctrines.length === 0) return false;
 
-  let cachedSquadId: string | null | undefined;
+  let cachedSquad: Squad | null | undefined;
 
   for (const d of state.doctrines) {
     if (d.status !== "active") continue;
@@ -665,15 +684,23 @@ function isUnitUnderHoldDoctrine(unit: Unit, state: GameState): boolean {
     // retreat, so we let priority 2 fire for units under that doctrine.
     if (d.type !== "no_retreat" && d.type !== "must_hold") continue;
 
-    // Squad tie — cheap and definitive
+    // Squad tie — cheap and definitive. Match is liberal because
+    // doctrine.assignedSquads is populated from intent.fromSquad, which the
+    // LLM may set to a squad ID ("I1"), a leader name ("Aiden"), or a
+    // commander key ("chen"). See squadRefMatchesUnit.
     if (d.assignedSquads.length > 0) {
-      if (cachedSquadId === undefined) {
-        cachedSquadId = findLeaderSquadIdForUnit(state, unit.id);
+      if (cachedSquad === undefined) {
+        cachedSquad = findLeaderSquadForUnit(state, unit.id);
       }
-      if (cachedSquadId && d.assignedSquads.includes(cachedSquadId)) return true;
+      if (cachedSquad) {
+        for (const ref of d.assignedSquads) {
+          if (squadRefMatchesUnit(ref, unit, cachedSquad)) return true;
+        }
+      }
     }
 
-    // Location tie — fallback for doctrines defined purely by area
+    // Location tie — fallback for doctrines defined purely by area, or for
+    // units in transit through the doctrine zone even if not on assignedSquads.
     if (d.locationTag && isUnitInLocationTag(state, unit, d.locationTag)) return true;
   }
 
