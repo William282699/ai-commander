@@ -136,6 +136,61 @@ function isValidTarget(intent: Intent, state: GameState): boolean {
   return true;
 }
 
+/**
+ * Clear target fields that reference non-existent locations/facilities so the
+ * intent can still execute on its remaining valid fields. The prior behavior
+ * blanket-rejected the entire intent if ANY target field was hallucinated by
+ * the LLM (e.g. "tag_hq_perimeter" with no such tag in state.tags). Now the
+ * bogus field is silently cleared with a warning and the intent proceeds on
+ * whichever fields are still valid.
+ *
+ * If every target field was bogus, the intent still falls through to
+ * resolveIntent, which returns a clean "无法确定目标" diagnostic — a gentler
+ * degradation than a blunt UI-layer reject that forces the player to retype.
+ *
+ * Mirrors the softer-than-strict architecture of the existing fromSquad
+ * soft-fix in handleApprove / thread approval.
+ */
+function softFixTargetFields(
+  intent: Intent,
+  state: GameState,
+  warn: (field: string, value: string) => void,
+): void {
+  if (intent.targetRegion && !isKnownLocation(intent.targetRegion, state)) {
+    warn("targetRegion", intent.targetRegion);
+    intent.targetRegion = undefined;
+  }
+  if (intent.targetFacility) {
+    const trimmed = intent.targetFacility.trim();
+    const hint = trimmed.toLowerCase();
+    let found = trimmed.length > 0 && state.facilities.has(intent.targetFacility);
+    if (!found && trimmed.length > 0) {
+      for (const [, f] of state.facilities) {
+        if (
+          f.id.toLowerCase() === hint ||
+          f.name.toLowerCase().includes(hint) ||
+          f.tags.some(t => t.toLowerCase().includes(hint))
+        ) {
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      warn("targetFacility", intent.targetFacility);
+      intent.targetFacility = undefined;
+    }
+  }
+  if (intent.toFront && !isKnownLocation(intent.toFront, state)) {
+    warn("toFront", intent.toFront);
+    intent.toFront = undefined;
+  }
+  if (intent.fromFront && !isKnownLocation(intent.fromFront, state)) {
+    warn("fromFront", intent.fromFront);
+    intent.fromFront = undefined;
+  }
+}
+
 // ── Phase 1: Deterministic auto-execute gate (from CommandPanel) ──
 
 function canAutoExecute(
@@ -666,7 +721,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             intent.fromSquad = undefined;
           }
         }
-      
+
+        // Soft-fix: clear hallucinated target fields (e.g. LLM invents a non-existent
+        // tag/front/facility). Other valid fields in the same intent still drive execution.
+        softFixTargetFields(intent, state, (field, value) => {
+          addMessage("warning", `目标 ${field}=${value} 不存在，已忽略此字段`, state.time, thread.channel, undefined, "command_ack");
+        });
+
         if (!isValidTarget(intent, state)) {
           const field = intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
           addMessage("warning", `目标 ${field} 不存在`, state.time, thread.channel, undefined, "command_ack");
@@ -1082,7 +1143,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           intent.fromSquad = undefined;
         }
       }
-    
+
+      // Soft-fix: clear hallucinated target fields (e.g. LLM invents a non-existent
+      // tag/front/facility). Other valid fields in the same intent still drive execution.
+      softFixTargetFields(intent, state, (field, value) => {
+        addMessage("warning", `目标 ${field}=${value} 不存在，已忽略此字段`, state.time, ch, undefined, "command_ack");
+      });
+
       if (!isValidTarget(intent, state)) {
         const field = intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
         addMessage("warning", `目标 ${field} 不存在`, state.time, ch, undefined, "command_ack");
