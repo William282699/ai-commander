@@ -2,7 +2,17 @@
 // AI Commander — Express Server
 // ============================================================
 
-import "dotenv/config";
+import { config as dotenvConfig } from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// Load .env explicitly relative to this source file. Avoids cwd ambiguity
+// when running under npm workspaces / git worktrees.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ENV_PATH = path.resolve(__dirname, "..", ".env");
+const envResult = dotenvConfig({ path: ENV_PATH });
+
 import express from "express";
 import cors from "cors";
 import { callAdvisor, callAdvisorStream, callGroupAdvisor, callLightBrief, isProviderConfigured } from "./ai.js";
@@ -153,8 +163,10 @@ app.post("/api/staff-ask", async (req, res) => {
 // Startup
 app.listen(PORT, () => {
   console.log(`AI Commander server running on http://localhost:${PORT}`);
+  const loadedKeys = envResult.parsed ? Object.keys(envResult.parsed).join(",") : "(none)";
+  console.log(`[boot] .env=${ENV_PATH} loaded=${!envResult.error} keys=${loadedKeys}`);
+  console.log(`[boot] LLM_PROFILE=${process.env.LLM_PROFILE || "(unset, using legacy LLM_PROVIDER fallback)"}`);
   if (!isProviderConfigured()) {
-    console.warn("⚠ LLM API key not configured. Set DEEPSEEK_API_KEY in .env");
-    console.warn("  Server will return error on /api/command until key is set.");
+    console.warn("⚠ LLM API key not configured. Check .env path above.");
   }
 });

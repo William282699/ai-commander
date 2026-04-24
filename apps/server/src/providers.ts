@@ -36,6 +36,16 @@ class OpenAICompatibleProvider implements LLMProvider {
     this.model = model;
   }
 
+  // Gemini 2.5 defaults to `thinkingBudget=-1` (dynamic thinking) which silently
+  // consumes max_tokens budget and truncates visible output mid-stream.
+  // Per Gemini OpenAI-compat docs, `reasoning_effort="none"` disables thinking
+  // for 2.5 models. The max_tokens bump is belt-and-suspenders.
+  private applyGeminiQuirks(body: Record<string, unknown>): void {
+    if (this.name !== "gemini") return;
+    body.reasoning_effort = "none";
+    if ((body.max_tokens as number) < 4000) body.max_tokens = 4000;
+  }
+
   async chat(messages: ChatMessage[], options?: ChatOptions): Promise<string> {
     const body: Record<string, unknown> = {
       model: this.model,
@@ -46,6 +56,7 @@ class OpenAICompatibleProvider implements LLMProvider {
     if (options?.jsonMode) {
       body.response_format = { type: "json_object" };
     }
+    this.applyGeminiQuirks(body);
 
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
@@ -78,6 +89,7 @@ class OpenAICompatibleProvider implements LLMProvider {
       stream: true,
     };
     // No jsonMode for streaming — first half is natural language
+    this.applyGeminiQuirks(body);
 
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
@@ -265,33 +277,88 @@ export interface ProviderConfig {
   apiKey: string;
   baseUrl: string;
   model: string;
+  keyEnvVar?: string;
 }
 
+// Curated presets — switch by setting LLM_PROFILE=<key> in .env.
+// Falls back to legacy LLM_PROVIDER-based config when LLM_PROFILE is unset.
+interface ProfileDef {
+  provider: string;
+  baseUrl: string;
+  model: string;
+  keyEnvVar: string;
+}
+
+const PROFILES: Record<string, ProfileDef> = {
+  "deepseek": {
+    provider: "deepseek",
+    baseUrl: "https://api.deepseek.com/v1",
+    model: "deepseek-chat",
+    keyEnvVar: "DEEPSEEK_API_KEY",
+  },
+  "gemini-2.5-flash": {
+    provider: "gemini",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    model: "gemini-2.5-flash",
+    keyEnvVar: "GEMINI_API_KEY",
+  },
+  "gemini-2.5-flash-lite": {
+    provider: "gemini",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    model: "gemini-2.5-flash-lite",
+    keyEnvVar: "GEMINI_API_KEY",
+  },
+  "gemini-3.1-flash-lite-preview": {
+    provider: "gemini",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    model: "gemini-3.1-flash-lite-preview",
+    keyEnvVar: "GEMINI_API_KEY",
+  },
+};
+
 export function getProviderConfig(): ProviderConfig {
+  // Preferred: LLM_PROFILE selects a curated preset.
+  const profile = process.env.LLM_PROFILE?.toLowerCase();
+  if (profile && PROFILES[profile]) {
+    const p = PROFILES[profile];
+    return {
+      provider: p.provider,
+      baseUrl: p.baseUrl,
+      model: p.model,
+      apiKey: process.env[p.keyEnvVar] || "",
+      keyEnvVar: p.keyEnvVar,
+    };
+  }
+
+  // Legacy fallback: LLM_PROVIDER-based.
   const provider = (process.env.LLM_PROVIDER || "deepseek").toLowerCase();
   let apiKey = "";
   let baseUrl = "";
   let model = "";
+  let keyEnvVar = "DEEPSEEK_API_KEY";
 
   switch (provider) {
     case "openai":
       apiKey = process.env.OPENAI_API_KEY || "";
       baseUrl = process.env.LLM_BASE_URL || "https://api.openai.com/v1";
       model = process.env.LLM_MODEL || "gpt-4o-mini";
+      keyEnvVar = "OPENAI_API_KEY";
       break;
     case "claude":
       apiKey = process.env.ANTHROPIC_API_KEY || "";
       baseUrl = ""; // not used
       model = process.env.LLM_MODEL || "claude-sonnet-4-20250514";
+      keyEnvVar = "ANTHROPIC_API_KEY";
       break;
     default: // deepseek
       apiKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || "";
       baseUrl = process.env.LLM_BASE_URL || "https://api.deepseek.com/v1";
       model = process.env.LLM_MODEL || "deepseek-chat";
+      keyEnvVar = "DEEPSEEK_API_KEY";
       break;
   }
 
-  return { provider, apiKey, baseUrl, model };
+  return { provider, apiKey, baseUrl, model, keyEnvVar };
 }
 
 export function createProvider(config: ProviderConfig): LLMProvider {

@@ -530,7 +530,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const startPTT = useCallback(() => {
     if (!SpeechRecCtor || loading) return;
     const rec = new SpeechRecCtor();
-    rec.lang = "en-US";
+    rec.lang = "zh-CN";
     rec.interimResults = true;
     rec.continuous = true;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

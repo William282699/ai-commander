@@ -331,15 +331,8 @@ function getProvider(): LLMProvider {
   if (!_provider) {
     const config = getProviderConfig();
     if (!config.apiKey) {
-      throw new Error(
-        `API密钥未配置。请设置环境变量: ${
-          config.provider === "claude"
-            ? "ANTHROPIC_API_KEY"
-            : config.provider === "openai"
-              ? "OPENAI_API_KEY"
-              : "DEEPSEEK_API_KEY"
-        }`,
-      );
+      const envVar = config.keyEnvVar || "DEEPSEEK_API_KEY";
+      throw new Error(`API密钥未配置。请设置环境变量: ${envVar}`);
     }
     _provider = createProvider(config);
     console.log(`LLM provider: ${_provider.name} (model: ${config.model})`);
