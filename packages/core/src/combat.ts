@@ -197,11 +197,26 @@ export function processCombat(state: GameState, dt: number): void {
     const target = findTarget(unit, state);
 
     if (!target) {
-      // No target — if we were attacking, go idle (unless we have a move order)
+      // No target — if we were attacking, pick the next posture.
       if (unit.state === "attacking") {
         unit.attackTarget = null;
-        // Resume movement if we have a target position
-        if (unit.target) {
+
+        // If an active `defend` order is present, this unit wandered out to
+        // engage and should now return to its defensive post. The order's
+        // target is the home position (set by applyOrders when the order
+        // was issued) and persists for the life of the order.
+        const activeOrder = unit.orders[0];
+        if (activeOrder && activeOrder.action === "defend") {
+          unit.state = "defending";
+          if (activeOrder.target) {
+            unit.target = { ...activeOrder.target };
+            unit.waypoints = [{ ...activeOrder.target }];
+          } else {
+            unit.target = null;
+            unit.waypoints = [];
+          }
+        } else if (unit.target) {
+          // Resume pending movement
           unit.state = "moving";
         } else {
           unit.state = "idle";

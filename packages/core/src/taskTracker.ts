@@ -4,11 +4,41 @@
 // Pure functions operating on GameState.
 // ============================================================
 
-import type { GameState, TaskCard } from "@ai-commander/shared";
+import type { GameState, TaskCard, Squad } from "@ai-commander/shared";
 import { collectUnitsUnder } from "@ai-commander/shared";
+
+/**
+ * Resolve a task.assignedSquads entry to actual Squad objects. The stored
+ * reference can be any of three forms (whatever the LLM put in
+ * intent.fromSquad — see ChatPanel.tsx handleApprove squad-extraction):
+ *   - Squad ID, e.g. "I1"
+ *   - Leader name, e.g. "Aiden"
+ *   - Commander key, e.g. "chen" (resolves to all squads owned by chen)
+ *
+ * Before this helper, taskTracker compared only against `squad.id` and
+ * silently misfiled leader-name refs as "squadless," falling into a branch
+ * that skipped every status transition AND the failing→cancelled safety
+ * net — so doctrine-bound tasks got stuck in CRITICAL forever after the
+ * assigned squad was wiped. Mirrors the same ref-resolution logic used
+ * in autoBehavior's doctrine gate for consistency.
+ */
+function resolveSquadRef(state: GameState, ref: string): Squad[] {
+  const refLower = ref.toLowerCase();
+  return state.squads.filter(s =>
+    s.id === ref ||
+    s.leaderName?.toLowerCase() === refLower ||
+    ((refLower === "chen" || refLower === "marcus" || refLower === "emily") &&
+      s.ownerCommander === refLower),
+  );
+}
 
 const CLEANUP_DELAY_SEC = 30;
 const HOLD_COMPLETE_SEC = 15;
+// Tasks whose assigned units are all dead/missing land in "failing" state. Without
+// a terminating condition they sit there forever — the failing squad can't
+// recover, but "failing" is not eligible for cleanup. Grace period lets the
+// state breathe (maybe reinforcements arrive) before we force-terminate.
+const FAIL_GRACE_SEC = 20;
 
 /**
  * Compute a numeric priority score for sorting.
@@ -70,14 +100,22 @@ export function updateTasks(state: GameState): void {
       continue;
     }
 
-    // Combat tasks — track via assigned squads/units
+    // Combat tasks — track via assigned squads/units. assignedSquads entries
+    // may be squad IDs, leader names, or commander keys (see resolveSquadRef
+    // above). Walk each ref to its actual Squad objects before collecting
+    // units, otherwise a leader-name ref returns zero units and the task
+    // looks squadless even though it has a real (possibly KIA) squad behind it.
     const aliveUnitIds: number[] = [];
-    for (const sqId of task.assignedSquads) {
-      const unitIds = collectUnitsUnder(state, sqId);
-      for (const id of unitIds) {
-        const u = state.units.get(id);
-        if (u && u.team === "player" && u.state !== "dead") {
-          aliveUnitIds.push(id);
+    const resolvedSquads: Squad[] = [];
+    for (const ref of task.assignedSquads) {
+      for (const sq of resolveSquadRef(state, ref)) {
+        resolvedSquads.push(sq);
+        const unitIds = collectUnitsUnder(state, sq.id);
+        for (const id of unitIds) {
+          const u = state.units.get(id);
+          if (u && u.team === "player" && u.state !== "dead") {
+            aliveUnitIds.push(id);
+          }
         }
       }
     }
@@ -85,10 +123,7 @@ export function updateTasks(state: GameState): void {
     // Determine new status from unit states
     let newStatus = task.status;
 
-    // Check if any assigned squad actually exists in state
-    const hasResolvedSquad = task.assignedSquads.some(sqId =>
-      state.squads.some(s => s.id === sqId),
-    );
+    const hasResolvedSquad = resolvedSquads.length > 0;
 
     if (task.assignedSquads.length === 0 || !hasResolvedSquad) {
       // Squadless combat task — units were assigned but not via squads
@@ -133,6 +168,16 @@ export function updateTasks(state: GameState): void {
     if (task.status === "holding" && !task.constraint &&
         state.time - task.statusChangedAt >= HOLD_COMPLETE_SEC) {
       task.status = "completed";
+      task.statusChangedAt = state.time;
+    }
+
+    // Terminate tasks stuck in "failing" — all assigned units are dead or
+    // retreated, and the doctrine/order can't be rescued from this state.
+    // Transition to "cancelled" so the existing cleanup filter can drop it
+    // instead of letting it hang in the UI forever.
+    if (task.status === "failing" &&
+        state.time - task.statusChangedAt >= FAIL_GRACE_SEC) {
+      task.status = "cancelled";
       task.statusChangedAt = state.time;
     }
   }

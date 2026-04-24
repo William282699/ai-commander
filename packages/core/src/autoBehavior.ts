@@ -12,7 +12,7 @@
 // Constraints enforced: C1, C2, C3, C4, C5
 // ============================================================
 
-import type { GameState, Unit, Position, Team, PatrolTask } from "@ai-commander/shared";
+import type { GameState, Unit, Position, Team, PatrolTask, Squad } from "@ai-commander/shared";
 import { getUnitCategory, isManualOnlyUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { clearPathCache } from "./pathfinding";
@@ -32,7 +32,14 @@ const ENGAGE_RANGE = 8;          // tiles
 // PATROL_RANGE removed (Day 9.5 Batch A: idle auto-patrol disabled)
 
 const RECENTLY_DAMAGED_WINDOW = 3.0;  // seconds — "recently damaged" for chase response
-const ALLY_ASSIST_RANGE = 15;          // tiles — scan radius for fighting allies
+const ALLY_ASSIST_RANGE = 15;          // tiles — scan radius for fighting allies (non-defending units)
+// Defending units use a tighter assist radius — they must stay within cluster
+// cohesion of their defensive posture. A 15-tile scan would pull a HQ defender
+// halfway across the map to help a front-line squad, breaking the defensive line.
+// 12 tiles tuned from 8 based on playtest: 8 left far-side defenders in a ~5-tile
+// wide cluster out of reach when the fight was at the near edge; 12 pulls the
+// whole cluster in without scatter.
+const DEFENDING_ASSIST_RANGE = 12;     // tiles — assist radius when state="defending"
 
 // ── Main entry ──
 
@@ -57,7 +64,12 @@ function runAutoBehavior(state: GameState): void {
 
     // ── Priority 2: lowHP emergency retreat ──
     // Overrides C1 (active orders), but NOT player-controlled units (already filtered above)
-    if (unit.hp / unit.maxHp < LOW_HP_THRESHOLD && unit.state !== "retreating") {
+    // EXCEPTION: units under an active `no_retreat` or `must_hold` doctrine must
+    // not auto-retreat — the commander explicitly ordered them to hold the line.
+    // Doctrine is a player directive at priority ABOVE system self-preservation.
+    if (unit.hp / unit.maxHp < LOW_HP_THRESHOLD
+        && unit.state !== "retreating"
+        && !isUnitUnderHoldDoctrine(unit, state)) {
       const hqPos = findTeamHQ(state, unit.team);
       const dx = hqPos.x - unit.position.x;
       const dy = hqPos.y - unit.position.y;
@@ -100,7 +112,15 @@ function runAutoBehavior(state: GameState): void {
     // ── Priority 3: active orders skip (C1 PRIMARY check) ──
     // unit.orders.length > 0 is the primary check.
     // State checks are advisory only, never override C1/C5.
-    if (unit.orders.length > 0) return;
+    //
+    // EXCEPTION: a persistent `defend` order means "hold this zone," not
+    // "ignore the zone being attacked." Defending units fall through to
+    // 4a/4b/4c so they can engage incoming threats and assist neighbors.
+    // combat.ts sends them back to their defend post when the engagement
+    // ends — see the `defend` branch in the no-target block of processCombat.
+    const currentAction = unit.orders[0]?.action;
+    const inDefendPosture = unit.orders.length > 0 && currentAction === "defend";
+    if (unit.orders.length > 0 && !inDefendPosture) return;
 
     // ── Priority 4: engage / patrol ──
 
@@ -132,7 +152,10 @@ function runAutoBehavior(state: GameState): void {
 
     // 4c: Assist nearby fighting ally — idle unit joins nearby combat
     if (unit.state === "idle" || unit.state === "defending") {
-      const allyTarget = findAllyBattleTarget(unit, state);
+      // Narrow the assist radius when defending so the cluster doesn't
+      // dissolve across the map chasing distant allies.
+      const assistRange = unit.state === "defending" ? DEFENDING_ASSIST_RANGE : ALLY_ASSIST_RANGE;
+      const allyTarget = findAllyBattleTarget(unit, state, assistRange);
       if (allyTarget) {
         unit.state = "moving";
         clearPathCache(unit.id);
@@ -247,8 +270,12 @@ function findOutrangingAttacker(unit: Unit, state: GameState): Unit | null {
  * Scans for friendly units within ALLY_ASSIST_RANGE in "attacking" state,
  * then returns their attack target if visible to this unit.
  */
-function findAllyBattleTarget(unit: Unit, state: GameState): Unit | null {
-  let bestAllyDist = ALLY_ASSIST_RANGE * ALLY_ASSIST_RANGE;
+function findAllyBattleTarget(
+  unit: Unit,
+  state: GameState,
+  maxRange: number = ALLY_ASSIST_RANGE,
+): Unit | null {
+  let bestAllyDist = maxRange * maxRange;
   let bestEnemy: Unit | null = null;
 
   state.units.forEach((ally) => {
@@ -261,7 +288,7 @@ function findAllyBattleTarget(unit: Unit, state: GameState): Unit | null {
     const adx = ally.position.x - unit.position.x;
     const ady = ally.position.y - unit.position.y;
     const allyDist2 = adx * adx + ady * ady;
-    if (allyDist2 > ALLY_ASSIST_RANGE * ALLY_ASSIST_RANGE) return;
+    if (allyDist2 > maxRange * maxRange) return;
 
     // Find ally's combat target
     if (ally.attackTarget === null) return;
@@ -559,4 +586,123 @@ function randomPassableInRadius(
     if (canUnitEnterTile(unit.type, x, y, state)) return { x, y };
   }
   return null;
+}
+
+// ── Doctrine gate for priority 2 (lowHP retreat) ──
+
+/** Find the direct (leader) squad this unit belongs to. CMD squads don't hold
+ * unitIds directly (see squadHierarchy.ts invariant), so this returns the
+ * leaf leader squad, which is also what doctrine.assignedSquads references. */
+function findLeaderSquadForUnit(state: GameState, unitId: number): Squad | null {
+  for (const sq of state.squads) {
+    if (sq.unitIds.includes(unitId)) return sq;
+  }
+  return null;
+}
+
+/** Test whether a doctrine.assignedSquads entry (which may be a squad ID like
+ * "I1", a leader name like "Aiden", or a commander key like "chen") refers
+ * to this unit's leader squad. Matching is liberal because the LLM populates
+ * assignedSquads from intent.fromSquad, which can be any of the three forms —
+ * see ChatPanel.tsx:838 processDoctrineFields. */
+function squadRefMatchesUnit(ref: string, unit: Unit, squad: Squad): boolean {
+  const refLower = ref.toLowerCase();
+  if (ref === squad.id) return true;
+  if (squad.leaderName && squad.leaderName.toLowerCase() === refLower) return true;
+  // Commander key — match if this squad is owned by that commander
+  if ((refLower === "chen" || refLower === "marcus" || refLower === "emily")
+      && squad.ownerCommander === refLower) {
+    return true;
+  }
+  return false;
+}
+
+/** Resolve a doctrine.locationTag (region id | front id | tag id | facility id)
+ * and test whether the unit is inside that location's area. Returns false for
+ * unresolvable tags so an unknown locationTag never accidentally locks a unit
+ * into hold behavior. */
+function isUnitInLocationTag(
+  state: GameState,
+  unit: Unit,
+  locationTag: string,
+): boolean {
+  const { x: ux, y: uy } = unit.position;
+
+  // Try region
+  const region = state.regions.get(locationTag);
+  if (region) {
+    const [x1, y1, x2, y2] = region.bbox;
+    return ux >= x1 && ux <= x2 && uy >= y1 && uy <= y2;
+  }
+
+  // Try front (union of its regions' bboxes)
+  const front = state.fronts.find(f => f.id === locationTag);
+  if (front) {
+    for (const rid of front.regionIds) {
+      const r = state.regions.get(rid);
+      if (!r) continue;
+      const [x1, y1, x2, y2] = r.bbox;
+      if (ux >= x1 && ux <= x2 && uy >= y1 && uy <= y2) return true;
+    }
+    return false;
+  }
+
+  // Try player-placed tag (point → 10-tile radius)
+  const tag = state.tags?.find(t => t.id === locationTag);
+  if (tag) {
+    const dx = ux - tag.position.x;
+    const dy = uy - tag.position.y;
+    return dx * dx + dy * dy <= 10 * 10;
+  }
+
+  // Try facility (point → 10-tile radius, e.g. ea_kidney_ridge)
+  const facility = state.facilities.get(locationTag);
+  if (facility) {
+    const dx = ux - facility.position.x;
+    const dy = uy - facility.position.y;
+    return dx * dx + dy * dy <= 10 * 10;
+  }
+
+  return false;
+}
+
+/** Is this unit covered by an active `no_retreat` or `must_hold` doctrine?
+ * Matches by EITHER assignedSquads (squad tie, accepts squad ID / leader
+ * name / commander key — whatever the LLM passed through intent.fromSquad)
+ * OR locationTag (spatial tie, resolving region / front / tag / facility IDs).
+ * Either match is sufficient — doctrines are player directives and should
+ * apply whenever the unit is implicated, not only when both criteria hit. */
+function isUnitUnderHoldDoctrine(unit: Unit, state: GameState): boolean {
+  if (!state.doctrines || state.doctrines.length === 0) return false;
+
+  let cachedSquad: Squad | null | undefined;
+
+  for (const d of state.doctrines) {
+    if (d.status !== "active") continue;
+    // Only doctrines that semantically forbid retreat count here.
+    // `preserve_force` means "minimize casualties" — it does NOT forbid
+    // retreat, so we let priority 2 fire for units under that doctrine.
+    if (d.type !== "no_retreat" && d.type !== "must_hold") continue;
+
+    // Squad tie — cheap and definitive. Match is liberal because
+    // doctrine.assignedSquads is populated from intent.fromSquad, which the
+    // LLM may set to a squad ID ("I1"), a leader name ("Aiden"), or a
+    // commander key ("chen"). See squadRefMatchesUnit.
+    if (d.assignedSquads.length > 0) {
+      if (cachedSquad === undefined) {
+        cachedSquad = findLeaderSquadForUnit(state, unit.id);
+      }
+      if (cachedSquad) {
+        for (const ref of d.assignedSquads) {
+          if (squadRefMatchesUnit(ref, unit, cachedSquad)) return true;
+        }
+      }
+    }
+
+    // Location tie — fallback for doctrines defined purely by area, or for
+    // units in transit through the doctrine zone even if not on assignedSquads.
+    if (d.locationTag && isUnitInLocationTag(state, unit, d.locationTag)) return true;
+  }
+
+  return false;
 }

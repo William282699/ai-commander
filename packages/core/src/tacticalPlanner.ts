@@ -255,7 +255,15 @@ function resolveAttack(
     }
   }
 
-  const count = resolveQuantity(intent.quantity, units.length, style);
+  // Scope-aware quantity default: without fromSquad or a player selection the
+  // source pool is the full global list. An LLM-omitted quantity in that case
+  // would otherwise send every dispatchable unit into one attack. With a scope,
+  // "undefined" honestly means "all of that squad" and stays as-is.
+  const isScoped = !!intent.fromSquad || (selectedUnitIds !== undefined && selectedUnitIds.length > 0);
+  const count = resolveQuantity(
+    isScoped ? intent.quantity : (intent.quantity ?? "some"),
+    units.length, style,
+  );
   units = sortByDistance(units, target).slice(0, count);
 
   if (units.length === 0) {
@@ -364,7 +372,16 @@ function resolveDefend(
     }
   }
 
-  const count = resolveQuantity(intent.quantity, units.length, style);
+  // Scope-aware quantity default — same shape as resolveAttack, but "few" by
+  // default. The prompt already asks the LLM for 3-6 units on a defensive
+  // position; this is the code-level safety net when the LLM omits quantity
+  // on an unscoped defend, which would otherwise freeze every dispatchable
+  // unit and starve subsequent intents in the same option.
+  const isScoped = !!intent.fromSquad || (selectedUnitIds !== undefined && selectedUnitIds.length > 0);
+  const count = resolveQuantity(
+    isScoped ? intent.quantity : (intent.quantity ?? "few"),
+    units.length, style,
+  );
 
   if (target) {
     units = sortByDistance(units, target).slice(0, count);
@@ -835,9 +852,22 @@ function resolveCapture(
   }
 
   let units = source.units;
-  // Prefer infantry for captures
-  const infantry = units.filter((u) => u.type === "infantry");
-  units = infantry.length > 0 ? infantry : units;
+  // Scenario-aware capture doctrine. Must match economy.ts::tickFacilityCapture
+  // line 118-126 — the *actual* game-engine rule that decides who can capture:
+  //   - El Alamein: any GROUND unit (infantry + armor + commanders)
+  //   - Default:   infantry only
+  // Previously this resolver hard-preferred infantry in ALL scenarios, which on
+  // El Alamein shrank a tank-heavy squad (e.g. Blake) to 0-2 lone infantry and
+  // effectively made "Blake capture X" dispatch a single token soldier while
+  // the real combat force sat idle.
+  const isElAlamein = state.scenarioId === "el_alamein";
+  if (isElAlamein) {
+    // Air/naval can't stand on a facility — filter to ground only.
+    units = units.filter((u) => getUnitCategory(u.type) === "ground");
+  } else {
+    const infantry = units.filter((u) => u.type === "infantry");
+    units = infantry.length > 0 ? infantry : units;
+  }
 
   const count = resolveQuantity(intent.quantity ?? "some", units.length, style);
   units = sortByDistance(units, target).slice(0, count);

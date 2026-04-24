@@ -1247,15 +1247,13 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
 
       const reportEvts = drainReportEvents(state, 5);
       for (const evt of reportEvts) {
+        // Suppress periodic economy spam — these repeat UI numbers and add no value.
+        // Real decision-point events (FACILITY_LOST, SQUAD_HEAVY_LOSS, etc.) still pass through.
+        if (evt.type === "ECONOMY_REPORT" || evt.type === "ECONOMY_SURPLUS") continue;
+
         const channel = EVENT_CHANNEL_MAP[evt.type] || "ops";
         const level: MessageLevel =
           evt.severity === "critical" ? "urgent" : evt.severity === "warning" ? "warning" : "info";
-
-        // Throttle: suppress ECONOMY_REPORT if logistics heartbeat message arrived < 30s ago
-        if (evt.type === "ECONOMY_REPORT") {
-          const lastHb = getLastMessageTimeBySource("logistics", "heartbeat");
-          if (lastHb !== null && state.time - lastHb < 30) continue;
-        }
 
         // Phase 3: actionRequired events should always surface and eventually produce a decision thread.
         // Skip staff-ask if a rule-based crisis card was already generated for this topic
@@ -1325,8 +1323,11 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       const inCombat = state.time <= heartbeatState.combatWindowUntil;
 
       // --- Heartbeat LLM brief (async, non-blocking) ---
+      // All advisors silent on heartbeat — they speak event-driven only via
+      // advisorTrigger / reportEvents. Flip back to ["combat"] (or more) to
+      // re-enable Chen's ambient chatter if the world feels too quiet.
       if (!state.gameOver) {
-        const channels = ["ops", "logistics", "combat"] as Channel[];
+        const channels: Channel[] = [];
         const heartbeatInterval = inCombat ? COMBAT_HEARTBEAT_INTERVAL_SEC : PEACE_HEARTBEAT_INTERVAL_SEC;
 
         const sendHeartbeat = (ch: Channel) => {

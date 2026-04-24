@@ -331,7 +331,7 @@ function detectPositionCritical(state: GameState): void {
       emit(
         state,
         "POSITION_CRITICAL",
-        `${front.name} about to collapse! Power ratio ${(ratio * 100).toFixed(0)}%, taking heavy fire!`,
+        `${front.name} 即将失守。战力比 ${(ratio * 100).toFixed(0)}%，承受重火力。`,
         "critical",
         front.id,
         true, // actionRequired
@@ -366,7 +366,7 @@ function detectMissionStalled(state: GameState): void {
         emit(
           state,
           "MISSION_STALLED",
-          `Mission "${m.name}" stalled at ${(m.progress * 100).toFixed(0)}% — no progress for 3 minutes.`,
+          `任务"${m.name}"卡在 ${(m.progress * 100).toFixed(0)}%，三分钟无进展。`,
           "warning",
           m.id,
           true, // actionRequired
