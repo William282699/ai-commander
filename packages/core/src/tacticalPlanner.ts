@@ -22,7 +22,7 @@ import type {
   QuantityHint,
   UnitCategoryHint,
 } from "@ai-commander/shared";
-import { getUnitCategory, UNIT_STATS, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit, isFootUnit } from "@ai-commander/shared";
+import { getUnitCategory, UNIT_STATS, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit, isFootUnit, resolveSquadRef, isCommanderKey } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { createMission } from "./missions";
 import { getFormationOffset, computeHeading, type FormationStyle } from "./formation";
@@ -312,8 +312,10 @@ function resolveAttack(
   }
 
   // ④ + ③: spread targets + passability degradation (replaces filterByTargetPassability)
-  // Look up squad formation style if dispatching from a squad
-  const squad = intent.fromSquad ? state.squads.find(s => s.id === intent.fromSquad) : undefined;
+  // Look up squad formation style if dispatching from a squad. resolveSquadRef
+  // accepts squad ID / leader name / commander key — commander refs return
+  // multiple squads but we only need a representative for formation style.
+  const squad = intent.fromSquad ? resolveSquadRef(state, intent.fromSquad)[0] : undefined;
   const formation = squad?.formationStyle as FormationStyle | undefined;
   const spread = createOrdersWithSpread(
     units, target, state, "attack_move", mapUrgency(intent.urgency), 1.5, formation,
@@ -1091,42 +1093,34 @@ function resolveSourceUnitsRaw(
   intent: Intent,
   state: GameState,
 ): SourceUnitsResult {
-  // ── Phase 2: fromSquad — match by squad.id, leaderName, or ownerCommander ──
+  // ── Phase 2: fromSquad — delegate ref resolution to shared helper,
+  // which already handles squad ID / leader name / commander key in one pass.
+  // We preserve the commander-vs-leaf distinction only in the error message.
   if (intent.fromSquad && typeof intent.fromSquad === "string") {
-    // 1. Exact squad id
-    let squad = state.squads.find((s) => s.id === intent.fromSquad);
-    // 2. Squad leader name
-    if (!squad) {
-      squad = state.squads.find((s) => s.leaderName === intent.fromSquad);
+    const matched = resolveSquadRef(state, intent.fromSquad);
+    if (matched.length === 0) {
+      return { units: [], error: `无法找到分队: ${intent.fromSquad}` };
     }
-    if (squad) {
-      // Use collectUnitsUnder for hierarchy-aware unit collection
-      const allIds = collectUnitsUnder(state, squad.id);
-      const units = allIds
-        .map((id) => state.units.get(id))
-        .filter(
-          (u): u is Unit => u !== undefined && isDispatchablePlayerUnit(u),
-        );
-      if (units.length > 0) return { units };
-      return { units: [], error: `分队 ${intent.fromSquad} 无可用单位（已阵亡或被手动接管）` };
+
+    // Aggregate units across all matched squads (commander ref → many; leaf → one).
+    // Dedup via Set since collectUnitsUnder may overlap if squads share descendants.
+    const allIds = new Set<number>();
+    for (const sq of matched) {
+      for (const id of collectUnitsUnder(state, sq.id)) allIds.add(id);
     }
-    // 3. Commander name (chen/marcus/emily) → all squads under that commander
-    const cmdKey = intent.fromSquad.toLowerCase() as import("@ai-commander/shared").CommanderKey;
-    const cmdSquads = state.squads.filter((s) => s.ownerCommander === cmdKey);
-    if (cmdSquads.length > 0) {
-      const allIds = new Set<number>();
-      for (const sq of cmdSquads) {
-        for (const id of collectUnitsUnder(state, sq.id)) allIds.add(id);
-      }
-      const units = Array.from(allIds)
-        .map((id) => state.units.get(id))
-        .filter(
-          (u): u is Unit => u !== undefined && isDispatchablePlayerUnit(u),
-        );
-      if (units.length > 0) return { units };
-      return { units: [], error: `指挥官 ${intent.fromSquad} 下属无可用单位` };
-    }
-    return { units: [], error: `无法找到分队: ${intent.fromSquad}` };
+    const units = Array.from(allIds)
+      .map((id) => state.units.get(id))
+      .filter((u): u is Unit => u !== undefined && isDispatchablePlayerUnit(u));
+    if (units.length > 0) return { units };
+
+    // Matched squads but none dispatchable — error wording differentiates
+    // "commander's forces all spent" from "that specific squad wiped."
+    return {
+      units: [],
+      error: isCommanderKey(intent.fromSquad)
+        ? `指挥官 ${intent.fromSquad} 下属无可用单位`
+        : `分队 ${intent.fromSquad} 无可用单位（已阵亡或被手动接管）`,
+    };
   }
 
   const fromHint =
