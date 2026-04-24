@@ -13,7 +13,7 @@
 // ============================================================
 
 import type { GameState, Unit, Position, Team, PatrolTask, Squad } from "@ai-commander/shared";
-import { getUnitCategory, isManualOnlyUnit, findLeaderSquadForUnit, squadRefMatchesSquad } from "@ai-commander/shared";
+import { getUnitCategory, isManualOnlyUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { clearPathCache } from "./pathfinding";
 
@@ -590,6 +590,33 @@ function randomPassableInRadius(
 
 // ── Doctrine gate for priority 2 (lowHP retreat) ──
 
+/** Find the direct (leader) squad this unit belongs to. CMD squads don't hold
+ * unitIds directly (see squadHierarchy.ts invariant), so this returns the
+ * leaf leader squad, which is also what doctrine.assignedSquads references. */
+function findLeaderSquadForUnit(state: GameState, unitId: number): Squad | null {
+  for (const sq of state.squads) {
+    if (sq.unitIds.includes(unitId)) return sq;
+  }
+  return null;
+}
+
+/** Test whether a doctrine.assignedSquads entry (which may be a squad ID like
+ * "I1", a leader name like "Aiden", or a commander key like "chen") refers
+ * to this unit's leader squad. Matching is liberal because the LLM populates
+ * assignedSquads from intent.fromSquad, which can be any of the three forms —
+ * see ChatPanel.tsx:838 processDoctrineFields. */
+function squadRefMatchesUnit(ref: string, unit: Unit, squad: Squad): boolean {
+  const refLower = ref.toLowerCase();
+  if (ref === squad.id) return true;
+  if (squad.leaderName && squad.leaderName.toLowerCase() === refLower) return true;
+  // Commander key — match if this squad is owned by that commander
+  if ((refLower === "chen" || refLower === "marcus" || refLower === "emily")
+      && squad.ownerCommander === refLower) {
+    return true;
+  }
+  return false;
+}
+
 /** Resolve a doctrine.locationTag (region id | front id | tag id | facility id)
  * and test whether the unit is inside that location's area. Returns false for
  * unresolvable tags so an unknown locationTag never accidentally locks a unit
@@ -657,15 +684,17 @@ function isUnitUnderHoldDoctrine(unit: Unit, state: GameState): boolean {
     // retreat, so we let priority 2 fire for units under that doctrine.
     if (d.type !== "no_retreat" && d.type !== "must_hold") continue;
 
-    // Squad tie — delegated to shared squadRefMatchesSquad. Handles all
-    // three ref forms (squad ID / leader name / commander key) in one place.
+    // Squad tie — cheap and definitive. Match is liberal because
+    // doctrine.assignedSquads is populated from intent.fromSquad, which the
+    // LLM may set to a squad ID ("I1"), a leader name ("Aiden"), or a
+    // commander key ("chen"). See squadRefMatchesUnit.
     if (d.assignedSquads.length > 0) {
       if (cachedSquad === undefined) {
         cachedSquad = findLeaderSquadForUnit(state, unit.id);
       }
       if (cachedSquad) {
         for (const ref of d.assignedSquads) {
-          if (squadRefMatchesSquad(ref, cachedSquad)) return true;
+          if (squadRefMatchesUnit(ref, unit, cachedSquad)) return true;
         }
       }
     }

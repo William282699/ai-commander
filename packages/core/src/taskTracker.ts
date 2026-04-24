@@ -5,7 +5,32 @@
 // ============================================================
 
 import type { GameState, TaskCard, Squad } from "@ai-commander/shared";
-import { collectUnitsUnder, resolveSquadRef } from "@ai-commander/shared";
+import { collectUnitsUnder } from "@ai-commander/shared";
+
+/**
+ * Resolve a task.assignedSquads entry to actual Squad objects. The stored
+ * reference can be any of three forms (whatever the LLM put in
+ * intent.fromSquad — see ChatPanel.tsx handleApprove squad-extraction):
+ *   - Squad ID, e.g. "I1"
+ *   - Leader name, e.g. "Aiden"
+ *   - Commander key, e.g. "chen" (resolves to all squads owned by chen)
+ *
+ * Before this helper, taskTracker compared only against `squad.id` and
+ * silently misfiled leader-name refs as "squadless," falling into a branch
+ * that skipped every status transition AND the failing→cancelled safety
+ * net — so doctrine-bound tasks got stuck in CRITICAL forever after the
+ * assigned squad was wiped. Mirrors the same ref-resolution logic used
+ * in autoBehavior's doctrine gate for consistency.
+ */
+function resolveSquadRef(state: GameState, ref: string): Squad[] {
+  const refLower = ref.toLowerCase();
+  return state.squads.filter(s =>
+    s.id === ref ||
+    s.leaderName?.toLowerCase() === refLower ||
+    ((refLower === "chen" || refLower === "marcus" || refLower === "emily") &&
+      s.ownerCommander === refLower),
+  );
+}
 
 const CLEANUP_DELAY_SEC = 30;
 const HOLD_COMPLETE_SEC = 15;

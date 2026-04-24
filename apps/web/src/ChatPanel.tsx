@@ -21,7 +21,7 @@ import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduct
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
-import { CHANNEL_LABELS, collectUnitsUnder, resolveSquadRef } from "@ai-commander/shared";
+import { CHANNEL_LABELS, collectUnitsUnder } from "@ai-commander/shared";
 import {
   addMessage,
   getActiveChannel,
@@ -128,17 +128,10 @@ function isValidTarget(intent: Intent, state: GameState): boolean {
   if (intent.toFront && !isKnownLocation(intent.toFront, state)) return false;
   if (intent.fromFront && !isKnownLocation(intent.fromFront, state)) return false;
   if (intent.fromSquad) {
-    // resolveSquadRef covers squad ID / leader name / commander key.
-    // The extra COMMANDER_META.label check accepts the Chinese-label form
-    // ("陈军士" / "马克斯上尉") which is specific to the UI layer.
-    const hasMatch = resolveSquadRef(state, intent.fromSquad).length > 0;
-    if (!hasMatch) {
-      const fs = intent.fromSquad.toLowerCase();
-      const isLabelMatch = COMMANDERS.some(c =>
-        c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!),
-      );
-      if (!isLabelMatch) return false;
-    }
+    const fs = intent.fromSquad.toLowerCase();
+    const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
+    const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
+    if (!isSquad && !isCommander) return false;
   }
   return true;
 }
@@ -224,31 +217,31 @@ function detectStaleSquadRefs(
     const fs = intent.fromSquad.toLowerCase();
 
     // Commander key → always treat as alive (aggregates many squads;
-    // we don't flag it stale unless the player specifically named a dead one).
-    // Handled through the Chinese-label check first since resolveSquadRef
-    // returns potentially many squads for a commander key and we don't want
-    // to mass-flag them all as stale.
+    // we don't flag it stale unless the player specifically named a dead one)
     if (COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!))) {
       continue;
     }
 
-    // Squad ID / leader name → resolve via shared helper, then check aliveness
-    // of every matched squad. A squad shell can persist in state.squads with
-    // all its units dead (KIA-but-lingering) — resolveSourceUnits would reject
-    // it downstream with "分队 X 无可用单位", but by that point the advisor
-    // brief has already claimed the squad will do things. Flag any ref whose
-    // resolved squads have zero living units.
-    const matched = resolveSquadRef(state, intent.fromSquad);
-    if (matched.length === 0) {
+    // Leader-name or squad-ID → find the squad entity
+    const squad = state.squads?.find(s =>
+      s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs,
+    );
+    if (!squad) {
+      // Entity doesn't exist at all — clearly stale
       stale.add(intent.fromSquad);
       continue;
     }
-    const hasLiving = matched.some(squad =>
-      collectUnitsUnder(state, squad.id).some(id => {
-        const u = state.units.get(id);
-        return u && u.state !== "dead" && u.hp > 0;
-      }),
-    );
+
+    // Entity exists, but it may be "KIA-but-lingering": the squad shell
+    // persists in state.squads while all its units are dead. resolveSourceUnits
+    // rejects this downstream with "分队 X 无可用单位", but by that point the
+    // player has already read the advisor brief claiming the squad will do
+    // things. Treat any squad with zero living dispatchable units as stale.
+    const unitIds = collectUnitsUnder(state, squad.id);
+    const hasLiving = unitIds.some(id => {
+      const u = state.units.get(id);
+      return u && u.state !== "dead" && u.hp > 0;
+    });
     if (!hasLiving) stale.add(intent.fromSquad);
   }
   return [...stale];
@@ -310,11 +303,9 @@ function canAutoExecute(
     if (intent.fromSquad) {
       const fs = intent.fromSquad.toLowerCase();
       const isSquadId = /^[A-Z]\d+$/i.test(intent.fromSquad);
-      // Shared resolver handles squad ID / leader name / commander key. For
-      // single-squad refs the array has at most one entry; commander-key refs
-      // resolve to multiple but canAutoExecute's per-squad mission check only
-      // needs a representative, which the first element provides.
-      const squad = resolveSquadRef(state, intent.fromSquad)[0];
+      const squad = state.squads?.find(s =>
+        s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs,
+      );
 
       // Accept anchor if user's text mentions this intent's source in any form:
       // the exact squad ID, the intent's leaderName/commander, or (if fromSquad is
@@ -779,7 +770,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         // Soft-fix: clear invalid fromSquad so engine auto-selects units
         if (intent.fromSquad) {
           const fs = intent.fromSquad.toLowerCase();
-          const isSquad = resolveSquadRef(state, intent.fromSquad).length > 0;
+          const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
           const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
           if (!isSquad && !isCommander) {
             addMessage("warning", `分队 ${intent.fromSquad} 不存在，将自动分配单位`, state.time, thread.channel, undefined, "command_ack");
@@ -1213,7 +1204,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       // Soft-fix: if fromSquad is invalid, clear it so the engine auto-selects units
       if (intent.fromSquad) {
         const fs = intent.fromSquad.toLowerCase();
-        const isSquad = resolveSquadRef(state, intent.fromSquad).length > 0;
+        const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
         const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
         if (!isSquad && !isCommander) {
           addMessage("warning", `分队 ${intent.fromSquad} 不存在，将自动分配单位`, state.time, ch, undefined, "command_ack");
