@@ -62,6 +62,7 @@ interface MessageStoreShape {
   setActiveChannel: typeof setActiveChannel;
   createThread: typeof createThread;
   resolveThread: typeof resolveThread;
+  dismissThread: typeof dismissThread;
   getActiveThread: typeof getActiveThread;
   getActiveThreads: typeof getActiveThreads;
   expireStaleThreads: typeof expireStaleThreads;
@@ -250,6 +251,21 @@ export function resolveThread(threadId: string): void {
   const t = _threads.find((th) => th.id === threadId);
   if (t && t.status === "open") {
     t.status = "resolved";
+    listeners.forEach((fn) => fn());
+  }
+}
+
+/**
+ * Dismiss a thread without taking any of its options. Used when the player
+ * doesn't want any of A/B/C and would rather handle the situation via direct
+ * chat. Treats as immediate expiration (matches "expired" status semantics).
+ */
+export function dismissThread(threadId: string): void {
+  const p = getOpenerStore();
+  if (p) { p.dismissThread(threadId); return; }
+  const t = _threads.find((th) => th.id === threadId);
+  if (t && t.status === "open") {
+    t.status = "expired";
     listeners.forEach((fn) => fn());
   }
 }

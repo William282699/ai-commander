@@ -30,6 +30,7 @@ import {
   getMessagesByChannel,
   getActiveThreads,
   resolveThread,
+  dismissThread,
   subscribe,
   CHANNEL_PERSONA,
   type FeedMessage,
@@ -1438,6 +1439,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         {/* Inline staff threads */}
         {activeThreads.length > 0 && !response && activeThreads.map((thread) => (
           <div key={thread.id} style={threadBubbleStyle}>
+            <button
+              onClick={() => dismissThread(thread.id)}
+              style={crisisDismissBtn}
+              title="关闭这条紧急通报（你自己用对话处理）"
+            >×</button>
             <div className="hud-thread-header">
               ⚠ {thread.eventType} — {thread.brief}
             </div>
@@ -2157,11 +2163,27 @@ const timeTagStyle: React.CSSProperties = {
 };
 
 const threadBubbleStyle: React.CSSProperties = {
-  padding: "10px 12px",
+  position: "relative",
+  padding: "10px 32px 10px 12px", // extra right padding so text doesn't run under × button
   background: "linear-gradient(180deg, rgba(240, 160, 48, 0.15) 0%, rgba(240, 160, 48, 0.05) 100%)",
   border: "1px solid rgba(240, 160, 48, 0.35)",
   borderLeft: "4px solid #f0a030",
   boxShadow: "0 3px 15px rgba(0, 0, 0, 0.35), 0 0 15px rgba(240, 160, 48, 0.08), inset 0 0 30px rgba(240, 160, 48, 0.05)",
+};
+
+const crisisDismissBtn: React.CSSProperties = {
+  position: "absolute",
+  top: 6,
+  right: 8,
+  background: "rgba(0, 0, 0, 0.35)",
+  border: "1px solid rgba(240, 160, 48, 0.55)",
+  borderRadius: 4,
+  color: "#f0a030",
+  cursor: "pointer",
+  fontSize: 16,
+  fontWeight: "bold",
+  lineHeight: "16px",
+  padding: "2px 7px",
 };
 
 const threadOptionBtnStyle: React.CSSProperties = {
