@@ -52,21 +52,21 @@ export interface UnitStats {
 
 export const UNIT_STATS: Record<UnitType, UnitStats> = {
   // Ground
-  infantry:   { hp: 60,  attack: 8,  attackInterval: 1.0, range: 3,  speed: 2.0, cost: 100,  fuelCost: 0,  buildTime: 5,  vision: 5,  category: "ground", special: ["capture", "forest_move", "swamp_move", "urban_cover"] },
-  light_tank: { hp: 120, attack: 15, attackInterval: 1.5, range: 5,  speed: 3.0, cost: 250,  fuelCost: 5,  buildTime: 8,  vision: 7,  category: "ground", special: ["fast"] },
-  main_tank:  { hp: 250, attack: 30, attackInterval: 2.0, range: 6,  speed: 2.0, cost: 500,  fuelCost: 10, buildTime: 12, vision: 5,  category: "ground", special: ["frontal_armor"] },
-  artillery:  { hp: 80,  attack: 45, attackInterval: 4.0, range: 12, speed: 1.0, cost: 400,  fuelCost: 5,  buildTime: 10, vision: 5,  category: "ground", special: ["indirect_fire", "no_move_attack"] },
-  commander:  { hp: 400, attack: 18, attackInterval: 1.0, range: 5,  speed: 2.0, cost: 0,    fuelCost: 0,  buildTime: 0,  vision: 7,  category: "ground", special: ["regen", "projectile3"] },
-  elite_guard:{ hp: 250, attack: 18, attackInterval: 1.0, range: 5,  speed: 2.0, cost: 0,    fuelCost: 0,  buildTime: 0,  vision: 5,  category: "ground", special: ["projectile3"] },
+  infantry:   { hp: 60,  attack: 6,  attackInterval: 1.5,  range: 3,  speed: 2.0, cost: 100,  fuelCost: 0,  buildTime: 5,  vision: 5,  category: "ground", special: ["capture", "forest_move", "swamp_move", "urban_cover"] },
+  light_tank: { hp: 120, attack: 11, attackInterval: 2.25, range: 5,  speed: 3.0, cost: 250,  fuelCost: 5,  buildTime: 8,  vision: 7,  category: "ground", special: ["fast"] },
+  main_tank:  { hp: 250, attack: 21, attackInterval: 3.0,  range: 6,  speed: 2.0, cost: 500,  fuelCost: 10, buildTime: 12, vision: 5,  category: "ground", special: ["frontal_armor"] },
+  artillery:  { hp: 80,  attack: 32, attackInterval: 6.0,  range: 12, speed: 1.0, cost: 400,  fuelCost: 5,  buildTime: 10, vision: 5,  category: "ground", special: ["indirect_fire", "no_move_attack"] },
+  commander:  { hp: 400, attack: 13, attackInterval: 1.5,  range: 5,  speed: 2.0, cost: 0,    fuelCost: 0,  buildTime: 0,  vision: 7,  category: "ground", special: ["regen", "projectile3"] },
+  elite_guard:{ hp: 250, attack: 13, attackInterval: 1.5,  range: 5,  speed: 2.0, cost: 0,    fuelCost: 0,  buildTime: 0,  vision: 5,  category: "ground", special: ["projectile3"] },
   // Naval
-  patrol_boat:{ hp: 80,  attack: 10, attackInterval: 1.0, range: 4,  speed: 4.0, cost: 150,  fuelCost: 3,  buildTime: 6,  vision: 8,  category: "naval",  special: ["fast", "shallow_water"] },
-  destroyer:  { hp: 200, attack: 25, attackInterval: 1.5, range: 7,  speed: 2.5, cost: 450,  fuelCost: 8,  buildTime: 12, vision: 7,  category: "naval",  special: ["anti_air"] },
-  cruiser:    { hp: 350, attack: 40, attackInterval: 2.5, range: 9,  speed: 1.8, cost: 700,  fuelCost: 15, buildTime: 18, vision: 7,  category: "naval",  special: ["shore_bombardment"] },
-  carrier:    { hp: 500, attack: 0,  attackInterval: 0,   range: 0,  speed: 1.2, cost: 1000, fuelCost: 25, buildTime: 25, vision: 7,  category: "naval",  special: ["launch_planes"] },
+  patrol_boat:{ hp: 80,  attack: 7,  attackInterval: 1.5,  range: 4,  speed: 4.0, cost: 150,  fuelCost: 3,  buildTime: 6,  vision: 8,  category: "naval",  special: ["fast", "shallow_water"] },
+  destroyer:  { hp: 200, attack: 18, attackInterval: 2.25, range: 7,  speed: 2.5, cost: 450,  fuelCost: 8,  buildTime: 12, vision: 7,  category: "naval",  special: ["anti_air"] },
+  cruiser:    { hp: 350, attack: 28, attackInterval: 3.75, range: 9,  speed: 1.8, cost: 700,  fuelCost: 15, buildTime: 18, vision: 7,  category: "naval",  special: ["shore_bombardment"] },
+  carrier:    { hp: 500, attack: 0,  attackInterval: 0,    range: 0,  speed: 1.2, cost: 1000, fuelCost: 25, buildTime: 25, vision: 7,  category: "naval",  special: ["launch_planes"] },
   // Air
-  fighter:    { hp: 100, attack: 20, attackInterval: 1.2, range: 5,  speed: 8.0, cost: 350,  fuelCost: 5,  buildTime: 8,  vision: 8,  category: "air",    special: ["air_superiority"] },
-  bomber:     { hp: 80,  attack: 60, attackInterval: 5.0, range: 3,  speed: 5.0, cost: 600,  fuelCost: 10, buildTime: 15, vision: 5,  category: "air",    special: ["aoe", "anti_building"] },
-  recon_plane:{ hp: 50,  attack: 0,  attackInterval: 0,   range: 0,  speed: 10.0,cost: 150,  fuelCost: 3,  buildTime: 5,  vision: 15, category: "air",    special: ["no_attack", "spotter"] },
+  fighter:    { hp: 100, attack: 14, attackInterval: 1.8,  range: 5,  speed: 8.0, cost: 350,  fuelCost: 5,  buildTime: 8,  vision: 8,  category: "air",    special: ["air_superiority"] },
+  bomber:     { hp: 80,  attack: 42, attackInterval: 7.5,  range: 3,  speed: 5.0, cost: 600,  fuelCost: 10, buildTime: 15, vision: 5,  category: "air",    special: ["aoe", "anti_building"] },
+  recon_plane:{ hp: 50,  attack: 0,  attackInterval: 0,    range: 0,  speed: 10.0,cost: 150,  fuelCost: 3,  buildTime: 5,  vision: 15, category: "air",    special: ["no_attack", "spotter"] },
 };
 
 // --- Counter Matrix ---
