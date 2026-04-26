@@ -322,8 +322,24 @@ const PROFILES: Record<string, ProfileDef> = {
   },
 };
 
-export function getProviderConfig(): ProviderConfig {
-  // Preferred: LLM_PROFILE selects a curated preset.
+export function getProviderConfig(channel?: string): ProviderConfig {
+  // Channel-specific override takes precedence: LLM_PROFILE_<CHANNEL_UPPER>
+  if (channel) {
+    const envKey = `LLM_PROFILE_${channel.toUpperCase()}`;
+    const channelProfile = process.env[envKey]?.toLowerCase();
+    if (channelProfile && PROFILES[channelProfile]) {
+      const p = PROFILES[channelProfile];
+      return {
+        provider: p.provider,
+        baseUrl: p.baseUrl,
+        model: p.model,
+        apiKey: process.env[p.keyEnvVar] || "",
+        keyEnvVar: p.keyEnvVar,
+      };
+    }
+  }
+
+  // Default: LLM_PROFILE selects a curated preset.
   const profile = process.env.LLM_PROFILE?.toLowerCase();
   if (profile && PROFILES[profile]) {
     const p = PROFILES[profile];
@@ -365,6 +381,59 @@ export function getProviderConfig(): ProviderConfig {
   }
 
   return { provider, apiKey, baseUrl, model, keyEnvVar };
+}
+
+// ── Per-channel diagnostics (D2=B: strict isProviderConfigured) ──
+
+export interface ChannelDiagnostic {
+  channel: string;       // "default", "combat", "ops", etc.
+  profile: string;       // resolved profile name OR legacy descriptor
+  model: string;         // resolved model
+  keyEnvVar: string;
+  keyPresent: boolean;
+}
+
+const KNOWN_CHANNELS = ["combat", "ops", "logistics", "group"] as const;
+
+/**
+ * Inspect all configured LLM channels and report key/profile state.
+ * Used by isProviderConfigured() (strict mode) and boot logging.
+ *
+ * Returns "default" entry plus one entry per LLM_PROFILE_<CHANNEL> env var
+ * that's set. Channels without explicit overrides aren't listed (they fall
+ * back to default at runtime).
+ */
+export function describeProviderConfig(): ChannelDiagnostic[] {
+  const result: ChannelDiagnostic[] = [];
+
+  // Default profile (used when no channel-specific override matches)
+  const defaultConfig = getProviderConfig();
+  const defaultProfile = process.env.LLM_PROFILE
+    || `(legacy LLM_PROVIDER=${process.env.LLM_PROVIDER || "deepseek"})`;
+  result.push({
+    channel: "default",
+    profile: defaultProfile,
+    model: defaultConfig.model,
+    keyEnvVar: defaultConfig.keyEnvVar || "?",
+    keyPresent: !!defaultConfig.apiKey,
+  });
+
+  // Channel-specific overrides
+  for (const ch of KNOWN_CHANNELS) {
+    const envKey = `LLM_PROFILE_${ch.toUpperCase()}`;
+    const profile = process.env[envKey]?.toLowerCase();
+    if (!profile) continue;
+    const channelConfig = getProviderConfig(ch);
+    result.push({
+      channel: ch,
+      profile,
+      model: channelConfig.model,
+      keyEnvVar: channelConfig.keyEnvVar || "?",
+      keyPresent: !!channelConfig.apiKey,
+    });
+  }
+
+  return result;
 }
 
 export function createProvider(config: ProviderConfig): LLMProvider {

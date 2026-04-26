@@ -15,7 +15,7 @@ const envResult = dotenvConfig({ path: ENV_PATH });
 
 import express from "express";
 import cors from "cors";
-import { callAdvisor, callAdvisorStream, callGroupAdvisor, callLightBrief, isProviderConfigured } from "./ai.js";
+import { callAdvisor, callAdvisorStream, callGroupAdvisor, callLightBrief, isProviderConfigured, describeProviderConfig } from "./ai.js";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -165,8 +165,12 @@ app.listen(PORT, () => {
   console.log(`AI Commander server running on http://localhost:${PORT}`);
   const loadedKeys = envResult.parsed ? Object.keys(envResult.parsed).join(",") : "(none)";
   console.log(`[boot] .env=${ENV_PATH} loaded=${!envResult.error} keys=${loadedKeys}`);
-  console.log(`[boot] LLM_PROFILE=${process.env.LLM_PROFILE || "(unset, using legacy LLM_PROVIDER fallback)"}`);
+  console.log(`[boot] LLM provider mapping:`);
+  for (const d of describeProviderConfig()) {
+    const status = d.keyPresent ? "✓" : `✗ MISSING ${d.keyEnvVar}`;
+    console.log(`  [${d.channel}] profile=${d.profile} model=${d.model} ${status}`);
+  }
   if (!isProviderConfigured()) {
-    console.warn("⚠ LLM API key not configured. Check .env path above.");
+    console.warn("⚠ Some channels missing API keys — they will fail at runtime");
   }
 });

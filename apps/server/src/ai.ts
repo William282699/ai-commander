@@ -18,7 +18,10 @@ import type {
   Intent,
   IntentType,
 } from "@ai-commander/shared";
-import { createProvider, getProviderConfig, type LLMProvider, type ChatMessage } from "./providers.js";
+import { createProvider, getProviderConfig, describeProviderConfig, type LLMProvider, type ChatMessage } from "./providers.js";
+
+// Re-export for index.ts boot logging
+export { describeProviderConfig };
 
 // ── Advisor Mode (single decision point) ──
 
@@ -323,44 +326,53 @@ function normalizeAdvisorForDay7(data: AdvisorResponse): AdvisorResult {
   };
 }
 
-// ── Provider singleton ──
+// ── Provider cache (per-channel) ──
 
-let _provider: LLMProvider | null = null;
+const _providers = new Map<string, LLMProvider>();
 
-function getProvider(): LLMProvider {
-  if (!_provider) {
-    const config = getProviderConfig();
-    if (!config.apiKey) {
-      const envVar = config.keyEnvVar || "DEEPSEEK_API_KEY";
-      throw new Error(`API密钥未配置。请设置环境变量: ${envVar}`);
-    }
-    _provider = createProvider(config);
-    console.log(`LLM provider: ${_provider.name} (model: ${config.model})`);
+/**
+ * Get the LLM provider for a given channel. Channel-specific config (via
+ * LLM_PROFILE_<CHANNEL> env var) overrides the default LLM_PROFILE.
+ * Cached per channel so each channel gets its own singleton instance.
+ */
+function getProvider(channel?: string): LLMProvider {
+  const key = channel || "default";
+  const cached = _providers.get(key);
+  if (cached) return cached;
+
+  const config = getProviderConfig(channel);
+  if (!config.apiKey) {
+    const envVar = config.keyEnvVar || "DEEPSEEK_API_KEY";
+    throw new Error(`API密钥未配置 (channel=${key})。请设置环境变量: ${envVar}`);
   }
-  return _provider;
+  const provider = createProvider(config);
+  _providers.set(key, provider);
+  console.log(`LLM provider [${key}]: ${provider.name} (model: ${config.model})`);
+  return provider;
 }
 
 /**
- * Check if the LLM provider is configured (API key present).
+ * Check if ALL configured channels have their API keys set (D2=B strict mode).
+ * Returns false if any referenced channel's keyEnvVar is missing — surfaces
+ * misconfig at startup rather than mid-game runtime crash.
  */
 export function isProviderConfigured(): boolean {
-  const config = getProviderConfig();
-  return !!config.apiKey;
+  return describeProviderConfig().every(d => d.keyPresent);
 }
 
 // ── Core LLM call ──
 
 /**
- * Call the configured LLM provider (DeepSeek by default).
- * Returns raw string response.
+ * Call the LLM provider for a given channel. Returns raw string response.
  * Throws on network/API errors.
  */
 async function callDeepSeek(
   systemPrompt: string,
   userMessage: string,
   options?: { temperature?: number; maxTokens?: number },
+  channel?: string,
 ): Promise<string> {
-  const provider = getProvider();
+  const provider = getProvider(channel);
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userMessage },
@@ -424,7 +436,7 @@ ${styleNote}
 指挥官命令：${playerMessage}`;
 
   try {
-    const raw = await callDeepSeek(systemPrompt, userContent);
+    const raw = await callDeepSeek(systemPrompt, userContent, undefined, channel);
     const validated = sanitize(raw);
 
     if (validated) {
@@ -523,7 +535,7 @@ ${styleNote}
     const raw = await callDeepSeek(GROUP_SYSTEM_PROMPT, userContent, {
       temperature: 0.5,  // slightly higher for more varied multi-persona output
       maxTokens: 1200,   // more room for 3 personas
-    });
+    }, "group");
 
     const rawParsed = safeParse(raw);
     if (!rawParsed) {
@@ -625,7 +637,7 @@ ${styleNote}
 
 指挥官命令：${playerMessage}`;
 
-  const provider = getProvider();
+  const provider = getProvider(channel);
 
   // If provider doesn't support streaming, fall back to non-streaming
   if (!provider.chatStream) {
@@ -726,6 +738,26 @@ ${styleNote}
       }
     }
 
+    // Marcus consult last-resort: if no parseable JSON but we did stream
+    // natural-language text, synthesize a NOOP response from that text.
+    // DeepSeek (and others) sometimes skip the ---JSON--- delimiter when
+    // the response is pure analysis with no options needed. Without this,
+    // Marcus's good brief gets thrown away and replaced by the generic
+    // "通讯干扰" fallback. Marcus V2 always coerces to NOOP/empty options
+    // anyway, so synthesizing the JSON envelope is safe.
+    if (!validated && mode === "marcus_consult" && fullText.trim()) {
+      const briefText = fullText.split(JSON_DELIMITER)[0]?.trim() ?? "";
+      if (briefText) {
+        validated = validateAdvisorResponse({
+          brief: briefText,
+          responseType: "NOOP",
+          options: [],
+          recommended: "A",
+          urgency: 0.3,
+        });
+      }
+    }
+
     if (validated) {
       let result = normalizeAdvisorForDay7(validated);
       if (mode === "marcus_consult") result = coerceMarcusConsult(result);
@@ -768,7 +800,7 @@ export async function callLightBrief(
     const raw = await callDeepSeek(prompt, digest, {
       temperature: 0.5,
       maxTokens: 250,
-    });
+    }, channel);
     const parsed = safeParse(raw);
     const validated = parsed ? validateLightResponse(parsed) : null;
     if (!validated) {
