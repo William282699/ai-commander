@@ -912,14 +912,22 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         return;
       }
 
-      // Dispatch each persona's brief to their respective channel
+      // Dispatch each persona's brief to their respective channel.
+      // Stagger display: shuffle order + 800-2300ms intervals so the war room
+      // feels like 3 officers chiming in, not a synchronous bot dump.
       const responses: Array<{ from: string; brief: string }> = data.responses || [];
-      for (const r of responses) {
-        const commander = FROM_TO_COMMANDER[r.from];
-        if (!commander) continue;
-        const ch = COMMANDER_CHANNEL[commander];
-        pushContext(channelContextRef.current, ch, { role: "assistant", text: r.brief, time: state.time });
-        addMessage("info", r.brief, state.time, ch, commander, "command_ack", true);
+      const shuffled = [...responses].sort(() => Math.random() - 0.5);
+      let cumulativeDelay = 0;
+      for (let i = 0; i < shuffled.length; i++) {
+        const r = shuffled[i];
+        if (i > 0) cumulativeDelay += 800 + Math.random() * 1500;
+        setTimeout(() => {
+          const commander = FROM_TO_COMMANDER[r.from];
+          if (!commander) return;
+          const ch = COMMANDER_CHANNEL[commander];
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: r.brief, time: state.time });
+          addMessage("info", r.brief, state.time, ch, commander, "command_ack", true);
+        }, cumulativeDelay);
       }
 
       // ALL channel is discussion-only — no options/execution handling
