@@ -913,14 +913,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       }
 
       // Dispatch each persona's brief to their respective channel.
-      // Stagger display: shuffle order + 800-2300ms intervals so the war room
-      // feels like 3 officers chiming in, not a synchronous bot dump.
+      // Stagger display: shuffle order + 2.2-4.0s intervals (mean ~3s) so each
+      // persona has clear breathing room — tight ranges felt synchronous, and
+      // bimodal made fast bursts indistinguishable from the original dump.
       const responses: Array<{ from: string; brief: string }> = data.responses || [];
       const shuffled = [...responses].sort(() => Math.random() - 0.5);
       let cumulativeDelay = 0;
       for (let i = 0; i < shuffled.length; i++) {
         const r = shuffled[i];
-        if (i > 0) cumulativeDelay += 800 + Math.random() * 1500;
+        if (i > 0) cumulativeDelay += 2200 + Math.random() * 1800;
         setTimeout(() => {
           const commander = FROM_TO_COMMANDER[r.from];
           if (!commander) return;
