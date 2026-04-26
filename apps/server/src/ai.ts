@@ -686,6 +686,7 @@ ${styleNote}
   try {
     let fullText = "";
     let emittedTextLen = 0;
+    let emittedAnyVisible = false;
     let jsonStarted = false;
     let jsonBuffer = "";
     const JSON_DELIMITER = "---JSON---";
@@ -701,7 +702,10 @@ ${styleNote}
         if (delimIdx >= 0) {
           // Emit any remaining text before delimiter
           const remaining = fullText.slice(emittedTextLen, delimIdx).trimEnd();
-          if (remaining) yield { type: "text", content: remaining };
+          if (remaining) {
+            yield { type: "text", content: remaining };
+            emittedAnyVisible = true;
+          }
           jsonStarted = true;
           jsonBuffer = fullText.slice(delimIdx + JSON_DELIMITER.length);
         } else {
@@ -711,6 +715,7 @@ ${styleNote}
           if (chunk) {
             yield { type: "text", content: chunk };
             emittedTextLen = safeLen;
+            emittedAnyVisible = true;
           }
         }
       } else {
@@ -721,7 +726,10 @@ ${styleNote}
     // Emit any buffered text if stream ended without delimiter
     if (!jsonStarted && emittedTextLen < fullText.length) {
       const tail = fullText.slice(emittedTextLen);
-      if (tail.trim()) yield { type: "text", content: tail };
+      if (tail.trim()) {
+        yield { type: "text", content: tail };
+        emittedAnyVisible = true;
+      }
     }
 
     // Parse the JSON portion
@@ -790,6 +798,16 @@ ${styleNote}
     if (validated) {
       let result = normalizeAdvisorForDay7(validated);
       if (mode === "marcus_consult") result = coerceMarcusConsult(result);
+
+      // P0.D: if stream emitted no visible text but brief exists in JSON,
+      // emit brief as text event so UI doesn't fall back to placeholder
+      // "参谋简报送达。". Covers Gemini's occasional "skip natural-language
+      // prelude, go straight to JSON" pattern. (Marcus consult's reverse
+      // case — streamed text but no JSON — is handled above.)
+      if (!emittedAnyVisible && result.data.brief?.trim()) {
+        yield { type: "text", content: result.data.brief };
+      }
+
       const payload = result.warning ? { ...result.data, warning: result.warning } : result.data;
       yield { type: "options", content: payload };
     } else {
