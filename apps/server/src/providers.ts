@@ -40,6 +40,12 @@ class OpenAICompatibleProvider implements LLMProvider {
   // consumes max_tokens budget and truncates visible output mid-stream.
   // Per Gemini OpenAI-compat docs, `reasoning_effort="none"` disables thinking
   // for 2.5 models. The max_tokens bump is belt-and-suspenders.
+  //
+  // Note: briefly tried "low" to enable consultation nuance. Reverted because
+  // Gemini batches visible chunks during the reasoning phase, breaking the
+  // smooth char-by-char streaming feel that's core to the radio-chatter UX.
+  // Consultation handling ("你觉得如何?" vs "进攻") is now a Chen prompt-level
+  // rule, not a model-reasoning trick.
   private applyGeminiQuirks(body: Record<string, unknown>): void {
     if (this.name !== "gemini") return;
     body.reasoning_effort = "none";
