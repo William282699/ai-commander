@@ -162,8 +162,12 @@ function buildSnapshots(state: GameState): void {
 // --- Detection: UNDER_ATTACK ---
 
 function detectUnderAttack(state: GameState): void {
-  // Collect fronts that have units taking damage
+  // Collect fronts that have units taking damage, AND the squads of those units.
+  // The squad annotation in the emitted message lets Chen's prompt (rule [D])
+  // recognize victim squads and avoid the self-relief fallacy ("send X to relieve
+  // the front X is already dying on").
   const damagedFronts = new Set<string>();
+  const damagedSquadsByFront = new Map<string, Set<string>>();
 
   state.units.forEach((u) => {
     if (u.team !== "player" || u.state === "dead") return;
@@ -172,8 +176,16 @@ function detectUnderAttack(state: GameState): void {
     if (u.hp < prev) {
       // This unit took damage — find its front
       const front = findFrontForPosition(state, u.position.x, u.position.y);
-      if (front) {
-        damagedFronts.add(front.id);
+      if (!front) return;
+      damagedFronts.add(front.id);
+      const squad = state.squads.find((s) => s.unitIds.includes(u.id));
+      if (squad) {
+        let set = damagedSquadsByFront.get(front.id);
+        if (!set) {
+          set = new Set();
+          damagedSquadsByFront.set(front.id, set);
+        }
+        set.add(squad.id);
       }
     }
   });
@@ -182,7 +194,11 @@ function detectUnderAttack(state: GameState): void {
     if (canFire(state, `UNDER_ATTACK:${frontId}`, 15)) {
       const front = state.fronts.find((f) => f.id === frontId);
       const name = front?.name ?? frontId;
-      emit(state, "UNDER_ATTACK", `${name} 遭到攻击！`, "warning", frontId);
+      const squadSet = damagedSquadsByFront.get(frontId);
+      const squadTag = squadSet && squadSet.size > 0
+        ? ` [战斗中: ${Array.from(squadSet).join(",")}]`
+        : "";
+      emit(state, "UNDER_ATTACK", `${name} 遭到攻击！${squadTag}`, "warning", frontId);
     }
   }
 }
