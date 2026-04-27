@@ -53,6 +53,7 @@ import {
   generateCrisisCard,
   updateTasks,
   updateBattleMarkers,
+  resetEngagementCache,
   processAdvisorTriggers,
   processDefensiveAI,
   resetDefensiveAITimer,
@@ -735,6 +736,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
     resetReportSignals();
+    resetEngagementCache();
     resetDefensiveAITimer();
     resetHeartbeatState();
     resetStaffAskState();
@@ -775,6 +777,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     resetAutoBehaviorTimer();
     resetWarPhaseTimers();
     resetReportSignals();
+    resetEngagementCache();
     resetDefensiveAITimer();
     resetHeartbeatState();
     resetStaffAskState();

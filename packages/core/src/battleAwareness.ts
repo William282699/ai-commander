@@ -1,10 +1,12 @@
 // ============================================================
-// Battle Awareness — visual markers for attack zones, deaths, critical fronts
-// Pure logic: reads/writes only state.battleMarkers, state.recentDeaths,
-// state.battleMarkerScanAccum. Does NOT touch any other system.
+// Battle Awareness — visual markers + per-front engagement intensity
+// Pure logic: reads/writes state.battleMarkers, state.recentDeaths,
+// state.battleMarkerScanAccum, state.battleMarkerDeathCursor, and
+// state.fronts[*].engagementIntensity (EMA-smoothed combat heat —
+// powers digest, battleContext, POSITION_CRITICAL, warPhase, renderer).
 // ============================================================
 
-import type { GameState, BattleMarker } from "@ai-commander/shared";
+import type { GameState, BattleMarker, Front } from "@ai-commander/shared";
 
 const SCAN_INTERVAL = 3; // seconds between full scans
 const DEATH_MARKER_DURATION = 10; // seconds before death marker expires
@@ -15,9 +17,23 @@ const MAX_RECENT_DEATHS = 100;
 const ATTACK_ZONE_CLUSTER_RADIUS = 5; // tiles — units within this range form a cluster
 const CRITICAL_FRONT_POWER_RATIO = 2.0;
 
+// Engagement signal — hybrid of engaged-unit count + attack_zone marker presence
+// per front, EMA-smoothed so digest values don't flicker. All three constants
+// below are tunable post-playtest (calibrated against 1v1 / 4v4 scenarios).
+const ENGAGEMENT_TAU_SEC = 4;          // tunable post-playtest — EMA time constant
+const ENGAGEMENT_UNIT_SAT = 6;         // tunable post-playtest — engaged units → 1.0 saturation
+const ENGAGEMENT_MARKER_WEIGHT = 0.4;  // tunable post-playtest — each attack_zone marker contribution
+
 let nextMarkerId = 0;
 function genId(): string {
   return `bm_${++nextMarkerId}`;
+}
+
+// Per-front raw engagement signal cache — recomputed on scan tick, EMA-smoothed every frame
+const rawEngagementCache = new Map<string, number>();
+
+export function resetEngagementCache(): void {
+  rawEngagementCache.clear();
 }
 
 /**
@@ -33,10 +49,12 @@ export function updateBattleMarkers(state: GameState, dt: number): void {
 
   // --- Periodic scan for attack_zone + critical_front ---
   state.battleMarkerScanAccum += dt;
+  let scannedThisFrame = false;
   if (state.battleMarkerScanAccum >= SCAN_INTERVAL) {
     state.battleMarkerScanAccum -= SCAN_INTERVAL;
     generateAttackZoneMarkers(state, now);
     generateCriticalFrontMarkers(state, now);
+    scannedThisFrame = true;
   }
 
   // --- Update pulse phase + opacity on all markers ---
@@ -57,6 +75,9 @@ export function updateBattleMarkers(state: GameState, dt: number): void {
   if (state.battleMarkers.length > MAX_MARKERS) {
     state.battleMarkers = state.battleMarkers.slice(-MAX_MARKERS);
   }
+
+  // --- Per-front engagement intensity: raw recomputed on scan, EMA every frame ---
+  updateFrontEngagement(state, dt, scannedThisFrame);
 }
 
 // ── Death markers ──────────────────────────────────────────
@@ -197,5 +218,62 @@ function generateCriticalFrontMarkers(state: GameState, now: number): void {
       opacity: 0.5,
       pulsePhase: 0,
     });
+  }
+}
+
+// ── Front engagement intensity (hybrid: engaged units + attack_zone markers) ──
+
+function computeRawEngagementForFront(state: GameState, front: Front): number {
+  const bboxes: [number, number, number, number][] = [];
+  for (const rid of front.regionIds) {
+    const region = state.regions.get(rid);
+    if (region) bboxes.push(region.bbox);
+  }
+  if (bboxes.length === 0) return 0;
+
+  // Engaged units: live target within attack range, inside front bbox.
+  // Counts BOTH teams (attacker + defender both add to "front is hot").
+  let engagedInFront = 0;
+  for (const u of state.units.values()) {
+    if (u.state === "dead" || u.attackTarget == null) continue;
+    const target = state.units.get(u.attackTarget);
+    if (!target || target.state === "dead") continue;
+    const dx = u.position.x - target.position.x;
+    const dy = u.position.y - target.position.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > (u.attackRange ?? 5) * 1.5) continue;
+
+    const inFront = bboxes.some(([x1, y1, x2, y2]) =>
+      u.position.x >= x1 && u.position.x <= x2 &&
+      u.position.y >= y1 && u.position.y <= y2,
+    );
+    if (inFront) engagedInFront++;
+  }
+
+  // attack_zone markers within front bbox — boost from clustered combat
+  let markersInFront = 0;
+  for (const m of state.battleMarkers) {
+    if (m.type !== "attack_zone") continue;
+    const inFront = bboxes.some(([x1, y1, x2, y2]) =>
+      m.x >= x1 && m.x <= x2 && m.y >= y1 && m.y <= y2,
+    );
+    if (inFront) markersInFront++;
+  }
+
+  const unitSignal = engagedInFront / ENGAGEMENT_UNIT_SAT;
+  const markerSignal = markersInFront * ENGAGEMENT_MARKER_WEIGHT;
+  return Math.min(1, unitSignal + markerSignal);
+}
+
+function updateFrontEngagement(state: GameState, dt: number, recomputeRaw: boolean): void {
+  // EMA blend factor — dt-independent so frame rate doesn't change responsiveness
+  const blend = 1 - Math.exp(-dt / ENGAGEMENT_TAU_SEC);
+
+  for (const front of state.fronts) {
+    if (recomputeRaw) {
+      rawEngagementCache.set(front.id, computeRawEngagementForFront(state, front));
+    }
+    const raw = rawEngagementCache.get(front.id) ?? 0;
+    front.engagementIntensity = front.engagementIntensity + (raw - front.engagementIntensity) * blend;
   }
 }
