@@ -450,6 +450,7 @@ export type ReportEventType =
   | "SUPPLY_LOW"
   | "FACILITY_CAPTURED"
   | "FACILITY_LOST"
+  | "FACILITY_CONTESTED"
   | "MISSION_DONE"
   | "MISSION_FAILED"
   | "HQ_DAMAGED"

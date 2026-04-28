@@ -78,6 +78,15 @@ export function processAdvisorTriggers(state: GameState): AdvisorTriggerResult[]
         results.push({ type: "llm_advice", event: evt, channel: "combat" });
       }
     }
+
+    // Rule 4: FACILITY_CONTESTED → Chen alert (event-driven, similar to
+    // UNDER_ATTACK). Player decides whether to reinforce; no crisis modal.
+    if (evt.type === "FACILITY_CONTESTED" && evt.entityId) {
+      const ruleKey = `advisor:facility_contested:${evt.entityId}`;
+      if (canFireTrigger(cd, ruleKey, now)) {
+        results.push({ type: "llm_advice", event: evt, channel: "combat" });
+      }
+    }
   }
 
   return results;

@@ -107,6 +107,9 @@ export function processReportSignals(state: GameState, _dt: number): void {
   // 3. FACILITY_CAPTURED / FACILITY_LOST (event-based, no cooldown)
   detectFacilityChanges(state);
 
+  // 3.5. FACILITY_CONTESTED (capture-in-progress on a player facility)
+  detectFacilityContested(state);
+
   // 4. MISSION_DONE / MISSION_FAILED (each mission reports once)
   detectMissionStatus(state);
 
@@ -238,6 +241,30 @@ function detectFacilityChanges(state: GameState): void {
       } else if (f.team !== "player" && prevTeam === "player") {
         emit(state, "FACILITY_LOST", `失去设施: ${f.name}`, "critical", f.id);
       }
+    }
+  });
+}
+
+// --- Detection: FACILITY_CONTESTED ---
+// Eager-fire: any non-zero capture progress by an enemy on a player facility
+// triggers a warning. Cooldown 30s/facility caps spam during sustained capture.
+// If post-playtest noise level is too high (e.g. enemy scouts brushing past),
+// raise the floor with a `f.captureProgress > 0.05` gate.
+
+function detectFacilityContested(state: GameState): void {
+  state.facilities.forEach((f) => {
+    if (f.team !== "player") return;
+    if (f.capturingTeam !== "enemy") return;
+    if (canFire(state, `FACILITY_CONTESTED:${f.id}`, 30)) {
+      const progress = Math.round(f.captureProgress * 100);
+      emit(
+        state,
+        "FACILITY_CONTESTED",
+        `${f.name} 正在被夺取！(${progress}%)`,
+        "warning",
+        f.id,
+        true, // actionRequired
+      );
     }
   });
 }

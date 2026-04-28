@@ -87,6 +87,7 @@ const EVENT_CHANNEL_MAP: Record<ReportEventType, Channel> = {
   SUPPLY_LOW: "logistics",
   FACILITY_CAPTURED: "ops",
   FACILITY_LOST: "ops",
+  FACILITY_CONTESTED: "combat",
   MISSION_DONE: "ops",
   MISSION_FAILED: "ops",
   HQ_DAMAGED: "combat",
