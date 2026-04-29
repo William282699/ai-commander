@@ -27,10 +27,11 @@ export function generateDigestV1(
 
   for (const front of state.fronts) {
     const ep = front.enemyPowerKnown ? Math.round(front.enemyPower) : "?";
-    const { ourComp, enemyComp } = computeFrontComposition(state, front);
+    const { ourComp, enemyEngagedComp, enemyMassingComp } = computeFrontComposition(state, front);
     digest += `${front.id}:${front.name} OurPwr=${Math.round(front.playerPower)} EnemyPwr=${ep}`;
     if (ourComp) digest += ` OurComp=[${ourComp}]`;
-    if (enemyComp) digest += ` EnemyComp=[${enemyComp}]`;
+    if (enemyEngagedComp) digest += ` EnemyEngaged=[${enemyEngagedComp}]`;
+    if (enemyMassingComp) digest += ` EnemyMassing=[${enemyMassingComp}]`;
     digest += ` Engagement=${front.engagementIntensity.toFixed(1)} Supply=${front.supplyStatus}`;
     if (front.keyEvents.length > 0) {
       digest += ` key=[${front.keyEvents.join(", ")}]`;
@@ -299,52 +300,95 @@ function unitsAvgPos(units: Unit[]): { x: number; y: number } {
 }
 
 /**
+ * "Engaged" cutoff: an enemy within this many tiles of any player unit in the
+ * same front is reported as `EnemyEngaged`; beyond it, as `EnemyMassing`. The
+ * split lets advisors distinguish "what's actively in contact with our units"
+ * from "what's in the area but distant" — the prior single-bucket EnemyComp
+ * lumped passing/distant enemies into the engaged signal and confused Chen
+ * into recommending reinforcement when local terrain was already cleared.
+ *
+ * Tunable post-playtest. 10 ≈ typical attack range × 1.5 + a small buffer.
+ */
+const ENGAGED_RADIUS = 10;
+
+/**
  * Per-front unit-type composition for LLM tactical briefings.
- * Returns "3×main_tank,8×infantry" style strings so Chen can report
- * "敌军3辆重甲+8步兵" instead of the abstract "power 1198".
+ *
+ * Returns three "3×main_tank,8×infantry" style strings:
+ *   - ourComp:           player units inside the front bbox
+ *   - enemyEngagedComp:  visible enemies within ENGAGED_RADIUS of any player unit in the front
+ *   - enemyMassingComp:  visible enemies in the front bbox but beyond ENGAGED_RADIUS
  *
  * Enemy units respect fog — only visible ones are counted, mirroring
  * updateFrontPower's fog-gated enemy power sum in intelDigest.ts. This
- * keeps OurPwr/EnemyPwr and OurComp/EnemyComp semantically aligned:
- * what the digest reports is what the player can actually see.
+ * keeps OurPwr/EnemyPwr and the *Comp fields semantically aligned: what
+ * the digest reports is what the player can actually see.
  *
- * Returns empty strings (not rendered by caller) when no units occupy
- * the front on that side.
+ * Returns empty strings (not rendered by caller) when no units occupy a
+ * given bucket.
  */
 function computeFrontComposition(
   state: GameState,
   front: Front,
-): { ourComp: string; enemyComp: string } {
+): { ourComp: string; enemyEngagedComp: string; enemyMassingComp: string } {
   const regionBboxes: [number, number, number, number][] = [];
   for (const rid of front.regionIds) {
     const region = state.regions.get(rid);
     if (region) regionBboxes.push(region.bbox);
   }
-  if (regionBboxes.length === 0) return { ourComp: "", enemyComp: "" };
+  if (regionBboxes.length === 0) {
+    return { ourComp: "", enemyEngagedComp: "", enemyMassingComp: "" };
+  }
 
+  const inFront = (x: number, y: number): boolean =>
+    regionBboxes.some(([x1, y1, x2, y2]) => x >= x1 && x <= x2 && y >= y1 && y <= y2);
+
+  // First pass: collect player positions in front, used to classify enemies.
+  const playerPositionsInFront: Position[] = [];
+  state.units.forEach((unit) => {
+    if (unit.team !== "player" || unit.hp <= 0 || unit.state === "dead") return;
+    if (inFront(unit.position.x, unit.position.y)) {
+      playerPositionsInFront.push(unit.position);
+    }
+  });
+
+  // Second pass: tally counts. Player units bucketed simply; enemies split
+  // engaged vs massing by min squared distance to any player position in front.
   const ourCounts = new Map<string, number>();
-  const enemyCounts = new Map<string, number>();
+  const enemyEngagedCounts = new Map<string, number>();
+  const enemyMassingCounts = new Map<string, number>();
+  const radiusSq = ENGAGED_RADIUS * ENGAGED_RADIUS;
 
   state.units.forEach((unit) => {
     if (unit.hp <= 0 || unit.state === "dead") return;
-    const inFront = regionBboxes.some(
-      ([x1, y1, x2, y2]) =>
-        unit.position.x >= x1 &&
-        unit.position.x <= x2 &&
-        unit.position.y >= y1 &&
-        unit.position.y <= y2,
-    );
-    if (!inFront) return;
+    if (!inFront(unit.position.x, unit.position.y)) return;
 
     if (unit.team === "player") {
       ourCounts.set(unit.type, (ourCounts.get(unit.type) || 0) + 1);
-    } else if (unit.team === "enemy") {
-      // Fog gate — match updateFrontPower's rule
-      const tx = Math.floor(unit.position.x);
-      const ty = Math.floor(unit.position.y);
-      if (state.fog[ty]?.[tx] === "visible") {
-        enemyCounts.set(unit.type, (enemyCounts.get(unit.type) || 0) + 1);
-      }
+      return;
+    }
+    if (unit.team !== "enemy") return;
+
+    // Fog gate — match updateFrontPower's rule
+    const tx = Math.floor(unit.position.x);
+    const ty = Math.floor(unit.position.y);
+    if (state.fog[ty]?.[tx] !== "visible") return;
+
+    // Classify: closest player unit in front decides engaged vs massing.
+    // Empty playerPositionsInFront → minDistSq stays Infinity → goes to massing
+    // (correct: no player in front to be "engaged with").
+    let minDistSq = Infinity;
+    for (const p of playerPositionsInFront) {
+      const dx = unit.position.x - p.x;
+      const dy = unit.position.y - p.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < minDistSq) minDistSq = d2;
+    }
+
+    if (minDistSq <= radiusSq) {
+      enemyEngagedCounts.set(unit.type, (enemyEngagedCounts.get(unit.type) || 0) + 1);
+    } else {
+      enemyMassingCounts.set(unit.type, (enemyMassingCounts.get(unit.type) || 0) + 1);
     }
   });
 
@@ -354,5 +398,9 @@ function computeFrontComposition(
       .map(([t, c]) => `${c}×${t}`)
       .join(",");
 
-  return { ourComp: fmt(ourCounts), enemyComp: fmt(enemyCounts) };
+  return {
+    ourComp: fmt(ourCounts),
+    enemyEngagedComp: fmt(enemyEngagedCounts),
+    enemyMassingComp: fmt(enemyMassingCounts),
+  };
 }
