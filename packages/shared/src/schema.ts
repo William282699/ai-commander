@@ -125,6 +125,12 @@ export function sanitizeIntent(raw: unknown): Intent | null {
     intent.excludeFront = obj.excludeFront.trim();
   }
 
+  // P1.F: formation override — whitelist enforcement
+  if (typeof obj.formationStyle === "string"
+      && (["line", "wedge", "column", "encircle"] as const).includes(obj.formationStyle as "line" | "wedge" | "column" | "encircle")) {
+    intent.formationStyle = obj.formationStyle as "line" | "wedge" | "column" | "encircle";
+  }
+
   return intent;
 }
 

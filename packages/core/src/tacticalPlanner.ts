@@ -189,6 +189,16 @@ function resolveIntentInner(
     return { orders: [], log: msg, degraded: true };
   }
 
+  // P1.F: apply formation override sticky to squad BEFORE per-type handlers run.
+  // After this, downstream handlers reading squad.formationStyle see the new style.
+  // Resolves fromSquad as squad ID or leaderName (matches Chen prompt semantics).
+  // TODO: when canonical squad-ref resolver lands, swap this lookup for it.
+  if (intent.formationStyle && intent.fromSquad) {
+    const ref = intent.fromSquad;
+    const squad = state.squads.find((s) => s.id === ref || s.leaderName === ref);
+    if (squad) squad.formationStyle = intent.formationStyle;
+  }
+
   switch (intent.type) {
     case "attack":
       return resolveAttack(intent, state, style, exclude, selectedUnitIds);
@@ -313,7 +323,12 @@ function resolveAttack(
 
   // ④ + ③: spread targets + passability degradation (replaces filterByTargetPassability)
   // Look up squad formation style if dispatching from a squad
-  const squad = intent.fromSquad ? state.squads.find(s => s.id === intent.fromSquad) : undefined;
+  // Resolve by squad ID OR leaderName — matches resolveIntent injection's pattern.
+  // Without name fallback, LLM passing "Aiden" (leader name) misses the squad and
+  // formationStyle is lost → createOrdersWithSpread falls back to circular spreadTarget.
+  const squad = intent.fromSquad
+    ? state.squads.find(s => s.id === intent.fromSquad || s.leaderName === intent.fromSquad)
+    : undefined;
   const formation = squad?.formationStyle as FormationStyle | undefined;
   const spread = createOrdersWithSpread(
     units, target, state, "attack_move", mapUrgency(intent.urgency), 1.5, formation,

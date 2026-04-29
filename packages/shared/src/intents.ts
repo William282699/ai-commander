@@ -59,6 +59,12 @@ export interface Intent {
   routeId?: string;       // "via_balbia" — single named route
   routeIds?: string[];    // multi-segment route chain
 
+  // Formation override (P1.F): when set, makes squad.formationStyle sticky-update
+  // before per-handler resolution. Mirrors the literal union on Squad.formationStyle
+  // (kept inline rather than imported to avoid shared→core dependency).
+  // Future extension hook: add `formationDoctrine?` for type-aware placement.
+  formationStyle?: "line" | "wedge" | "column" | "encircle";
+
   // Source filtering (internal, set by crisis card system).
   // Units physically inside this front are excluded from dispatch.
   excludeFront?: string;

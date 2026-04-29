@@ -8,10 +8,15 @@ import type { Position } from "@ai-commander/shared";
 
 export type FormationStyle = "line" | "wedge" | "column" | "encircle";
 
-const FORMATION_SPACING = 2.5; // tiles between units
+const FORMATION_SPACING = 2.5;        // default tiles between units (≥5 squad)
+const TIGHT_FORMATION_SPACING = 1.5;  // small-squad spacing (<5 units) — handoff D3
+                                      // 0.6× of default; tighter than 1.25 (which risks clip)
 
 /**
  * Compute an offset position for a unit within a formation.
+ * Spacing is auto-tightened for small squads (<5 units) so 3-4-man strike
+ * teams feel cohesive instead of looking like scattered skirmishers.
+ * encircle uses radius scaling instead of spacing — unaffected by total count.
  * @param target    The formation center / objective point
  * @param index     Unit's index within the squad (0 = leader)
  * @param total     Total units in the squad
@@ -30,20 +35,26 @@ export function getFormationOffset(
     return { ...target }; // leader goes to exact target (except encircle)
   }
 
+  const spacing = total < 5 ? TIGHT_FORMATION_SPACING : FORMATION_SPACING;
   let dx = 0;
   let dy = 0;
 
+  // Body-frame convention: +x = forward (heading direction), ±y = perpendicular (left/right).
+  // The rotation below maps body coords → world. Earlier the line/column/wedge offsets had
+  // x and y swapped — line spread along movement axis, column stacked perpendicular, wedge
+  // tip pointed perpendicular instead of forward. Fix: line spreads in body y, column
+  // trails in body -x, wedge has both (leader at +x tip, trail in -x with ±y spread).
   switch (style) {
     case "line":
-      dx = lineOffset(index, total);
-      dy = 0;
+      dx = 0;
+      dy = lineOffset(index, spacing);
       break;
     case "wedge":
-      ({ dx, dy } = wedgeOffset(index));
+      ({ dx, dy } = wedgeOffset(index, spacing));
       break;
     case "column":
-      dx = 0;
-      dy = columnOffset(index);
+      dx = columnOffset(index, spacing);
+      dy = 0;
       break;
     case "encircle":
       return encircleOffset(target, index, total);
@@ -62,39 +73,41 @@ export function getFormationOffset(
 }
 
 /**
- * line: units spread horizontally, leader in center
- *   ○ ○ ○ ○ ★ ○ ○ ○ ○
+ * line: units spread perpendicular to movement, leader in center.
+ * Returns body-y component (alternate left/right of forward axis).
+ *   ○ ○ ○ ○ ★ ○ ○ ○ ○   (perpendicular to direction of travel)
  */
-function lineOffset(index: number, total: number): number {
-  // index 0 is leader at center, others alternate left/right
+function lineOffset(index: number, spacing: number): number {
   const half = Math.ceil(index / 2);
   const sign = index % 2 === 1 ? -1 : 1;
-  return sign * half * FORMATION_SPACING;
+  return sign * half * spacing;
 }
 
 /**
- * wedge: V-shape, leader at front
- *       ★
+ * wedge: V-shape, leader at the tip (forward), others trail back + spread.
+ * Body offset: dx = -row (behind leader along movement axis); dy = ±row (alternate sides).
+ *       ★ (forward)
  *     ○   ○
  *   ○       ○
  */
-function wedgeOffset(index: number): { dx: number; dy: number } {
+function wedgeOffset(index: number, spacing: number): { dx: number; dy: number } {
   const row = Math.ceil(index / 2);
   const sign = index % 2 === 1 ? -1 : 1;
   return {
-    dx: sign * row * FORMATION_SPACING,
-    dy: -row * FORMATION_SPACING, // behind leader
+    dx: -row * spacing,        // behind leader (along movement axis)
+    dy: sign * row * spacing,  // alternate L/R perpendicular
   };
 }
 
 /**
- * column: units in a single file, leader at front
- *   ★
+ * column: single file, leader at front, others trail directly behind along movement axis.
+ * Returns body-x component (negative = behind).
+ *   ★ (forward)
  *   ○
  *   ○
  */
-function columnOffset(index: number): number {
-  return -index * FORMATION_SPACING; // behind leader
+function columnOffset(index: number, spacing: number): number {
+  return -index * spacing; // behind leader along movement direction
 }
 
 /**

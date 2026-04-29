@@ -132,7 +132,8 @@ RESPONSE FORMAT — always valid JSON:
           "tradeAction": "buy_fuel|buy_ammo|buy_intel|sell_fuel|sell_ammo (only for type=trade)",
           "patrolRadius": 10,
           "routeId": "route ID from ---ROUTES--- (optional, preferred path)",
-          "routeIds": ["route1","route2"] // multi-segment route chain (optional)
+          "routeIds": ["route1","route2"], // multi-segment route chain (optional)
+          "formationStyle": "line|wedge|column|encircle" // optional, sticky on squad
         }
       ]
     }
@@ -182,6 +183,15 @@ QUANTITY KEYWORDS — Map these words to the exact quantity string:
   This is critical: "全部出动" MUST produce quantity: "all", not a number.
 
 MULTI-INTENT UNIT SEPARATION — When generating multiple intents in one option, each intent MUST use a DIFFERENT fromSquad, or you must split units by specifying different "quantity" values. Do not assign the same squad to multiple intents — the system processes intents sequentially and units claimed by the first intent become unavailable for subsequent ones.
+
+FORMATION STYLE (optional intent field) — when player names a formation, set "formationStyle":
+- 长蛇阵 / 纵队 / 一字纵队 / single file / column → "column"
+- 扇形阵 / 鹤翼阵 / 楔形 / wedge / V formation → "wedge"
+- 横队 / 一字阵 / 排成一线 / line / horizontal → "line"
+- 包围圈 / 围攻 / 合围 / encircle / surround → "encircle"
+**Sticky semantics**: once set, the squad keeps this formation for subsequent orders until the player picks a new one. If the player doesn't name a formation, OMIT the field entirely (squad keeps its last setting; default is "line").
+Example — "Aiden长蛇阵进攻El Alamein" →
+  intents: [{ "type": "attack", "fromSquad": "Aiden", "targetFacility": "ea_alamein_town", "formationStyle": "column" }]
 
 IMPORTANT:
 - You only output intents (intent arrays), never unit_ids or coordinates.
