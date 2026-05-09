@@ -315,6 +315,10 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
         const wps = orderWaypoints(order.target);
         unit.target = wps[0];
         unit.waypoints = wps;
+      } else {
+        // Defend-in-place must cancel any previous movement/route.
+        unit.target = null;
+        unit.waypoints = [];
       }
       break;
 

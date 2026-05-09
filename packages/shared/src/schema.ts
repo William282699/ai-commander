@@ -131,6 +131,19 @@ export function sanitizeIntent(raw: unknown): Intent | null {
     intent.formationStyle = obj.formationStyle as "line" | "wedge" | "column" | "encircle";
   }
 
+  // Step 2: Route fields — preserved for tacticalPlanner consumption
+  // (16+ refs in tacticalPlanner.ts; sanitizer must pass them through, otherwise
+  // routeId/routeIds get silently dropped and route-aware pathfinding never fires)
+  if (typeof obj.routeId === "string" && obj.routeId.trim().length > 0) {
+    intent.routeId = obj.routeId.trim();
+  }
+  if (Array.isArray(obj.routeIds)) {
+    const validIds = (obj.routeIds as unknown[])
+      .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+      .map((id) => id.trim());
+    if (validIds.length > 0) intent.routeIds = validIds;
+  }
+
   return intent;
 }
 

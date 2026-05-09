@@ -817,43 +817,103 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   };
 
   // ── Doctrine: process standingOrder / cancelDoctrine from LLM response ──
-  const processDoctrineFields = (data: Record<string, unknown>, state: GameState, ch: Channel, approvedIntents?: Intent[]) => {
+  // Returns true if any doctrine action succeeded (created/cancelled/dup-idempotent),
+  // false only when standingOrder field is present but rejected (e.g. must_hold w/ unresolvable locationTag).
+  const processDoctrineFields = (data: Record<string, unknown>, state: GameState, ch: Channel, approvedIntents?: Intent[]): boolean => {
+    let processed = false;
+
     // Standing order creation
     if (data.standingOrder && typeof data.standingOrder === "object") {
       const so = data.standingOrder as Record<string, unknown>;
       if (typeof so.type === "string" && typeof so.locationTag === "string") {
-        const VALID_SO_TYPES: string[] = ["must_hold", "can_trade_space", "preserve_force", "no_retreat", "delay_only"];
+        const VALID_SO_TYPES: StandingOrderType[] = ["must_hold", "can_trade_space", "preserve_force", "no_retreat", "delay_only"];
         const VALID_PRIORITIES: string[] = ["low", "normal", "high", "critical"];
-        const soType = VALID_SO_TYPES.includes(so.type) ? so.type as StandingOrderType : "must_hold";
-        const soPriority = (typeof so.priority === "string" && VALID_PRIORITIES.includes(so.priority))
-          ? so.priority as DoctrinePriority : "normal";
+        const rawType = so.type.trim().toLowerCase();
+        if (!VALID_SO_TYPES.includes(rawType as StandingOrderType)) {
+          addMessage(
+            "warning",
+            `持续命令类型 "${rawType}" 无效，未登记。`,
+            state.time, ch, undefined, "command_ack",
+          );
+          return false;
+        }
+        const soType = rawType as StandingOrderType;
+        const rawPriority = typeof so.priority === "string" ? so.priority.trim().toLowerCase() : "";
+        const soPriority = VALID_PRIORITIES.includes(rawPriority)
+          ? rawPriority as DoctrinePriority : "normal";
+        const rawLocation = (so.locationTag as string).trim();
+        if (!rawLocation) {
+          addMessage("warning", "持续命令缺少有效地点，未登记。", state.time, ch, undefined, "command_ack");
+          return false;
+        }
 
-        // Deduplicate: skip if an active doctrine with same type+location already exists
-        const dup = state.doctrines.find(d => d.status === "active" && d.type === soType && d.locationTag === so.locationTag);
-        if (!dup) {
-          const docId = `doc_${String(state.doctrines.length + 1).padStart(3, "0")}`;
-          // Extract assigned squads from approved intents
-          const squads: string[] = [];
-          if (approvedIntents) {
-            for (const intent of approvedIntents) {
-              if (intent.fromSquad) squads.push(intent.fromSquad);
+        // Step 2 hardening: canonicalize locationTag.
+        // - must_hold: STRICT — engine ratio monitoring (doctrine.ts:checkDoctrines) only matches
+        //   front IDs/names + region IDs (NOT facility/tag). Reject if findFront fails to avoid
+        //   silent monitoring failure.
+        // - other types: LENIENT — canonicalize known front/facility/tag/region IDs when possible,
+        //   then preserve raw locationTag if no match (don't break existing loose prompts).
+        const matched = findFront(state, rawLocation);
+        let resolvedLocationTag = matched ? matched.id : rawLocation;
+        if (!matched && soType !== "must_hold") {
+          // Exact match only (id or full name) — substring matching risks silent
+          // semantic mismatch (e.g. "Coastal" partial-matching "Coastal Highway Junction"
+          // facility when player meant Coastal front). Order tag → facility → region
+          // matches the prompt's location priority convention (line 240).
+          const lower = rawLocation.toLowerCase();
+          const facility = state.facilities.get(rawLocation) ?? Array.from(state.facilities.values()).find(f =>
+            f.id.toLowerCase() === lower ||
+            f.name.toLowerCase() === lower ||
+            f.tags.some(t => t.toLowerCase() === lower),
+          );
+          const tag = state.tags?.find(t =>
+            t.id === rawLocation ||
+            t.id.toLowerCase() === lower ||
+            t.name.toLowerCase() === lower,
+          );
+          const region = state.regions.get(rawLocation) ?? Array.from(state.regions.values()).find(r =>
+            r.id.toLowerCase() === lower ||
+            r.name.toLowerCase() === lower,
+          );
+          resolvedLocationTag = tag?.id ?? facility?.id ?? region?.id ?? rawLocation;
+        }
+
+        if (soType === "must_hold" && !matched) {
+          addMessage(
+            "warning",
+            `长官，"${rawLocation}" 不是可识别防线，must_hold 需要明确防线名才能监控，请重新指定。`,
+            state.time, ch, undefined, "command_ack",
+          );
+          // Reject: do not create doctrine. processed stays false for this attempt.
+        } else {
+          // Deduplicate: skip if an active doctrine with same type+canonical location already exists
+          const dup = state.doctrines.find(d => d.status === "active" && d.type === soType && d.locationTag === resolvedLocationTag);
+          if (!dup) {
+            const docId = `doc_${String(state.doctrines.length + 1).padStart(3, "0")}`;
+            // Extract assigned squads from approved intents
+            const squads: string[] = [];
+            if (approvedIntents) {
+              for (const intent of approvedIntents) {
+                if (intent.fromSquad) squads.push(intent.fromSquad);
+              }
             }
+            const newDoc: StandingOrder = {
+              id: docId,
+              type: soType,
+              commander: ch,
+              locationTag: resolvedLocationTag,
+              priority: soPriority,
+              allowAutoReinforce: typeof so.allowAutoReinforce === "boolean" ? so.allowAutoReinforce : false,
+              assignedSquads: squads,
+              createdAt: state.time,
+              status: "active",
+            };
+            state.doctrines.push(newDoc);
+            const commitDesc = `${soType} @ ${resolvedLocationTag}`;
+            pushCommitment(ch, commitDesc);
+            addMessage("info", `持续命令已登记: ${commitDesc} [${soPriority.toUpperCase()}]`, state.time, ch, undefined, "command_ack");
           }
-          const newDoc: StandingOrder = {
-            id: docId,
-            type: soType,
-            commander: ch,
-            locationTag: so.locationTag as string,
-            priority: soPriority,
-            allowAutoReinforce: typeof so.allowAutoReinforce === "boolean" ? so.allowAutoReinforce : false,
-            assignedSquads: squads,
-            createdAt: state.time,
-            status: "active",
-          };
-          state.doctrines.push(newDoc);
-          const commitDesc = `${soType} @ ${so.locationTag}`;
-          pushCommitment(ch, commitDesc);
-          addMessage("info", `持续命令已登记: ${commitDesc} [${soPriority.toUpperCase()}]`, state.time, ch, undefined, "command_ack");
+          processed = true; // dup considered idempotent success
         }
       }
     }
@@ -864,8 +924,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       if (result.cancelled) {
         removeCommitment(result.channel, `${result.type} @ ${result.locationTag}`);
         addMessage("info", `${result.locationTag} 的 ${result.type} 命令已取消，部队恢复自由调度。`, state.time, result.channel, undefined, "command_ack");
+        processed = true;
       }
     }
+
+    return processed;
   };
 
   // ── 0.5: Group chat — single LLM call, 3 personas ──
@@ -1012,15 +1075,35 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         if (data.brief) {
           pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
         }
-        if (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0) {
-          processDoctrineFields({ cancelDoctrine: data.cancelDoctrine }, state, ch);
-        }
+        // Step 2: Process BOTH standingOrder and cancelDoctrine on NOOP path.
+        // NOOP doctrine is location-scoped only (no approved intents → assignedSquads stays empty;
+        // squad-binding requires schema extension, out of scope for Step 2).
+        processDoctrineFields(data as unknown as Record<string, unknown>, state, ch);
       } else if (Array.isArray(data.options) && data.options.length === 0) {
-        setResponse(null);
-        setError(null);
-        const reason = (data.brief as string) || "命令目标不存在或不明确";
-        setClarification(reason + " — 请重新描述指令");
-        addMessage("warning", reason, state.time, ch, undefined, "command_ack");
+        // Step 2 hardening: doctrine-only commands may emit options:[] without explicit responseType:"NOOP".
+        // Schema validator (schema.ts:175 Day 13 Layer B path) preserves standingOrder/cancelDoctrine
+        // through this code path, but previously they were silently dropped. Check for doctrine fields
+        // BEFORE treating as failed clarification.
+        const hasDoctrineFields =
+          (data.standingOrder && typeof data.standingOrder === "object")
+          || (typeof data.cancelDoctrine === "string" && data.cancelDoctrine.length > 0);
+        if (hasDoctrineFields) {
+          setResponse(null);
+          setError(null);
+          setClarification(null);
+          if (data.brief) {
+            addMessage("info", data.brief as string, state.time, ch, undefined, "command_ack");
+            pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
+          }
+          // processDoctrineFields surfaces its own warning when must_hold locationTag can't be canonicalized.
+          processDoctrineFields(data as unknown as Record<string, unknown>, state, ch);
+        } else {
+          setResponse(null);
+          setError(null);
+          const reason = (data.brief as string) || "命令目标不存在或不明确";
+          setClarification(reason + " — 请重新描述指令");
+          addMessage("warning", reason, state.time, ch, undefined, "command_ack");
+        }
       } else {
         if (data.brief) {
           pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
