@@ -331,6 +331,11 @@ function detectPositionCritical(state: GameState): void {
     let localPlayerHp = 0;
     let localEnemyHp = 0;
     const counted = new Set<number>();
+    // Victim squads in this front. Same annotation pattern as detectUnderAttack:
+    // Chen's prompt rule [D] reads the "[战斗中: X,Y]" tag to recognize squads
+    // already engaged at the critical position, so it doesn't recommend
+    // sending them to relieve themselves.
+    const victimSquads = new Set<string>();
     for (const regionId of front.regionIds) {
       const region = state.regions.get(regionId);
       if (!region) continue;
@@ -341,7 +346,11 @@ function detectPositionCritical(state: GameState): void {
         if (u.position.x >= x1 && u.position.x <= x2 &&
             u.position.y >= y1 && u.position.y <= y2) {
           counted.add(u.id);
-          if (u.team === "player") localPlayerHp += u.hp;
+          if (u.team === "player") {
+            localPlayerHp += u.hp;
+            const squad = state.squads.find((s) => s.unitIds.includes(u.id));
+            if (squad) victimSquads.add(squad.id);
+          }
           else if (u.team === "enemy") localEnemyHp += u.hp;
         }
       });
@@ -371,10 +380,13 @@ function detectPositionCritical(state: GameState): void {
     if (!engaged) continue;
 
     if (canFire(state, `POSITION_CRITICAL:${front.id}`, 30)) {
+      const squadTag = victimSquads.size > 0
+        ? ` [战斗中: ${Array.from(victimSquads).join(",")}]`
+        : "";
       emit(
         state,
         "POSITION_CRITICAL",
-        `${front.name} 即将失守。战力比 ${(ratio * 100).toFixed(0)}%，承受重火力。`,
+        `${front.name} 即将失守。战力比 ${(ratio * 100).toFixed(0)}%，承受重火力。${squadTag}`,
         "critical",
         front.id,
         true, // actionRequired
