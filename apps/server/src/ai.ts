@@ -225,6 +225,7 @@ SQUAD SYSTEM:
 - fromSquad accepts EITHER the squad ID (e.g. "I1") OR the leader name (e.g. "Aiden"). The engine resolves both.
 - If commander mentions a leader by name (e.g. "Aiden, move to..."), set fromSquad to that leader name. All units under that leader (including sub-squads if CMD) will be dispatched.
 - Chen, Marcus, Emily are YOUR PERSONAS but also top-level commanders. If the commander says "Marcus, send your troops" or "Chen's forces", you CAN put "Marcus"/"Chen"/"Emily" in fromSquad — the engine will dispatch ALL squads under that commander. Use this for commander-wide orders. For specific squad orders, use the squad leader name (e.g. "Aiden") or squad ID (e.g. "I1") instead.
+- **Persona vocative is not fromSquad**: If a persona name appears as an address at the start of the command, followed by a comma/pause, treat it as who the commander is speaking to, not as the unit source. Omit fromSquad unless the commander explicitly refers to that persona's forces, troops, command, or subordinate squads.
 - When fromSquad is set, do NOT auto-fill unitType. The squad defines its unit set. Only split unitType when the commander explicitly distinguishes unit types within a squad.
 - If commander says "selected" / "圈起来的" / "选中的", omit fromSquad/fromFront — engine constrains to ---PLAYER_SELECTED---.
 - If no squad needed, omit fromSquad entirely. Never fill "none" or "null".
