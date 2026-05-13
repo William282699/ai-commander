@@ -524,11 +524,25 @@ function resolveRecon(
 
   let units = source.units;
 
+  // LLM-explicit unitType filter (mirrors resolveAttack / resolveHold / resolvePatrol).
+  // When the player said "派 3 个步兵侦察 X", LLM fills intent.unitType:"infantry"
+  // — the engine must honor it. Without this filter, the type-priority sort
+  // below would pick recon_plane instead and brief-vs-engine would mismatch
+  // in the opposite direction (player asked infantry, engine sends planes).
+  if (intent.unitType) {
+    const filtered = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+    if (filtered.length === 0 && intent.fromSquad && units.length > 0) {
+      pushDiagnostic(state, "UNITTYPE_FILTER_BYPASSED",
+        `分队 ${intent.fromSquad} 无 ${intent.unitType} 类型单位，已忽略类型筛选`);
+    } else {
+      units = filtered;
+    }
+  }
+
   // Prefer scout types as a sensible default (recon is conventionally light).
-  // EXCEPT: respect "全军 / all" — when the player explicitly requests every
-  // unit, don't silently filter out main_tank/artillery. Otherwise Chen's
-  // brief ("Blake 全员侦察") drifts from engine execution (only infantry sent).
-  if (intent.quantity !== "all") {
+  // Skip when player asked for "全军 / all" (P2 #4) OR already filtered above
+  // by explicit unitType — both cases mean the player has already chosen.
+  if (intent.quantity !== "all" && !intent.unitType) {
     const scouts = units.filter(
       (u) =>
         u.type === "recon_plane" ||
@@ -539,7 +553,18 @@ function resolveRecon(
   }
 
   const count = resolveQuantity(intent.quantity ?? "few", units.length, style);
-  const selected = sortByDistance(units, target).slice(0, count);
+  // Selection ordering:
+  //   "all"             → source order (every unit goes anyway)
+  //   explicit unitType → distance only (single-type pool, no need to rank)
+  //   implicit          → type priority (recon_plane > light_tank > infantry) + distance
+  let selected: Unit[];
+  if (intent.quantity === "all") {
+    selected = units.slice(0, count);
+  } else if (intent.unitType) {
+    selected = sortByDistance(units, target).slice(0, count);
+  } else {
+    selected = sortReconCandidates(units, target).slice(0, count);
+  }
 
   if (selected.length === 0) {
     return { orders: [], log: "无可用单位执行侦察", degraded: true };
@@ -1429,6 +1454,37 @@ function resolveQuantity(
 /** Sort units by distance to a target (closest first). */
 function sortByDistance(units: Unit[], target: Position): Unit[] {
   return [...units].sort((a, b) => {
+    const da =
+      (a.position.x - target.x) ** 2 + (a.position.y - target.y) ** 2;
+    const db =
+      (b.position.x - target.x) ** 2 + (b.position.y - target.y) ** 2;
+    return da - db;
+  });
+}
+
+/**
+ * Rank recon candidates: type-priority then distance.
+ * Order is recon_plane > light_tank > infantry > everything-else;
+ * within a tier, closest unit to the target wins.
+ *
+ * Why: when Chen's brief says "派 N 架侦察机", the engine should actually pick
+ * recon_plane first if any are available, instead of silently falling back to
+ * infantry just because some footman happens to be closer. Aligns engine
+ * selection with the LLM's natural brief wording.
+ *
+ * Only used by resolveRecon for finite quantity (not "all", which dispatches
+ * every unit anyway).
+ */
+function sortReconCandidates(units: Unit[], target: Position): Unit[] {
+  const TYPE_PRIORITY: Record<string, number> = {
+    recon_plane: 0,
+    light_tank: 1,
+    infantry: 2,
+  };
+  return [...units].sort((a, b) => {
+    const pa = TYPE_PRIORITY[a.type] ?? 99;
+    const pb = TYPE_PRIORITY[b.type] ?? 99;
+    if (pa !== pb) return pa - pb;
     const da =
       (a.position.x - target.x) ** 2 + (a.position.y - target.y) ** 2;
     const db =
