@@ -524,14 +524,19 @@ function resolveRecon(
 
   let units = source.units;
 
-  // Prefer fast / scout units
-  const scouts = units.filter(
-    (u) =>
-      u.type === "recon_plane" ||
-      u.type === "light_tank" ||
-      u.type === "infantry",
-  );
-  units = scouts.length > 0 ? scouts : units;
+  // Prefer scout types as a sensible default (recon is conventionally light).
+  // EXCEPT: respect "全军 / all" — when the player explicitly requests every
+  // unit, don't silently filter out main_tank/artillery. Otherwise Chen's
+  // brief ("Blake 全员侦察") drifts from engine execution (only infantry sent).
+  if (intent.quantity !== "all") {
+    const scouts = units.filter(
+      (u) =>
+        u.type === "recon_plane" ||
+        u.type === "light_tank" ||
+        u.type === "infantry",
+    );
+    units = scouts.length > 0 ? scouts : units;
+  }
 
   const count = resolveQuantity(intent.quantity ?? "few", units.length, style);
   const selected = sortByDistance(units, target).slice(0, count);
