@@ -9,15 +9,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-commander/shared": "*",
     "@ai-commander/core": "*",
-    "express": "^4.21.0",
+    "@ai-commander/shared": "*",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "msedge-tts": "^2.0.5"
   },
   "devDependencies": {
-    "@types/express": "^5.0.0",
     "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.3"
   }

@@ -16,12 +16,14 @@ const envResult = dotenvConfig({ path: ENV_PATH });
 import express from "express";
 import cors from "cors";
 import { callAdvisor, callAdvisorStream, callGroupAdvisor, callLightBrief, isProviderConfigured, describeProviderConfig } from "./ai.js";
+import { ttsRouter } from "./routes/tts.js";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
 app.use(cors());
 app.use(express.json({ limit: "100kb" }));
+app.use("/api/tts", ttsRouter);
 
 // Health check
 app.get("/api/health", (_req, res) => {
