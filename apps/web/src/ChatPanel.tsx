@@ -38,6 +38,7 @@ import {
   type MessageFrom,
   type StaffThread,
 } from "./messageStore";
+import { speak, flush, cancel, type Persona } from "./tts";
 
 const API_URL = "http://localhost:3001";
 
@@ -482,51 +483,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const pttRecRef = useRef<any>(null);
 
   // ── TTS (Text-to-Speech) for streaming readback ──
-  const hasTTS = typeof window !== "undefined" && "speechSynthesis" in window;
+  // Implementation lives in ./tts/* — ChatPanel only touches 3 functions
+  // (speak / flush / cancel) imported above. Sentence buffer, queue,
+  // generation tokens, fallback state all owned by the module.
+  const hasTTS = typeof Audio !== "undefined" || (typeof window !== "undefined" && "speechSynthesis" in window);
   const [ttsEnabled, setTtsEnabled] = useState(false);
-  const ttsBufferRef = useRef("");        // accumulates streamed text not yet spoken
-  const ttsSpokenLenRef = useRef(0);      // how many chars of accumulatedText we already spoke
-
-  const ttsSpeakSentence = useCallback((text: string) => {
-    if (!hasTTS || !text.trim()) return;
-    const synth = window.speechSynthesis;
-    const utt = new SpeechSynthesisUtterance(text.trim());
-    utt.lang = "en-US";
-    utt.rate = 1.1;
-    synth.speak(utt);
-  }, [hasTTS]);
-
-  /** Feed new accumulated text; extracts complete sentences and queues them for TTS */
-  const ttsFeedChunk = useCallback((accumulated: string) => {
-    if (!ttsEnabled || !hasTTS) return;
-    const newText = accumulated.slice(ttsSpokenLenRef.current);
-    if (!newText) return;
-    // Split on sentence-ending punctuation, keeping delimiters
-    const parts = newText.split(/(?<=[.!?;,\n])\s*/);
-    // If last part doesn't end with punctuation, keep it buffered
-    const lastPart = parts[parts.length - 1];
-    const lastComplete = /[.!?;,\n]$/.test(lastPart);
-    const toSpeak = lastComplete ? parts : parts.slice(0, -1);
-    const spoken = toSpeak.join(" ");
-    if (spoken.trim()) {
-      ttsSpeakSentence(spoken);
-      ttsSpokenLenRef.current += spoken.length;
-    }
-  }, [ttsEnabled, hasTTS, ttsSpeakSentence]);
-
-  /** Flush remaining buffered TTS text (call on stream end) */
-  const ttsFlush = useCallback((accumulated: string) => {
-    if (!ttsEnabled || !hasTTS) return;
-    const remaining = accumulated.slice(ttsSpokenLenRef.current);
-    if (remaining.trim()) ttsSpeakSentence(remaining);
-    ttsSpokenLenRef.current = 0;
-  }, [ttsEnabled, hasTTS, ttsSpeakSentence]);
-
-  /** Cancel all queued TTS and reset */
-  const ttsCancel = useCallback(() => {
-    if (hasTTS) window.speechSynthesis.cancel();
-    ttsSpokenLenRef.current = 0;
-  }, [hasTTS]);
 
   const startPTT = useCallback(() => {
     if (!SpeechRecCtor || loading) return;
@@ -1036,6 +997,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
     // ── Single commander path ──
     const ch = primaryChannel;
+    // Capture persona once for the entire stream. selectedCommanders[0]
+    // could in theory drift if user switches tabs mid-stream; ttsPersona
+    // is the locked persona used by every speak()/flush() call below.
+    const ttsPersona: Persona = selectedCommanders[0];
 
     // Phase 3: thread context
     const activeThreadOnChannel = activeThreads.find(t => t.channel === ch);
@@ -1172,8 +1137,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       let gotOptions = false;
 
       setStreamingText("");
-      ttsCancel(); // reset TTS for new stream
-      ttsSpokenLenRef.current = 0;
+      cancel(); // reset TTS for new stream
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1195,7 +1159,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             if (event.type === "text") {
               accumulatedText += event.content;
               setStreamingText(accumulatedText);
-              ttsFeedChunk(accumulatedText);
+              if (ttsEnabled) speak(event.content, ttsPersona);
             } else if (event.type === "options") {
               gotOptions = true;
               setStreamingText(null);
@@ -1227,6 +1191,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
               if (event.type === "text") {
                 accumulatedText += event.content;
                 setStreamingText(accumulatedText);
+                if (ttsEnabled) speak(event.content, ttsPersona);
               } else if (event.type === "options") {
                 gotOptions = true;
                 setStreamingText(null);
@@ -1239,8 +1204,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         }
       }
 
-      // Flush any remaining TTS text
-      ttsFlush(accumulatedText);
+      // Flush any remaining TTS sentence buffer (held inside ./tts module).
+      if (ttsEnabled) flush(ttsPersona);
 
       if (!gotOptions) {
         setStreamingText(null);
@@ -1354,9 +1319,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       } else {
         addMessage("info", `${voiceConfirm} Executing ${letter}: ${cleanLabel}`, state.time, ch, undefined, "command_ack");
       }
-      // TTS readback of confirmation
-      if (ttsEnabled && hasTTS) {
-        ttsSpeakSentence(voiceConfirm);
+      // TTS readback of confirmation (its own short stream — speak()
+      // detects persona switch from any prior stream and cancels cleanly).
+      if (ttsEnabled) {
+        speak(voiceConfirm, approveCommander);
       }
       applyOrders(state, allOrders);
 
@@ -1968,7 +1934,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           {hasTTS && (
             <button
               className="dp-dock-btn dp-dock-btn--ptt"
-              onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) ttsCancel(); }}
+              onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }}
               style={{ background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined }}
               title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}
             >{ttsEnabled ? "🔊" : "🔇"}</button>
@@ -2137,7 +2103,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         <button onClick={() => handleProduce("light_tank")} disabled={playerMoney < 250 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 250 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产轻坦 ($250)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+坦$250</button>
         <input ref={inputRef} type="text" value={message} onChange={(e) => setMessage(e.target.value)} onKeyDown={handleKeyDown} placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`} disabled={loading} style={inputStyle} />
         <button onPointerDown={(e) => { e.preventDefault(); startPTT(); }} onPointerUp={stopPTT} onPointerCancel={stopPTT} onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined, opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttStatus === "listening" ? "🔴" : "🎤"}</button>
-        {hasTTS && (<button onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) ttsCancel(); }} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}>{ttsEnabled ? "🔊" : "🔇"}</button>)}
+        {hasTTS && (<button onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}>{ttsEnabled ? "🔊" : "🔇"}</button>)}
         {onCreateSquad && (<button onClick={() => onCreateSquad(selectedCommanders[0])} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
         {onDeclareWar && canDeclareWar && (<button onClick={onDeclareWar} style={warBtnStyle} title="向敌方宣战">宣战</button>)}
         <button data-send-btn onClick={sendCommand} disabled={loading || !message.trim()} style={{ ...sendBtnStyle, opacity: loading || !message.trim() ? 0.5 : 1 }}>{loading ? "..." : "发送"}</button>
