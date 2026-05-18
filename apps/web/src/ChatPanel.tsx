@@ -1068,6 +1068,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           const reason = (data.brief as string) || "命令目标不存在或不明确";
           setClarification(reason + " — 请重新描述指令");
           addMessage("warning", reason, state.time, ch, undefined, "command_ack");
+          // Preserve the clarification question in context so a follow-up
+          // short confirmation ("对的"/"yes") can be resolved against it.
+          pushContext(channelContextRef.current, ch, {
+            role: "assistant",
+            text: reason,
+            time: state.time,
+          });
         }
       } else {
         if (data.brief) {

@@ -159,6 +159,7 @@ RESPONSE TYPE RULES:
   - 例：❌ "我们要不要派 Aiden 进攻？" → EXECUTE（错，含疑问语气是 CONSULTATION）
        ✅ "我们要不要派 Aiden 进攻？" → NOOP + 给分析
        ✅ "派 Aiden 进攻" → EXECUTE（纯祈使）
+- **SHORT FOLLOW-UP RESOLUTION** — when the latest commander message is a short confirmation, rejection, or correction, resolve it against the immediately preceding assistant question in ---CONTEXT---. If that prior assistant question proposed a concrete executable action with unit + target + task, a confirmation authorizes that action → responseType:"EXECUTE" with matching intents. If the reply rejects or modifies the proposal, update the plan accordingly or ask for the missing detail.
 
 patrolRadius: for type=patrol. small=5, medium=10, large=15. Default 10.
 
