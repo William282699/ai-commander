@@ -639,8 +639,8 @@ export function renderFog(
     Math.ceil((camera.y + canvasHeight / camera.zoom) / TILE_SIZE),
   );
 
-  // Pass 1: explored (semi-transparent dim)
-  ctx.fillStyle = "rgba(8,8,18,0.5)";
+  // Pass 1: explored — faint "stale info" tint, terrain/facilities still readable
+  ctx.fillStyle = "rgba(20,30,55,0.10)";
   for (let row = startRow; row < endRow; row++) {
     for (let col = startCol; col < endCol; col++) {
       if (fog[row]?.[col] === "explored") {
@@ -651,8 +651,9 @@ export function renderFog(
     }
   }
 
-  // Pass 2: unknown (nearly opaque black)
-  ctx.fillStyle = "rgba(8,8,18,0.92)";
+  // Pass 2: unknown — light cool intel haze. Strategic map stays readable;
+  // tier semantics (=== "visible") still gate enemy units, combat, digest.
+  ctx.fillStyle = "rgba(40,60,90,0.18)";
   for (let row = startRow; row < endRow; row++) {
     for (let col = startCol; col < endCol; col++) {
       if (fog[row]?.[col] === "unknown") {

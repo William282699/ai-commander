@@ -3,8 +3,48 @@
 // Three visibility layers: unknown → explored → visible
 // ============================================================
 
-import type { GameState, Visibility } from "@ai-commander/shared";
+import type { GameState, Visibility, Unit, Facility, UnitType } from "@ai-commander/shared";
 import { getUnitCategory } from "@ai-commander/shared";
+
+// ============================================================
+// El Alamein scenario vision overrides
+//
+// The default UNIT_STATS visions (infantry=5, main_tank=5 ...) feel "blind"
+// on the 500×300 El Alamein map. Boost vision per-scenario without mutating
+// UNIT_STATS (other scenarios stay untouched). Helpers are consulted by
+// updateFog only — engagement/chase still use raw unit.visionRange, so
+// vision > engagement is by design.
+// ============================================================
+
+const EL_ALAMEIN_UNIT_VISION: Partial<Record<UnitType, number>> = {
+  infantry: 15,
+  light_tank: 18,
+  main_tank: 15,
+  artillery: 16,
+  commander: 20,
+  elite_guard: 16,
+  fighter: 20,
+  bomber: 14,
+  recon_plane: 45,
+};
+
+function getScenarioUnitVision(state: GameState, unit: Unit): number {
+  if (state.scenarioId === "el_alamein") {
+    return EL_ALAMEIN_UNIT_VISION[unit.type] ?? unit.visionRange;
+  }
+  return unit.visionRange;
+}
+
+function getScenarioFacilityVision(state: GameState, fac: Facility): number {
+  if (state.scenarioId === "el_alamein") {
+    if (fac.type === "headquarters") return 30;
+    if (fac.type === "radar") return 45;
+    return 18;
+  }
+  if (fac.type === "headquarters") return 10;
+  if (fac.type === "radar") return 20;
+  return 6;
+}
 
 /**
  * Create initial fog state (all unknown).
@@ -45,8 +85,8 @@ export function updateFog(state: GameState): void {
     const cx = Math.floor(unit.position.x);
     const cy = Math.floor(unit.position.y);
 
-    // Base vision range
-    let r = unit.visionRange;
+    // Base vision range (scenario-aware; forest penalty still applies below)
+    let r = getScenarioUnitVision(state, unit);
 
     // Forest penalty for ground units
     if (cx >= 0 && cx < mapWidth && cy >= 0 && cy < mapHeight) {
@@ -68,9 +108,8 @@ export function updateFog(state: GameState): void {
     const cy = Math.floor(fac.position.y);
 
     // Radar gives large vision; other owned buildings provide local vision.
-    let r = 6;
-    if (fac.type === "headquarters") r = 10;
-    if (fac.type === "radar") r = 20;
+    // El Alamein boosts these radii via getScenarioFacilityVision.
+    const r = getScenarioFacilityVision(state, fac);
 
     revealCircle(fog, cx, cy, r, mapWidth, mapHeight);
   });
