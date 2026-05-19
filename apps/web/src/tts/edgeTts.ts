@@ -25,7 +25,8 @@
 //   - AbortError (6s timeout OR caller-initiated abort())
 //   - Network error
 
-const API_URL = "http://localhost:3001";
+import { API_URL } from "../api";
+
 const FETCH_TIMEOUT_MS = 6000;
 
 export type EdgeRequest = {

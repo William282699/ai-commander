@@ -21,8 +21,42 @@ import { ttsRouter } from "./routes/tts.js";
 const app = express();
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
+// PLAYTEST_ENABLED gate.
+// Resolved once at startup; restart the server to flip. Only active in
+// production — dev (NODE_ENV !== "production") always passes through so
+// `npm run dev:server` is never affected.
+// TODO(playtest): optional PLAYTEST_CODE / ?code=xxx + cookie gate.
+const PLAYTEST_DISABLED =
+  process.env.NODE_ENV === "production" &&
+  process.env.PLAYTEST_ENABLED === "false";
+
 app.use(cors());
 app.use(express.json({ limit: "100kb" }));
+
+// Gate runs after JSON parser (so 503 JSON body is well-formed) but before
+// every route, including /api/tts.
+app.use((req, res, next) => {
+  if (!PLAYTEST_DISABLED) return next();
+  if (req.path.startsWith("/api")) {
+    res.status(503).json({ error: "playtest closed" });
+    return;
+  }
+  res.status(503).type("html").send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>AI Commander — Playtest closed</title>
+<style>
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #0a0f1e; color: #c0d0e0;
+         display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  div { max-width: 480px; text-align: center; padding: 24px 28px;
+        border: 1px solid #3a5a8a; border-radius: 4px; background: rgba(10,15,30,0.85); }
+  h1 { font-size: 18px; margin: 0 0 12px; color: #ffaa00; letter-spacing: 0.5px; }
+  p { margin: 0; font-size: 14px; line-height: 1.6; }
+</style></head>
+<body><div>
+  <h1>AI COMMANDER</h1>
+  <p>Playtest is currently closed.<br>Please check back later.</p>
+</div></body></html>`);
+});
+
 app.use("/api/tts", ttsRouter);
 
 // Health check
@@ -162,9 +196,25 @@ app.post("/api/staff-ask", async (req, res) => {
   }
 });
 
-// Startup
-app.listen(PORT, () => {
+// ──────────────────────────────────────────────────────────────
+// Static SPA serving (playtest single-URL deploy).
+// Goes AFTER all /api routes so they win route matching first.
+// The SPA fallback uses a regex with negative lookahead so a typo'd
+// /api/whatever still returns 404 from Express's default handler instead
+// of being served the SPA index.html (which would mask the bug).
+// ──────────────────────────────────────────────────────────────
+const WEB_DIST = path.resolve(__dirname, "..", "..", "web", "dist");
+app.use(express.static(WEB_DIST));
+app.get(/^(?!\/api).*/, (_req, res) => {
+  res.sendFile(path.join(WEB_DIST, "index.html"));
+});
+
+// Startup. Bind 0.0.0.0 so the server is reachable from outside the loopback
+// interface — required for Cloudflare Tunnel / ngrok / Render / Railway.
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`AI Commander server running on http://localhost:${PORT}`);
+  console.log(`[boot] static SPA dir: ${WEB_DIST}`);
+  console.log(`[boot] NODE_ENV=${process.env.NODE_ENV ?? "(unset)"} PLAYTEST_ENABLED=${process.env.PLAYTEST_ENABLED ?? "(unset)"} → ${PLAYTEST_DISABLED ? "CLOSED" : "open"}`);
   const loadedKeys = envResult.parsed ? Object.keys(envResult.parsed).join(",") : "(none)";
   console.log(`[boot] .env=${ENV_PATH} loaded=${!envResult.error} keys=${loadedKeys}`);
   console.log(`[boot] LLM provider mapping:`);

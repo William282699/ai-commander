@@ -79,6 +79,7 @@ import {
   getLastMessageTimeBySource,
   type MessageLevel,
 } from "./messageStore";
+import { API_URL } from "./api";
 
 // ── Day 16B: event → channel routing ──
 
@@ -134,7 +135,6 @@ function resetStaffAskState(): void {
 const COMBAT_HEARTBEAT_INTERVAL_SEC = 20;
 const PEACE_HEARTBEAT_INTERVAL_SEC = 40;
 const COMBAT_WINDOW_SEC = 25;
-const API_URL = "http://localhost:3001";
 
 const heartbeatState = {
   lastTime: { ops: 0, logistics: 0, combat: 0 } as Record<Channel, number>,

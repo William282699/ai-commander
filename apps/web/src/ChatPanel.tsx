@@ -39,8 +39,7 @@ import {
   type StaffThread,
 } from "./messageStore";
 import { speak, flush, cancel, type Persona } from "./tts";
-
-const API_URL = "http://localhost:3001";
+import { API_URL } from "./api";
 
 // ── 0.3: Commander ↔ Channel mapping ──
 
@@ -1237,7 +1236,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         const data = await res.json();
         processAdvisorData(data);
       } catch {
-        const errMsg = "无法连接服务器，请确保后端运行在 localhost:3001";
+        const errMsg = "无法连接服务器，请检查网络或稍后再试";
         setError(errMsg);
         setResponse(null);
         selectedIdsSnapshotRef.current = undefined;
