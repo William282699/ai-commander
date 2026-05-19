@@ -121,22 +121,43 @@ function transitionTo(state: GameState, newPhase: GameState["phase"]): void {
 export function checkGameOver(state: GameState, dt: number): void {
   if (state.gameOver) return;
 
-  // El Alamein: All capture objectives taken → victory
-  if (state.captureObjectives && state.captureObjectives.length > 0) {
+  // Step 5B: scenario-driven win/loss tuning.
+  // When scenarioWinConfig is present, use K-of-N objectives + keypoint-loss + timeout.
+  // Falls back to legacy all-captured logic for scenarios without the config (dual_island).
+  const winCfg = state.scenarioWinConfig;
+  if (winCfg) {
+    // Victory: K of N objectives captured
+    const capturedCount = (state.captureObjectives ?? []).filter(id =>
+      state.facilities.get(id)?.team === "player",
+    ).length;
+    if (capturedCount >= winCfg.requiredCapturedObjectives) {
+      endGame(state, "player", `已夺取 ${capturedCount} 处据点 — 阿拉曼大捷！`);
+      return;
+    }
+    // Defeat: friendly keypoints lost (missing OR hp<=0 OR team flipped to non-player)
+    const lostCount = winCfg.friendlyKeypoints.filter(id => {
+      const f = state.facilities.get(id);
+      return !f || f.hp <= 0 || f.team !== "player";
+    }).length;
+    if (lostCount >= winCfg.maxFriendlyKeypointsLost) {
+      endGame(state, "enemy", `失守 ${lostCount} 处前哨 — 战线崩溃`);
+      return;
+    }
+    // Defeat: scenario timeout
+    if (state.time >= winCfg.timeLimitSec) {
+      endGame(state, "enemy", "超时未达成战略目标 — 进攻失败");
+      return;
+    }
+  } else if (state.captureObjectives && state.captureObjectives.length > 0) {
+    // Legacy path: all-captured victory (no timeout, no keypoint loss).
     const allCaptured = state.captureObjectives.every(objId => {
       const fac = state.facilities.get(objId);
       return fac && fac.team === "player";
     });
     if (allCaptured) {
-      endGame(state, "player", "所有据点已夺取 — 阿拉曼大捷！");
+      endGame(state, "player", "所有据点已夺取！");
       return;
     }
-  }
-
-  // El Alamein: 20-minute timeout → defeat
-  if (state.scenarioId === "el_alamein" && state.time >= 1200) {
-    endGame(state, "enemy", "超时未能夺取全部据点 — 进攻失败");
-    return;
   }
 
   // MVP2 Rule 1: Commander killed → defeat
@@ -166,8 +187,14 @@ export function checkGameOver(state: GameState, dt: number): void {
     return;
   }
 
-  // Fallback: ENDGAME timeout → forced game-over by score
-  if (state.phase === "ENDGAME" && state.endgameStartTime !== null) {
+  // Fallback: ENDGAME timeout → forced game-over by score.
+  // Step 5B: scenarios with scenarioWinConfig own their own timeout (winCfg.timeLimitSec
+  // at 1800s for el_alamein). The legacy ENDGAME_MAX_SEC fallback fires at
+  // ENDGAME_START_SEC(900) + ENDGAME_MAX_SEC(300) = 1200s, which would pre-empt
+  // the scenario's authoritative deadline. Skip it for those scenarios.
+  if (!state.scenarioWinConfig
+      && state.phase === "ENDGAME"
+      && state.endgameStartTime !== null) {
     const endgameElapsed = state.time - state.endgameStartTime;
     if (endgameElapsed >= ENDGAME_MAX_SEC) {
       const winner = evaluateScore(state);

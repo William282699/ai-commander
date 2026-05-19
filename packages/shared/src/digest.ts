@@ -87,8 +87,37 @@ export function generateDigestV1(
     }
   }
 
-  // Day 12: ENDGAME / GAMEOVER compact lines
-  if (state.phase === "ENDGAME" && state.endgameStartTime !== null) {
+  // Step 5B: scenario win/loss progress. Public information only —
+  // no hidden enemy positions. Helps commanders speak concretely about
+  // strategic state ("we have 1/2 objectives, lost 0/2 keypoints, 27:14 left").
+  if (state.scenarioWinConfig) {
+    const cfg = state.scenarioWinConfig;
+    const captured = (state.captureObjectives ?? []).filter(id =>
+      state.facilities.get(id)?.team === "player",
+    ).length;
+    const keypointStatus = cfg.friendlyKeypoints.map(id => {
+      const f = state.facilities.get(id);
+      if (!f || f.hp <= 0 || f.team !== "player") return `${id}:LOST`;
+      return `${id}:OK`;
+    });
+    const lost = keypointStatus.filter(s => s.endsWith(":LOST")).length;
+    const timeLeft = Math.max(0, cfg.timeLimitSec - state.time);
+    const mm = Math.floor(timeLeft / 60).toString().padStart(2, "0");
+    const ss = Math.floor(timeLeft % 60).toString().padStart(2, "0");
+    digest += `---WIN_PROGRESS---\n`;
+    digest += `objectives=${captured}/${cfg.requiredCapturedObjectives} `;
+    digest += `keypoints_lost=${lost}/${cfg.maxFriendlyKeypointsLost} `;
+    digest += `time_left=${mm}:${ss}\n`;
+    digest += `keypoints=[${keypointStatus.join(", ")}]\n`;
+  }
+
+  // Day 12: ENDGAME / GAMEOVER compact lines.
+  // Step 5B: scenarios with scenarioWinConfig surface their own deadline via
+  // WIN_PROGRESS above; the legacy ENDGAME_MAX_SEC=300 countdown is meaningless
+  // for them and would contradict time_left from WIN_PROGRESS. Suppress here.
+  if (!state.scenarioWinConfig
+      && state.phase === "ENDGAME"
+      && state.endgameStartTime !== null) {
     const eta = Math.max(0, 300 - (state.time - state.endgameStartTime));
     digest += `ENDGAME: eta=${Math.round(eta)}s\n`;
   }

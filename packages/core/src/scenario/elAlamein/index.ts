@@ -130,6 +130,19 @@ export function createElAlameinState(): GameState {
     scenarioId: "el_alamein",
     namedRoutes: EL_ALAMEIN_ROUTES.map(r => ({ ...r, waypoints: r.waypoints.map(w => ({ ...w })) })),
     captureObjectives: [...EL_ALAMEIN_OBJECTIVES],
+    // Step 5B win/loss tuning: capture ANY 2 of 4 Axis objectives to win,
+    // lose 2 of 3 forward keypoints OR run out of time to lose. HQ destroyed
+    // and all-commanders-dead are handled by scenario-agnostic checks in warPhase.
+    scenarioWinConfig: {
+      timeLimitSec: 1800,                  // 30 minutes
+      requiredCapturedObjectives: 2,       // of 4 in captureObjectives
+      friendlyKeypoints: [
+        "ea_player_coastal_post",
+        "ea_player_central_post",
+        "ea_player_south_post",
+      ],
+      maxFriendlyKeypointsLost: 2,         // defeat at 2 of 3 lost
+    },
     enemyAIMode: "defensive",
     entrenchTimers: new Map(),
   };

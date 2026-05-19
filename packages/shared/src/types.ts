@@ -556,7 +556,19 @@ export interface GameState {
   // --- Scenario system ---
   scenarioId: ScenarioId;
   namedRoutes: NamedRoute[];
-  captureObjectives?: string[];  // facility IDs that must be captured for victory
+  captureObjectives?: string[];  // facility IDs that may count toward victory (subset required via scenarioWinConfig)
+  /**
+   * Scenario-driven win/loss tuning (Step 5B). When set, warPhase.checkGameOver
+   * evaluates victory/defeat against these thresholds instead of the legacy
+   * "all captureObjectives taken" path. Leave undefined for scenarios that
+   * still use legacy capture-all logic (currently dual_island).
+   */
+  scenarioWinConfig?: {
+    timeLimitSec: number;
+    requiredCapturedObjectives: number;   // K-of-N from captureObjectives
+    friendlyKeypoints: string[];          // facility IDs whose loss is a defeat trigger
+    maxFriendlyKeypointsLost: number;     // defeat when this many keypoints are lost
+  };
   enemyAIMode?: "offensive" | "defensive";
   entrenchTimers: Map<number, number>;  // unitId → seconds spent stationary in defend
 }

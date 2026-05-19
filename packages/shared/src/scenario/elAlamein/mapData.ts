@@ -423,6 +423,52 @@ export const EL_ALAMEIN_FACILITIES: Facility[] = [
     captureProgress: 0,
     capturingTeam: null,
   },
+
+  // === Player Forward Keypoints (Step 5B) — defendable strongpoints ahead of British HQ.
+  // Loss of 2 of these = defeat. Capturable + destructible like normal facilities.
+  // Tagged "前哨" (forward post) to disambiguate from Axis "据点" objectives. ===
+  {
+    id: "ea_player_coastal_post",
+    name: "Coastal Forward Post",
+    type: "comm_tower",
+    tags: ["forward", "keypoint", "前哨", "player"],
+    position: { x: 360, y: 35 },
+    team: "player",
+    hp: 350,
+    maxHp: 350,
+    regionId: "northern_coastal",
+    strategicEffect: "Forward coastal observation post",
+    captureProgress: 0,
+    capturingTeam: null,
+  },
+  {
+    id: "ea_player_central_post",
+    name: "Central Desert Forward Post",
+    type: "ammo_depot",
+    tags: ["forward", "keypoint", "前哨", "player"],
+    position: { x: 360, y: 105 },
+    team: "player",
+    hp: 350,
+    maxHp: 350,
+    regionId: "central_desert",  // ID matches region — (360,105) sits in central_desert bbox, not ruweisat_zone
+    strategicEffect: "Forward ammunition cache",
+    captureProgress: 0,
+    capturingTeam: null,
+  },
+  {
+    id: "ea_player_south_post",
+    name: "Alam Halfa Forward Post",
+    type: "radar",
+    tags: ["forward", "keypoint", "前哨", "player"],
+    position: { x: 365, y: 155 },
+    team: "player",
+    hp: 350,
+    maxHp: 350,
+    regionId: "alam_halfa_zone",
+    strategicEffect: "Southern flank surveillance",
+    captureProgress: 0,
+    capturingTeam: null,
+  },
 ];
 
 // ──────────────────────────────────────────────
@@ -560,7 +606,10 @@ export const EL_ALAMEIN_CAMERA_TARGETS: Record<string, { x: number; y: number }>
 };
 
 // ──────────────────────────────────────────────
-// Capture objectives — all 5 must be captured for victory
+// Capture objectives — pool of Axis strongpoints that count toward victory.
+// Step 5B: victory requires capturing ANY K of these (K = scenarioWinConfig.
+// requiredCapturedObjectives, currently 2). Rommel's HQ remains a separate
+// "destroy HQ" win path handled by warPhase, not listed here.
 // ──────────────────────────────────────────────
 
 export const EL_ALAMEIN_OBJECTIVES: string[] = [

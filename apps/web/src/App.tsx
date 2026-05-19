@@ -75,6 +75,17 @@ export default function App() {
     time: 0,
   });
 
+  // Step 5B: win-progress snapshot for the top-right HUD. When set, the topbar
+  // replaces the legacy clock with a 3-line scenario progress block. Null means
+  // the scenario has no scenarioWinConfig — fall back to the legacy clock.
+  const [winProgress, setWinProgress] = useState<{
+    captured: number;
+    required: number;
+    lost: number;
+    maxLost: number;
+    timeLeftSec: number;
+  } | null>(null);
+
   const registerStateGetter = useCallback((getter: () => GameState | null) => {
     stateGetterRef.current = getter;
   }, []);
@@ -92,6 +103,26 @@ export default function App() {
         readiness: state.economy.player.readiness,
         time: state.time,
       });
+      // Step 5B: scenario win-progress (only for scenarios with scenarioWinConfig).
+      const cfg = state.scenarioWinConfig;
+      if (cfg) {
+        const captured = (state.captureObjectives ?? []).filter(fid =>
+          state.facilities.get(fid)?.team === "player",
+        ).length;
+        const lost = cfg.friendlyKeypoints.filter(fid => {
+          const f = state.facilities.get(fid);
+          return !f || f.hp <= 0 || f.team !== "player";
+        }).length;
+        setWinProgress({
+          captured,
+          required: cfg.requiredCapturedObjectives,
+          lost,
+          maxLost: cfg.maxFriendlyKeypointsLost,
+          timeLeftSec: Math.max(0, cfg.timeLimitSec - state.time),
+        });
+      } else {
+        setWinProgress(null);
+      }
     }, 250);
     return () => clearInterval(id);
   }, []);
@@ -178,7 +209,34 @@ export default function App() {
           </button>
         )}
 
-        <span className="hud-topbar__clock">{formatTime(topBar.time)}</span>
+        {/* Step 5B: scenario win-progress as a horizontal chip group, sharing
+            the Money/Fuel/Ammo chip style. Pinned to the far right via
+            marginLeft:auto. Dual_island and other scenarios with no
+            scenarioWinConfig fall back to the legacy clock. */}
+        {winProgress ? (
+          <div className="hud-topbar__resources" style={{ marginLeft: "auto" }}>
+            <div className="hud-resource-chip hud-resource-chip--info">
+              <span className="hud-resource-chip__label">OBJECTIVES</span>
+              <span className="hud-resource-chip__value">
+                {winProgress.captured}/{winProgress.required}
+              </span>
+            </div>
+            <div className="hud-resource-chip hud-resource-chip--danger">
+              <span className="hud-resource-chip__label">POSTS LOST</span>
+              <span className="hud-resource-chip__value">
+                {winProgress.lost}/{winProgress.maxLost}
+              </span>
+            </div>
+            <div className="hud-resource-chip hud-resource-chip--success">
+              <span className="hud-resource-chip__label">TIME LEFT</span>
+              <span className="hud-resource-chip__value">
+                {String(Math.floor(winProgress.timeLeftSec / 60)).padStart(2, "0")}:{String(Math.floor(winProgress.timeLeftSec % 60)).padStart(2, "0")}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <span className="hud-topbar__clock">{formatTime(topBar.time)}</span>
+        )}
       </div>
 
       {/* Main canvas area */}

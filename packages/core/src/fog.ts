@@ -37,9 +37,25 @@ function getScenarioUnitVision(state: GameState, unit: Unit): number {
 
 function getScenarioFacilityVision(state: GameState, fac: Facility): number {
   if (state.scenarioId === "el_alamein") {
-    if (fac.type === "headquarters") return 30;
-    if (fac.type === "radar") return 45;
-    return 18;
+    // Per-type baseline.
+    let base: number;
+    if (fac.type === "headquarters") base = 30;
+    else if (fac.type === "radar") base = 45;
+    else base = 18;
+
+    // Captured Axis objective bonus: holding key terrain pays off with at
+    // least 2x normal ground-unit vision (infantry/main_tank=15 → floor 30).
+    // Radar-type objectives already exceed 30 via their type default; this
+    // floor mainly lifts comm_tower-typed objectives like ea_alamein_town
+    // (18 → 30). Pre-capture (team !== "player") this branch doesn't apply
+    // because the outer updateFog loop already skips non-player facilities.
+    const isCapturedObjective =
+      fac.team === "player" &&
+      (state.captureObjectives?.includes(fac.id) ?? false);
+    if (isCapturedObjective) {
+      return Math.max(base, 30);
+    }
+    return base;
   }
   if (fac.type === "headquarters") return 10;
   if (fac.type === "radar") return 20;

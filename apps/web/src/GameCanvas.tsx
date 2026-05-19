@@ -395,6 +395,10 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     return () => clearInterval(id);
   }, []);
 
+  // Step 5B note: scenario win-progress HUD lives in App.tsx (replaces the
+  // legacy topbar clock). GameCanvas does not render its own win-progress
+  // overlay anymore — keeps the map area clean and avoids ChatPanel overlap.
+
   // Day 15: Tag naming dialog state
   const [tagNaming, setTagNaming] = useState<{ worldX: number; worldY: number } | null>(null);
   const [tagNameInput, setTagNameInput] = useState("");
