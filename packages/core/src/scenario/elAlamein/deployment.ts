@@ -126,26 +126,31 @@ export function deployElAlameinUnits(): { units: Map<number, Unit>; nextUnitId: 
   uid++;
   placeGroup("elite_guard", "player", circleFormation(432, 88, 10, 4), { playerControlled: true });
 
-  // ── Northern Battle Group (390, 30) — for coastal push ──
-  // 5 infantry in block + 3 light tanks in line behind
-  placeGroup("infantry", "player", blockFormation(388, 28, 5, 2));
-  placeGroup("light_tank", "player", lineFormation(388, 35, 3, 3));
+  // ── Coastal Forward Post Garrison (360, 35) — defends ea_player_coastal_post ──
+  // Step 5C-prep: was Northern Battle Group at (388,28). Pulled forward onto
+  // the keypoint so the post starts defended; raids hitting it find immediate
+  // resistance instead of an undefended building.
+  // 5 infantry block + 3 light tanks in line behind
+  placeGroup("infantry", "player", blockFormation(360, 33, 5, 2));
+  placeGroup("light_tank", "player", lineFormation(360, 40, 3, 3));
 
   // ── Central Armored Group (380, 85) — main assault force ──
   // 6 main tanks in 2×3 block + 4 infantry screening in front line
   placeGroup("main_tank", "player", blockFormation(378, 82, 6, 3));
   placeGroup("infantry", "player", lineFormation(378, 76, 4, 3));
 
-  // ── Central Support Group (390, 100) — second wave ──
-  // 4 main tanks wedge + 4 infantry block
-  placeGroup("main_tank", "player", wedgeFormation(392, 98, 4, 3));
-  placeGroup("infantry", "player", blockFormation(392, 106, 4, 2));
+  // ── Central Forward Post Garrison (360, 105) — defends ea_player_central_post ──
+  // Step 5C-prep: was Central Support Group at (392,98). Same 4 main_tank wedge
+  // + 4 infantry block, recentered onto the keypoint.
+  placeGroup("main_tank", "player", wedgeFormation(360, 103, 4, 3));
+  placeGroup("infantry", "player", blockFormation(360, 111, 4, 2));
 
-  // ── Southern Strike Force (385, 170) — flanking group ──
-  // 4 infantry block + 3 light tanks line + 2 light tanks scout
-  placeGroup("infantry", "player", blockFormation(384, 168, 4, 2));
-  placeGroup("light_tank", "player", lineFormation(384, 175, 3, 3));
-  placeGroup("light_tank", "player", [[378, 162], [390, 162]]);
+  // ── South Forward Post Garrison (365, 155) — defends ea_player_south_post ──
+  // Step 5C-prep: was Southern Strike Force at (385,170). 4 infantry block
+  // + 3 light_tank line + 2 light_tank scouts, recentered onto the keypoint.
+  placeGroup("infantry", "player", blockFormation(365, 153, 4, 2));
+  placeGroup("light_tank", "player", lineFormation(365, 160, 3, 3));
+  placeGroup("light_tank", "player", [[359, 147], [371, 147]]);
 
   // ── Reserve Infantry (415, 110) — rear reserve ──
   placeGroup("infantry", "player", blockFormation(416, 112, 3, 2));
