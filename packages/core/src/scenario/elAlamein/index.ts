@@ -81,17 +81,27 @@ export function createElAlameinState(): GameState {
     economy: {
       player: (() => {
         const eco = makeEconomy();
-        eco.resources.money = 3000; // 8th Army well-supplied
-        eco.resources.fuel = 150;
-        eco.resources.ammo = 150;
+        eco.resources.money = 3500; // 5C-lite: bigger pool for 30-min sustained ops
+        eco.resources.fuel = 300;
+        eco.resources.ammo = 225;
+        eco.baseIncome = { money: 120, fuel: 30, ammo: 30, intel: 10 };
         return eco;
       })(),
       enemy: (() => {
         const eco = makeEconomy();
-        eco.resources.money = 4000;   // Axis well-stocked at start
-        eco.resources.fuel = 250;     // Enough for sustained early ops
-        eco.resources.ammo = 250;     // Ample ammo reserves
-        eco.baseIncome = { money: 150, fuel: 35, ammo: 30, intel: 10 };
+        // 5C-lite v3: fuel restored to 1500 (was 400 in v2.1)
+        //   Root cause of v2.1 playtest "armor flood at 60s + stalled tanks"
+        //   was P2 massedOffensive firing too early, not fuel being too high.
+        //   V3 solves it via PHASE_STRATEGY (P2 gated to 12 min+ in El Alamein).
+        //   Fuel is NOT a rhythm lever — it should just cover armor movement.
+        //
+        // money: 12,500 total (3500 + 150×60) — income +25% 玩家反映 AI 90% sustain vs 玩家 70%
+        // fuel:  3,300 total (1500 + 30×60) — ~2.9× of 30-min demand (~1,150)
+        // ammo:  2,025 total (225 + 30×60) — 持平玩家, 双方 ~2× demand
+        eco.resources.money = 3500;
+        eco.resources.fuel = 1500;
+        eco.resources.ammo = 225;
+        eco.baseIncome = { money: 150, fuel: 30, ammo: 30, intel: 10 };
         return eco;
       })(),
     },
@@ -135,13 +145,17 @@ export function createElAlameinState(): GameState {
     // and all-commanders-dead are handled by scenario-agnostic checks in warPhase.
     scenarioWinConfig: {
       timeLimitSec: 1800,                  // 30 minutes
-      requiredCapturedObjectives: 2,       // of 4 in captureObjectives
+      requiredCapturedObjectives: 3,       // 5C-lite: K=3 of 4 Axis objectives
       friendlyKeypoints: [
         "ea_player_coastal_post",
         "ea_player_central_post",
         "ea_player_south_post",
       ],
-      maxFriendlyKeypointsLost: 2,         // defeat at 2 of 3 lost
+      maxFriendlyKeypointsLost: 3,         // 5C-lite: all 3 lost → defeat (rating handles partial)
+      ratingThresholds: {
+        majorVictory: 3, victory: 2, minorVictory: 1,
+        draw: 0, minorDefeat: -1, defeat: -2,
+      },
     },
     enemyAIMode: "defensive",
     entrenchTimers: new Map(),

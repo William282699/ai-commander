@@ -535,6 +535,10 @@ export interface GameState {
   logisticsZeroSec: { player: number; enemy: number };
   warEngageSec: number;
   gameOverReason?: string;
+  /** 5C-lite: 30-min rating; absent on immediate win/loss. */
+  gameOverRating?: "major_victory" | "victory" | "minor_victory" | "draw" | "minor_defeat" | "defeat";
+  /** 5C-lite: score breakdown for game-over UI. */
+  gameOverBreakdown?: { capturedObjectives: number; lostKeypoints: number; score: number };
   combatEffects: CombatEffects;
   diagnostics: DiagnosticEntry[];
   reportEvents: ReportEvent[];
@@ -568,6 +572,11 @@ export interface GameState {
     requiredCapturedObjectives: number;   // K-of-N from captureObjectives
     friendlyKeypoints: string[];          // facility IDs whose loss is a defeat trigger
     maxFriendlyKeypointsLost: number;     // defeat when this many keypoints are lost
+    /** 5C-lite: 30-min timeout rating thresholds on score = captured - lost. */
+    ratingThresholds?: {
+      majorVictory: number; victory: number; minorVictory: number;
+      draw: number; minorDefeat: number; defeat: number;
+    };
   };
   enemyAIMode?: "offensive" | "defensive";
   entrenchTimers: Map<number, number>;  // unitId → seconds spent stationary in defend

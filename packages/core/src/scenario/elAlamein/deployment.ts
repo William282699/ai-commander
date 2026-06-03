@@ -161,9 +161,29 @@ export function deployElAlameinUnits(): { units: Map<number, Unit>; nextUnitId: 
   // ── Artillery Battery (430, 130) — southern battery ──
   placeGroup("artillery", "player", lineFormation(430, 132, 3, 4));
 
-  // ── Air Wing (450, 128) ──
-  placeGroup("recon_plane", "player", lineFormation(452, 124, 3, 3));
-  placeGroup("fighter", "player", [[448, 130], [456, 130]]);
+  // ── HQ Mobile Reserve (450, 128) — 5C-lite: replaces air wing ──
+  placeGroup("infantry",   "player", blockFormation(450, 120, 2, 2));
+  placeGroup("light_tank", "player", lineFormation(450, 126, 2, 3));
+  placeGroup("main_tank",  "player", [[450, 132]]);
+
+  // ── North Strike Force (400, 60) — 5C-lite v2: 北线进攻群 ──
+  // X Corps staging area pattern. Doctrine: 步兵 leading + 装甲 spearhead
+  // 任务: 推 Alamein Town (280, 30)
+  placeGroup("infantry",   "player", blockFormation(400, 56, 4, 2));
+  placeGroup("light_tank", "player", lineFormation(400, 62, 3, 3));
+  placeGroup("main_tank",  "player", [[396, 68], [404, 68]]);
+
+  // ── Central Strike Force (400, 95) — 5C-lite v2: 中线进攻群 ──
+  // 任务: 推 Kidney Ridge (220, 55) 或 Miteirya Ridge (230, 70)
+  placeGroup("infantry",   "player", blockFormation(400, 91, 4, 2));
+  placeGroup("light_tank", "player", [[396, 97], [404, 97]]);
+  placeGroup("main_tank",  "player", [[396, 103], [404, 103]]);
+
+  // ── South Strike Force (400, 145) — 5C-lite v2: 南线进攻群 ──
+  // 任务: 推 Himeimat Heights (250, 218)
+  placeGroup("infantry",   "player", blockFormation(400, 141, 4, 2));
+  placeGroup("light_tank", "player", lineFormation(400, 147, 3, 3));
+  placeGroup("main_tank",  "player", [[400, 153]]);
 
   // ═══════════════════════════════════════════
   // ENEMY (Afrika Korps + Italian) — West side + strongpoints
@@ -214,9 +234,25 @@ export function deployElAlameinUnits(): { units: Map<number, Unit>; nextUnitId: 
   placeGroup("infantry", "enemy", blockFormation(148, 178, 3, 2));  // 6 infantry
   placeGroup("light_tank", "enemy", [[145, 185], [155, 185]]);      // 2 light_tank
 
-  // ── Air Wing (58, 128) ──
-  placeGroup("fighter", "enemy", lineFormation(58, 128, 3, 3));
-  placeGroup("bomber", "enemy", [[56, 134], [64, 134]]);
+  // ── Axis Mobile Reserve (58, 128) — 5C-lite: replaces air wing ──
+  placeGroup("infantry",   "enemy", blockFormation(58, 122, 2, 2));
+  placeGroup("light_tank", "enemy", blockFormation(58, 128, 3, 3));
+  placeGroup("main_tank",  "enemy", [[55, 134], [65, 134]]);
+
+  // ── 15. Panzer Counter-attack Group (180, 75) — 5C-lite v2: 北部反击装甲 ──
+  // Historical position: Rommel's 15. Panzer Division held in reserve
+  // west of Kidney Ridge / Miteirya Ridge, ready to counter-attack
+  placeGroup("infantry",   "enemy", blockFormation(180, 71, 3, 2));
+  placeGroup("light_tank", "enemy", lineFormation(180, 77, 3, 3));
+  placeGroup("main_tank",  "enemy", [[176, 83], [184, 83]]);
+
+  // ── 21. Panzer Counter-attack Group (210, 185) — 5C-lite v2: 南部反击装甲 ──
+  // Historical position: 21. Panzer Division 南部反击预备
+  // Positioned 52 tile NW of Himeimat for actual proximity to south objective
+  // (original (180, 165) was 88 tile away — too far for "南部反击" intent)
+  placeGroup("infantry",   "enemy", blockFormation(210, 181, 3, 2));
+  placeGroup("light_tank", "enemy", [[206, 187], [214, 187]]);
+  placeGroup("main_tank",  "enemy", [[210, 193]]);
 
   return { units, nextUnitId: uid };
 }

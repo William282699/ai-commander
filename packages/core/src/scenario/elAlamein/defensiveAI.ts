@@ -8,6 +8,34 @@ import { getUnitCategory } from "@ai-commander/shared";
 import { applyEnemyOrders } from "../../applyOrders";
 import { canUnitEnterTile } from "../../sim";
 import { enqueueProduction } from "../../economy";
+import { PHASE_STRATEGY, getCurrentStrategicPhase, type PhaseConfig } from "./pressureDirector";
+
+// ── 5C-lite tuning history (3 rounds, cumulative) ──
+//
+// round 1 (codex): fallback target → player forward post (was: HQ).
+//                  Design correction for K=3 win mode. Permanent.
+// round 2 (codex): selectP2Target / findPlayerPressureTarget routes to forward
+//                  post via FRONT_PLAYER_POST_MAP. Permanent.
+// round 3 (V3):    P1/P2/P3 timing gates and caps pulled from PHASE_STRATEGY
+//                  (defined in pressureDirector.ts). Hardcoded
+//                  grace `state.time < 60` in opportunisticAttack /
+//                  massedOffensive replaced with cfg.p1Grace / cfg.p2Grace.
+//                  proactiveProbe uses cfg.p3Grace + cfg.p3MaxUnits.
+//                  P2 uses cfg.p2CommitRatio + cfg.p2CooldownSec.
+//                  P1 uses cfg.p1MaxAttack (instead of re-using P2_MAX_ATTACK).
+//                  Non-El-Alamein scenarios get "legacy" phase whose config
+//                  mirrors original baseline 1:1 → dual_island behavior unchanged.
+//
+// Original hardcoded const (PROBE_START_TIME / PROBE_MAX_UNITS /
+// P2_COMMIT_RATIO / P2_COOLDOWN_SEC / P2_MAX_ATTACK) are KEPT below but
+// no longer read by P1/P2/P3. They serve as fallback defaults for the
+// "delete pressureDirector entirely" path (see STEP_5C_LITE_V3_WORKPLAN.md
+// § 10.2 mechanical revert).
+
+/** Read PHASE_STRATEGY config for current strategic phase. Pure lookup. */
+function getPhaseConfig(state: GameState): PhaseConfig {
+  return PHASE_STRATEGY[getCurrentStrategicPhase(state)];
+}
 
 // ── Constants ──
 const DEFENSIVE_AI_INTERVAL = 5.0;
@@ -37,6 +65,8 @@ const PROBE_MIN_FUEL = 50;            // Don't probe when fuel is critical
 const MAX_ACTIVE_ATTACKERS = 24;      // v3: was 12 — P1/P3 soft cap
 const MAX_ACTIVE_ATTACKERS_HARD = 32; // v3: P2 only — massed offensive hard cap
 const TACTICAL_DEVIATION_MAX = 25;    // v3: max deviation tiles for visible-enemy targeting
+const HQ_ASSAULT_START_SEC = 1200;    // 5C-lite: HQ is a late-game target, not default pressure
+const HQ_ASSAULT_LOST_KEYPOINTS = 2;  // Or when player has already lost the forward screen
 
 // §9: Diagnostics cap
 const MAX_DIAGNOSTICS = 200;
@@ -492,7 +522,8 @@ function reactiveCounterattack(state: GameState): void {
 // ── P1: Opportunistic attack ──
 
 function opportunisticAttack(state: GameState): void {
-  if (state.time < 60) return; // grace period
+  const cfg = getPhaseConfig(state);
+  if (state.time < cfg.p1Grace) return; // V3: phase-gated grace (was hardcoded 60)
   if (state.time < p1CooldownUntil) return;
   if (activeAttackerIds.size >= MAX_ACTIVE_ATTACKERS) return;  // §4: global cap
 
@@ -540,7 +571,8 @@ function opportunisticAttack(state: GameState): void {
     if (reserves.length === 0) continue;
 
     const p1Budget = MAX_ACTIVE_ATTACKERS - activeAttackerIds.size;
-    const attackers = reserves.slice(0, Math.min(P2_MAX_ATTACK, reserves.length, p1Budget));
+    // V3: P1 uses its own cfg.p1MaxAttack cap (was reusing P2_MAX_ATTACK=8)
+    const attackers = reserves.slice(0, Math.min(cfg.p1MaxAttack, reserves.length, p1Budget));
     if (attackers.length === 0) continue;
     const leadType = getLeadType(attackers);
     const { target: finalTarget, corridor } = getTargetPosition(state, front, leadType);
@@ -558,7 +590,8 @@ function opportunisticAttack(state: GameState): void {
 // ── P2: Massed offensive ──
 
 function massedOffensive(state: GameState): void {
-  if (state.time < 60) return;
+  const cfg = getPhaseConfig(state);
+  if (state.time < cfg.p2Grace) return; // V3: phase-gated grace (was hardcoded 60)
   if (state.time < p2CooldownUntil) return;
   if (activeAttackerIds.size >= MAX_ACTIVE_ATTACKERS_HARD) return;  // v3: P2 uses hard cap (32)
 
@@ -598,7 +631,8 @@ function massedOffensive(state: GameState): void {
 
   // v3: P2 uses HARD cap budget (32) — massed offensive should feel massive
   const budget = MAX_ACTIVE_ATTACKERS_HARD - activeAttackerIds.size;
-  const commitCount = Math.min(Math.ceil(pool.length * P2_COMMIT_RATIO), budget);
+  // V3: phase-driven commit ratio (was hardcoded P2_COMMIT_RATIO=0.75)
+  const commitCount = Math.min(Math.ceil(pool.length * cfg.p2CommitRatio), budget);
   if (commitCount < 4) return; // not enough even after fuel filter
 
   const attackers = pool.slice(0, commitCount);
@@ -613,7 +647,8 @@ function massedOffensive(state: GameState): void {
   if (applied === 0) return;
 
   offensiveWaveCount++;
-  p2CooldownUntil = state.time + P2_COOLDOWN_SEC;
+  // V3: phase-driven cooldown (was hardcoded P2_COOLDOWN_SEC=50)
+  p2CooldownUntil = state.time + cfg.p2CooldownSec;
 
   pushDiagnostic(state,
     `P2 massed wave=${offensiveWaveCount} atk=${applied}/${attackers.length} tgt=(${finalTarget.x},${finalTarget.y}) front=${targetFront.id}`
@@ -825,9 +860,11 @@ function reissueAttackerOrders(state: GameState): void {
     if (found) {
       newTarget = found.pos;
     } else {
-      // ── Phase 3: No visible enemies — push toward player HQ ──
-      const hq = findPlayerHQ(state);
-      newTarget = hq ? { ...hq.position } : { x: 430, y: 90 };
+      // ── Phase 3: No visible enemies — continue toward the assigned pressure target.
+      // 5C-lite: avoid turning idle attackers into default HQ rushers.
+      newTarget = storedTarget
+        ? { ...storedTarget }
+        : findNearestPlayerPressureTarget(state, u.position);
     }
 
     // Skip reissue if already targeting same position
@@ -904,6 +941,59 @@ function findPlayerHQ(state: GameState): { position: Position; hp: number } | un
   return hq;
 }
 
+function countLostFriendlyKeypoints(state: GameState): number {
+  const winCfg = state.scenarioWinConfig;
+  if (!winCfg) return 0;
+  return winCfg.friendlyKeypoints.filter(id => {
+    const f = state.facilities.get(id);
+    return !f || f.hp <= 0 || f.team !== "player";
+  }).length;
+}
+
+function shouldAssaultPlayerHQ(state: GameState): boolean {
+  return state.time >= HQ_ASSAULT_START_SEC
+    || countLostFriendlyKeypoints(state) >= HQ_ASSAULT_LOST_KEYPOINTS;
+}
+
+function getPlayerHQFallback(state: GameState): Position {
+  const hq = findPlayerHQ(state);
+  return hq ? { ...hq.position } : { x: 430, y: 90 };
+}
+
+function isTargetableForwardPost(state: GameState, facilityId: string): Position | null {
+  const f = state.facilities.get(facilityId);
+  if (!f || f.hp <= 0 || f.team === "enemy") return null;
+  return { ...f.position };
+}
+
+function findPlayerPressureTarget(state: GameState, front: typeof state.fronts[0]): Position {
+  if (shouldAssaultPlayerHQ(state)) return getPlayerHQFallback(state);
+
+  const mappedPostId = FRONT_PLAYER_POST_MAP[front.id];
+  if (mappedPostId) {
+    const mapped = isTargetableForwardPost(state, mappedPostId);
+    if (mapped) return mapped;
+  }
+
+  const center = getFrontCenter(state, front);
+  return findNearestPlayerPressureTarget(state, center ?? getPlayerHQFallback(state));
+}
+
+function findNearestPlayerPressureTarget(state: GameState, from: Position): Position {
+  if (shouldAssaultPlayerHQ(state)) return getPlayerHQFallback(state);
+
+  const candidates: { pos: Position; distSq: number }[] = [];
+  for (const kpId of state.scenarioWinConfig?.friendlyKeypoints ?? []) {
+    const pos = isTargetableForwardPost(state, kpId);
+    if (!pos) continue;
+    const dx = pos.x - from.x;
+    const dy = pos.y - from.y;
+    candidates.push({ pos, distSq: dx * dx + dy * dy });
+  }
+  candidates.sort((a, b) => a.distSq - b.distSq);
+  return candidates[0]?.pos ?? getPlayerHQFallback(state);
+}
+
 function getLeadType(units: Unit[]): UnitType {
   const counts = new Map<UnitType, number>();
   for (const u of units) {
@@ -925,6 +1015,16 @@ const FRONT_OBJECTIVE_MAP: Record<string, string[]> = {
   front_ridge:   ["ea_kidney_ridge", "ea_miteirya_ridge"],
   front_center:  ["ea_miteirya_ridge", "ea_kidney_ridge"],
   front_south:   ["ea_himeimat"],
+};
+
+// 5C-lite: when the Axis already owns its objectives, pressure the Allied
+// forward posts instead of falling through to player HQ. This keeps the match
+// centered on the three-post tug-of-war until late game / player collapse.
+const FRONT_PLAYER_POST_MAP: Record<string, string> = {
+  front_coastal: "ea_player_coastal_post",
+  front_ridge:   "ea_player_central_post",
+  front_center:  "ea_player_central_post",
+  front_south:   "ea_player_south_post",
 };
 
 // Multi-waypoint attack corridors (west→east, bypassing Devil's Gardens minefield)
@@ -953,7 +1053,7 @@ const ATTACK_CORRIDORS: Record<string, Position[]> = {
 
 /** v3: Result of getTargetPosition */
 interface AttackTargetResult {
-  target: Position;        // Final destination (objective, visible enemy, or HQ)
+  target: Position;        // Final destination (objective, forward post, visible enemy, or HQ)
   corridor: Position[];    // Corridor waypoints to prepend (may be empty)
 }
 
@@ -962,7 +1062,8 @@ interface AttackTargetResult {
  *
  * Priority 1: Player/neutral objective in this front (always known, no vision needed)
  * Priority 2: Visible weak enemy within TACTICAL_DEVIATION_MAX of strategic target
- * Priority 3: Player HQ (ultimate fallback, always known)
+ * Priority 3: Allied forward post in this front (5C-lite tug-of-war)
+ * Priority 4: Player HQ only after late-game escalation / forward-screen collapse
  *
  * Corridor waypoints from ATTACK_CORRIDORS are returned for the caller to
  * trim (drop waypoints behind the wave's starting position) and prepend to order.
@@ -987,10 +1088,10 @@ function getTargetPosition(
     }
   }
 
-  // If all objectives in this front are already enemy-held, fall through to HQ
-  const playerHQ = findPlayerHQ(state);
-  const hqFallback = playerHQ ? { ...playerHQ.position } : { x: 430, y: 90 };
-  const finalStrategic = strategicTarget ?? hqFallback;
+  // If all objectives in this front are already enemy-held, pressure the matching
+  // Allied forward post. HQ is reserved for late-game / near-collapse escalation.
+  const fallbackTarget = findPlayerPressureTarget(state, front);
+  const finalStrategic = strategicTarget ?? fallbackTarget;
 
   // ── Priority 2: Tactical deviation — visible weak enemy near strategic target ──
   let weakest: { pos: Position; hp: number } | null = null;
@@ -1127,7 +1228,9 @@ function findSafeRetreatPosition(state: GameState, from: Position): Position | n
  * §3: Proactive probe — send small raiding parties to test player defenses.
  */
 function proactiveProbe(state: GameState): void {
-  if (state.time < PROBE_START_TIME) return;
+  const cfg = getPhaseConfig(state);
+  if (state.time < cfg.p3Grace) return;         // V3: phase-gated grace (was PROBE_START_TIME=60)
+  if (cfg.p3MaxUnits === 0) return;             // V3: phase explicitly disables probe (endgame_defense)
   if (state.time < probeCooldownUntil) return;
 
   // Global attacker cap
@@ -1175,9 +1278,10 @@ function proactiveProbe(state: GameState): void {
     return (priority[a.type] ?? 3) - (priority[b.type] ?? 3);
   });
 
-  // Cap by both PROBE_MAX_UNITS and remaining attacker budget
+  // Cap by both phase config p3MaxUnits and remaining attacker budget
+  // (V3: was hardcoded PROBE_MAX_UNITS=6)
   const budget = MAX_ACTIVE_ATTACKERS - activeAttackerIds.size;
-  const count = Math.min(PROBE_MAX_UNITS, sorted.length, budget);
+  const count = Math.min(cfg.p3MaxUnits, sorted.length, budget);
   const probeUnits = sorted.slice(0, count);
   if (probeUnits.length < PROBE_MIN_UNITS) return;
 

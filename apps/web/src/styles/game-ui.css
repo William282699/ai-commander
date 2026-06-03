@@ -1355,6 +1355,11 @@
   text-shadow: 0 0 20px var(--hud-accent-red-glow), 0 0 40px rgba(255, 48, 64, 0.2);
 }
 
+/* 5C-lite: neutral grey for draw — must not read as victory or defeat */
+.hud-gameover-title--draw {
+  color: var(--hud-text-dim, #94a3b8);
+}
+
 .hud-gameover-reason {
   font-size: 16px;
   color: var(--hud-text-primary);

@@ -57,6 +57,8 @@ import {
   processAdvisorTriggers,
   processDefensiveAI,
   resetDefensiveAITimer,
+  processPressureDirector,
+  resetPressureDirector,
 } from "@ai-commander/core";
 import type { AdvisorTriggerResult } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
@@ -167,7 +169,29 @@ const SUPPRESSED_DIAG_CODES = new Set([
   // El Alamein defensive-AI debug diagnostics — useful in dev tooling, too noisy for the feed.
   "DEFAI_ROLES",
   "DEFAI_DBG",
+  "P4_DBG",   // 5C-lite pressure director debug
 ]);
+
+// 5C-lite: rating-driven game-over title. UI MUST read rating first; the binary
+// gameOverInfo.isVictory falls back only when rating is absent (immediate win/loss).
+// Draw uses neutral grey so it doesn't visually read as VICTORY (winner = "player").
+type GameOverRating = NonNullable<GameState["gameOverRating"]>;
+const RATING_LABELS: Record<GameOverRating, string> = {
+  major_victory: "MAJOR VICTORY",
+  victory:       "VICTORY",
+  minor_victory: "MINOR VICTORY",
+  draw:          "DRAW",
+  minor_defeat:  "MINOR DEFEAT",
+  defeat:        "DEFEAT",
+};
+const RATING_TITLE_CLASS: Record<GameOverRating, string> = {
+  major_victory: "hud-gameover-title--victory",
+  victory:       "hud-gameover-title--victory",
+  minor_victory: "hud-gameover-title--victory",
+  draw:          "hud-gameover-title--draw",
+  minor_defeat:  "hud-gameover-title--defeat",
+  defeat:        "hud-gameover-title--defeat",
+};
 
 /** Map diagnostic code → feed message level */
 const DIAG_LEVEL: Record<string, MessageLevel> = {
@@ -359,6 +383,8 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     playerUnits: number;
     enemyUnits: number;
     isVictory: boolean;
+    rating?: GameState["gameOverRating"];
+    breakdown?: GameState["gameOverBreakdown"];
   } | null>(null);
   const gameOverDetectedRef = useRef(false); // loop-safe flag (avoids stale closure on gameOverInfo)
 
@@ -743,6 +769,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     resetReportSignals();
     resetEngagementCache();
     resetDefensiveAITimer();
+    resetPressureDirector();
     resetHeartbeatState();
     resetStaffAskState();
     clearMessages();
@@ -784,6 +811,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     resetReportSignals();
     resetEngagementCache();
     resetDefensiveAITimer();
+    resetPressureDirector();
     resetHeartbeatState();
     resetStaffAskState();
 
@@ -1150,6 +1178,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       // --- AI & Auto-Behavior (Day 8) --- (guards: if gameOver return)
       processEnemyAI(state, dt);        // enemy strategic decisions (5s interval)
       processDefensiveAI(state, dt);    // El Alamein defensive AI (5s interval, no-op for other scenarios)
+      processPressureDirector(state, dt); // 5C-lite: scripted P4 pressure (5s, El Alamein only)
       processAutoBehavior(state, dt);    // both teams micro-behavior (2s interval)
 
       // --- ENDGAME Pressure (Day 12) ---
@@ -1175,6 +1204,8 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
           playerUnits: playerAlive,
           enemyUnits: enemyAlive,
           isVictory,
+          rating: state.gameOverRating,
+          breakdown: state.gameOverBreakdown,
         });
       }
 
@@ -1711,8 +1742,14 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       {gameOverInfo && (
         <div className="hud-gameover-overlay">
           <div className="hud-gameover-box hud-scanline">
-            <div className={`hud-gameover-title ${gameOverInfo.isVictory ? "hud-gameover-title--victory" : "hud-gameover-title--defeat"}`}>
-              {gameOverInfo.winner}
+            <div className={`hud-gameover-title ${
+              gameOverInfo.rating
+                ? RATING_TITLE_CLASS[gameOverInfo.rating]
+                : (gameOverInfo.isVictory ? "hud-gameover-title--victory" : "hud-gameover-title--defeat")
+            }`}>
+              {gameOverInfo.rating
+                ? RATING_LABELS[gameOverInfo.rating]
+                : gameOverInfo.winner}
             </div>
             <div className="hud-gameover-reason">
               {gameOverInfo.reason}
@@ -1733,6 +1770,16 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
                 </div>
               </div>
             </div>
+            {gameOverInfo.breakdown && (
+              <div className="hud-gameover-breakdown" style={{
+                fontFamily: "monospace",
+                marginTop: 12,
+                color: "#94a3b8",
+                fontSize: 13,
+              }}>
+                据点 {gameOverInfo.breakdown.capturedObjectives}/3 · 丢失 {gameOverInfo.breakdown.lostKeypoints}/3 · 净分 {gameOverInfo.breakdown.score >= 0 ? "+" : ""}{gameOverInfo.breakdown.score}
+              </div>
+            )}
             <button onClick={handleRestart} className="hud-btn hud-btn-primary hud-btn-lg" style={{ marginTop: 20 }}>
               再来一局
             </button>

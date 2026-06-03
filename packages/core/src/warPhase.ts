@@ -143,9 +143,9 @@ export function checkGameOver(state: GameState, dt: number): void {
       endGame(state, "enemy", `失守 ${lostCount} 处前哨 — 战线崩溃`);
       return;
     }
-    // Defeat: scenario timeout
+    // 5C-lite: scenario timeout → rating, NOT immediate defeat
     if (state.time >= winCfg.timeLimitSec) {
-      endGame(state, "enemy", "超时未达成战略目标 — 进攻失败");
+      endGameWithRating(state, winCfg);
       return;
     }
   } else if (state.captureObjectives && state.captureObjectives.length > 0) {
@@ -160,17 +160,20 @@ export function checkGameOver(state: GameState, dt: number): void {
     }
   }
 
-  // MVP2 Rule 1: Commander killed → defeat
-  let commanderAlive = false;
-  state.units.forEach((u) => {
-    if (u.type === "commander" && u.team === "player" && u.state !== "dead" && u.hp > 0) {
-      commanderAlive = true;
+  // 5C-lite: commander-death failure only fires for scenarios WITHOUT scenarioWinConfig.
+  // El Alamein uses Chen/Marcus/Emily as chat personas; on-map commander-unit death
+  // no longer ends the game there. Legacy dual_island still uses this rule.
+  if (!state.scenarioWinConfig) {
+    let commanderAlive = false;
+    state.units.forEach((u) => {
+      if (u.type === "commander" && u.team === "player" && u.state !== "dead" && u.hp > 0) {
+        commanderAlive = true;
+      }
+    });
+    if (!commanderAlive && state.time > 1) {
+      endGame(state, "enemy", "司令阵亡");
+      return;
     }
-  });
-  // Only check after game has started (time > 1s to avoid false trigger before units spawn)
-  if (!commanderAlive && state.time > 1) {
-    endGame(state, "enemy", "司令阵亡");
-    return;
   }
 
   // MVP2 Rule 2: Player HQ destroyed → defeat
@@ -239,6 +242,44 @@ function endGame(state: GameState, winner: Team, reason: string): void {
     code: "GAME_OVER",
     message: `游戏结束: ${reason} — ${winner === "player" ? "我方胜利" : "敌方胜利"}`,
   });
+}
+
+// 5C-lite: 30-min timeout → rating evaluation.
+// Score = capturedObjectives - lostKeypoints. Mapped to 6 tiers via winCfg.ratingThresholds
+// (with sensible defaults). Sets gameOverRating + gameOverBreakdown on state; winner is
+// "player" for draw/victory tiers, "enemy" for defeat tiers — UI MUST read rating to render
+// title correctly, otherwise draw will mis-render as VICTORY.
+function endGameWithRating(state: GameState, winCfg: NonNullable<GameState["scenarioWinConfig"]>): void {
+  const captured = (state.captureObjectives ?? []).filter(id =>
+    state.facilities.get(id)?.team === "player",
+  ).length;
+  const lost = winCfg.friendlyKeypoints.filter(id => {
+    const f = state.facilities.get(id);
+    return !f || f.hp <= 0 || f.team !== "player";
+  }).length;
+  const score = captured - lost;
+
+  const t = winCfg.ratingThresholds ?? {
+    majorVictory: 3, victory: 2, minorVictory: 1, draw: 0, minorDefeat: -1, defeat: -2,
+  };
+
+  let rating: NonNullable<GameState["gameOverRating"]>;
+  let winner: Team;
+  let label: string;
+  if      (score >= t.majorVictory) { rating = "major_victory"; winner = "player"; label = "大胜"; }
+  else if (score >= t.victory)      { rating = "victory";       winner = "player"; label = "胜利"; }
+  else if (score >= t.minorVictory) { rating = "minor_victory"; winner = "player"; label = "小胜"; }
+  else if (score >= t.draw)         { rating = "draw";          winner = "player"; label = "平局"; }
+  else if (score >= t.minorDefeat)  { rating = "minor_defeat";  winner = "enemy";  label = "小败"; }
+  else                              { rating = "defeat";        winner = "enemy";  label = "失败"; }
+
+  state.gameOverRating = rating;
+  state.gameOverBreakdown = { capturedObjectives: captured, lostKeypoints: lost, score };
+  endGame(
+    state,
+    winner,
+    `战果评级 ${label}：占领 ${captured}/${winCfg.requiredCapturedObjectives}，丢失 ${lost}/${winCfg.maxFriendlyKeypointsLost}，净分 ${score >= 0 ? "+" : ""}${score}`,
+  );
 }
 
 // ── ENDGAME pressure ──
