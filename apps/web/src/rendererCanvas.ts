@@ -296,17 +296,36 @@ export function renderFacilities(
       ctx.fillText(symbol, cx, cy);
     }
 
-    // Label (when zoomed in enough) — shared by both sprite and icon paths
-    if (camera.zoom >= 0.8) {
-      ctx.font = `${Math.max(9, 10 * camera.zoom)}px sans-serif`;
-      ctx.fillStyle = "#fff";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.strokeStyle = "#000";
-      ctx.lineWidth = 2;
-      ctx.strokeText(fac.name, cx, cy + iconSize / 2 + 8);
-      ctx.fillText(fac.name, cx, cy + iconSize / 2 + 8);
-    }
+    // Label (shared by both sprite and icon paths)
+    //
+    // Policy (V5 comprehensive): ALL facility labels always visible, regardless
+    // of zoom. Player can zoom out to see whole map and still spot every
+    // facility name (阿拉曼镇 / 我军总部 / 沿海雷达 / 敌军兵营 etc) to
+    // issue commands without needing to zoom in first.
+    //
+    // Visual hierarchy via font weight/size:
+    //   - Strategic (capture objectives + forward posts + both HQ): bold,
+    //     larger font, thicker stroke. These are the primary command targets.
+    //   - Regular (barracks / airfield / depot / radar etc): normal weight,
+    //     smaller font, thinner stroke. Visible but doesn't compete with
+    //     strategic labels.
+    //
+    // Stroke (black outline) is essential on sand-colored terrain for contrast.
+    const isStrategic =
+      fac.type === "headquarters" ||
+      fac.tags.includes("据点") ||
+      fac.tags.includes("前哨");
+    const fontSize = isStrategic
+      ? Math.max(12, 14 * camera.zoom)
+      : Math.max(10, 12 * camera.zoom);
+    ctx.font = `${isStrategic ? "bold " : ""}${fontSize}px sans-serif`;
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = isStrategic ? 3 : 2;
+    ctx.strokeText(fac.name, cx, cy + iconSize / 2 + 8);
+    ctx.fillText(fac.name, cx, cy + iconSize / 2 + 8);
 
     // MVP2: HQ health bar (always visible)
     if (fac.type === "headquarters") {
@@ -782,7 +801,10 @@ export function renderFrontLabels(
 ): void {
   if (camera.zoom > 0.9) return; // Only show when zoomed out
 
-  ctx.font = "bold 14px sans-serif";
+  // Shrunk from 14px/box-20h/pad-16/alpha-0.7 to 12px/box-16h/pad-10/alpha-0.45
+  // so front label is a lighter "context badge", less likely to occlude
+  // facility names that render on top (see GameCanvas step 1.5 vs step 2).
+  ctx.font = "bold 12px sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
@@ -799,15 +821,15 @@ export function renderFrontLabels(
     else if (front.engagementIntensity > 0.2) statusColor = "#ffaa00"; // warm
     else if (front.playerPower > 0) statusColor = "#44cc44"; // held
 
-    // Background
-    const labelW = ctx.measureText(front.name).width + 16;
-    ctx.fillStyle = "rgba(0,0,0,0.7)";
-    ctx.fillRect(screenX - labelW / 2, screenY - 10, labelW, 20);
+    // Background (more transparent so terrain shows through)
+    const labelW = ctx.measureText(front.name).width + 10;
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(screenX - labelW / 2, screenY - 8, labelW, 16);
 
     // Border
     ctx.strokeStyle = statusColor;
     ctx.lineWidth = 1;
-    ctx.strokeRect(screenX - labelW / 2, screenY - 10, labelW, 20);
+    ctx.strokeRect(screenX - labelW / 2, screenY - 8, labelW, 16);
 
     // Text
     ctx.fillStyle = statusColor;

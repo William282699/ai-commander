@@ -1423,7 +1423,23 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       // 1. Terrain tiles
       renderTerrain(ctx, state.terrain, camera, canvas.width, canvas.height);
 
-      // 2. Facilities on map
+      // 1.5 Context labels (front/route/region) — drawn BEFORE facilities so
+      // facility names render on top of front-label boxes and are never occluded.
+      // Was previously rendered as steps 7/7.5 after facilities, but front-label
+      // boxes (e.g. "1. 北部战线", "5. 敌军后方") would cover nearby facility
+      // names like "阿拉曼镇", "敌军总部" at mid-zoom. Swapping render order keeps
+      // facility names readable.
+      renderFrontLabels(ctx, state.fronts, cameraTargets, camera);
+      if (state.namedRoutes.length > 0) {
+        renderRouteLabels(ctx, state.namedRoutes, camera);
+      }
+      const regions = state.regions ? Array.from(state.regions.values()) : [];
+      if (regions.length > 0) {
+        renderRegionLabels(ctx, regions, camera);
+      }
+
+      // 2. Facilities on map (drawn after context labels so facility names
+      // are always readable on top of any overlapping front/route/region label)
       const facArray = Array.from(state.facilities.values());
       renderFacilities(ctx, facArray, camera);
 
@@ -1466,17 +1482,8 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
         );
       }
 
-      // 7. Front labels (when zoomed out)
-      renderFrontLabels(ctx, state.fronts, cameraTargets, camera);
-
-      // 7.5 Route labels + region labels (on terrain, zoomed out)
-      if (state.namedRoutes.length > 0) {
-        renderRouteLabels(ctx, state.namedRoutes, camera);
-      }
-      const regions = state.regions ? Array.from(state.regions.values()) : [];
-      if (regions.length > 0) {
-        renderRegionLabels(ctx, regions, camera);
-      }
+      // 7+7.5: front/route/region labels moved to step 1.5 above (rendered
+      // before facilities so facility names appear on top).
 
       // 8. Minimap (bottom-right, with facility + unit dots)
       renderMinimap(
