@@ -48,6 +48,13 @@ const ROOT_COMMANDERS: RootCommanderConfig[] = [
   { key: "emily",  label: "Emily",  role: "LOGISTICS", avatar: "📦", accent: "#00e070", accentSoft: "rgba(0, 224, 112, 0.14)",  accentLine: "rgba(0, 224, 112, 0.35)" },
 ];
 
+// Circular portrait avatars (PNG in apps/web/public/avatars/).
+const AVATAR_IMG: Record<string, string> = {
+  chen: "/avatars/chen.png",
+  marcus: "/avatars/marcus.png",
+  emily: "/avatars/emily.png",
+};
+
 // ── Helpers ──
 
 function getStatusColor(squad: Squad, units: Map<number, Unit>): string {
@@ -160,7 +167,7 @@ export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRe
                   boxShadow: `inset 3px 0 0 ${cmd.accent}, 0 2px 6px rgba(0,0,0,0.3)`,
                 }}
               >
-                <span style={{ fontSize: 14 }}>{cmd.avatar}</span>
+                <img src={AVATAR_IMG[cmd.key]} alt="" style={{ width: 24, height: 24, borderRadius: "50%", objectFit: "cover", border: `2px solid ${cmd.accent}`, display: "block", flexShrink: 0 }} />
                 <span style={{ fontWeight: "bold", fontSize: 11, color: cmd.accent, letterSpacing: 1 }}>{cmd.label}</span>
                 <span style={{ color: "var(--hud-text-dim)", fontSize: 9 }}>({aliveCount})</span>
                 <span style={{ marginLeft: "auto", fontSize: 8, color: cmd.accent, opacity: 0.75, letterSpacing: 1 }}>{cmd.role}</span>

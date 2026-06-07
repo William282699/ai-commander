@@ -424,6 +424,23 @@ const FROM_AVATARS: Record<string, string> = {
   system: "⚙️",
 };
 
+// Circular portrait avatars for the three advisors (PNG in apps/web/public/avatars/).
+const AVATAR_IMG: Record<Commander, string> = {
+  chen: "/avatars/chen.png",
+  marcus: "/avatars/marcus.png",
+  emily: "/avatars/emily.png",
+};
+
+function CmdAvatar({ cmd, size, ring }: { cmd: Commander; size: number; ring: string }) {
+  return (
+    <img
+      src={AVATAR_IMG[cmd]}
+      alt=""
+      style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", border: `2px solid ${ring}`, display: "block", flexShrink: 0 }}
+    />
+  );
+}
+
 // ── Props ──
 
 interface Props {
@@ -1837,7 +1854,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
                       style={{ borderLeftColor: isActive ? cmdColor : "transparent" }}
                       title={`${meta.label} (${meta.role})`}
                     >
-                      <span className="dp-channel-btn__avatar">{meta.avatar}</span>
+                      <span className="dp-channel-btn__avatar"><CmdAvatar cmd={cmd} size={30} ring={cmdColor} /></span>
                       <span className="dp-channel-btn__name" style={{ color: isActive ? cmdColor : undefined }}>{meta.label}</span>
                       <span className="dp-channel-btn__role">{meta.role}</span>
                     </button>
@@ -1859,7 +1876,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
               <div className="dp-conv-pane">
                 <div className="dp-conv-header">
                   <span style={{ color: isGroupChat ? "#fbbf24" : FROM_COLORS[selectedCommanders[0]] }}>
-                    {isGroupChat ? "📡" : FROM_AVATARS[selectedCommanders[0]]}
+                    {isGroupChat ? "📡" : <CmdAvatar cmd={selectedCommanders[0]} size={22} ring={FROM_COLORS[selectedCommanders[0]]} />}
                   </span>
                   <span>
                     {isGroupChat ? "全体通信" : `${COMMANDER_META[selectedCommanders[0]].label} — ${COMMANDER_META[selectedCommanders[0]].role}`}
@@ -2023,7 +2040,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
                 display: "flex", alignItems: "center", justifyContent: "center",
                 fontSize: 14, flexShrink: 0,
                 boxShadow: isSelected ? `0 0 8px ${cmdColor}40` : "none",
-              }}>{meta.avatar}</span>
+              }}><img src={AVATAR_IMG[cmd]} alt="" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover", display: "block" }} /></span>
               <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.5px", textTransform: "uppercase" as const }}>{meta.label}</span>
               <span style={{ fontSize: 8, color: "var(--hud-text-dim)", textTransform: "uppercase" as const, letterSpacing: "1px" }}>{meta.role}</span>
             </button>
@@ -2061,20 +2078,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             style={{
               ...tabBtnStyle,
               borderBottomColor: activeTab === "chat" ? "var(--hud-accent-cyan)" : "transparent",
-              color: activeTab === "chat" ? "var(--hud-accent-cyan)" : undefined,
+              color: activeTab === "chat" ? "var(--hud-accent-cyan)" : "var(--hud-text-secondary)",
             }}
           >
-            聊天 💬
+            通讯 ☎
           </button>
           <button
             onClick={() => setActiveTab("org")}
             style={{
               ...tabBtnStyle,
               borderBottomColor: activeTab === "org" ? "var(--hud-accent-cyan)" : "transparent",
-              color: activeTab === "org" ? "var(--hud-accent-cyan)" : undefined,
+              color: activeTab === "org" ? "var(--hud-accent-cyan)" : "var(--hud-text-secondary)",
             }}
           >
-            编制 🏗️
+            编制 ☰
           </button>
         </div>
 
