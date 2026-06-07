@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect, useCallback } from "react";
 import { GameCanvas } from "./GameCanvas";
 import { ChatPanel } from "./ChatPanel";
+import { TutorialOverlay } from "./TutorialOverlay";
 import type { GameState } from "@ai-commander/shared";
 import type { GameBridge } from "./GameCanvas";
 
@@ -14,6 +15,9 @@ function formatTime(sec: number): string {
 // ── Panel-only mode (pop-out window) ──
 
 const isPanelMode = new URLSearchParams(window.location.search).get("mode") === "panel";
+
+// Onboarding tutorial only runs on El Alamein (same URL gate GameCanvas uses for scenarioId).
+const isTutorialScenario = new URLSearchParams(window.location.search).get("scenario") === "el_alamein";
 
 function PanelApp() {
   const [bridge, setBridge] = useState<GameBridge | null>(null);
@@ -65,6 +69,9 @@ export default function App() {
 
   const stateGetterRef = useRef<(() => GameState | null) | null>(null);
   const [panelDetached, setPanelDetached] = useState(false);
+  // Onboarding tutorial overlay gate (every El Alamein launch; skippable). When
+  // active, GameCanvas is paused (frozen map, clock stopped) until 开始作战/跳过.
+  const [tutorialActive, setTutorialActive] = useState(isTutorialScenario);
 
   const [topBar, setTopBar] = useState({
     money: 2000,
@@ -241,8 +248,10 @@ export default function App() {
 
       {/* Main canvas area */}
       <div style={{ flex: 1, position: "relative" }}>
-        <GameCanvas onStateReady={registerStateGetter} panelDetached={panelDetached} />
+        <GameCanvas onStateReady={registerStateGetter} panelDetached={panelDetached} paused={tutorialActive} />
       </div>
+
+      {tutorialActive && <TutorialOverlay onStart={() => setTutorialActive(false)} />}
     </div>
   );
 }

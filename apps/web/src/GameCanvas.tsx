@@ -368,12 +368,38 @@ declare global {
 interface GameCanvasProps {
   onStateReady?: (getter: () => GameState | null) => void;
   panelDetached?: boolean;
+  /** Onboarding tutorial: when true, freeze the sim loop (render only). Default false = unchanged behavior. */
+  paused?: boolean;
 }
 
-export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
+export function GameCanvas({ onStateReady, panelDetached, paused = false }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<GameState | null>(null);
   const inputRef = useRef(createInputState());
+
+  // Onboarding tutorial pause. Ref (not the prop directly) so the rAF loop
+  // closure reads the LIVE value — a prop change would never reach the
+  // useEffect([],…) loop, so reading the prop would pause forever.
+  const pausedRef = useRef(paused);
+  useEffect(() => {
+    pausedRef.current = paused;
+    if (!paused) {
+      // On unpause (开始作战 / 跳过): clear transient input so nothing queued
+      // during the frozen tutorial is consumed on the first live tick.
+      // (App can't reach inputRef, so this cleanup lives here — see workplan §1 P1.)
+      const i = inputRef.current;
+      i.keys.clear();
+      i.selectedUnitIds = [];
+      i.isSelecting = false;
+      i.selectionComplete = false;
+      i.pendingTag = null;
+      i.rightClickCommand = null;
+      i.frontJumpRequest = null;
+      i.tagMode = false;
+      i.escPressed = false;
+      i.returnToAIPressed = false;
+    }
+  }, [paused]);
 
   // Day 12: game-over overlay state
   const [gameOverInfo, setGameOverInfo] = useState<{
@@ -497,6 +523,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
   // Debug: Shift+D to simulate a doctrine breach (for testing crisis response cards)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (pausedRef.current) return; // tutorial: no debug crisis injection
       if (e.key !== "D" || !e.shiftKey) return;
       const el = e.target as HTMLElement;
       if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) return;
@@ -539,6 +566,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
   useEffect(() => {
     let ambientTriggered = false;
     const triggerAmbient = () => {
+      if (pausedRef.current) return; // tutorial: don't start ambient over the frozen map
       if (ambientTriggered) return;
       ambientTriggered = true;
       startAmbientSounds();
@@ -549,6 +577,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
     document.addEventListener("keydown", triggerAmbient);
 
     const muteHandler = (e: KeyboardEvent) => {
+      if (pausedRef.current) return; // tutorial: ignore mute toggle
       if (e.key !== "m" && e.key !== "M") return;
       if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
       const el = e.target as HTMLElement;
@@ -873,7 +902,13 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
       }
 
       const dt = Math.min((now - lastTime) / 1000, 0.05); // cap dt
-      lastTime = now;
+      lastTime = now; // 每帧更新（含暂停帧）→ unpause 后首帧不会吃大 dt
+
+      // ── Onboarding tutorial pause guard (workplan §1 P0-1) ──
+      // Skip ALL input/command/sim/report/LLM logic while paused; only the render
+      // block below (after the matching `}`) keeps running so the map shows as a
+      // frozen backdrop. Default (paused=false) → unchanged behavior.
+      if (!pausedRef.current) {
 
       // Process front jump hotkeys (1-5)
       if (input.frontJumpRequest !== null) {
@@ -1415,6 +1450,7 @@ export function GameCanvas({ onStateReady, panelDetached }: GameCanvasProps) {
           }
         }
       }
+      } // ── end onboarding tutorial pause guard; render below always runs ──
 
       // --- Rendering ---
       ctx.fillStyle = "#1a1a2e";
