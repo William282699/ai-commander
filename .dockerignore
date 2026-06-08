@@ -1,0 +1,22 @@
+# Reinstalled / rebuilt inside the image
+node_modules
+**/node_modules
+dist
+**/dist
+
+# SECRETS — never copy into the image. API keys live in the host's
+# runtime env (e.g. `fly secrets set DEEPSEEK_API_KEY=...`), not the image.
+.env
+*.env
+**/.env
+**/.env.*
+
+# VCS / tooling / git worktrees
+.git
+.gitignore
+.claude
+
+# misc
+*.log
+.DS_Store
+.vscode

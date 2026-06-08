@@ -1,0 +1,30 @@
+# fly.toml — AI Commander (single Express service: SPA + /api)
+#
+# First deploy:
+#   1) fly launch            # detects this Dockerfile; pick/confirm an app name
+#                            #   (must be globally unique — change `app` below if taken)
+#   2) fly secrets set DEEPSEEK_API_KEY=sk-...    # the LLM key (NOT in the repo)
+#   3) fly deploy
+#
+# Region hkg (Hong Kong) for better reachability from mainland China.
+# (To close access later: `fly secrets set PLAYTEST_ENABLED=false`.)
+
+app = "ai-commander"
+primary_region = "hkg"
+
+[build]
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
