@@ -470,7 +470,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const [activeTab, setActiveTab] = useState<"chat" | "org">("chat");
 
   // ── Commander selection state ──
-  const [selectedCommanders, setSelectedCommanders] = useState<Commander[]>(["marcus"]);
+  const [selectedCommanders, setSelectedCommanders] = useState<Commander[]>(["chen"]);
   const isGroupChat = selectedCommanders.length > 1;
 
   // ── Message display state ──
