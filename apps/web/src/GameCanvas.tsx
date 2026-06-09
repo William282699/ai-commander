@@ -776,7 +776,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
   const handleRestart = useCallback(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const scenarioParam = urlParams.get("scenario");
-    const sid = scenarioParam === "el_alamein" ? "el_alamein" as const : "dual_island" as const;
+    const sid = scenarioParam === "dual_island" ? "dual_island" as const : "el_alamein" as const;
     const newState = createInitialGameState(sid);
     stateRef.current = newState;
     gameOverDetectedRef.current = false;
@@ -823,10 +823,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resize();
     window.addEventListener("resize", resize);
 
-    // Create game state — read scenario from URL param (?scenario=el_alamein)
+    // Create game state — El Alamein is the default; only ?scenario=dual_island opts out.
     const urlParams = new URLSearchParams(window.location.search);
     const scenarioParam = urlParams.get("scenario");
-    const scenarioId = scenarioParam === "el_alamein" ? "el_alamein" as const : "dual_island" as const;
+    const scenarioId = scenarioParam === "dual_island" ? "dual_island" as const : "el_alamein" as const;
     const noFog = urlParams.get("nofog") === "1";
     const initialState = createInitialGameState(scenarioId);
     stateRef.current = initialState;

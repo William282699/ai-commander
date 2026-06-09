@@ -16,8 +16,9 @@ function formatTime(sec: number): string {
 
 const isPanelMode = new URLSearchParams(window.location.search).get("mode") === "panel";
 
-// Onboarding tutorial only runs on El Alamein (same URL gate GameCanvas uses for scenarioId).
-const isTutorialScenario = new URLSearchParams(window.location.search).get("scenario") === "el_alamein";
+// El Alamein is the default scenario (only ?scenario=dual_island opts out). The
+// onboarding tutorial runs on El Alamein, so it shows on the default load too.
+const isTutorialScenario = new URLSearchParams(window.location.search).get("scenario") !== "dual_island";
 
 function PanelApp() {
   const [bridge, setBridge] = useState<GameBridge | null>(null);
