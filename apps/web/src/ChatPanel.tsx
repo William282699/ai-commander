@@ -40,6 +40,7 @@ import {
 } from "./messageStore";
 import { speak, flush, cancel, type Persona } from "./tts";
 import { API_URL } from "./api";
+import { SESSION_ID } from "./session";
 
 // ── 0.3: Commander ↔ Channel mapping ──
 
@@ -943,6 +944,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           message: userMsg,
           styleNote,
           channelContext: groupCtx,
+          sessionId: SESSION_ID,
         }),
       });
       const data = await res.json();
@@ -1145,7 +1147,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       const streamRes = await fetch(`${API_URL}/api/command-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch }),
+        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID }),
       });
 
       if (!streamRes.ok || !streamRes.body) {
@@ -1248,7 +1250,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         const res = await fetch(`${API_URL}/api/command`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch }),
+          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID }),
         });
         const data = await res.json();
         processAdvisorData(data);

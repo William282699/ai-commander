@@ -59,6 +59,23 @@ app.use((req, res, next) => {
 
 app.use("/api/tts", ttsRouter);
 
+// ──────────────────────────────────────────────────────────────
+// Step 1 — structured event logging.
+// One line per player command (and per staff-initiated prompt), tagged by
+// `type`, so we can later tell whether a tester actually played and mine
+// their phrasing for personalization. Visible in `fly logs`. console.log
+// only — no persistence yet (a Fly volume + JSONL comes later). Pure
+// observability: it never gates or changes a request, and `digest` (the
+// large battlefield snapshot) is deliberately omitted to keep lines small.
+//   type:"command"     → player's own words (/api/command{,-stream,-group})
+//   type:"staff_event" → system-triggered advisor prompt (/api/staff-ask);
+//                        NOT player input, kept separate via `type`.
+// /api/brief (periodic system brief) is intentionally not logged.
+// ──────────────────────────────────────────────────────────────
+function logEvent(o: Record<string, unknown>): void {
+  console.log("[EVENT] " + JSON.stringify({ t: Date.now(), ...o }));
+}
+
 // Health check
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -70,7 +87,7 @@ app.get("/api/health", (_req, res) => {
 
 // Full advisor call (player command → 3 options)
 app.post("/api/command", async (req, res) => {
-  const { digest, message, styleNote, channel } = req.body;
+  const { digest, message, styleNote, channel, sessionId } = req.body;
 
   if (!digest || typeof digest !== "string") {
     res.status(400).json({ error: "digest (string) 必填" });
@@ -80,6 +97,8 @@ app.post("/api/command", async (req, res) => {
     res.status(400).json({ error: "message (string) 必填" });
     return;
   }
+
+  logEvent({ type: "command", route: "command", sessionId, channel: channel || "", message });
 
   try {
     const result = await callAdvisor(digest, message, styleNote || "", channel || "");
@@ -98,7 +117,7 @@ app.post("/api/command", async (req, res) => {
 
 // Streaming advisor call (SSE) — same input as /api/command
 app.post("/api/command-stream", async (req, res) => {
-  const { digest, message, styleNote, channel } = req.body;
+  const { digest, message, styleNote, channel, sessionId } = req.body;
 
   if (!digest || typeof digest !== "string") {
     res.status(400).json({ error: "digest (string) 必填" });
@@ -108,6 +127,8 @@ app.post("/api/command-stream", async (req, res) => {
     res.status(400).json({ error: "message (string) 必填" });
     return;
   }
+
+  logEvent({ type: "command", route: "command-stream", sessionId, channel: channel || "", message });
 
   // SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -132,7 +153,7 @@ app.post("/api/command-stream", async (req, res) => {
 
 // Group chat advisor call (ALL mode — one LLM call, 3 personas)
 app.post("/api/command-group", async (req, res) => {
-  const { digest, message, styleNote, channelContext } = req.body;
+  const { digest, message, styleNote, channelContext, sessionId } = req.body;
 
   if (!digest || typeof digest !== "string") {
     res.status(400).json({ error: "digest (string) 必填" });
@@ -142,6 +163,8 @@ app.post("/api/command-group", async (req, res) => {
     res.status(400).json({ error: "message (string) 必填" });
     return;
   }
+
+  logEvent({ type: "command", route: "command-group", sessionId, channel: "group", message });
 
   try {
     const result = await callGroupAdvisor(digest, message, styleNote || "", channelContext || "");
@@ -181,6 +204,8 @@ app.post("/api/staff-ask", async (req, res) => {
     res.status(400).json({ error: "eventMessage (string) required" });
     return;
   }
+
+  logEvent({ type: "staff_event", route: "staff-ask", eventType: eventType || "UNKNOWN", channel: channel || "", message: eventMessage });
 
   try {
     const prompt = `[EVENT:${eventType || "UNKNOWN"}] ${eventMessage}\n\nProvide 2-3 response options for the commander.`;
