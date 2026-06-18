@@ -2019,7 +2019,8 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 /* ── Right Column: Org Tree container ── */
 
 .dp-org-container {
-  flex: 1;
+  flex: 2;
+  min-height: 0;
   overflow: auto;
   background: linear-gradient(180deg, rgba(26, 36, 56, 0.6) 0%, rgba(15, 24, 37, 0.6) 100%);
   border: 1px solid rgba(6, 182, 212, 0.2);
@@ -2029,6 +2030,25 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 .dp-org-container::-webkit-scrollbar { width: 4px; }
 .dp-org-container::-webkit-scrollbar-track { background: var(--hud-bg-primary); }
 .dp-org-container::-webkit-scrollbar-thumb { background: var(--hud-border-bright); border-radius: 2px; }
+
+/* ── Right Column: Battle Report feed (Step 3 — system reports split out of comms) ── */
+
+.dp-report-feed {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+  background: linear-gradient(180deg, rgba(26, 36, 56, 0.4) 0%, rgba(15, 24, 37, 0.4) 100%);
+  border: 1px solid var(--hud-border-dim);
+  border-radius: 2px;
+}
+
+.dp-report-feed::-webkit-scrollbar { width: 4px; }
+.dp-report-feed::-webkit-scrollbar-track { background: var(--hud-bg-primary); }
+.dp-report-feed::-webkit-scrollbar-thumb { background: var(--hud-border-bright); border-radius: 2px; }
 
 /* ── Bottom Dock ── */
 

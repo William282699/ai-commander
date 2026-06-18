@@ -431,6 +431,34 @@ const FROM_AVATARS: Record<string, string> = {
   system: "⚙️",
 };
 
+// Step 3: a feed message is a "system report" (vs conversation) iff it comes from
+// a non-conversational source. Classify by `source`/`from` — NEVER assume a
+// persona `from` means conversation: addMessage auto-wraps event_report / heartbeat
+// with a channel persona. Only command_ack / player are conversation.
+function isReportMessage(msg: FeedMessage): boolean {
+  return msg.source === "heartbeat" || msg.source === "event_report"
+    || msg.source === "system" || msg.from === "system";
+}
+
+// Low-key report line: dimmed, small, no avatar; urgent → amber standout.
+// Shared by the embedded inline lane and the detached battle-report panel.
+function renderReportLine(msg: FeedMessage) {
+  const urgent = msg.level === "urgent";
+  return (
+    <div key={msg.id} style={{
+      ...reportLineStyle,
+      borderLeft: `2px solid ${urgent ? "var(--hud-accent-amber)" : "var(--hud-border-base)"}`,
+    }}>
+      <span style={timeTagStyle}>{formatTime(msg.time)}</span>
+      <span style={{
+        color: urgent ? "var(--hud-accent-amber)" : "var(--hud-text-dim)",
+        fontSize: 11,
+        fontWeight: urgent ? 600 : 400,
+      }}>{msg.text}</span>
+    </div>
+  );
+}
+
 // Circular portrait avatars for the three advisors (PNG in apps/web/public/avatars/).
 const AVATAR_IMG: Record<Commander, string> = {
   chen: "/avatars/chen.png",
@@ -1499,15 +1527,26 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const approveSnapshotCtx = responseExecCtxRef.current ? { ...responseExecCtxRef.current } : undefined;
 
   // ── Shared chat content fragment (used in both detached and embedded) ──
+  // Step 3: split conversation from system reports. Embedded keeps reports inline
+  // as a low-key lane (no layout change). Detached pulls them out of the
+  // conversation pane entirely and shows them in a dedicated panel under the org
+  // tree (see dp-col-right) so battle reports never push the dialogue off-screen.
+  const reportMessages = displayMessages.filter(isReportMessage);
+  const conversationMessages = isDetached
+    ? displayMessages.filter((m) => !isReportMessage(m))
+    : displayMessages;
   const chatContentFragment = (
     <>
       <div ref={scrollRef} className={isDetached ? "dp-chat-scroll" : undefined} style={isDetached ? undefined : chatFlowStyle}>
-        {displayMessages.length === 0 && (
+        {conversationMessages.length === 0 && (
           <div className="hud-empty-state">
             等待指令...
           </div>
         )}
-        {displayMessages.map((msg) => {
+        {conversationMessages.map((msg) => {
+          // Embedded: system reports stay inline as a low-key lane. Detached:
+          // conversationMessages already excludes them, so this only fires embedded.
+          if (isReportMessage(msg)) return renderReportLine(msg);
           const isPlayer = msg.from === "player";
           return (
             <div key={msg.id} style={{ ...bubbleRowStyle, justifyContent: isPlayer ? "flex-end" : "flex-start" }}>
@@ -1927,6 +1966,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
                 <div style={{ color: "var(--hud-text-dim)", textAlign: "center", padding: 12 }}>加载中...</div>
               )}
             </div>
+
+            {/* Battle reports — system feed split out of the conversation pane (Step 3) */}
+            <div className="dp-section-header" style={{ padding: "10px 0 6px 0" }}>战报 BATTLE REPORTS</div>
+            <div className="dp-report-feed">
+              {reportMessages.length === 0 && (
+                <div style={{ fontSize: 10, color: "var(--hud-text-dim)" }}>暂无战报</div>
+              )}
+              {reportMessages.map(renderReportLine)}
+            </div>
           </div>
         </div>
 
@@ -2261,6 +2309,15 @@ const bubbleStyle: React.CSSProperties = {
 const timeTagStyle: React.CSSProperties = {
   fontSize: 9,
   color: "var(--hud-text-dim)",
+};
+
+// Step 3: low-key "report lane" for system reports (heartbeat / event_report /
+// system notices) — a compact log line, visually distinct from persona bubbles.
+const reportLineStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 6,
+  alignItems: "baseline",
+  padding: "2px 8px",
 };
 
 const threadBubbleStyle: React.CSSProperties = {
