@@ -201,7 +201,10 @@ function executeTrade(
 
   if (info.cost > 0) {
     // Buying: spend money, gain resource
-    if (eco.resources.money < info.cost) return;
+    if (eco.resources.money < info.cost) {
+      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", "交易失败: 资金不足");
+      return;
+    }
     eco.resources.money -= info.cost;
     if (tradeType === "buy_fuel") eco.resources.fuel += info.gain;
     else if (tradeType === "buy_ammo") eco.resources.ammo += info.gain;
@@ -209,8 +212,14 @@ function executeTrade(
   } else {
     // Selling: lose resource, gain money (cost is negative)
     const loss = -info.gain; // positive amount of resource to sell
-    if (tradeType === "sell_fuel" && eco.resources.fuel < loss) return;
-    if (tradeType === "sell_ammo" && eco.resources.ammo < loss) return;
+    if (tradeType === "sell_fuel" && eco.resources.fuel < loss) {
+      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", "交易失败: 燃油不足");
+      return;
+    }
+    if (tradeType === "sell_ammo" && eco.resources.ammo < loss) {
+      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", "交易失败: 弹药不足");
+      return;
+    }
     if (tradeType === "sell_fuel") eco.resources.fuel -= loss;
     else if (tradeType === "sell_ammo") eco.resources.ammo -= loss;
     eco.resources.money += -info.cost; // cost is negative, so -cost is positive

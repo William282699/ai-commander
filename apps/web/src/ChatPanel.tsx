@@ -290,6 +290,12 @@ function canAutoExecute(
   // Validate each intent independently — multi-intent is fine as long as every
   // intent clears the same safety bar a single intent would.
   for (const intent of intents) {
+    // produce/trade are economy actions with no squad anchor — a clear command
+    // should execute without the squad gate it would otherwise fail (no_anchor).
+    // Affordability stays the engine's call; failures surface as Emily feedback
+    // after applyOrders (Step 2).
+    if (intent.type === "produce" || intent.type === "trade") continue;
+
     if (!isValidTarget(intent, state)) return { auto: false, reason: "invalid_intent_fields" };
 
     // high_impact only fires when the intent has NO explicit scope (no fromSquad).
@@ -1349,7 +1355,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       if (ttsEnabled) {
         speak(voiceConfirm, approveCommander);
       }
+      const diagsBefore = new Set(state.diagnostics);
       applyOrders(state, allOrders);
+
+      // Surface economy failures (produce/trade) the engine recorded as
+      // diagnostics during this apply — otherwise insufficient money/fuel/stock
+      // stays silent. Affordability is the engine's decision; the frontend only
+      // voices it. Object-identity diff is robust to the 50-entry ring buffer.
+      for (const d of state.diagnostics) {
+        if (diagsBefore.has(d)) continue;
+        if (d.code === "PRODUCE_FAIL" || d.code === "TRADE_FAIL") {
+          addMessage("warning", d.message, state.time, ch, undefined, "command_ack");
+        }
+      }
 
       // Process doctrine fields at approve time (not at response time)
       const docSource = sourceResponse ?? response;
