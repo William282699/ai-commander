@@ -4,7 +4,7 @@
 // ============================================================
 
 import type { GameState, Unit, Position, Order, UnitType } from "@ai-commander/shared";
-import { getUnitCategory } from "@ai-commander/shared";
+import { getUnitCategory, UNIT_STATS } from "@ai-commander/shared";
 import { applyEnemyOrders } from "../../applyOrders";
 import { canUnitEnterTile } from "../../sim";
 import { enqueueProduction } from "../../economy";
@@ -431,19 +431,19 @@ function manageEconomy(state: GameState): void {
 
   if (fuel < 30) {
     // Only infantry when fuel critically low (foot units = 0 fuel)
-    if (money >= 100) enqueueProduction(state, "enemy", "infantry");
-  } else if (needsTanks && money >= 250) {
+    if (money >= UNIT_STATS.infantry.cost) enqueueProduction(state, "enemy", "infantry");
+  } else if (needsTanks && money >= UNIT_STATS.light_tank.cost) {
     // Prioritize tanks if ratio is off
-    enqueueProduction(state, "enemy", money >= 500 ? "main_tank" : "light_tank");
+    enqueueProduction(state, "enemy", money >= UNIT_STATS.main_tank.cost ? "main_tank" : "light_tank");
   } else {
     const roll = Math.random();
-    if (roll < 0.6 && money >= 100) {
+    if (roll < 0.6 && money >= UNIT_STATS.infantry.cost) {
       enqueueProduction(state, "enemy", "infantry");
-    } else if (roll < 0.85 && money >= 250) {
+    } else if (roll < 0.85 && money >= UNIT_STATS.light_tank.cost) {
       enqueueProduction(state, "enemy", "light_tank");
-    } else if (money >= 500) {
+    } else if (money >= UNIT_STATS.main_tank.cost) {
       enqueueProduction(state, "enemy", "main_tank");
-    } else if (money >= 100) {
+    } else if (money >= UNIT_STATS.infantry.cost) {
       enqueueProduction(state, "enemy", "infantry");
     }
   }

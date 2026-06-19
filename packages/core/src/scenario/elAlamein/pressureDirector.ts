@@ -39,7 +39,7 @@
 import type {
   GameState, Unit, Position, Order, UnitType,
 } from "@ai-commander/shared";
-import { getUnitCategory } from "@ai-commander/shared";
+import { getUnitCategory, UNIT_STATS } from "@ai-commander/shared";
 
 import { type FormationStyle, getFormationOffset, computeHeading } from "../../formation";
 import { applyEnemyOrders } from "../../applyOrders";
@@ -635,20 +635,20 @@ function boostEnemyProduction(state: GameState): void {
   const eco = state.economy.enemy.resources;
   const phase = getPressurePhase(state);
 
-  // Costs from UNIT_STATS: infantry=100, light_tank=250, main_tank=500.
+  // Costs come live from UNIT_STATS (single source of truth) so they track price changes.
   const wishlist: { type: UnitType; cost: number }[] = [];
   if (phase === "easy") {
-    wishlist.push({ type: "infantry",   cost: 100 });
-    wishlist.push({ type: "infantry",   cost: 100 });
+    wishlist.push({ type: "infantry",   cost: UNIT_STATS.infantry.cost });
+    wishlist.push({ type: "infantry",   cost: UNIT_STATS.infantry.cost });
   } else if (phase === "mid") {
-    wishlist.push({ type: "infantry",   cost: 100 });
-    wishlist.push({ type: "light_tank", cost: 250 });
+    wishlist.push({ type: "infantry",   cost: UNIT_STATS.infantry.cost });
+    wishlist.push({ type: "light_tank", cost: UNIT_STATS.light_tank.cost });
   } else {
-    wishlist.push({ type: "infantry",   cost: 100 });
-    if (eco.money >= 500) {
-      wishlist.push({ type: "main_tank",  cost: 500 });
+    wishlist.push({ type: "infantry",   cost: UNIT_STATS.infantry.cost });
+    if (eco.money >= UNIT_STATS.main_tank.cost) {
+      wishlist.push({ type: "main_tank",  cost: UNIT_STATS.main_tank.cost });
     } else {
-      wishlist.push({ type: "light_tank", cost: 250 });
+      wishlist.push({ type: "light_tank", cost: UNIT_STATS.light_tank.cost });
     }
   }
 

@@ -6,7 +6,7 @@
 // ============================================================
 
 import type { GameState, Unit, Front, Position, Order } from "@ai-commander/shared";
-import { getUnitCategory } from "@ai-commander/shared";
+import { getUnitCategory, UNIT_STATS } from "@ai-commander/shared";
 import { applyEnemyOrders } from "./applyOrders";
 import { canUnitEnterTile } from "./sim";
 import { enqueueProduction } from "./economy";
@@ -100,16 +100,16 @@ function enemyProductionAI(state: GameState): void {
   const roll = Math.random();
   let result: { ok: boolean };
 
-  if (roll < 0.5 && money >= 100) {
+  if (roll < 0.5 && money >= UNIT_STATS.infantry.cost) {
     result = enqueueProduction(state, "enemy", "infantry");
     if (result.ok) enemyProdToggle = !enemyProdToggle;
-  } else if (roll < 0.8 && money >= 250) {
+  } else if (roll < 0.8 && money >= UNIT_STATS.light_tank.cost) {
     result = enqueueProduction(state, "enemy", "light_tank");
     if (result.ok) enemyProdToggle = !enemyProdToggle;
-  } else if (money >= 500) {
+  } else if (money >= UNIT_STATS.main_tank.cost) {
     result = enqueueProduction(state, "enemy", "main_tank");
     if (result.ok) enemyProdToggle = !enemyProdToggle;
-  } else if (money >= 100) {
+  } else if (money >= UNIT_STATS.infantry.cost) {
     // Fallback: infantry if can't afford desired type
     result = enqueueProduction(state, "enemy", "infantry");
     if (result.ok) enemyProdToggle = !enemyProdToggle;

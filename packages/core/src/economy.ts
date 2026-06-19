@@ -172,6 +172,11 @@ function recalcBonusIncome(state: GameState): void {
   const enemyBonus: Resources = { money: 0, fuel: 0, ammo: 0, intel: 0 };
 
   state.facilities.forEach((fac) => {
+    // Step 4a: a destroyed facility (hp <= 0) yields no income until it's
+    // rebuilt/recaptured. Ownership & capture logic stay untouched — this only
+    // gates the bonusIncome contribution.
+    if (fac.hp <= 0) return;
+
     const bonus = FACILITY_BONUSES[fac.type];
     if (!bonus) return;
 

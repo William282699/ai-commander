@@ -1983,17 +1983,17 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           <button
             className="dp-dock-btn dp-dock-btn--prod"
             onClick={() => handleProduce("infantry")}
-            disabled={playerMoney < 100 || playerQueueLen >= 3}
-            style={{ opacity: playerMoney >= 100 && playerQueueLen < 3 ? 1 : 0.35 }}
-            title={`生产步兵 ($100)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
-          >+兵$100</button>
+            disabled={playerMoney < 80 || playerQueueLen >= 3}
+            style={{ opacity: playerMoney >= 80 && playerQueueLen < 3 ? 1 : 0.35 }}
+            title={`生产步兵 ($80)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
+          >+兵$80</button>
           <button
             className="dp-dock-btn dp-dock-btn--prod"
             onClick={() => handleProduce("light_tank")}
-            disabled={playerMoney < 250 || playerQueueLen >= 3}
-            style={{ opacity: playerMoney >= 250 && playerQueueLen < 3 ? 1 : 0.35 }}
-            title={`生产轻坦 ($250)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
-          >+坦$250</button>
+            disabled={playerMoney < 200 || playerQueueLen >= 3}
+            style={{ opacity: playerMoney >= 200 && playerQueueLen < 3 ? 1 : 0.35 }}
+            title={`生产轻坦 ($200)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
+          >+坦$200</button>
           <input
             ref={inputRef}
             type="text"
@@ -2190,8 +2190,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
       {/* ── Bottom: Input area ── */}
       <div style={inputContainerStyle}>
-        <button onClick={() => handleProduce("infantry")} disabled={playerMoney < 100 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 100 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产步兵 ($100)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+兵$100</button>
-        <button onClick={() => handleProduce("light_tank")} disabled={playerMoney < 250 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 250 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产轻坦 ($250)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+坦$250</button>
+        <button onClick={() => handleProduce("infantry")} disabled={playerMoney < 80 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 80 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产步兵 ($80)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+兵$80</button>
+        <button onClick={() => handleProduce("light_tank")} disabled={playerMoney < 200 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 200 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产轻坦 ($200)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+坦$200</button>
         <input ref={inputRef} type="text" value={message} onChange={(e) => setMessage(e.target.value)} onKeyDown={handleKeyDown} placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`} disabled={loading} style={inputStyle} />
         <button onPointerDown={(e) => { e.preventDefault(); startPTT(); }} onPointerUp={stopPTT} onPointerCancel={stopPTT} onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined, opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttStatus === "listening" ? "🔴" : "🎤"}</button>
         {hasTTS && (<button onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}>{ttsEnabled ? "🔊" : "🔇"}</button>)}

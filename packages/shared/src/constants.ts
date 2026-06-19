@@ -52,21 +52,21 @@ export interface UnitStats {
 
 export const UNIT_STATS: Record<UnitType, UnitStats> = {
   // Ground
-  infantry:   { hp: 60,  attack: 6,  attackInterval: 1.5,  range: 3,  speed: 2.0, cost: 100,  fuelCost: 0,  buildTime: 5,  vision: 5,  category: "ground", special: ["capture", "forest_move", "swamp_move", "urban_cover"] },
-  light_tank: { hp: 120, attack: 11, attackInterval: 2.25, range: 5,  speed: 3.0, cost: 250,  fuelCost: 5,  buildTime: 8,  vision: 7,  category: "ground", special: ["fast"] },
-  main_tank:  { hp: 250, attack: 21, attackInterval: 3.0,  range: 6,  speed: 2.0, cost: 500,  fuelCost: 10, buildTime: 12, vision: 5,  category: "ground", special: ["frontal_armor"] },
-  artillery:  { hp: 80,  attack: 32, attackInterval: 6.0,  range: 12, speed: 1.0, cost: 400,  fuelCost: 5,  buildTime: 10, vision: 5,  category: "ground", special: ["indirect_fire", "no_move_attack"] },
+  infantry:   { hp: 60,  attack: 6,  attackInterval: 1.5,  range: 3,  speed: 2.0, cost: 80,   fuelCost: 0,  buildTime: 5,  vision: 5,  category: "ground", special: ["capture", "forest_move", "swamp_move", "urban_cover"] },
+  light_tank: { hp: 120, attack: 11, attackInterval: 2.25, range: 5,  speed: 3.0, cost: 200,  fuelCost: 5,  buildTime: 8,  vision: 7,  category: "ground", special: ["fast"] },
+  main_tank:  { hp: 250, attack: 21, attackInterval: 3.0,  range: 6,  speed: 2.0, cost: 400,  fuelCost: 10, buildTime: 12, vision: 5,  category: "ground", special: ["frontal_armor"] },
+  artillery:  { hp: 80,  attack: 32, attackInterval: 6.0,  range: 12, speed: 1.0, cost: 320,  fuelCost: 5,  buildTime: 10, vision: 5,  category: "ground", special: ["indirect_fire", "no_move_attack"] },
   commander:  { hp: 400, attack: 13, attackInterval: 1.5,  range: 5,  speed: 2.0, cost: 0,    fuelCost: 0,  buildTime: 0,  vision: 7,  category: "ground", special: ["regen", "projectile3"] },
   elite_guard:{ hp: 250, attack: 13, attackInterval: 1.5,  range: 5,  speed: 2.0, cost: 0,    fuelCost: 0,  buildTime: 0,  vision: 5,  category: "ground", special: ["projectile3"] },
   // Naval
-  patrol_boat:{ hp: 80,  attack: 7,  attackInterval: 1.5,  range: 4,  speed: 4.0, cost: 150,  fuelCost: 3,  buildTime: 6,  vision: 8,  category: "naval",  special: ["fast", "shallow_water"] },
-  destroyer:  { hp: 200, attack: 18, attackInterval: 2.25, range: 7,  speed: 2.5, cost: 450,  fuelCost: 8,  buildTime: 12, vision: 7,  category: "naval",  special: ["anti_air"] },
-  cruiser:    { hp: 350, attack: 28, attackInterval: 3.75, range: 9,  speed: 1.8, cost: 700,  fuelCost: 15, buildTime: 18, vision: 7,  category: "naval",  special: ["shore_bombardment"] },
-  carrier:    { hp: 500, attack: 0,  attackInterval: 0,    range: 0,  speed: 1.2, cost: 1000, fuelCost: 25, buildTime: 25, vision: 7,  category: "naval",  special: ["launch_planes"] },
+  patrol_boat:{ hp: 80,  attack: 7,  attackInterval: 1.5,  range: 4,  speed: 4.0, cost: 120,  fuelCost: 3,  buildTime: 6,  vision: 8,  category: "naval",  special: ["fast", "shallow_water"] },
+  destroyer:  { hp: 200, attack: 18, attackInterval: 2.25, range: 7,  speed: 2.5, cost: 360,  fuelCost: 8,  buildTime: 12, vision: 7,  category: "naval",  special: ["anti_air"] },
+  cruiser:    { hp: 350, attack: 28, attackInterval: 3.75, range: 9,  speed: 1.8, cost: 560,  fuelCost: 15, buildTime: 18, vision: 7,  category: "naval",  special: ["shore_bombardment"] },
+  carrier:    { hp: 500, attack: 0,  attackInterval: 0,    range: 0,  speed: 1.2, cost: 800,  fuelCost: 25, buildTime: 25, vision: 7,  category: "naval",  special: ["launch_planes"] },
   // Air
-  fighter:    { hp: 100, attack: 14, attackInterval: 1.8,  range: 5,  speed: 8.0, cost: 350,  fuelCost: 5,  buildTime: 8,  vision: 8,  category: "air",    special: ["air_superiority"] },
-  bomber:     { hp: 80,  attack: 42, attackInterval: 7.5,  range: 3,  speed: 5.0, cost: 600,  fuelCost: 10, buildTime: 15, vision: 5,  category: "air",    special: ["aoe", "anti_building"] },
-  recon_plane:{ hp: 50,  attack: 0,  attackInterval: 0,    range: 0,  speed: 10.0,cost: 150,  fuelCost: 3,  buildTime: 5,  vision: 15, category: "air",    special: ["no_attack", "spotter"] },
+  fighter:    { hp: 100, attack: 14, attackInterval: 1.8,  range: 5,  speed: 8.0, cost: 280,  fuelCost: 5,  buildTime: 8,  vision: 8,  category: "air",    special: ["air_superiority"] },
+  bomber:     { hp: 80,  attack: 42, attackInterval: 7.5,  range: 3,  speed: 5.0, cost: 480,  fuelCost: 10, buildTime: 15, vision: 5,  category: "air",    special: ["aoe", "anti_building"] },
+  recon_plane:{ hp: 50,  attack: 0,  attackInterval: 0,    range: 0,  speed: 10.0,cost: 120,  fuelCost: 3,  buildTime: 5,  vision: 15, category: "air",    special: ["no_attack", "spotter"] },
 };
 
 // --- Counter Matrix ---
@@ -147,7 +147,16 @@ export const FACILITY_BONUSES: Record<string, Partial<{ money: number; fuel: num
   ammo_depot:    { ammo: 25 },
   comm_tower:    { intel: 20 },
   rail_hub:      { ammo: 25 },
-  repair_station:{},
+  // Step 4 — give the remaining capturable strongholds a felt income so holding
+  // ground matters and losing it hurts (recalcBonusIncome runs every 30s tick, so
+  // capture adds it / loss removes it automatically, symmetric for both teams).
+  // In El Alamein the "radar" type IS the contested high-ground strongpoints
+  // (Kidney/Miteirya ridges, observation posts — 5 of them), so each capture pays
+  // a felt money+intel (strategic ground + observation); the lone repair_station
+  // (field workshop) is the rarer, richer logistics capture. Sized against
+  // BASE_INCOME (money 100 / fuel 20 / intel 10 per 30s) and the existing depots.
+  radar:         { money: 15, intel: 10 },
+  repair_station:{ money: 40, fuel: 20 },
 };
 
 // --- Trade Costs ---
