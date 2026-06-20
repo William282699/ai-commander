@@ -1,7 +1,8 @@
-# 对话化改造 · 开工 WORKPLAN（v2 · 已纳入 Codex 审核）
+# 对话化改造 · 开工 WORKPLAN（v2.2 · Step 5 已落 main）
 
-> **给接手的 Claude Code 窗口:** 自带上下文的执行计划。**先从头读完**,再开工。工作目录 = 仓库根 `AI Commander`(直接在此文件夹,不开 worktree)。
-> **v2.1 改动:** 据 Codex 两轮静态审核修订——重排顺序(安全四步先行)、重写 Step 5(砍卡:false-reason 三分流 + anchor_mismatch 细分)、拆 Step 6(6a/6b)、扩"不碰区"。行号经 Codex 对照实时代码核过,但仍**先读后改**。Codex 复审结论:可开工,新窗口先做 1-4。
+> **当前事实(2026-06-19):** Step 1-5 已完成并合入 `main` / `origin/main`。当前收口 commit = `57e021b step5 no command card`, tag = `testv2_司令感——Jun19th`。
+> **给接手的 Claude Code 新窗口:** 先在仓库根 `AI Commander` 读完本文 + `改动方向-傻瓜版.md`,再**全局审核当前代码是否仍符合本文锚点**。审核完成后,从当前根目录开一个新的 worktree 做 Step 6a;不要直接在 main 工作树里改 6a。
+> **v2.2 改动:** 记录 Step 5 bench 后的真实实现:命令卡已砍;`mission_conflict` gate 因 TaskCard/currentMission 半接线已撤掉;`high_impact` 确认改为前端 pending confirm 闭环。Step 6a 开工前必须以当前代码为准,不要按旧行号盲改。
 > 配套背景:`改动方向-傻瓜版.md`。
 
 ---
@@ -11,7 +12,8 @@
 1. **一次只做一步。** 做完 → `npm run typecheck` 绿 → **停下,让用户手动测,过了 bench 才 commit。** 用户没确认通过前,绝不开下一步。
 2. **行号是快照,会漂。** 每步动手前**先读点名的文件**核对,不一致按实际适配,别盲改。
 3. **永不退步。** 任何一步让原本能跑的变差 = 不算过,回滚。
-4. 建议开分支 `conversation-redesign`(同文件夹,不开 worktree),每步 commit + tag。
+4. **Step 6a 起必须开 worktree:** 从当前 `main` 根目录开新 worktree/分支做 6a;先审核再改。主工作树保持 `main` 的已验证收口状态。
+5. **不要穷举法:** 不要把自然语言玩法写成一堆命令字符串 if/else。LLM 继续负责理解意图;本地代码只做结构化状态、护栏、执行位置和可测试的数据流。
 
 ## 🚫 不碰区（命门,扩大版）
 
@@ -47,7 +49,7 @@
 | 6a | 自主-只上报问你 | 中·已重写 | 先定数据结构 + 执行位置 |
 | 6b | 自主-act-and-report+撤销 | 高·会反复改 | 不复用 staff-ask |
 
-新窗口可**先连做 1→2→3→4**(都安全);5 / 6 在动手前再读一遍本文对应段(已按审核改细)。
+Step 1-5 已完成。新窗口只从 **Step 6a** 开始;动手前先复核 Step 5 当前实现,确认没有要带入 6a 的旧卡片路径。
 
 ---
 
@@ -147,7 +149,9 @@
 
 ---
 
-## Step 5 — 砍卡（命令卡）⚠️ v2 重写（Codex:最危险的一步）
+## Step 5 — 砍卡（命令卡）✅ 已完成并合入 main
+
+**状态:** 已完成,commit `57e021b`,tag `testv2_司令感——Jun19th`。本段保留给 Step 6a 新窗口理解现状,不要重新实现 Step 5。
 
 **目标:** 清楚命令直接执行+回报;该问的问一句;**高后悔/不可逆的必须先确认**。**不再弹命令的 A/B/C 菜单。** prompt 不动。
 
@@ -162,9 +166,9 @@
 - **桶 A · 自动降级执行 + 回报**(低后悔):命令清楚,且玩家**原话里没有任何显式部队**(无 squad/leader/commander),LLM 替他挑了(`no_anchor`,或 `anchor_mismatch` 但用户原话本就没点名任何部队)→ **按推荐项执行,回报里说明替你挑了谁**(「我让 Aiden 上了,跟您说一声」),玩家可纠正。
 - **桶 B · 必须问一句**(真歧义):`invalid_intent_fields`(目标不存在)、`no_selected_units`(说"选中的"但没选)、**⚠️ `anchor_mismatch` 且用户原话有显式部队、但和 LLM 给的不一致**(用户说 Carter、LLM 给 Aiden → 可能误读,**自动执行 = 错调兵,必须问**)。**判据用现成的:** `canAutoExecute` 已算出 `squadIdsInText` / `mentionedAnchors`——用户原话提过任意部队(集合非空)但 `intent.fromSquad` 不在其中 → 桶 B;一个都没提 → 桶 A。
   - **注(Codex):** "多个目标同等可能"这种歧义**没有现成 deterministic detector**(`isValidTarget` 只判字段有效性,不判歧义)——靠 LLM 返回 `options:[]`/澄清问句触发,前端只处理这种返回,别假设有本地歧义判据。
-- **桶 C · 必须确认**(高后悔/不可逆):`high_impact`(无范围全军调动)、`mission_conflict`(打断正在执行任务的部队)→ **Chen 顶一句顾虑 + 要一个 yes 才动**。
-- **CONFIRM 不另建(Codex:它现在不存在):** prompt 写的是"warn but execute"、前端无 CONFIRM 分支。所以桶 C 的"确认"**复用现成 ASK/澄清回合**——Chen 在对话里问 yes/no,玩家答"行",由 prompt 里已有的 **SHORT FOLLOW-UP RESOLUTION** 规则接住执行。**不碰 schema、不加新 responseType。**
-- **保留所有安全网:** `detectStaleSquadRefs`(~208)、`mission_conflict`、`high_impact` 一个都不能丢——它们决定进哪个桶,不是被绕过。
+- **桶 C · 必须确认(当前实现):** 只保留 `high_impact`(无范围全军调动)。第一次拦截后在前端保存 pending confirm;玩家回复精确确认词(确认/是/对/执行/同意/可以/行/yes/ok)时直接执行保存的 option,不再发给 LLM,避免确认死循环。取消词(不/否/取消/算了/no/cancel)清 pending。
+- **`mission_conflict` 已撤掉(bench 后产品决策):** 旧 gate 只看 `squad.currentMission`,而玩家命令常见的左下角任务卡来自 `state.tasks/TaskCard`;两套状态半接线。保留旧 gate 会造成"有些任务拦、有些任务不拦"的假安全。真正的 Mission Interrupt Flow 留以后单独做,不要在 Step 6a 顺手补半功能。
+- **保留安全网:** `detectStaleSquadRefs` 仍然不盲执行;`high_impact` 仍需确认;`anchor_mismatch` 仍按玩家原话是否点名分桶。
 - **只砍命令卡:** `setResponse` 渲染的那套 A/B/C 不再出现。**staff thread 紧急卡本步仍在**(它在 6a 处理)——**这是预期的中间态**,测试时知道"命令不弹卡了,但危机仍弹 thread 卡",别当 bug。
 - **prompt 不改:** LLM 照旧返回方案,前端只取推荐项 + 按桶分流。解析安全。
 
@@ -175,17 +179,16 @@
 2. 玩家没指明部队的命令:执行推荐+回报说明挑了谁(桶 A)。
 3. 目标不存在 / 多义:问一句(桶 B)。
 4. 「全军压上」无范围:Chen 顶一句+要确认(桶 C)。
-5. 正在打任务的部队被改派:问/确认,不直接打断。
-6. 引用已阵亡 squad:不盲执行,问/警告。
-7. 回归:之前能正确执行的命令仍正确。
+5. 引用已阵亡 squad:不盲执行,问/警告。
+6. 回归:之前能正确执行的命令仍正确。
 
 **通过 bench:**
 - [ ] (1)(2) 不弹卡、执行+回报(2 里回报说明挑了谁)。
 - [ ] (3) 问一句,不弹 3 卡。
-- [ ] (4)(5) **没有**自动执行,而是 Chen 顶一句+等你确认。
-- [ ] (6) stale-ref 不盲执行。
-- [ ] (7) 无回归;命令卡彻底不出现;typecheck 绿。
-- [ ] (已知中间态)危机 thread 卡仍在 = 正常,留 6a。
+- [x] (4) `high_impact` 先确认;确认后直接执行,不再循环。
+- [x] stale-ref 不盲执行。
+- [x] 无回归;命令卡彻底不出现;typecheck 绿。
+- [x] (已知中间态)危机 thread 卡仍在 = 正常,留 6a。
 
 **完成:** commit + tag `step5-no-command-card`。
 
@@ -194,6 +197,13 @@
 ## Step 6a — Chen 自主:只"上报问你"（escalate）⚠️ 先打地基
 
 **目标:** 危机有真两难时,Chen **在对话里问你**(替掉 staff thread 紧急卡),**还不自动动兵**。先把数据结构、执行位置、日志关联打好,风险最低。
+
+**开工前强制诊断(新 Claude 窗口先做,不诊断不改):**
+1. 从当前 `main` 根目录开新 worktree/分支做 6a;不要在 main 工作树直接改。
+2. 读并核对 `ChatPanel.tsx` / `GameCanvas.tsx` / `messageStore.ts` / `advisorTrigger.ts` / `crisisResponse.ts` / `types.ts` 当前实际链路。
+3. 写出当前"危机 thread 卡"的创建源头、渲染源头、批准/关闭路径、消息流向;确认哪些是 6a 要关源头,哪些不碰。
+4. 先给出诊断结论再改:说明 6a 计划是否仍符合当前代码,若锚点漂移,按当前代码更新方案。
+5. 保持架构链路干净:不要把 6a 写成一堆具体中文命令/战报字符串匹配;LLM 继续理解语言,本地只处理结构化 trigger、护栏、对话上报和日志 correlation。
 
 **关键纠正(Codex):**
 - `processAdvisorTriggers`(`advisorTrigger.ts` ~36/43)是**纯扫描/路由,只改 cooldown**——**不要在这里执行任何动作**。执行放 **GameCanvas 消费 trigger 之后的一个明确 autonomous helper**(或 core 里新函数,由 GameCanvas 调)。
