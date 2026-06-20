@@ -257,7 +257,7 @@ function canAutoExecute(
   state: GameState,
   selectedIds?: readonly number[],
   isGroupChat?: boolean,
-): { auto: boolean; reason?: string } {
+): { auto: boolean; reason?: string; playerNamedSquad?: boolean } {
   // Group chat forces manual approval
   if (isGroupChat) return { auto: false, reason: "group_chat" };
 
@@ -326,11 +326,17 @@ function canAutoExecute(
         if (squad.id && squadIdsInText.has(squad.id.toUpperCase())) anchored = true;
         if (squad.leaderName && mentionedAnchors.has(squad.leaderName.toLowerCase())) anchored = true;
       }
-      if (!anchored) return { auto: false, reason: "anchor_mismatch" };
-
-      if (squad && squad.currentMission !== null) {
-        return { auto: false, reason: "mission_conflict" };
-      }
+      // Step 5 (revised): the mission_conflict gate was removed. It only read
+      // squad.currentMission, which player commands never set — they create a
+      // TaskCard in state.tasks instead, and only capture/sabotage intents bind a
+      // Mission (createMission → currentMission). So it fired inconsistently
+      // (capture/sabotage only) and missed the common attack/defend TaskCards shown
+      // bottom-left — false, half-wired protection. A real Mission Interrupt Flow
+      // (linking TaskCard ↔ currentMission) is deferred; for now there's no gate.
+      //
+      // anchor_mismatch + player named a squad → possible misread (ask, bucket B);
+      // anchor_mismatch + player named nothing → advisor picked for them (bucket A).
+      if (!anchored) return { auto: false, reason: "anchor_mismatch", playerNamedSquad: squadIdsInText.size > 0 || mentionedAnchors.size > 0 };
     } else {
       // No fromSquad — auto only if player has selected units AND used a selected keyword
       if (!hasSelectedKeyword) return { auto: false, reason: "no_anchor" };
@@ -339,6 +345,49 @@ function canAutoExecute(
   }
 
   return { auto: true };
+}
+
+// Step 5 — high_impact local confirmation. Deterministic, frontend-only word lists
+// (user-specified). A pending high_impact action executes directly on a confirm
+// word — with NO fresh LLM call, which would re-emit the same unscoped intent and
+// re-trigger high_impact (the confirm loop). A cancel word drops the pending.
+const HIGH_IMPACT_CONFIRM_WORDS = ["确认", "是", "对", "执行", "同意", "可以", "行", "yes", "ok"];
+const HIGH_IMPACT_CANCEL_WORDS = ["不", "否", "取消", "算了", "no", "cancel"];
+const HIGH_IMPACT_CONFIRM_WINDOW_SEC = 120;
+
+function normalizeReply(s: string): string {
+  return s.trim().toLowerCase().replace(/[。.!！?？,，、\s]+$/g, "");
+}
+function isConfirmReply(s: string): boolean {
+  return HIGH_IMPACT_CONFIRM_WORDS.includes(normalizeReply(s));
+}
+function isCancelReply(s: string): boolean {
+  return HIGH_IMPACT_CANCEL_WORDS.includes(normalizeReply(s));
+}
+
+// Step 5: build the one-line question/concern for a gated command (buckets B & C).
+// It embeds the advisor's brief (the concrete unit+target+task) so the player's
+// short "确认"/"对" resolves via the prompt's SHORT FOLLOW-UP RESOLUTION rule.
+// Bucket C (high_impact only) voices a concern + asks for a yes (resolved locally
+// via the pending-confirm path, not a fresh LLM call); bucket B (ambiguous /
+// missing target / wrong squad) asks for a clarification.
+function buildGateQuestion(reason: string | undefined, brief: string, staleRefs: string[]): string {
+  const lead = brief ? brief.trim() : "";
+  if (staleRefs.length > 0) {
+    return `${lead ? lead + " " : ""}⚠ 这条引用的 ${staleRefs.join("、")} 已不在编 —— 确认要继续，还是另指部队？`;
+  }
+  switch (reason) {
+    case "high_impact":
+      return `${lead || "这是一次没指定范围的全军级行动"} —— 会抽空其它方向，确认要全线压上吗？（回"确认"执行）`;
+    case "no_selected_units":
+      return `您说的"选中的部队"我没看到选中任何单位 —— 请先框选，或直接说明哪支部队。`;
+    case "invalid_intent_fields":
+      return `${lead || "命令目标不存在或不明确"} —— 请确认目标或重述。`;
+    case "anchor_mismatch":
+      return `${lead || "您指定的部队和我理解的可能不一致"} —— 请确认是哪支部队。`;
+    default:
+      return `${lead || "这条命令我需要再跟您确认一下"} —— 请确认或重述。`;
+  }
 }
 
 // ── Day 16B: Context Memory (from CommandPanel) ──
@@ -517,6 +566,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<DisplayResponse | null>(null);
   const pendingGroupResponsesRef = useRef<{ data: DisplayResponse; channel: Channel; requestId: string }[]>([]);
+  // Step 5: a high_impact action awaiting the player's local confirm word. Resolved
+  // in sendCommand without a fresh LLM call (avoids the high_impact confirm loop).
+  const pendingConfirmRef = useRef<{ opt: AdvisorOption; data: DisplayResponse; execCtx: ExecContext; channel: Channel; expiresAt: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [approvedIdx, setApprovedIdx] = useState<number | null>(null);
   const [clarification, setClarification] = useState<string | null>(null);
@@ -1049,6 +1101,29 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
     // ── Single commander path ──
     const ch = primaryChannel;
+
+    // Step 5 — resolve a pending high_impact confirm locally, with NO fresh LLM call
+    // (which would re-emit the same unscoped intent and re-trigger high_impact → the
+    // confirm loop). Any new command consumes the pending; only a same-channel,
+    // in-window confirm word executes the saved option; a cancel word drops it.
+    const pendingConfirm = pendingConfirmRef.current;
+    if (pendingConfirm) {
+      pendingConfirmRef.current = null;
+      if (pendingConfirm.channel === ch && state.time <= pendingConfirm.expiresAt) {
+        if (isConfirmReply(userMsg)) {
+          handleApprove(pendingConfirm.opt, 0, "auto", pendingConfirm.execCtx, pendingConfirm.data);
+          setLoading(false);
+          return;
+        }
+        if (isCancelReply(userMsg)) {
+          addMessage("info", "行，那就不动。", state.time, ch, undefined, "command_ack");
+          setLoading(false);
+          return;
+        }
+      }
+      // off-channel / expired / neither word → fall through to the normal LLM flow.
+    }
+
     // Capture persona once for the entire stream. selectedCommanders[0]
     // could in theory drift if user switches tabs mid-stream; ttsPersona
     // is the locked persona used by every speak()/flush() call below.
@@ -1133,7 +1208,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
         }
 
-        const gate = (Array.isArray(data.options) && data.options.length >= 1)
+        const gate: { auto: boolean; reason?: string; playerNamedSquad?: boolean } =
+          (Array.isArray(data.options) && data.options.length >= 1)
           ? canAutoExecute((data.options as AdvisorOption[])[0], userMsg, state, [], isGroupChat)
           : { auto: false };
 
@@ -1145,10 +1221,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           const autoData = data as DisplayResponse;
           setTimeout(() => handleApprove(autoData.options[0], 0, "auto", execCtx, autoData), 0);
         } else {
-          if (!gate.auto && gate.reason) {
-            const opt0 = (data.options as AdvisorOption[])[0];
+          const reason = gate.reason;
+          const opt0 = Array.isArray(data.options) ? (data.options as AdvisorOption[])[0] : undefined;
+          if (reason) {
             const intent0 = opt0?.intents?.[0] ?? opt0?.intent;
-            console.log(`[P1 gate] no-auto reason=${gate.reason}`, {
+            console.log(`[P1 gate] no-auto reason=${reason}`, {
               numIntents: opt0?.intents?.length ?? (opt0?.intent ? 1 : 0),
               fromSquad: intent0?.fromSquad,
               quantity: intent0?.quantity,
@@ -1157,21 +1234,46 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             });
           }
           responseExecCtxRef.current = execCtx;
-          setResponse(data as DisplayResponse);
+          // Step 5 — no more A/B/C command card. Route the safety gate's false reason
+          // into 3 buckets; setResponse(card) is never shown for a command now.
+          setResponse(null);
           setError(null);
-          // Stale-state post-check: surface a warning when the advisor's brief
-          // references squads that died while the LLM request was in flight.
-          // The message lands right under the streamed brief so the player sees
-          // the dissonance immediately rather than discovering it only on approve.
+
+          // Safety net stays: a brief that references squads which died in-flight must
+          // never blind-execute — it disqualifies bucket A and falls through to ask/warn.
           const staleRefs = detectStaleSquadRefs(data.options as AdvisorOption[] | undefined, state);
-          if (staleRefs.length > 0) {
-            addMessage(
-              "warning",
-              `⚠ 参谋回复引用 ${staleRefs.join(", ")} 已阵亡或不存在，以下方案基于过时战况`,
-              state.time, ch, undefined, "command_ack",
-            );
+
+          // Bucket A — clear command, player named no squad of their own → the advisor
+          // picked. Auto-execute the recommended option + a one-line "I chose for you"
+          // note (handleApprove's confirm echoes the option label, which names the pick).
+          const bucketA = staleRefs.length === 0 && opt0 != null &&
+            (reason === "no_anchor" || (reason === "anchor_mismatch" && !gate.playerNamedSquad));
+
+          if (bucketA) {
+            setClarification(null);
+            addMessage("info", "您没点名部队，我按战况替您安排，要改随时说。", state.time, ch, undefined, "command_ack");
+            setTimeout(() => handleApprove(opt0, 0, "auto", execCtx, data as DisplayResponse), 0);
+          } else {
+            // Bucket B (clarify) / C (confirm high_impact). Voice the concern/question.
+            // high_impact → stash a LOCAL pending-confirm so the player's next confirm
+            // word executes THIS option directly (resolved in sendCommand), with no LLM
+            // round-trip that would re-emit the unscoped intent and re-trigger
+            // high_impact (the loop). Bucket B still resolves via the LLM's SHORT
+            // FOLLOW-UP RESOLUTION. Nothing executes here.
+            if (reason === "high_impact" && opt0) {
+              pendingConfirmRef.current = {
+                opt: opt0,
+                data: data as DisplayResponse,
+                execCtx,
+                channel: ch,
+                expiresAt: state.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC,
+              };
+            }
+            const q = buildGateQuestion(reason, (data.brief as string) || "", staleRefs);
+            setClarification(q);
+            addMessage("warning", q, state.time, ch, undefined, "command_ack");
+            pushContext(channelContextRef.current, ch, { role: "assistant", text: q, time: state.time });
           }
-          addMessage("info", "参谋简报送达。", state.time, ch, undefined, "command_ack");
         }
       }
     };
