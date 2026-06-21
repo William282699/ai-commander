@@ -87,7 +87,7 @@ app.get("/api/health", (_req, res) => {
 
 // Full advisor call (player command → 3 options)
 app.post("/api/command", async (req, res) => {
-  const { digest, message, styleNote, channel, sessionId } = req.body;
+  const { digest, message, styleNote, channel, sessionId, escalateId } = req.body;
 
   if (!digest || typeof digest !== "string") {
     res.status(400).json({ error: "digest (string) 必填" });
@@ -98,7 +98,9 @@ app.post("/api/command", async (req, res) => {
     return;
   }
 
-  logEvent({ type: "command", route: "command", sessionId, channel: channel || "", message });
+  // Step 6a: escalateId (when present) ties this reply back to the crisis
+  // escalation the player is responding to. JSON.stringify drops it when absent.
+  logEvent({ type: "command", route: "command", sessionId, escalateId, channel: channel || "", message });
 
   try {
     const result = await callAdvisor(digest, message, styleNote || "", channel || "");
@@ -117,7 +119,7 @@ app.post("/api/command", async (req, res) => {
 
 // Streaming advisor call (SSE) — same input as /api/command
 app.post("/api/command-stream", async (req, res) => {
-  const { digest, message, styleNote, channel, sessionId } = req.body;
+  const { digest, message, styleNote, channel, sessionId, escalateId } = req.body;
 
   if (!digest || typeof digest !== "string") {
     res.status(400).json({ error: "digest (string) 必填" });
@@ -128,7 +130,9 @@ app.post("/api/command-stream", async (req, res) => {
     return;
   }
 
-  logEvent({ type: "command", route: "command-stream", sessionId, channel: channel || "", message });
+  // Step 6a: escalateId (when present) ties this reply back to the crisis
+  // escalation the player is responding to. JSON.stringify drops it when absent.
+  logEvent({ type: "command", route: "command-stream", sessionId, escalateId, channel: channel || "", message });
 
   // SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -149,6 +153,16 @@ app.post("/api/command-stream", async (req, res) => {
     res.write("data: [DONE]\n\n");
     res.end();
   }
+});
+
+// Step 6a: pure-observability endpoint for client-originated events (crisis
+// escalations). Like logEvent itself — it never gates or changes anything, just
+// records. The escalate's actionId reappears as `escalateId` on the player's
+// next /api/command{,-stream}, correlating action ↔ reaction in [EVENT] logs.
+app.post("/api/log-event", (req, res) => {
+  const { type, actionId, channel, frontId, kind, message, sessionId } = req.body ?? {};
+  logEvent({ type: type || "client_event", actionId, channel: channel || "", frontId, kind, message, sessionId });
+  res.json({ ok: true });
 });
 
 // Group chat advisor call (ALL mode — one LLM call, 3 personas)

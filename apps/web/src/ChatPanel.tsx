@@ -31,6 +31,8 @@ import {
   getActiveThreads,
   resolveThread,
   dismissThread,
+  getActiveEscalation,
+  clearEscalation,
   subscribe,
   CHANNEL_PERSONA,
   type FeedMessage,
@@ -1129,16 +1131,27 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     // is the locked persona used by every speak()/flush() call below.
     const ttsPersona: Persona = selectedCommanders[0];
 
-    // Phase 3: thread context
+    // Phase 3: thread context (threads are dormant in 6a; kept as a safety net)
     const activeThreadOnChannel = activeThreads.find(t => t.channel === ch);
     const threadContext = activeThreadOnChannel
       ? `\n---ACTIVE_THREAD---\n[${activeThreadOnChannel.eventType}] ${activeThreadOnChannel.eventMessage}\nStaff brief: ${activeThreadOnChannel.brief}`
       : "";
 
+    // Step 6a: if Chen escalated a crisis on this channel, this reply is answering
+    // it. Carry the correlation id to the server log (action ↔ reaction) and feed
+    // the question back as context so a short reply resolves against it. The reply
+    // still runs through the normal command path — 6a never auto-executes.
+    const activeEsc = getActiveEscalation(ch, state.time);
+    const escalateId = activeEsc?.actionId;
+    const escalationContext = activeEsc
+      ? `\n---ACTIVE_ESCALATION---\nChen 刚问:「${activeEsc.question}」\n指挥官下面这句是对它的回应。`
+      : "";
+    if (activeEsc) clearEscalation(ch);
+
     commanderMemoryRef.current[ch].playerIntent = userMsg;
     const baseDigest = buildDigestForChannel(state, ch, commanderMemoryRef.current[ch]);
     const contextSuffix = formatContext(channelContextRef.current, ch);
-    const digest = baseDigest + contextSuffix + threadContext;
+    const digest = baseDigest + contextSuffix + threadContext + escalationContext;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
     // Append declined context if player is refining a rejected proposal
@@ -1283,7 +1296,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       const streamRes = await fetch(`${API_URL}/api/command-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID }),
+        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId }),
       });
 
       if (!streamRes.ok || !streamRes.body) {
@@ -1386,7 +1399,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         const res = await fetch(`${API_URL}/api/command`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID }),
+          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId }),
         });
         const data = await res.json();
         processAdvisorData(data);

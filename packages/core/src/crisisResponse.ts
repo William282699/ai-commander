@@ -686,3 +686,77 @@ export function generateCrisisCard(
 
   return options;
 }
+
+// ============================================================
+// Step 6a — Crisis escalation assessment (clean read-only entry)
+//
+// Classifies a crisis so the web layer can pose a Chen-voiced QUESTION in
+// conversation (replacing the old A/B/C thread card). 6a NEVER auto-moves —
+// this only shapes the question and the [EVENT] log. It reuses the existing
+// collapse-time + reinforcement math and changes NO decision numbers.
+// ============================================================
+
+export type CrisisEscalationKind = "safe_reinforce" | "dilemma" | "report_only";
+
+export interface CrisisEscalation {
+  kind: CrisisEscalationKind;
+  frontId: string;
+  frontName: string;
+  tCollapse: number;                       // seconds before collapse; Infinity if stable
+  /** Best ORGANIZED idle/low-priority reinforcement (excludes __reserve__). */
+  bestCandidate: ReinforceCandidate | null;
+}
+
+/**
+ * Classify a crisis for 6a conversation escalation.
+ *  - safe_reinforce: an organized idle/low-priority squad can be dispatched
+ *    (the future 6b auto-case) → Chen asks permission to send it.
+ *  - dilemma: no free organized squad — reinforcing means pulling committed
+ *    forces off another line → Chen lays out the hard choice.
+ *  - report_only: front can't be resolved → generic ask.
+ *
+ * Per the workplan, __reserve__ (unassigned scratch units) is NOT offered as a
+ * 6a/6b reinforcement, so it is filtered out of the candidate set here.
+ */
+export function assessCrisisEscalation(
+  state: GameState,
+  crisis: CrisisEvent,
+): CrisisEscalation | null {
+  const front = resolveCrisisFront(state, crisis.locationTag);
+  if (!front) {
+    return {
+      kind: "report_only",
+      frontId: crisis.locationTag,
+      frontName: crisis.locationTag,
+      tCollapse: Infinity,
+      bestCandidate: null,
+    };
+  }
+
+  const { tCollapse } = estimateCollapseTime(state, front);
+
+  // findBestReinforcements ignores the doctrine arg (it scans the battlefield
+  // directly), so a minimal stand-in is sufficient here.
+  const stubDoctrine: StandingOrder = {
+    id: "__escalation__",
+    type: "must_hold",
+    commander: "ops",
+    locationTag: crisis.locationTag,
+    priority: "high",
+    allowAutoReinforce: true,
+    assignedSquads: [],
+    createdAt: state.time,
+    status: "active",
+  };
+  const candidates = findBestReinforcements(state, crisis, stubDoctrine)
+    .filter((c) => c.squadId !== "__reserve__");
+  const bestCandidate = candidates[0] ?? null;
+
+  return {
+    kind: bestCandidate ? "safe_reinforce" : "dilemma",
+    frontId: front.id,
+    frontName: front.name,
+    tCollapse,
+    bestCandidate,
+  };
+}

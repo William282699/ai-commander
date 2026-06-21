@@ -67,6 +67,9 @@ interface MessageStoreShape {
   getActiveThreads: typeof getActiveThreads;
   expireStaleThreads: typeof expireStaleThreads;
   clearThreads: typeof clearThreads;
+  setActiveEscalation: typeof setActiveEscalation;
+  getActiveEscalation: typeof getActiveEscalation;
+  clearEscalation: typeof clearEscalation;
 }
 
 function getOpenerStore(): MessageStoreShape | null {
@@ -129,6 +132,9 @@ export function clearMessages(): void {
   messages.length = 0;
   nextId = 1;
   _activeChannel = "ops";
+  _escalations.ops = null;
+  _escalations.logistics = null;
+  _escalations.combat = null;
   listeners.forEach((fn) => fn());
 }
 
@@ -307,5 +313,51 @@ export function clearThreads(): void {
   if (p) { p.clearThreads(); return; }
   _threads = [];
   _nextThreadId = 1;
+}
+
+// ── Step 6a: Crisis escalation correlation ──
+// When Chen escalates a crisis as a conversation QUESTION (replacing the thread
+// card), we stash a per-channel correlation id + the question text. The player's
+// next command on that channel carries this actionId to the server log (Step 1),
+// tying their reaction to the escalation; the question text is fed back as LLM
+// context so a short reply resolves against it. Same cross-window delegation as
+// threads, so the detached panel shares one source of truth.
+export interface ActiveEscalation {
+  actionId: string;
+  question: string;
+  createdAt: number; // game time
+}
+
+const ESCALATION_WINDOW_SEC = 120;
+const _escalations: Record<Channel, ActiveEscalation | null> = {
+  ops: null,
+  logistics: null,
+  combat: null,
+};
+
+export function setActiveEscalation(channel: Channel, esc: ActiveEscalation): void {
+  const p = getOpenerStore();
+  if (p) { p.setActiveEscalation(channel, esc); return; }
+  _escalations[channel] = esc;
+  listeners.forEach((fn) => fn());
+}
+
+/** Latest open escalation on a channel, or null. Pass gameTime to drop stale ones (>120s). */
+export function getActiveEscalation(channel: Channel, gameTime?: number): ActiveEscalation | null {
+  const p = getOpenerStore();
+  if (p) return p.getActiveEscalation(channel, gameTime);
+  const esc = _escalations[channel];
+  if (!esc) return null;
+  if (gameTime != null && gameTime - esc.createdAt > ESCALATION_WINDOW_SEC) return null;
+  return esc;
+}
+
+export function clearEscalation(channel: Channel): void {
+  const p = getOpenerStore();
+  if (p) { p.clearEscalation(channel); return; }
+  if (_escalations[channel]) {
+    _escalations[channel] = null;
+    listeners.forEach((fn) => fn());
+  }
 }
 

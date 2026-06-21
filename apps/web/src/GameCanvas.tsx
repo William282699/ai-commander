@@ -49,8 +49,7 @@ import {
   buildDigest,
   checkDoctrines,
   cancelDoctrine,
-  findBestReinforcements,
-  generateCrisisCard,
+  assessCrisisEscalation,
   updateTasks,
   updateBattleMarkers,
   resetEngagementCache,
@@ -79,9 +78,11 @@ import {
   createThread,
   expireStaleThreads,
   getLastMessageTimeBySource,
+  setActiveEscalation,
   type MessageLevel,
 } from "./messageStore";
 import { API_URL } from "./api";
+import { SESSION_ID } from "./session";
 
 // ── Day 16B: event → channel routing ──
 
@@ -128,6 +129,89 @@ function resetStaffAskState(): void {
   }
   staffAskState.topicCooldown.clear();
   staffAskState.session++;
+}
+
+// ── Step 6a: Crisis escalation (replaces the A/B/C thread cards) ──
+// A crisis becomes a Chen-voiced QUESTION in the conversation channel. 6a NEVER
+// auto-moves troops: the question primes the player, whose reply runs through the
+// normal command path. A correlation id ties the escalation to that reply in the
+// [EVENT] log. Per-topic cooldown stops the same front re-asking every tick.
+const escalationState = {
+  topicCooldown: new Map<string, number>(), // topicKey → game time of last escalation
+};
+const ESCALATION_TOPIC_COOLDOWN_SEC = 30;
+
+function resetEscalationState(): void {
+  escalationState.topicCooldown.clear();
+}
+
+function makeActionId(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch { /* fall through */ }
+  return `esc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Escalate a crisis as a Chen-voiced question in `channel`, replacing the old
+ * thread card. Deterministic, template-based phrasing off the structured
+ * assessment — no matching of player command/report strings (the LLM still
+ * parses the player's free-text reply via the normal command path).
+ *
+ * Returns true if a question was posted (false if still on cooldown).
+ */
+function escalateCrisisToConversation(
+  state: GameState,
+  crisis: CrisisEvent,
+  channel: Channel,
+  topicKey: string,
+): boolean {
+  const now = state.time;
+  const last = escalationState.topicCooldown.get(topicKey) ?? -Infinity;
+  if (now - last < ESCALATION_TOPIC_COOLDOWN_SEC) return false;
+  escalationState.topicCooldown.set(topicKey, now);
+
+  const a = assessCrisisEscalation(state, crisis);
+  const where = a?.frontName ?? crisis.locationTag;
+  const etaStr = a && a.tCollapse !== Infinity ? `，预计 ${Math.round(a.tCollapse)} 秒内失守` : "";
+
+  let q: string;
+  if (a && a.kind === "safe_reinforce" && a.bestCandidate) {
+    const c = a.bestCandidate;
+    q = `${where}告急${etaStr}。我手头 ${c.leaderName}（${c.aliveCount}人）还闲着，要不要我调过去顶住？`;
+  } else if (a && a.kind === "dilemma") {
+    q = `${where}告急${etaStr}，可眼下能动的部队都在别处吃紧——是死守、后撤，还是从别的方向抽人过去？`;
+  } else {
+    q = `${where}出状况了：${crisis.message} —— 您看怎么处理？`;
+  }
+
+  const actionId = makeActionId();
+
+  // command_ack source → renders as the channel persona speaking (Chen on
+  // combat), NOT a system report (see ChatPanel isReportMessage).
+  addMessage("urgent", q, now, channel, undefined, "command_ack");
+  setActiveEscalation(channel, { actionId, question: q, createdAt: now });
+
+  // Step 1 log: escalate event + correlation id. The player's next command on
+  // this channel carries the id back, tying reaction → action. Pure
+  // observability — fire-and-forget, never blocks gameplay.
+  fetch(`${API_URL}/api/log-event`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      type: "escalate",
+      actionId,
+      channel,
+      frontId: a?.frontId ?? crisis.locationTag,
+      kind: a?.kind ?? "report_only",
+      message: q,
+      sessionId: SESSION_ID,
+    }),
+  }).catch(() => {});
+
+  return true;
 }
 
 // ── Diagnostic → Staff Feed bridge ──
@@ -545,18 +629,9 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       };
       const channel = activeDoctrine.commander ?? "ops";
       addMessage("urgent", crisis.message, state.time, channel, undefined, "event_report");
-      const candidates = findBestReinforcements(state, crisis, activeDoctrine);
-      const crisisOptions = generateCrisisCard(state, crisis, candidates, activeDoctrine);
-      createThread(
-        `DOCTRINE_BREACH:${activeDoctrine.id}:debug`,
-        "DOCTRINE_BREACH",
-        channel,
-        crisis.message,
-        crisis.message,
-        crisisOptions,
-        state.time,
-      );
-      addMessage("info", `[DEBUG] Crisis card 已生成 (${crisisOptions.length} 选项, ${candidates.length} 候选增援)`, state.time, "ops", undefined, "system");
+      // Step 6a: debug breach now escalates as a conversation question (no card).
+      escalateCrisisToConversation(state, crisis, channel, `DOCTRINE_BREACH:${activeDoctrine.id}:debug`);
+      addMessage("info", `[DEBUG] 已触发 escalate 对话问句`, state.time, "ops", undefined, "system");
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -801,6 +876,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetPressureDirector();
     resetHeartbeatState();
     resetStaffAskState();
+    resetEscalationState();
     clearMessages();
     clearThreads();
     addMessage("info", "等待指令...", 0, "ops", "system", "system");
@@ -843,6 +919,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetPressureDirector();
     resetHeartbeatState();
     resetStaffAskState();
+    resetEscalationState();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
@@ -1112,47 +1189,22 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       const advisorTriggers = processAdvisorTriggers(state);
       for (const trig of advisorTriggers) {
         if (trig.type === "crisis_card") {
-          // Build synthetic doctrine + crisis for generateCrisisCard reuse
+          // Step 6a: escalate as a Chen-voiced question instead of an A/B/C card.
           const locationTag = trig.event.type === "FACILITY_LOST" && trig.event.entityId
             ? (state.facilities.get(trig.event.entityId)?.regionId ?? trig.event.entityId)
             : (trig.event.entityId ?? "unknown");
-          // Synthetic doctrine — assignedSquads unused; crisisResponse.ts
-          // scans the battlefield directly via scanBattlefield().
-          const syntheticDoctrine = {
-            id: `advisor_trig_${Date.now()}`,
-            type: "must_hold" as const,
-            commander: trig.channel,
-            locationTag,
-            priority: "high" as const,
-            allowAutoReinforce: true,
-            assignedSquads: [] as string[],
-            createdAt: state.time,
-            status: "active" as const,
-          };
-          const syntheticCrisis = {
-            type: "DOCTRINE_BREACH" as const,
-            severity: "critical" as const,
-            doctrineId: syntheticDoctrine.id,
+          const syntheticCrisis: CrisisEvent = {
+            type: "DOCTRINE_BREACH",
+            severity: "critical",
+            doctrineId: "__escalation__",
             locationTag,
             message: trig.event.message,
             time: state.time,
           };
-          const candidates = findBestReinforcements(state, syntheticCrisis, syntheticDoctrine);
-          const crisisOptions = generateCrisisCard(state, syntheticCrisis, candidates, syntheticDoctrine);
-          if (crisisOptions.length > 0) {
-            const threadKey = `ADVISOR_CRISIS:${trig.event.type}:${trig.event.entityId ?? "global"}`;
-            createThread(
-              threadKey,
-              trig.event.type,
-              trig.channel,
-              trig.event.message,
-              trig.event.message,
-              crisisOptions,
-              state.time,
-            );
-            // Mark this topic so staff-ask LLM path won't create a duplicate card
-            crisisCardTopics.add(`${trig.event.type}:${trig.event.entityId ?? "global"}`);
-          }
+          const topicKey = `${trig.event.type}:${trig.event.entityId ?? "global"}`;
+          escalateCrisisToConversation(state, syntheticCrisis, trig.channel, `ADVISOR_CRISIS:${topicKey}`);
+          // Mark so the staff-ask path doesn't also escalate this topic.
+          crisisCardTopics.add(topicKey);
         } else if (trig.type === "llm_advice") {
           // Fire-and-forget /api/brief call
           const digest = buildDigest(state, [], [], []);
@@ -1182,20 +1234,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         const channel = doctrine?.commander ?? "ops";
         addMessage(level, crisis.message, crisis.time, channel, undefined, "event_report");
 
-        // DOCTRINE_BREACH: generate zero-delay crisis card + thread
+        // Step 6a: DOCTRINE_BREACH escalates as a conversation question (no card).
         if (crisis.type === "DOCTRINE_BREACH" && doctrine && doctrine.status === "active") {
-          const candidates = findBestReinforcements(state, crisis, doctrine);
-          const crisisOptions = generateCrisisCard(state, crisis, candidates, doctrine);
-          createThread(
-            `DOCTRINE_BREACH:${crisis.doctrineId}`,
-            "DOCTRINE_BREACH",
-            channel,
-            crisis.message,
-            crisis.message,
-            crisisOptions,
-            state.time,
-          );
-          // Mark so staff-ask LLM path won't duplicate
+          escalateCrisisToConversation(state, crisis, channel, `DOCTRINE_BREACH:${crisis.doctrineId}`);
+          // Mark so the staff-ask path won't also escalate this topic.
           crisisCardTopics.add(`UNDER_ATTACK:${crisis.locationTag}`);
         }
       }
@@ -1332,29 +1374,26 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         // Phase 3: actionRequired events should always surface and eventually produce a decision thread.
         // Skip staff-ask if a rule-based crisis card was already generated for this topic
         // (avoids duplicate English LLM card + Chinese rule card for the same event).
-        if (ENABLE_STAFF_ASK && evt.actionRequired) {
+        // Step 6a: actionRequired events surface in the report lane AND escalate as
+        // a Chen-voiced conversation question (replacing the staff-ask LLM card).
+        if (evt.actionRequired) {
           const topicKey = `${evt.type}:${evt.entityId ?? "global"}`;
           addMessage(level, evt.message, state.time, channel, undefined, "event_report");
 
-          if (crisisCardTopics.has(topicKey)) continue; // rule-based card already covers this
+          if (crisisCardTopics.has(topicKey)) continue; // crisis_card / doctrine path already escalated this
 
-          const started = tryStartStaffAsk(
-            { type: evt.type, message: evt.message, entityId: evt.entityId },
-            channel,
-            state.time,
-            topicKey,
-          );
-          if (started) {
-            // New ask started for this channel; stale pending payload is no longer useful.
-            staffAskState.pendingByChannel[channel] = null;
-          } else {
-            // Channel busy or topic in cooldown → queue latest actionRequired event for retry.
-            staffAskState.pendingByChannel[channel] = {
-              topicKey,
-              eventType: evt.type,
-              eventMessage: evt.message,
-            };
-          }
+          const locationTag = evt.type === "FACILITY_LOST" && evt.entityId
+            ? (state.facilities.get(evt.entityId)?.regionId ?? evt.entityId)
+            : (evt.entityId ?? "unknown");
+          const synthCrisis: CrisisEvent = {
+            type: "DOCTRINE_BREACH",
+            severity: "critical",
+            doctrineId: "__escalation__",
+            locationTag,
+            message: evt.message,
+            time: state.time,
+          };
+          escalateCrisisToConversation(state, synthCrisis, channel, topicKey);
         } else {
           // Regular report-only message
           addMessage(level, evt.message, state.time, channel, undefined, "event_report");

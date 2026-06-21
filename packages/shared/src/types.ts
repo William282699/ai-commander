@@ -252,6 +252,12 @@ export interface Order {
     radius: number;
   };
   crisisFrontId?: string;     // Tag: this order is a reinforcement for this front (dedup)
+  // Step 6a groundwork (issued only from 6b onward): mark an engine-initiated
+  // autonomous order and carry a correlation id so a player's later reaction can
+  // be tied back to the action in the [EVENT] log. 6a poses questions only and
+  // issues NO autonomous orders, so these stay undefined until 6b.
+  autonomous?: boolean;
+  actionId?: string;
 }
 
 // --- Production ---
