@@ -284,6 +284,7 @@ const DIAG_LEVEL: Record<string, MessageLevel> = {
   PATH_BLOCKED: "warning",
   PRODUCE_FAIL: "warning",
   TRADE_FAIL: "warning",
+  TRADE_BUDGET: "info", // 7b.1: Emily's budget-buy report (actual spend/qty/remaining)
   NO_VISIBLE_TARGET: "warning",
   NO_AVAILABLE_UNITS: "warning",
   IMPASSABLE_TARGET: "warning",
@@ -1295,7 +1296,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           if (d.time > lastDrainedDiagTime) {
             if (SUPPRESSED_DIAG_CODES.has(d.code)) continue; // Day 9.5: suppress spam
             const lvl = DIAG_LEVEL[d.code] ?? "warning";
-            addMessage(lvl, d.message, d.time, "ops", undefined, "system");
+            // 7b.1: trade-budget feedback is Emily's domain → logistics lane.
+            // (Other diagnostics, incl. single-buy TRADE_FAIL, stay on ops — unchanged.)
+            const diagChannel: Channel = d.code === "TRADE_BUDGET" ? "logistics" : "ops";
+            addMessage(lvl, d.message, d.time, diagChannel, undefined, "system");
           }
         }
         lastDrainedDiagTime =

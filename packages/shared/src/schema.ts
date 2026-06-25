@@ -115,6 +115,26 @@ export function sanitizeIntent(raw: unknown): Intent | null {
   if (typeof obj.produceType === "string") intent.produceType = obj.produceType;
   if (typeof obj.tradeAction === "string") intent.tradeAction = obj.tradeAction;
 
+  // 7b.1: budget-scaled trade. Defensive — anything malformed is omitted, which
+  // the engine treats as a normal one-shot buy (so a bad parse can never silently
+  // drain all the player's money). The engine, never the LLM, does the arithmetic.
+  if (obj.tradeBudget && typeof obj.tradeBudget === "object" && !Array.isArray(obj.tradeBudget)) {
+    const tb = obj.tradeBudget as Record<string, unknown>;
+    if (tb.mode === "single") {
+      intent.tradeBudget = { mode: "single" };
+    } else if (tb.mode === "fraction_of_money"
+        && typeof tb.fraction === "number" && Number.isFinite(tb.fraction)) {
+      // Safety: only honor a budget buy when fraction is a real, finite number,
+      // clamped to [0,1]. A missing / NaN / Infinity fraction is a malformed parse →
+      // leave tradeBudget UNSET so the engine runs the normal single buy. A dropped
+      // field must NEVER silently spend all the money. "全部钱买X" still works because
+      // the LLM emits fraction:1 explicitly.
+      intent.tradeBudget = { mode: "fraction_of_money", fraction: Math.max(0, Math.min(1, tb.fraction)) };
+    }
+    // single, fraction_of_money w/ missing|bad fraction, or any other mode
+    //   → leave tradeBudget undefined → single (old one-shot buy) behavior
+  }
+
   // Patrol radius (Day 9.5): clamp [3, 30], integer
   if (typeof obj.patrolRadius === "number") {
     intent.patrolRadius = Math.round(Math.max(3, Math.min(30, obj.patrolRadius)));

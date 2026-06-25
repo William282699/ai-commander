@@ -688,6 +688,7 @@ function resolveTrade(
     action: "trade",
     target: null,
     tradeType: tradeAction as import("@ai-commander/shared").TradeType,
+    tradeBudget: intent.tradeBudget, // 7b.1: carry budget intent through to executeTrade
     priority: mapUrgency(intent.urgency),
   }];
 

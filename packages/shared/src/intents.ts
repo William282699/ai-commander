@@ -24,6 +24,19 @@ export type UrgencyLevel = "low" | "medium" | "high" | "critical";
 export type QuantityHint = "all" | "most" | "some" | "few" | number;
 export type UnitCategoryHint = "armor" | "infantry" | "air" | "naval";
 
+/**
+ * Step 7b.1 — budget-scaled trade. The LLM only classifies the budget INTENT into
+ * this struct; the engine computes how many buys / how much spend / what remains
+ * from TRADE_COSTS + current money (never the LLM). Absent or `single` = the old
+ * one-shot buy (unchanged behavior). `fraction_of_money` means "spend this share of
+ * current money on the trade" — e.g. 1 = all-in, 0.5 = half, 0.75 = three-quarters.
+ * Generic on purpose: ammo/intel reuse the same struct — no `buy_all_xxx` fields.
+ */
+export interface TradeBudget {
+  mode: "single" | "fraction_of_money";
+  fraction?: number; // 0–1, only meaningful for fraction_of_money; engine clamps
+}
+
 export interface Intent {
   type: IntentType;
 
@@ -51,6 +64,7 @@ export interface Intent {
   // Production / trade specifics
   produceType?: string;  // unit type to produce
   tradeAction?: string;  // buy_fuel, sell_ammo, etc.
+  tradeBudget?: TradeBudget; // 7b.1: budget-scaled trade (absent/single = one buy)
 
   // Patrol specifics (Day 9.5)
   patrolRadius?: number; // 小=5, 中=10, 大=15 (clamped [3,30])

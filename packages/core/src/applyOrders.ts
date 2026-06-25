@@ -3,7 +3,7 @@
 // All orders flow through here → mutate GameState
 // ============================================================
 
-import type { GameState, Order, Unit, Position, TradeType, PatrolTask } from "@ai-commander/shared";
+import type { GameState, Order, Unit, Position, TradeType, TradeBudget, PatrolTask } from "@ai-commander/shared";
 import { TRADE_COSTS } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
 import { findPath, clearPathCache } from "./pathfinding";
@@ -186,29 +186,80 @@ function handleEconomyOrder(
         `生产 ${order.produceUnitType} 失败: ${result.reason}`);
     }
   } else if (order.action === "trade" && order.tradeType) {
-    executeTrade(state, team, order.tradeType);
+    executeTrade(state, team, order.tradeType, order.tradeBudget);
   }
+}
+
+/** Player-facing resource name for trade feedback. */
+function tradeResName(tradeType: TradeType): string {
+  if (tradeType === "buy_fuel") return "燃油";
+  if (tradeType === "buy_ammo") return "弹药";
+  if (tradeType === "buy_intel") return "情报";
+  return tradeType;
+}
+
+/** Apply a bought resource gain to the right pool. */
+function addBoughtResource(eco: GameState["economy"]["player"], tradeType: TradeType, gain: number): void {
+  if (tradeType === "buy_fuel") eco.resources.fuel += gain;
+  else if (tradeType === "buy_ammo") eco.resources.ammo += gain;
+  else if (tradeType === "buy_intel") eco.resources.intel += gain;
 }
 
 function executeTrade(
   state: GameState,
   team: "player" | "enemy",
   tradeType: TradeType,
+  budget?: TradeBudget,
 ): void {
   const info = TRADE_COSTS[tradeType];
   if (!info) return;
   const eco = state.economy[team];
 
+  // 7b.1 — budget-scaled BUYS. Only buys (cost>0) honor fraction_of_money; sells
+  // and the default `single` path fall through to the unchanged one-shot logic
+  // below, so normal "buy fuel" behaves exactly as before. The ENGINE does all the
+  // arithmetic — the LLM only classified the budget intent.
+  // Verified (economy.ts): resources have NO upper cap (income accumulates; only a
+  // 0 floor on spend), so batched buys can't overflow/waste — no cap clamp needed.
+  if (
+    info.cost > 0 &&
+    budget?.mode === "fraction_of_money" &&
+    typeof budget.fraction === "number" &&
+    Number.isFinite(budget.fraction)
+  ) {
+    // Defense in depth (mirrors schema.ts): only batch-buy when fraction is a real,
+    // finite number. A missing / NaN / Infinity fraction — however the Order was
+    // built (schema is one source; future 6b autonomous orders / tests are others) —
+    // falls through to the single one-shot buy below. Never all-in on a bad fraction.
+    const fraction = Math.max(0, Math.min(1, budget.fraction));
+    const budgetMoney = eco.resources.money * fraction;
+    const times = Math.floor(budgetMoney / info.cost);
+    if (times < 1) {
+      if (team === "player") {
+        pushDiagnostic(state, "TRADE_BUDGET",
+          `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一份${tradeResName(tradeType)}（$${info.cost}）都买不下来，没动钱。`);
+      }
+      return;
+    }
+    const spend = times * info.cost;
+    const gain = times * info.gain;
+    eco.resources.money -= spend;
+    addBoughtResource(eco, tradeType, gain);
+    if (team === "player") {
+      pushDiagnostic(state, "TRADE_BUDGET",
+        `${tradeResName(tradeType)} ×${times}：花了 $${spend}（+${gain}），还剩 $${Math.floor(eco.resources.money)}。`);
+    }
+    return;
+  }
+
   if (info.cost > 0) {
-    // Buying: spend money, gain resource
+    // Buying: spend money, gain resource  (single — unchanged)
     if (eco.resources.money < info.cost) {
       if (team === "player") pushDiagnostic(state, "TRADE_FAIL", "交易失败: 资金不足");
       return;
     }
     eco.resources.money -= info.cost;
-    if (tradeType === "buy_fuel") eco.resources.fuel += info.gain;
-    else if (tradeType === "buy_ammo") eco.resources.ammo += info.gain;
-    else if (tradeType === "buy_intel") eco.resources.intel += info.gain;
+    addBoughtResource(eco, tradeType, info.gain);
   } else {
     // Selling: lose resource, gain money (cost is negative)
     const loss = -info.gain; // positive amount of resource to sell
