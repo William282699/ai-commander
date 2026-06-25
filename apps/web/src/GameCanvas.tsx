@@ -50,6 +50,7 @@ import {
   checkDoctrines,
   cancelDoctrine,
   assessCrisisEscalation,
+  selectEscalationEvent,
   updateTasks,
   updateBattleMarkers,
   resetEngagementCache,
@@ -1362,6 +1363,20 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       };
 
       const reportEvts = drainReportEvents(state, 5);
+
+      // Step 7b — director-gated denoise. In a multi-crisis window only ONE
+      // actionRequired event escalates to a Chen-voiced question (the director's
+      // pick); the rest still surface in the quiet report lane but do not ask.
+      // Single-crisis windows are unchanged from 6a (selectEscalationEvent returns
+      // the sole candidate), so there is no regression. The eligibility filter must
+      // mirror the per-event skips below (economy spam + crisis_card-handled topics).
+      const escalationCandidates = reportEvts.filter((e) =>
+        e.actionRequired &&
+        e.type !== "ECONOMY_REPORT" && e.type !== "ECONOMY_SURPLUS" &&
+        !crisisCardTopics.has(`${e.type}:${e.entityId ?? "global"}`),
+      );
+      const eventToEscalate = selectEscalationEvent(state, escalationCandidates);
+
       for (const evt of reportEvts) {
         // Suppress periodic economy spam — these repeat UI numbers and add no value.
         // Real decision-point events (FACILITY_LOST, SQUAD_HEAVY_LOSS, etc.) still pass through.
@@ -1381,6 +1396,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           addMessage(level, evt.message, state.time, channel, undefined, "event_report");
 
           if (crisisCardTopics.has(topicKey)) continue; // crisis_card / doctrine path already escalated this
+
+          // Step 7b: only the director's chosen event escalates this window; the
+          // others are already in the report lane above (quiet, queryable).
+          if (evt !== eventToEscalate) continue;
 
           const locationTag = evt.type === "FACILITY_LOST" && evt.entityId
             ? (state.facilities.get(evt.entityId)?.regionId ?? evt.entityId)

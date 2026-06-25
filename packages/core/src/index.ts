@@ -27,3 +27,8 @@ export { updateTasks, computeTaskPriority } from "./taskTracker";
 export { updateBattleMarkers, resetEngagementCache } from "./battleAwareness";
 export { processAdvisorTriggers } from "./advisorTrigger";
 export type { AdvisorTriggerResult } from "./advisorTrigger";
+// Step 7a — director read-board (pure; not yet wired into UI/LLM)
+export { selectDirectorBeat, collectDirectorBeats, snapshotForDirector, describeDirectorBeat } from "./director";
+// Step 7b — report-event denoise gate (pure; chooses which event escalates)
+export { selectEscalationEvent } from "./director";
+export type { DirectorBeat, DirectorBeatKind, DirectorStake, DirectorTrend, DirectorMetricSnapshot, DirectorSnapshot } from "./director";
