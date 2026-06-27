@@ -49,8 +49,10 @@ import {
   buildDigest,
   checkDoctrines,
   cancelDoctrine,
-  assessCrisisEscalation,
   selectEscalationEvent,
+  frontEscalationFacts,
+  facilityEscalationFacts,
+  facilityContestWorthAsking,
   updateTasks,
   updateBattleMarkers,
   resetEngagementCache,
@@ -92,7 +94,7 @@ const EVENT_CHANNEL_MAP: Record<ReportEventType, Channel> = {
   SUPPLY_LOW: "logistics",
   FACILITY_CAPTURED: "ops",
   FACILITY_LOST: "ops",
-  FACILITY_CONTESTED: "combat",
+  FACILITY_CONTESTED: "ops", // 7c.1-stab A3: stolen/contested objectives are Marcus's domain, not Chen's
   MISSION_DONE: "ops",
   MISSION_FAILED: "ops",
   HQ_DAMAGED: "combat",
@@ -139,11 +141,16 @@ function resetStaffAskState(): void {
 // [EVENT] log. Per-topic cooldown stops the same front re-asking every tick.
 const escalationState = {
   topicCooldown: new Map<string, number>(), // topicKey → game time of last escalation
+  // 7c.1: one async voice per channel at a time; session discards stale responses after restart.
+  inFlight: { ops: false, logistics: false, combat: false } as Record<Channel, boolean>,
+  session: 0,
 };
 const ESCALATION_TOPIC_COOLDOWN_SEC = 30;
 
 function resetEscalationState(): void {
   escalationState.topicCooldown.clear();
+  for (const ch of ["ops", "logistics", "combat"] as Channel[]) escalationState.inFlight[ch] = false;
+  escalationState.session++;
 }
 
 function makeActionId(): string {
@@ -156,12 +163,21 @@ function makeActionId(): string {
 }
 
 /**
- * Escalate a crisis as a Chen-voiced question in `channel`, replacing the old
- * thread card. Deterministic, template-based phrasing off the structured
- * assessment — no matching of player command/report strings (the LLM still
- * parses the player's free-text reply via the normal command path).
+ * Escalate a crisis as an LLM-voiced QUESTION in `channel` (Step 7c.1, replacing
+ * 6a's fixed defensive templates). The engine hands the LLM only the STRUCTURED
+ * facts for THIS one situation (`frontEscalationFacts` + `stake`) — never the full
+ * digest, never a fixed option menu — and the LLM writes the sentence. The `stake`
+ * fact is what stops the voice assuming we're on defense when we're attacking.
  *
- * Returns true if a question was posted (false if still on cooldown).
+ * Correlation-safe (async): cooldown / in-flight are reserved synchronously, but the
+ * question is posted and `setActiveEscalation` is set ONLY when the voiced (or
+ * neutral-fallback) line becomes VISIBLE. During the in-flight window there is
+ * deliberately NO active escalation, so a player's unrelated command then does NOT
+ * carry a stale escalateId. On voice failure a NEUTRAL fallback is posted — never the
+ * old 死守/后撤/抽人 template, never assuming defense.
+ *
+ * Returns true if the escalation was accepted (a question will post), false if
+ * skipped (cooldown, or a voice already in flight on this channel).
  */
 function escalateCrisisToConversation(
   state: GameState,
@@ -172,45 +188,113 @@ function escalateCrisisToConversation(
   const now = state.time;
   const last = escalationState.topicCooldown.get(topicKey) ?? -Infinity;
   if (now - last < ESCALATION_TOPIC_COOLDOWN_SEC) return false;
+  if (escalationState.inFlight[channel]) return false; // one escalation voice per channel at a time
+
+  // 7c.1-stab (A1): a FACILITY_CONTESTED crisis carries a facility id, not a front,
+  // so the front helper would return near-empty facts and the voice could only
+  // parrot raw_signal. Read facility-specific grounding facts instead.
+  const facility = state.facilities.get(crisis.locationTag);
+  const facFacts = facility ? facilityEscalationFacts(state, crisis.locationTag) : null;
+
+  // 7c.1-stab (A4): minimal worthiness gate — a trivial nibble on a minor post with
+  // nothing to do about it stays a quiet report (already posted by the drain), no
+  // white-text question. No cooldown consumed here, so it can still escalate later
+  // if the capture genuinely advances or becomes actionable.
+  if (facFacts && !facilityContestWorthAsking(facFacts)) return false;
+
+  // Reserve synchronously so we don't re-fire, but DO NOT setActiveEscalation yet —
+  // correlation activates only once the question is visible (see postQuestion).
   escalationState.topicCooldown.set(topicKey, now);
-
-  const a = assessCrisisEscalation(state, crisis);
-  const where = a?.frontName ?? crisis.locationTag;
-  const etaStr = a && a.tCollapse !== Infinity ? `，预计 ${Math.round(a.tCollapse)} 秒内失守` : "";
-
-  let q: string;
-  if (a && a.kind === "safe_reinforce" && a.bestCandidate) {
-    const c = a.bestCandidate;
-    q = `${where}告急${etaStr}。我手头 ${c.leaderName}（${c.aliveCount}人）还闲着，要不要我调过去顶住？`;
-  } else if (a && a.kind === "dilemma") {
-    q = `${where}告急${etaStr}，可眼下能动的部队都在别处吃紧——是死守、后撤，还是从别的方向抽人过去？`;
-  } else {
-    q = `${where}出状况了：${crisis.message} —— 您看怎么处理？`;
-  }
-
+  escalationState.inFlight[channel] = true;
+  const reqSession = escalationState.session;
   const actionId = makeActionId();
 
-  // command_ack source → renders as the channel persona speaking (Chen on
-  // combat), NOT a system report (see ChatPanel isReportMessage).
-  addMessage("urgent", q, now, channel, undefined, "command_ack");
-  setActiveEscalation(channel, { actionId, question: q, createdAt: now });
+  const frontFacts = facFacts ? null : frontEscalationFacts(state, crisis);
+  const place = facFacts?.facilityName ?? frontFacts?.frontName ?? crisis.locationTag;
+  const logFrontId = frontFacts?.frontId ?? crisis.locationTag;
+  const logStake = facFacts ? "contested_objective" : (frontFacts?.stake ?? "unknown");
 
-  // Step 1 log: escalate event + correlation id. The player's next command on
-  // this channel carries the id back, tying reaction → action. Pure
-  // observability — fire-and-forget, never blocks gameplay.
-  fetch(`${API_URL}/api/log-event`, {
+  // Structured mini-facts for ONE situation — NOT the full battlefield digest, NO
+  // option menu, NO question text. The LLM writes the question from these.
+  const miniFacts = (facFacts
+    ? [
+        "SITUATION (voice ONE in-character line for THIS single point only):",
+        "type: facility_contested",
+        `facility: ${facFacts.facilityName}`,
+        `owner: ${facFacts.owner}`,
+        `capturing: ${facFacts.capturingTeam ?? "none"}`,
+        `capture_progress_pct: ${Math.round(facFacts.captureProgress * 100)}`,
+        `is_keypoint: ${facFacts.isKeypoint}`,
+        `is_objective: ${facFacts.isObjective}`,
+        `nearby_forces_ours_vs_enemy_visible: ${facFacts.nearbyPlayerUnits} vs ${facFacts.nearbyEnemyVisibleUnits}`,
+        `idle_reinforcement_available: ${facFacts.idleReinforcementAvailable}`,
+        `raw_signal: ${crisis.message}`,
+      ]
+    : [
+        "SITUATION (voice ONE in-character line for THIS single point only):",
+        `front: ${place}`,
+        `stake: ${logStake}`,
+        `our_committed_force_survival_sec: ${frontFacts?.estimatedCollapseSeconds ?? "unknown"}`,
+        `local_power_ratio_ours_to_visible_enemy: ${frontFacts?.powerRatio ?? "unknown"}`,
+        `idle_reinforcement_available: ${
+          frontFacts?.freeReinforcement
+            ? `${frontFacts.freeReinforcement.leaderName}, ${frontFacts.freeReinforcement.aliveCount} men`
+            : "none"
+        }`,
+        `raw_signal: ${crisis.message}`,
+      ]).join("\n");
+
+  // Neutral fallback — one open question, no defensive assumption, no option menu.
+  const fallback =
+    !facFacts && frontFacts?.estimatedCollapseSeconds != null
+      ? `${place} 吃紧，约 ${frontFacts.estimatedCollapseSeconds} 秒，您看怎么处理？`
+      : `${place} 出状况了，您要怎么处理？`;
+
+  // Post the question and ACTIVATE correlation only now (the line is visible).
+  const postQuestion = (text: string): void => {
+    if (reqSession !== escalationState.session) return; // restart happened → discard
+    if (state.gameOver) return;
+    const t = state.time;
+    // command_ack source → renders as the channel persona speaking, not a report.
+    addMessage("urgent", text, t, channel, undefined, "command_ack");
+    setActiveEscalation(channel, { actionId, question: text, createdAt: t });
+    // Step 1 log: escalate + correlation id (the player's reply carries it back).
+    fetch(`${API_URL}/api/log-event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "escalate",
+        actionId,
+        channel,
+        frontId: logFrontId,
+        stake: logStake,
+        message: text,
+        sessionId: SESSION_ID,
+      }),
+    }).catch(() => {});
+  };
+
+  // Voice it (one small fact pack). On any failure, fall back to the neutral line.
+  fetch(`${API_URL}/api/brief`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      type: "escalate",
-      actionId,
-      channel,
-      frontId: a?.frontId ?? crisis.locationTag,
-      kind: a?.kind ?? "report_only",
-      message: q,
-      sessionId: SESSION_ID,
-    }),
-  }).catch(() => {});
+    body: JSON.stringify({ digest: miniFacts, channel, mode: "escalation" }),
+  })
+    .then((r) => r.json())
+    .then((data) => {
+      const voiced =
+        typeof data?.brief === "string" && data.brief.trim() ? data.brief.trim() : null;
+      // 7c.1-stab (Fix 1): this is the ASK path — it must register a QUESTION the
+      // player can answer, never a pure statement left active (which would bleed into
+      // the next command). If the LLM returned a non-question, fall back to the
+      // neutral question. Defense-in-depth behind the now decision-only prompt.
+      const text = voiced && /[？?]/.test(voiced) ? voiced : fallback;
+      postQuestion(text);
+    })
+    .catch(() => postQuestion(fallback))
+    .finally(() => {
+      if (reqSession === escalationState.session) escalationState.inFlight[channel] = false;
+    });
 
   return true;
 }
@@ -1374,11 +1458,22 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       // Single-crisis windows are unchanged from 6a (selectEscalationEvent returns
       // the sole candidate), so there is no regression. The eligibility filter must
       // mirror the per-event skips below (economy spam + crisis_card-handled topics).
-      const escalationCandidates = reportEvts.filter((e) =>
-        e.actionRequired &&
-        e.type !== "ECONOMY_REPORT" && e.type !== "ECONOMY_SURPLUS" &&
-        !crisisCardTopics.has(`${e.type}:${e.entityId ?? "global"}`),
-      );
+      const escalationCandidates = reportEvts.filter((e) => {
+        if (!e.actionRequired) return false;
+        if (e.type === "ECONOMY_REPORT" || e.type === "ECONOMY_SURPLUS") return false;
+        if (crisisCardTopics.has(`${e.type}:${e.entityId ?? "global"}`)) return false;
+        // 7c.1-stab (A4): worthiness gate must run BEFORE selectEscalationEvent — an
+        // unworthy 1% FACILITY_CONTESTED must not win the single per-window slot only
+        // to be suppressed later (leaving a genuinely ask-worthy event demoted with no
+        // question). Unworthy facility contests still hit the report lane below; they
+        // just don't compete for eventToEscalate. Non-facility events are unchanged.
+        // (escalateCrisisToConversation keeps the same gate internally as defense.)
+        if (e.type === "FACILITY_CONTESTED" && e.entityId) {
+          const ff = facilityEscalationFacts(state, e.entityId);
+          if (ff && !facilityContestWorthAsking(ff)) return false;
+        }
+        return true;
+      });
       const eventToEscalate = selectEscalationEvent(state, escalationCandidates);
 
       for (const evt of reportEvts) {

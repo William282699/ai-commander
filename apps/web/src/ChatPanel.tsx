@@ -367,6 +367,18 @@ function isCancelReply(s: string): boolean {
   return HIGH_IMPACT_CANCEL_WORDS.includes(normalizeReply(s));
 }
 
+// 7c.1-stab (Fix 3): a small decline/defer set for DISMISSING an active escalation
+// (a confirm/cancel-style mechanism, NOT command-keyword enumeration — we never
+// parse an execution action out of these). A reply that opens with one of these
+// means the player is waving off the question, so the escalation must be cleared
+// or it bleeds into the next, unrelated command. Leading-match (not exact) because
+// a real decline is usually phrased as a fuller sentence.
+const ESCALATION_DECLINE_WORDS = ["不用", "暂时不用", "先不用", "别管", "先观察", "不处理", "先不动"];
+function isDeclineReply(s: string): boolean {
+  const n = normalizeReply(s);
+  return ESCALATION_DECLINE_WORDS.some((w) => n.startsWith(w));
+}
+
 // Step 5: build the one-line question/concern for a gated command (buckets B & C).
 // It embeds the advisor's brief (the concrete unit+target+task) so the player's
 // short "确认"/"对" resolves via the prompt's SHORT FOLLOW-UP RESOLUTION rule.
@@ -1144,9 +1156,18 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     const activeEsc = getActiveEscalation(ch, state.time);
     const escalateId = activeEsc?.actionId;
     const escalationContext = activeEsc
-      ? `\n---ACTIVE_ESCALATION---\nChen 刚问:「${activeEsc.question}」\n指挥官下面这句是对它的回应。`
+      ? `\n---ACTIVE_ESCALATION---\n参谋刚问:「${activeEsc.question}」\n指挥官下面这句是对它的回应。`
       : "";
-    if (activeEsc) clearEscalation(ch);
+    // 7c.1-stab (A2 Tier 1): do NOT clear the escalation on every first reply — a
+    // multi-step answer ("调用Drake去" then "可以") must keep the question context so
+    // the follow-up still lands. Clear on an explicit cancel/decline here; an executed
+    // (actionable) reply clears it in processAdvisorData below; an abandoned one
+    // auto-expires (getActiveEscalation drops it after 120s). While it stays active,
+    // this channel's commands carry the escalation context — bounded by that window
+    // plus clear-on-execute. (Deterministic resolve of a confirm is Tier 2, deferred.)
+    // Fix 3: a decline/defer reply ("不用/先观察/...") dismisses the escalation so it
+    // can't bleed into the player's NEXT, unrelated command.
+    if (activeEsc && (isCancelReply(userMsg) || isDeclineReply(userMsg))) clearEscalation(ch);
 
     commanderMemoryRef.current[ch].playerIntent = userMsg;
     const baseDigest = buildDigestForChannel(state, ch, commanderMemoryRef.current[ch]);
@@ -1217,6 +1238,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           });
         }
       } else {
+        // 7c.1-stab (A2 Tier 1): an actionable reply (≥1 option) resolves the
+        // escalation it was answering — clear it so later commands aren't biased by
+        // stale context. Guard by id so a newer escalation arriving mid-round-trip
+        // isn't dropped. The NOOP / clarification branches above deliberately keep
+        // the escalation alive for a follow-up.
+        if (escalateId && getActiveEscalation(ch, state.time)?.actionId === escalateId) {
+          clearEscalation(ch);
+        }
         if (data.brief) {
           pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
         }

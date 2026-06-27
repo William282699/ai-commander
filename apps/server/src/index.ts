@@ -191,13 +191,15 @@ app.post("/api/command-group", async (req, res) => {
 
 // Light brief call (periodic update, Day 16B: channel-aware)
 app.post("/api/brief", async (req, res) => {
-  const { digest, channel } = req.body;
+  const { digest, channel, mode } = req.body;
   if (!digest || typeof digest !== "string") {
     res.status(400).json({ error: "digest (string) 必填" });
     return;
   }
 
-  const result = await callLightBrief(digest, channel);
+  // 7c.1: mode="escalation" voices a decision question from the beat facts;
+  // anything else keeps the legacy statement-style brief.
+  const result = await callLightBrief(digest, channel, mode === "escalation" ? "escalation" : "brief");
   if (!result) {
     res.status(502).json({ error: "简报生成失败" });
     return;

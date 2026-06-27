@@ -31,4 +31,10 @@ export type { AdvisorTriggerResult } from "./advisorTrigger";
 export { selectDirectorBeat, collectDirectorBeats, snapshotForDirector, describeDirectorBeat } from "./director";
 // Step 7b — report-event denoise gate (pure; chooses which event escalates)
 export { selectEscalationEvent } from "./director";
+// Step 7c.1 — escalation grounding facts (pure; for LLM voice, not a template)
+export { frontEscalationFacts } from "./director";
+export type { EscalationFacts } from "./director";
+// Step 7c.1 stabilization — facility-contest grounding facts + worthiness gate (pure)
+export { facilityEscalationFacts, facilityContestWorthAsking } from "./director";
+export type { FacilityEscalationFacts } from "./director";
 export type { DirectorBeat, DirectorBeatKind, DirectorStake, DirectorTrend, DirectorMetricSnapshot, DirectorSnapshot } from "./director";

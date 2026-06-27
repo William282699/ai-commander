@@ -39,7 +39,7 @@
 //     feint now requires VISIBLE massing on a quiet axis.
 // ============================================================
 
-import type { GameState, Front, Channel, CrisisEvent, MissionType, ReportEvent, ReportEventType } from "@ai-commander/shared";
+import type { GameState, Front, Channel, CrisisEvent, MissionType, ReportEvent, ReportEventType, Team } from "@ai-commander/shared";
 import { assessCrisisEscalation } from "./crisisResponse";
 
 // ── Tunables (one place, so later steps tune from real playtest, not guesswork) ──
@@ -657,6 +657,135 @@ export function selectEscalationEvent(
     }
   }
   return best;
+}
+
+// ============================================================
+// Step 7c.1 — Escalation grounding facts (for LLM voice, NOT a template)
+//
+// When the web layer escalates a crisis as a question, it must hand the LLM the
+// CONCRETE structured facts (so the voice can't go generic) PLUS the neutral
+// `stake` (so it never assumes we're defending). This bundles exactly that — no
+// player-facing wording, no options, no question. The engine states facts; the LLM
+// (7c voice) writes the sentence. Reuses 6a's `assessCrisisEscalation` for the
+// collapse math (untouched) and the director's own stake + power read.
+// ============================================================
+
+export interface EscalationFacts {
+  frontId: string;
+  frontName: string;
+  stake: DirectorStake;
+  /** Survival estimate of OUR committed force at the front; null if stable/n-a. */
+  estimatedCollapseSeconds: number | null;
+  /** Fresh fog-gated playerDPS/enemyDPS at the front; null if no known enemy. */
+  powerRatio: number | null;
+  /** An idle/low-priority squad that could be committed; null for a dilemma/none. */
+  freeReinforcement: { leaderName: string; aliveCount: number } | null;
+}
+
+/**
+ * Gather the grounding facts for escalating `crisis` as a question. Pure. Returns
+ * null only when the crisis front can't be resolved at all (caller then voices a
+ * minimal neutral line). The stake is what stops the voice assuming a defense.
+ */
+export function frontEscalationFacts(state: GameState, crisis: CrisisEvent): EscalationFacts | null {
+  const a = assessCrisisEscalation(state, crisis);
+  if (!a) return null;
+
+  const front = state.fronts.find((f) => f.id === a.frontId);
+  return {
+    frontId: a.frontId,
+    frontName: a.frontName,
+    stake: front ? classifyStake(state, front) : "unknown",
+    estimatedCollapseSeconds: a.tCollapse === Infinity ? null : Math.round(a.tCollapse),
+    powerRatio: front ? freshFrontPowerRatio(state, front) : null,
+    freeReinforcement: a.bestCandidate
+      ? { leaderName: a.bestCandidate.leaderName, aliveCount: a.bestCandidate.aliveCount }
+      : null,
+  };
+}
+
+// ── 7c.1 stabilization (A1): facility-contest grounding facts ──────────────────
+// A FACILITY_CONTESTED crisis carries a facility id, which doesn't resolve to a
+// front — so the front helper above returns near-empty facts and the voice could
+// only parrot raw_signal. This reads the facility directly so the LLM has real,
+// specific facts (name, owner, who's capturing, progress, keypoint/objective
+// status, nearby forces, whether help is available). Pure read.
+
+/** Tunables for the facility worthiness gate (A4). One place to tune from playtest. */
+const FACILITY_GATE = {
+  /** A capture this far along counts as "genuinely being taken". Conservative. */
+  PROGRESS_ASK_THRESHOLD: 0.34,
+  /** Radius (tiles) around the facility for the nearby-force tally. */
+  NEAR_RADIUS: 12,
+} as const;
+
+export interface FacilityEscalationFacts {
+  facilityName: string;
+  owner: Team;
+  capturingTeam: Team | null;
+  captureProgress: number; // 0-1
+  isKeypoint: boolean;     // loss is a defeat trigger (scenarioWinConfig.friendlyKeypoints)
+  isObjective: boolean;    // counts toward victory (captureObjectives)
+  nearbyPlayerUnits: number;
+  nearbyEnemyVisibleUnits: number;
+  /** Is there ANY dispatchable idle combat unit that could answer this? (cheap proxy) */
+  idleReinforcementAvailable: boolean;
+}
+
+export function facilityEscalationFacts(state: GameState, facilityId: string): FacilityEscalationFacts | null {
+  const f = state.facilities.get(facilityId);
+  if (!f) return null;
+
+  const r2 = FACILITY_GATE.NEAR_RADIUS * FACILITY_GATE.NEAR_RADIUS;
+  let nearbyPlayerUnits = 0;
+  let nearbyEnemyVisibleUnits = 0;
+  let idleReinforcementAvailable = false;
+  state.units.forEach((u) => {
+    if (u.hp <= 0 || u.state === "dead") return;
+    const dx = u.position.x - f.position.x;
+    const dy = u.position.y - f.position.y;
+    const near = dx * dx + dy * dy <= r2;
+    if (u.team === "player") {
+      if (near) nearbyPlayerUnits++;
+      // an idle, non-commander, armed unit anywhere = something we could send
+      if (!idleReinforcementAvailable && u.state === "idle" && u.type !== "commander" && u.attackDamage > 0) {
+        idleReinforcementAvailable = true;
+      }
+    } else if (u.team === "enemy" && near && isEnemyVisible(state, u.position.x, u.position.y)) {
+      nearbyEnemyVisibleUnits++;
+    }
+  });
+
+  return {
+    facilityName: f.name,
+    owner: f.team,
+    capturingTeam: f.capturingTeam,
+    captureProgress: f.captureProgress,
+    isKeypoint: state.scenarioWinConfig?.friendlyKeypoints?.includes(facilityId) ?? false,
+    isObjective: state.captureObjectives?.includes(facilityId) ?? false,
+    nearbyPlayerUnits,
+    nearbyEnemyVisibleUnits,
+    idleReinforcementAvailable,
+  };
+}
+
+/**
+ * 7c.1 stabilization (A4): minimal worthiness gate — should a contested facility
+ * interrupt the commander with a QUESTION, or just sit in the report lane? Only the
+ * leading edge of the real 7d decision-gate: ask when there's genuine stake. A 1%
+ * nibble on a minor post with nothing to do about it stays a quiet report.
+ */
+export function facilityContestWorthAsking(f: FacilityEscalationFacts): boolean {
+  // The escalation path is the ASK-the-commander path — only reach it when there's a
+  // real decision. Strategic importance (keypoint/objective) raises the stakes but is
+  // NOT on its own a reason to interrupt at 1%: there must ALSO be real danger — the
+  // capture has genuinely advanced, the spot is undefended, or we're outnumbered there.
+  // A barely-begun contest where we hold clear local advantage stays a quiet report.
+  const advancing = f.captureProgress >= FACILITY_GATE.PROGRESS_ASK_THRESHOLD;
+  const undefended = f.nearbyPlayerUnits === 0;
+  const localDisadvantage = f.nearbyEnemyVisibleUnits > f.nearbyPlayerUnits;
+  if (f.isKeypoint || f.isObjective) return advancing || undefended || localDisadvantage;
+  return advancing; // a minor post only interrupts once it's genuinely being taken
 }
 
 /**
