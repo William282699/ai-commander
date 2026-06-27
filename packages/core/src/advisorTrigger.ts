@@ -79,14 +79,13 @@ export function processAdvisorTriggers(state: GameState): AdvisorTriggerResult[]
       }
     }
 
-    // Rule 4: FACILITY_CONTESTED → Chen alert (event-driven, similar to
-    // UNDER_ATTACK). Player decides whether to reinforce; no crisis modal.
-    if (evt.type === "FACILITY_CONTESTED" && evt.entityId) {
-      const ruleKey = `advisor:facility_contested:${evt.entityId}`;
-      if (canFireTrigger(cd, ruleKey, now)) {
-        results.push({ type: "llm_advice", event: evt, channel: "combat" });
-      }
-    }
+    // Rule 4 (FACILITY_CONTESTED → Chen llm_advice): RETIRED in Step 7c.2-pre.
+    // FACILITY_CONTESTED was remapped to ops/Marcus (EVENT_CHANNEL_MAP, 7c.1-stab
+    // A3) and is now fully handled by the report-drain: one ops event_report plus,
+    // when worthy, one Marcus escalation question. The old combat llm_advice here
+    // duplicated that as a second (Chen) voice, ran BEFORE the worthiness gate, and
+    // fed Chen the full digest — so a trivial 1% nibble got voiced twice on two
+    // channels. Contests now flow through the single denoised ops path only.
   }
 
   return results;

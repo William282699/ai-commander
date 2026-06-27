@@ -153,6 +153,40 @@ function resetEscalationState(): void {
   escalationState.session++;
 }
 
+// ── Step 7c.2-pre: global STATEMENT budget + question priority ──
+// This is NOT a full one-window-one-interrupt arbiter yet. What it actually does:
+//   • proactive STATEMENTS (advisorTrigger llm_advice) are gated by a global budget
+//     — at most one statement per PROACTIVE_BUDGET_GAP_SEC window, across all channels;
+//   • a statement yields to an escalation QUESTION already accepted this tick: the
+//     question stamps the slot synchronously at commit, and statements are deferred to
+//     AFTER this tick's escalations, so a question always wins;
+//   • an escalation question itself is NOT gated by this budget — it only STAMPS the
+//     slot (it self-limits via per-topic cooldown + per-channel inFlight).
+// So question-vs-question is deliberately NOT arbitrated here: two real crises on
+// different fronts can still each escalate. The one-window-one-QUESTION rule across
+// the 4 escalation call sites is left to Step 7d.
+// Dark report lines (event_report) are NOT governed by this budget — raw reports
+// always surface in the quiet report lane.
+const PROACTIVE_BUDGET_GAP_SEC = 12;
+const proactiveBudget = {
+  lastInterruptAt: -Infinity, // sim time the last proactive interrupt (question or statement) committed
+};
+
+function resetProactiveBudget(): void {
+  proactiveBudget.lastInterruptAt = -Infinity;
+}
+
+/** A low-priority proactive STATEMENT may fire only when the gap since the last
+ *  interrupt has elapsed. Questions are never gated by this (see above). */
+function proactiveBudgetAllowsStatement(now: number): boolean {
+  return now - proactiveBudget.lastInterruptAt >= PROACTIVE_BUDGET_GAP_SEC;
+}
+
+/** Claim the single proactive slot (called by both questions and statements). */
+function consumeProactiveBudget(now: number): void {
+  proactiveBudget.lastInterruptAt = now;
+}
+
 function makeActionId(): string {
   try {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -206,6 +240,11 @@ function escalateCrisisToConversation(
   // correlation activates only once the question is visible (see postQuestion).
   escalationState.topicCooldown.set(topicKey, now);
   escalationState.inFlight[channel] = true;
+  // 7c.2-pre: question priority — stamp the global statement budget synchronously
+  // here (past every guard, so it only stamps when the question truly commits) so a
+  // deferred llm_advice STATEMENT this tick yields. The question itself is NOT gated
+  // by the budget; it only stamps. (Question-vs-question arbitration is Step 7d.)
+  consumeProactiveBudget(now);
   const reqSession = escalationState.session;
   const actionId = makeActionId();
 
@@ -963,6 +1002,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetHeartbeatState();
     resetStaffAskState();
     resetEscalationState();
+    resetProactiveBudget();
     clearMessages();
     clearThreads();
     addMessage("info", "等待指令...", 0, "ops", "system", "system");
@@ -1006,6 +1046,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetHeartbeatState();
     resetStaffAskState();
     resetEscalationState();
+    resetProactiveBudget();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
@@ -1273,6 +1314,15 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       // so the staff-ask LLM path skips them (avoids duplicate cards).
       const crisisCardTopics = new Set<string>();
       const advisorTriggers = processAdvisorTriggers(state);
+      // 7c.2-pre: collect llm_advice (proactive STATEMENTS) and fire them AFTER this
+      // tick's escalation questions (below, post report-drain), so a question always
+      // wins the slot first. crisis_card stays inline — it escalates.
+      // DEFERRED RISK (pre-acceptable, do NOT carry forward as-is): this list is fired
+      // first-wins in drain order. Fine for pre, but 7c.2a / 7d must NOT treat
+      // first-wins as the final voice arbitration — who is worth interrupting for
+      // should be decided by director beat / severity / structured facts, not by
+      // whichever advisor trigger happened to drain first.
+      const pendingAdvice: AdvisorTriggerResult[] = [];
       for (const trig of advisorTriggers) {
         if (trig.type === "crisis_card") {
           // Step 6a: escalate as a Chen-voiced question instead of an A/B/C card.
@@ -1292,23 +1342,8 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           // Mark so the staff-ask path doesn't also escalate this topic.
           crisisCardTopics.add(topicKey);
         } else if (trig.type === "llm_advice") {
-          // Fire-and-forget /api/brief call
-          const digest = buildDigest(state, [], [], []);
-          const evtInfo = `[${trig.event.type}] ${trig.event.message}`;
-          const capturedTime = state.time;
-          const ch = trig.channel;
-          fetch(`${API_URL}/api/brief`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ digest: `${evtInfo}\n\n${digest}`, channel: ch }),
-          })
-            .then((r) => r.json())
-            .then((data) => {
-              if (data?.brief) {
-                addMessage("info", data.brief, capturedTime, ch, undefined, "event_report");
-              }
-            })
-            .catch(() => {}); // advisor trigger brief failure is silent
+          // 7c.2-pre: defer — fired below, after escalations, under the budget.
+          pendingAdvice.push(trig);
         }
       }
 
@@ -1516,6 +1551,36 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           // Regular report-only message
           addMessage(level, evt.message, state.time, channel, undefined, "event_report");
         }
+      }
+
+      // 7c.2-pre: now that every escalation QUESTION this tick has stamped the global
+      // statement budget, fire deferred llm_advice STATEMENTS under whatever budget is
+      // left. A question (or an earlier statement) within PROACTIVE_BUDGET_GAP_SEC
+      // suppresses these — at most one statement per budget window, and a question
+      // always wins the tick. The dark report lines above are unaffected by the budget.
+      // DEFERRED RISK (inherited from the old inline path, pre-acceptable): the async
+      // post below has NO session guard, so a restart mid-flight could surface a stale
+      // statement. This is parity with prior behavior; add a heartbeatState-style
+      // session check when this path is reworked in 7c.2a.
+      for (const trig of pendingAdvice) {
+        if (!proactiveBudgetAllowsStatement(state.time)) break; // slot spent — yield
+        consumeProactiveBudget(state.time);
+        const digest = buildDigest(state, [], [], []);
+        const evtInfo = `[${trig.event.type}] ${trig.event.message}`;
+        const capturedTime = state.time;
+        const ch = trig.channel;
+        fetch(`${API_URL}/api/brief`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ digest: `${evtInfo}\n\n${digest}`, channel: ch }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data?.brief) {
+              addMessage("info", data.brief, capturedTime, ch, undefined, "event_report");
+            }
+          })
+          .catch(() => {}); // advisor trigger brief failure is silent
       }
 
       // Phase 3: retry one pending actionRequired event per channel once inFlight/cooldown constraints clear.
