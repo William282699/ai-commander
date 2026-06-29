@@ -197,9 +197,11 @@ app.post("/api/brief", async (req, res) => {
     return;
   }
 
-  // 7c.1: mode="escalation" voices a decision question from the beat facts;
-  // anything else keeps the legacy statement-style brief.
-  const result = await callLightBrief(digest, channel, mode === "escalation" ? "escalation" : "brief");
+  // 7c.1: mode="escalation" voices a decision question from the beat facts.
+  // 7c.2a: mode="proactive" voices a one-line situational statement from the beat
+  // facts (never a question). Anything else keeps the legacy statement-style brief.
+  const briefMode = mode === "escalation" ? "escalation" : mode === "proactive" ? "proactive" : "brief";
+  const result = await callLightBrief(digest, channel, briefMode);
   if (!result) {
     res.status(502).json({ error: "简报生成失败" });
     return;

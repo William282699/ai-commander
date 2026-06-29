@@ -50,6 +50,8 @@ import {
   checkDoctrines,
   cancelDoctrine,
   selectEscalationEvent,
+  collectDirectorBeats,
+  snapshotForDirector,
   frontEscalationFacts,
   facilityEscalationFacts,
   facilityContestWorthAsking,
@@ -62,7 +64,7 @@ import {
   processPressureDirector,
   resetPressureDirector,
 } from "@ai-commander/core";
-import type { AdvisorTriggerResult } from "@ai-commander/core";
+import type { AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
 import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
@@ -80,6 +82,7 @@ import {
   clearThreads,
   createThread,
   expireStaleThreads,
+  getActiveEscalation,
   getLastMessageTimeBySource,
   setActiveEscalation,
   type MessageLevel,
@@ -185,6 +188,67 @@ function proactiveBudgetAllowsStatement(now: number): boolean {
 /** Claim the single proactive slot (called by both questions and statements). */
 function consumeProactiveBudget(now: number): void {
   proactiveBudget.lastInterruptAt = now;
+}
+
+// ── Step 7c.2a: director beat → proactive STATEMENT (Chen front pressure / Emily supply) ──
+// The war-room "someone in HQ is reading the battle" layer. A director beat is voiced as
+// ONE in-character STATEMENT — never a question, never an active escalation, never queued.
+// Triggered by a real beat ONLY (not a timer broadcast): no beat → silence (the dead
+// heartbeat block below stays closed). Conservative cadence + per-beat cooldown + the
+// global statement budget keep it present-but-not-noisy. Marcus / feint_suspicion → 7c.2b.
+const PROACTIVE_EVAL_INTERVAL_SEC = 8;   // how often we even READ the director (compute throttle, NOT a broadcast cadence)
+const PROACTIVE_TOPIC_COOLDOWN_SEC = 45; // same beat (kind+front) won't re-voice within this
+const PROACTIVE_BEAT_KINDS: ReadonlySet<DirectorBeatKind> = new Set<DirectorBeatKind>([
+  "front_collapse", "cross_front_dilemma", "supply_strain",
+]); // Chen (combat) + Emily (logistics) only; feint_suspicion (ops/Marcus) deferred to 7c.2b
+
+const proactiveDirectorState = {
+  lastEvalTime: 0,
+  prevSnapshot: null as DirectorSnapshot | null, // threaded into collectDirectorBeats for trend
+  lastTopicAt: new Map<string, number>(),        // topicKey (kind:frontId) → game time of last proactive voice
+  inFlight: false,                                // one proactive voice at a time (slow-network re-entry guard)
+  session: 0,                                     // bumped on restart; stale async responses discarded
+};
+
+function resetProactiveDirectorState(): void {
+  proactiveDirectorState.lastEvalTime = 0;
+  proactiveDirectorState.prevSnapshot = null;
+  proactiveDirectorState.lastTopicAt.clear();
+  proactiveDirectorState.inFlight = false;
+  proactiveDirectorState.session++;
+}
+
+// Build structured mini-facts for ONE beat — from the beat's STRUCTURED fields only
+// (never debugFact, never the full digest). The LLM writes the sentence; these are the
+// concrete facts it must stay specific to. Shape mirrors the escalation mini-facts.
+function buildProactiveMiniFacts(beat: DirectorBeat): string {
+  const m = beat.metric;
+  if (beat.kind === "supply_strain") {
+    return [
+      "SITUATION (voice ONE in-character STATEMENT for THIS single point — NOT a question):",
+      "type: supply_strain",
+      "subject: overall_player_supply", // economy-wide strain, NOT tied to a front — Emily speaks to the supply picture
+      `scarcer_resource: ${m.fuel <= m.ammo ? "fuel" : "ammo"}`,
+      `fuel: ${Math.floor(m.fuel)}`,
+      `ammo: ${Math.floor(m.ammo)}`,
+      `trend: ${m.trend}`,
+    ].join("\n");
+  }
+  // front_collapse / cross_front_dilemma
+  return [
+    "SITUATION (voice ONE in-character STATEMENT for THIS single point — NOT a question):",
+    "type: front_pressure",
+    `front: ${beat.frontName ?? beat.frontId ?? "unknown"}`,
+    `stake: ${beat.stake}`,
+    `our_committed_force_survival_sec: ${beat.estimatedCollapseSeconds ?? "unknown"}`,
+    `local_power_ratio_ours_to_visible_enemy: ${m.powerRatio ?? "unknown"}`,
+    `trend: ${m.trend}`,
+    `idle_reinforcement_available: ${
+      beat.freeReinforcement
+        ? `${beat.freeReinforcement.leaderName}, ${beat.freeReinforcement.aliveCount} men`
+        : "none"
+    }`,
+  ].join("\n");
 }
 
 function makeActionId(): string {
@@ -1003,6 +1067,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetStaffAskState();
     resetEscalationState();
     resetProactiveBudget();
+    resetProactiveDirectorState();
     clearMessages();
     clearThreads();
     addMessage("info", "等待指令...", 0, "ops", "system", "system");
@@ -1047,6 +1112,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetStaffAskState();
     resetEscalationState();
     resetProactiveBudget();
+    resetProactiveDirectorState();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
@@ -1581,6 +1647,79 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
             }
           })
           .catch(() => {}); // advisor trigger brief failure is silent
+      }
+
+      // 7c.2a: director beat → proactive STATEMENT. Runs AFTER this tick's escalations
+      // AND the deferred llm_advice, so questions + old advice claim the global budget
+      // first (proactive yields same-tick). Beat-triggered (no beat → silence), never a
+      // question, never setActiveEscalation, never queued — if no beat is eligible we
+      // drop it and re-read the live board next cadence.
+      //
+      // We scan collectDirectorBeats in the director's OWN ranking order (we do NOT
+      // touch that ordering/scoring) and voice the FIRST eligible Chen/Emily beat. This
+      // is what lets Emily's supply_strain still surface when the top beat is a Chen
+      // front beat blocked on its OWN channel (active escalation / topic cooldown): an
+      // unblocked higher-ranked Chen beat still wins (scanned first), but a blocked one
+      // steps aside instead of muting everyone. At most ONE statement per cadence.
+      if (
+        !state.gameOver &&
+        !proactiveDirectorState.inFlight &&
+        state.time - proactiveDirectorState.lastEvalTime >= PROACTIVE_EVAL_INTERVAL_SEC
+      ) {
+        proactiveDirectorState.lastEvalTime = state.time;
+        const beats = collectDirectorBeats(state, proactiveDirectorState.prevSnapshot);
+        proactiveDirectorState.prevSnapshot = snapshotForDirector(state); // for next tick's trend
+
+        // Global gate: one proactive statement per budget window, across all channels.
+        if (proactiveBudgetAllowsStatement(state.time)) {
+          for (const beat of beats) {
+            if (!PROACTIVE_BEAT_KINDS.has(beat.kind)) continue; // Chen/Emily only; feint → 7c.2b
+            // Per-beat, per-channel gates: a pending/in-flight QUESTION on the beat's OWN
+            // channel silences THIS beat (a question on a DIFFERENT channel does not —
+            // Emily may note supply while Chen is mid-question; the global budget still
+            // spaces them out, and proactive is always a statement, never a question).
+            if (getActiveEscalation(beat.channel, state.time) !== null) continue;
+            if (escalationState.inFlight[beat.channel]) continue;
+            const topicKey = `${beat.kind}:${beat.frontId ?? "global"}`;
+            const lastTopic = proactiveDirectorState.lastTopicAt.get(topicKey) ?? -Infinity;
+            if (state.time - lastTopic < PROACTIVE_TOPIC_COOLDOWN_SEC) continue;
+
+            // First eligible beat wins. Reserve the slot synchronously (before the async
+            // voice), like escalation does, then voice exactly this one and stop.
+            proactiveDirectorState.lastTopicAt.set(topicKey, state.time);
+            consumeProactiveBudget(state.time);
+            proactiveDirectorState.inFlight = true;
+            const reqSession = proactiveDirectorState.session;
+            const ch = beat.channel;
+            const miniFacts = buildProactiveMiniFacts(beat);
+            fetch(`${API_URL}/api/brief`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ digest: miniFacts, channel: ch, mode: "proactive" }),
+            })
+              .then((r) => r.json())
+              .then((data) => {
+                if (reqSession !== proactiveDirectorState.session) return; // restart → discard
+                if (state.gameOver) return;
+                const voiced =
+                  typeof data?.brief === "string" && data.brief.trim() ? data.brief.trim() : null;
+                // Statement only: drop a question-shaped line so proactive never reads as
+                // an unanswerable interrogative. Failure is silent — no fallback (this
+                // layer is optional presence, not a must-say). source="proactive" renders
+                // as the persona speaking (conversation), NOT a report; no setActiveEscalation.
+                if (voiced && !/[？?]/.test(voiced)) {
+                  addMessage("info", voiced, state.time, ch, undefined, "proactive");
+                }
+              })
+              .catch(() => {}) // network failure → silent, no fallback
+              .finally(() => {
+                if (reqSession === proactiveDirectorState.session) {
+                  proactiveDirectorState.inFlight = false;
+                }
+              });
+            break; // one proactive statement per cadence
+          }
+        }
       }
 
       // Phase 3: retry one pending actionRequired event per channel once inFlight/cooldown constraints clear.

@@ -12,7 +12,10 @@ export type MessageLevel = "info" | "warning" | "urgent";
 export type MessageFrom = "player" | "chen" | "marcus" | "emily" | "system";
 
 /** How the message originated. */
-export type MessageSource = "heartbeat" | "event_report" | "command_ack" | "player" | "system";
+// "proactive" (7c.2a): a director-beat situational STATEMENT voiced by a persona.
+// NOT in isReportMessage's denylist → renders as the persona speaking (conversation),
+// while staying distinct from command_ack for observability/filtering.
+export type MessageSource = "heartbeat" | "event_report" | "command_ack" | "player" | "system" | "proactive";
 
 /** Channel → default persona mapping. */
 export const CHANNEL_PERSONA: Record<Channel, MessageFrom> = {

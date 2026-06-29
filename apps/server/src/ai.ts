@@ -449,6 +449,33 @@ ${ESCALATION_BASE}`,
 ${ESCALATION_BASE}`,
 };
 
+// ── Step 7c.2a: proactive voice prompts (situational STATEMENT mode, beat-driven) ──
+// SEPARATE from the command-parse SYSTEM_PROMPT (命门) and from escalation (which asks
+// a QUESTION). The engine hands the director beat's STRUCTURED facts (one situation);
+// the LLM writes ONE in-character STATEMENT — never a question, never an option menu.
+// This is the "someone in HQ is reading the battle" layer. Example lines are
+// deliberately omitted (a concrete sample gets copied verbatim into a fixed template —
+// the exact trap this step avoids). Persona descriptors are register rulers only.
+const PROACTIVE_BASE = `你拿到的是一个战场情况的【结构化事实】（不是脚本）。你是参谋部里盯着战局的人，此刻**主动**向长官**报一句**你读出来的态势——不是长官问你，也不是要他拍板，是你看到值得提一句的事。写【一句】符合人设的**陈述**：
+1) 点出对象（战线 / 资源领域 / 具体目标，按 facts 里给的那个来）+ 当前最要紧的一个具体事实（survival 秒数 / 战力比 / 趋势 / 闲置可增援的名字 / 油弹数——有就用上，必须具体，别空泛）；
+2) 点出一个真实代价或趋势（再这样下去会怎样），**到此为止**——**不要向长官发起任何决策请求，不要给选项，不要二选一菜单**。这是态势播报，不是请示。
+**这是陈述句，不是问句：不向长官发问、不追问要不要做什么，结尾不用问号。**
+按 stake 理解局面（**只决定你怎么读这局，不规定你用哪句话说**）：
+- player_attack_under_pressure = 我方正向敌方阵地推进、前锋在挨打；按进攻态势措辞，别把它当成我方在防守来说。
+- player_defense = 敌军在压我方阵地 / 目标。
+- contested_objective = 某目标正在易手。
+- unknown = 局面不明，别假设是进攻还是防守。
+用词限于战场参谋 / 前线无线电语域；不得出现开发、系统、规则、桌游、prompt 一类的词，也别把任何实现层面的概念讲给长官。
+别煽情、别夸大，寻常压力别说成危急。短、具体、点一个真实代价，每次换说法，别落定式。
+只返回 JSON：{"brief": "...", "urgency": 0.0-1.0}`;
+
+const PROACTIVE_PROMPTS: Record<string, string> = {
+  combat: `你是陈军士（Chen），湖南籍前线士官，专业冷静。全中文，一句上限，战术术语准确（压制 / 侧翼 / 纵深 / 反斜面）。对长官称「长官 / 您」，自称「我」。
+${PROACTIVE_BASE}`,
+  logistics: `你是艾米莉中尉（LT Emily），后勤官，精确、关注代价、也接地气。全中文，一句上限。
+${PROACTIVE_BASE}`,
+};
+
 // ── Day 7 intent normalization ──
 // Maps unsupported intents to their closest Day7 equivalent.
 // Keeps VALID_INTENT_TYPES in schema.ts intact for Day10+ forward compatibility.
@@ -1001,17 +1028,21 @@ ${styleNote}
 export async function callLightBrief(
   digest: string,
   channel?: string,
-  mode: "brief" | "escalation" = "brief",
+  mode: "brief" | "escalation" | "proactive" = "brief",
 ): Promise<LightAdvisorResponse | null> {
   try {
-    // 7c.1: escalation mode voices a decision QUESTION from structured facts;
-    // brief mode keeps the statement-style sitrep. Both are isolated from the
-    // command-parse SYSTEM_PROMPT.
-    const prompt = mode === "escalation"
-      ? (channel && ESCALATION_PROMPTS[channel]) || ESCALATION_PROMPTS.ops
-      : (channel && CHANNEL_PROMPTS[channel]) || LIGHT_SYSTEM_PROMPT;
+    // 7c.1: escalation mode voices a decision QUESTION from structured facts.
+    // 7c.2a: proactive mode voices a one-line situational STATEMENT (never a question)
+    // from the director beat's structured facts. brief mode keeps the statement-style
+    // sitrep. All three are isolated from the command-parse SYSTEM_PROMPT.
+    const prompt =
+      mode === "escalation"
+        ? (channel && ESCALATION_PROMPTS[channel]) || ESCALATION_PROMPTS.ops
+        : mode === "proactive"
+          ? (channel && PROACTIVE_PROMPTS[channel]) || PROACTIVE_PROMPTS.combat
+          : (channel && CHANNEL_PROMPTS[channel]) || LIGHT_SYSTEM_PROMPT;
     const raw = await callDeepSeek(prompt, digest, {
-      temperature: mode === "escalation" ? 0.6 : 0.5,
+      temperature: mode === "brief" ? 0.5 : 0.6,
       maxTokens: 250,
     }, channel);
     const parsed = safeParse(raw);
