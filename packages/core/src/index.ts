@@ -38,3 +38,6 @@ export type { EscalationFacts } from "./director";
 export { facilityEscalationFacts, facilityContestWorthAsking } from "./director";
 export type { FacilityEscalationFacts } from "./director";
 export type { DirectorBeat, DirectorBeatKind, DirectorStake, DirectorTrend, DirectorMetricSnapshot, DirectorSnapshot } from "./director";
+// Step 7c.2b — Marcus strategic aggregation (pure; report-driven situations)
+export { collectStrategicSituations, STRATEGIC_WINDOW_SEC } from "./director";
+export type { StrategicSituation, StrategicSituationKind } from "./director";

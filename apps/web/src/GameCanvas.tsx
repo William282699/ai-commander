@@ -51,6 +51,8 @@ import {
   cancelDoctrine,
   selectEscalationEvent,
   collectDirectorBeats,
+  collectStrategicSituations,
+  STRATEGIC_WINDOW_SEC,
   snapshotForDirector,
   frontEscalationFacts,
   facilityEscalationFacts,
@@ -64,8 +66,8 @@ import {
   processPressureDirector,
   resetPressureDirector,
 } from "@ai-commander/core";
-import type { AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot } from "@ai-commander/core";
-import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
+import type { AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot, StrategicSituation } from "@ai-commander/core";
+import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
 import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import { ChatPanel } from "./ChatPanel";
@@ -195,12 +197,13 @@ function consumeProactiveBudget(now: number): void {
 // ONE in-character STATEMENT — never a question, never an active escalation, never queued.
 // Triggered by a real beat ONLY (not a timer broadcast): no beat → silence (the dead
 // heartbeat block below stays closed). Conservative cadence + per-beat cooldown + the
-// global statement budget keep it present-but-not-noisy. Marcus / feint_suspicion → 7c.2b.
+// global statement budget keep it present-but-not-noisy. (Marcus: 7c.2b strategic path via
+// collectStrategicSituations; feint_suspicion still deferred.)
 const PROACTIVE_EVAL_INTERVAL_SEC = 8;   // how often we even READ the director (compute throttle, NOT a broadcast cadence)
 const PROACTIVE_TOPIC_COOLDOWN_SEC = 45; // same beat (kind+front) won't re-voice within this
 const PROACTIVE_BEAT_KINDS: ReadonlySet<DirectorBeatKind> = new Set<DirectorBeatKind>([
   "front_collapse", "cross_front_dilemma", "supply_strain",
-]); // Chen (combat) + Emily (logistics) only; feint_suspicion (ops/Marcus) deferred to 7c.2b
+]); // Chen (combat) + Emily (logistics) beats only. Marcus speaks via collectStrategicSituations (7c.2b), not this set; feint_suspicion stays deferred.
 
 const proactiveDirectorState = {
   lastEvalTime: 0,
@@ -216,6 +219,48 @@ function resetProactiveDirectorState(): void {
   proactiveDirectorState.lastTopicAt.clear();
   proactiveDirectorState.inFlight = false;
   proactiveDirectorState.session++;
+}
+
+// 7c.2b: caller-owned rolling buffer of recent reports for Marcus's strategic
+// aggregation (collectStrategicSituations). Only the report types Marcus aggregates are
+// kept, pruned to STRATEGIC_WINDOW_SEC. This never feeds the full digest or raw report
+// text to Marcus — only the engine's structured aggregation does.
+let recentReports: ReportEvent[] = [];
+
+function resetRecentReports(): void {
+  recentReports = [];
+}
+
+// Build structured mini-facts for ONE Marcus strategic situation — concrete names /
+// counts / flags only (no debugFact, no full digest, no per-report recital). The LLM
+// writes ONE strategic line from these.
+function buildStrategicMiniFacts(sit: StrategicSituation): string {
+  const lines = ["SITUATION (voice ONE in-character STATEMENT for THIS single point — NOT a question):"];
+  if (sit.kind === "repeated_contest") {
+    lines.push(
+      "type: repeated_contest",
+      `facility: ${sit.facilityName}`,
+      `contested_times_in_window: ${sit.contestCount}`,
+      `window_sec: ${sit.windowSec}`,
+      `is_keypoint: ${sit.isKeypoint}`,
+      `is_objective: ${sit.isObjective}`,
+    );
+  } else if (sit.kind === "keypoint_loss") {
+    lines.push(
+      "type: keypoint_loss",
+      `facility: ${sit.facilityName}`,
+      `is_keypoint: ${sit.isKeypoint}`,
+      `is_objective: ${sit.isObjective}`,
+    );
+  } else {
+    lines.push(
+      "type: convergent_pressure",
+      `pressed_fronts: ${(sit.frontNames ?? []).join(", ")}`,
+      `front_count: ${sit.frontCount}`,
+      `recent_window_sec: ${sit.windowSec}`, // these fronts were pressed within this window — NOT necessarily all critical right now
+    );
+  }
+  return lines.join("\n");
 }
 
 // Build structured mini-facts for ONE beat — from the beat's STRUCTURED fields only
@@ -1068,6 +1113,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetEscalationState();
     resetProactiveBudget();
     resetProactiveDirectorState();
+    resetRecentReports();
     clearMessages();
     clearThreads();
     addMessage("info", "等待指令...", 0, "ops", "system", "system");
@@ -1113,6 +1159,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetEscalationState();
     resetProactiveBudget();
     resetProactiveDirectorState();
+    resetRecentReports();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
@@ -1553,6 +1600,18 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
 
       const reportEvts = drainReportEvents(state, 5);
 
+      // 7c.2b: feed Marcus's strategic-aggregation buffer with ONLY the report types he
+      // aggregates (contest / loss / front-pressure), then prune to the window. Marcus
+      // reads this caller-owned buffer via collectStrategicSituations — never the full
+      // digest, never raw report text.
+      for (const e of reportEvts) {
+        if (e.type === "FACILITY_CONTESTED" || e.type === "FACILITY_LOST" ||
+            e.type === "UNDER_ATTACK" || e.type === "POSITION_CRITICAL") {
+          recentReports.push(e);
+        }
+      }
+      recentReports = recentReports.filter((r) => state.time - r.time < STRATEGIC_WINDOW_SEC);
+
       // Step 7b — director-gated denoise. In a multi-crisis window only ONE
       // actionRequired event escalates to a Chen-voiced question (the director's
       // pick); the rest still surface in the quiet report lane but do not ask.
@@ -1649,49 +1708,80 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           .catch(() => {}); // advisor trigger brief failure is silent
       }
 
-      // 7c.2a: director beat → proactive STATEMENT. Runs AFTER this tick's escalations
-      // AND the deferred llm_advice, so questions + old advice claim the global budget
-      // first (proactive yields same-tick). Beat-triggered (no beat → silence), never a
-      // question, never setActiveEscalation, never queued — if no beat is eligible we
-      // drop it and re-read the live board next cadence.
+      // 7c.2a/7c.2b: director-driven proactive STATEMENT. Runs AFTER this tick's
+      // escalations AND the deferred llm_advice, so questions + old advice claim the
+      // global budget first (proactive yields same-tick). Triggered by a beat/situation
+      // (none eligible → silence), never a question, never setActiveEscalation, never
+      // queued — if nothing is eligible we drop it and re-read the live board next cadence.
       //
-      // We scan collectDirectorBeats in the director's OWN ranking order (we do NOT
-      // touch that ordering/scoring) and voice the FIRST eligible Chen/Emily beat. This
-      // is what lets Emily's supply_strain still surface when the top beat is a Chen
-      // front beat blocked on its OWN channel (active escalation / topic cooldown): an
-      // unblocked higher-ranked Chen beat still wins (scanned first), but a blocked one
-      // steps aside instead of muting everyone. At most ONE statement per cadence.
+      // We MERGE Chen/Emily DirectorBeats (collectDirectorBeats — its ranking/scoring is
+      // untouched) with Marcus strategic situations (collectStrategicSituations — report
+      // aggregation), sort by severity, and voice the FIRST eligible one. A blocked
+      // higher-ranked candidate (active escalation / topic cooldown on its OWN channel)
+      // steps aside so a lower one can still surface. At most ONE statement per cadence.
       if (
         !state.gameOver &&
         !proactiveDirectorState.inFlight &&
         state.time - proactiveDirectorState.lastEvalTime >= PROACTIVE_EVAL_INTERVAL_SEC
       ) {
         proactiveDirectorState.lastEvalTime = state.time;
-        const beats = collectDirectorBeats(state, proactiveDirectorState.prevSnapshot);
+
+        // Unified candidate list: Chen/Emily front/supply beats + Marcus strategic
+        // situations. Each carries its channel, a ranking severity, a cooldown topicKey,
+        // and a lazy facts builder (built only for the one we actually voice).
+        const candidates: Array<{
+          channel: Channel;
+          severity: number;
+          topicKey: string;
+          cooldownSec: number;
+          buildFacts: () => string;
+        }> = [];
+        for (const beat of collectDirectorBeats(state, proactiveDirectorState.prevSnapshot)) {
+          if (!PROACTIVE_BEAT_KINDS.has(beat.kind)) continue; // Chen/Emily beats only; feint deferred
+          candidates.push({
+            channel: beat.channel,
+            severity: beat.severity,
+            topicKey: `${beat.kind}:${beat.frontId ?? "global"}`,
+            cooldownSec: PROACTIVE_TOPIC_COOLDOWN_SEC,
+            buildFacts: () => buildProactiveMiniFacts(beat),
+          });
+        }
+        for (const sit of collectStrategicSituations(state, recentReports)) {
+          candidates.push({
+            channel: sit.channel, // always "ops" (Marcus)
+            severity: sit.severity,
+            topicKey: sit.topicKey,
+            // Marcus situations cool down for the FULL window, NOT the global 45s: a
+            // one-time keypoint_loss (and any situation whose source events linger in the
+            // window after it resolves) must voice at most ONCE per window, never get
+            // re-recited every PROACTIVE_TOPIC_COOLDOWN_SEC. Chen/Emily keep the short cd.
+            cooldownSec: STRATEGIC_WINDOW_SEC,
+            buildFacts: () => buildStrategicMiniFacts(sit),
+          });
+        }
         proactiveDirectorState.prevSnapshot = snapshotForDirector(state); // for next tick's trend
+        candidates.sort((a, b) => b.severity - a.severity);
 
         // Global gate: one proactive statement per budget window, across all channels.
         if (proactiveBudgetAllowsStatement(state.time)) {
-          for (const beat of beats) {
-            if (!PROACTIVE_BEAT_KINDS.has(beat.kind)) continue; // Chen/Emily only; feint → 7c.2b
-            // Per-beat, per-channel gates: a pending/in-flight QUESTION on the beat's OWN
-            // channel silences THIS beat (a question on a DIFFERENT channel does not —
-            // Emily may note supply while Chen is mid-question; the global budget still
-            // spaces them out, and proactive is always a statement, never a question).
-            if (getActiveEscalation(beat.channel, state.time) !== null) continue;
-            if (escalationState.inFlight[beat.channel]) continue;
-            const topicKey = `${beat.kind}:${beat.frontId ?? "global"}`;
-            const lastTopic = proactiveDirectorState.lastTopicAt.get(topicKey) ?? -Infinity;
-            if (state.time - lastTopic < PROACTIVE_TOPIC_COOLDOWN_SEC) continue;
+          for (const c of candidates) {
+            // Per-candidate, per-channel gates: a pending/in-flight QUESTION on the
+            // candidate's OWN channel silences IT (a question on a different channel does
+            // not — the global budget still spaces them out, and proactive is always a
+            // statement, never a question).
+            if (getActiveEscalation(c.channel, state.time) !== null) continue;
+            if (escalationState.inFlight[c.channel]) continue;
+            const lastTopic = proactiveDirectorState.lastTopicAt.get(c.topicKey) ?? -Infinity;
+            if (state.time - lastTopic < c.cooldownSec) continue;
 
-            // First eligible beat wins. Reserve the slot synchronously (before the async
-            // voice), like escalation does, then voice exactly this one and stop.
-            proactiveDirectorState.lastTopicAt.set(topicKey, state.time);
+            // First eligible candidate wins. Reserve the slot synchronously (before the
+            // async voice), like escalation does, then voice exactly this one and stop.
+            proactiveDirectorState.lastTopicAt.set(c.topicKey, state.time);
             consumeProactiveBudget(state.time);
             proactiveDirectorState.inFlight = true;
             const reqSession = proactiveDirectorState.session;
-            const ch = beat.channel;
-            const miniFacts = buildProactiveMiniFacts(beat);
+            const ch = c.channel;
+            const miniFacts = c.buildFacts();
             fetch(`${API_URL}/api/brief`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },

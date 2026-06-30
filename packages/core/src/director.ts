@@ -824,3 +824,155 @@ export function describeDirectorBeat(beat: DirectorBeat | null): string {
   if (beat.debugTradeoff) out += `\n  fork: ${beat.debugTradeoff}`;
   return out;
 }
+
+// ============================================================
+// Step 7c.2b — Marcus strategic aggregation (proactive voice source)
+//
+// Marcus (ops) is NOT a second report-reader: he speaks only when MULTIPLE dark
+// reports add up to a STRATEGIC picture. This pure function reads a caller-owned
+// rolling buffer of recent ReportEvents (+ live state) and returns the structured
+// situations worth ONE Marcus line — never a per-report recital. The web layer voices
+// the top eligible one through the SAME proactive path as Chen/Emily (one statement
+// per cadence, global budget, topic cooldown). It does NOT touch the DirectorBeat
+// stream or its scoring — these severities only rank Marcus situations against beats
+// in the caller's merged proactive scan.
+//
+// Hard scope (7c.2b): report-AGGREGATION only — repeated_contest / keypoint_loss /
+// convergent_pressure. Feint (live-state massing) is deliberately deferred: voicing it
+// needs the existing feint beat's massing exposed as structured facts (a separate
+// change), and 7c.2b stays zero-touch on the existing beat stream.
+// ============================================================
+
+/** Window (seconds) the caller keeps recent reports for, and over which Marcus
+ *  aggregates. Exported so the caller prunes its buffer with the same horizon. */
+export const STRATEGIC_WINDOW_SEC = 120;
+
+const STRATEGIC_TUNING = {
+  /** A facility contested at least this many times in-window reads as sustained
+   *  pressure worth a strategic note. The engine stays NEUTRAL — it counts, it does
+   *  NOT label "probe" vs "assault"; Marcus judges that from the neutral count. */
+  REPEATED_CONTEST_MIN: 2,
+  /** This many DISTINCT pressed fronts in-window = converging pressure. */
+  CONVERGENT_FRONTS_MIN: 2,
+} as const;
+
+export type StrategicSituationKind =
+  | "repeated_contest"     // one player facility contested >=N times in the window
+  | "keypoint_loss"        // a keypoint/objective facility was lost (captured OR destroyed)
+  | "convergent_pressure"; // >=2 DISTINCT fronts pressed within the recent window (NOT necessarily all critical at this instant)
+
+/**
+ * Structured strategic situation for Marcus to voice. Flat shape with per-kind
+ * optionals; every fact is concrete (names / counts / flags) so the voice can't go
+ * generic. `severity` ranks this against Chen/Emily beats in the caller's merged
+ * proactive scan — it does NOT change any DirectorBeat score.
+ */
+export interface StrategicSituation {
+  kind: StrategicSituationKind;
+  channel: Channel;   // always "ops" (Marcus)
+  severity: number;   // ranking only; separate from DirectorBeat severity
+  topicKey: string;   // per-situation cooldown key
+  facilityName?: string;   // repeated_contest / keypoint_loss
+  contestCount?: number;   // repeated_contest
+  windowSec?: number;      // repeated_contest
+  isKeypoint?: boolean;    // repeated_contest / keypoint_loss
+  isObjective?: boolean;   // repeated_contest / keypoint_loss
+  frontNames?: string[];   // convergent_pressure
+  frontCount?: number;     // convergent_pressure
+}
+
+/**
+ * Aggregate recent reports (caller-owned buffer) + live state into the strategic
+ * situations worth a Marcus line. Pure: no I/O, no LLM, no mutation. The caller prunes
+ * its buffer to STRATEGIC_WINDOW_SEC; this also filters defensively so a stale entry
+ * can't leak in.
+ */
+export function collectStrategicSituations(
+  state: GameState,
+  recentReports: ReportEvent[],
+): StrategicSituation[] {
+  // Strict `<` so a one-time report (e.g. a keypoint_loss) ages out exactly at the
+  // window edge; paired with the caller's window-length Marcus cooldown, a one-shot loss
+  // is voiced at most once and never re-derived after its report leaves the window.
+  const inWindow = recentReports.filter((r) => state.time - r.time < STRATEGIC_WINDOW_SEC);
+  if (inWindow.length === 0) return [];
+
+  const keypointSet = new Set(state.scenarioWinConfig?.friendlyKeypoints ?? []);
+  const objectiveSet = new Set(state.captureObjectives ?? []);
+  const out: StrategicSituation[] = [];
+
+  // ① repeated_contest: one player facility contested >=N times in-window. The 30s
+  // FACILITY_CONTESTED cooldown means a sustained capture trips this too — fine: the
+  // engine stays neutral (count only) and leaves the read ("probing" vs "assault") to
+  // Marcus. Only OUR still-held facilities qualify; a lost one is keypoint_loss instead.
+  const contestCounts = new Map<string, number>();
+  for (const r of inWindow) {
+    if (r.type === "FACILITY_CONTESTED" && r.entityId) {
+      contestCounts.set(r.entityId, (contestCounts.get(r.entityId) ?? 0) + 1);
+    }
+  }
+  for (const [facilityId, count] of contestCounts) {
+    if (count < STRATEGIC_TUNING.REPEATED_CONTEST_MIN) continue;
+    const f = state.facilities.get(facilityId);
+    if (!f || f.team !== "player") continue;
+    out.push({
+      kind: "repeated_contest",
+      channel: "ops",
+      severity: 0.45 + Math.min(count - STRATEGIC_TUNING.REPEATED_CONTEST_MIN, 3) * 0.03, // 中低 < front_collapse
+      topicKey: `repeated_contest:${facilityId}`,
+      facilityName: f.name,
+      contestCount: count,
+      windowSec: STRATEGIC_WINDOW_SEC,
+      isKeypoint: keypointSet.has(facilityId),
+      isObjective: objectiveSet.has(facilityId),
+    });
+  }
+
+  // ③ keypoint_loss: a keypoint/objective facility was lost — captured OR destroyed
+  // (FACILITY_LOST covers both; we do NOT distinguish). Strategic either way.
+  const lostKeypoints = new Set<string>();
+  for (const r of inWindow) {
+    if (r.type === "FACILITY_LOST" && r.entityId &&
+        (keypointSet.has(r.entityId) || objectiveSet.has(r.entityId))) {
+      lostKeypoints.add(r.entityId);
+    }
+  }
+  for (const facilityId of lostKeypoints) {
+    const isKeypoint = keypointSet.has(facilityId);
+    out.push({
+      kind: "keypoint_loss",
+      channel: "ops",
+      severity: isKeypoint ? 0.72 : 0.65, // 中高
+      topicKey: `keypoint_loss:${facilityId}`,
+      facilityName: state.facilities.get(facilityId)?.name ?? facilityId,
+      isKeypoint,
+      isObjective: objectiveSet.has(facilityId),
+    });
+  }
+
+  // ⑤ convergent_pressure: >=2 DISTINCT fronts under UNDER_ATTACK/POSITION_CRITICAL in
+  // the window. Count distinct frontIds, NOT events — one hot front emits both types,
+  // and must not self-trigger "two fronts".
+  const pressedFronts = new Set<string>();
+  for (const r of inWindow) {
+    if ((r.type === "UNDER_ATTACK" || r.type === "POSITION_CRITICAL") && r.entityId) {
+      pressedFronts.add(r.entityId); // entityId is the frontId for both
+    }
+  }
+  if (pressedFronts.size >= STRATEGIC_TUNING.CONVERGENT_FRONTS_MIN) {
+    const frontNames = [...pressedFronts].map(
+      (fid) => state.fronts.find((f) => f.id === fid)?.name ?? fid,
+    );
+    out.push({
+      kind: "convergent_pressure",
+      channel: "ops",
+      severity: 0.7 + Math.min(pressedFronts.size - STRATEGIC_TUNING.CONVERGENT_FRONTS_MIN, 3) * 0.05, // 高，可近/超单线 collapse
+      topicKey: "convergent_pressure:global", // one converging-pressure note per cooldown, not per front-set
+      frontNames,
+      frontCount: pressedFronts.size,
+      windowSec: STRATEGIC_WINDOW_SEC, // basis is the recent window, not a live "all critical now" snapshot
+    });
+  }
+
+  return out;
+}
