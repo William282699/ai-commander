@@ -192,6 +192,36 @@ function consumeProactiveBudget(now: number): void {
   proactiveBudget.lastInterruptAt = now;
 }
 
+// ── Step 7d: global question budget (one active must-ask at a time) ──
+// Lives in escalateCrisisToConversation (the single question entry), so all 4 escalation
+// call sites + the director cross_front_dilemma must-ask share ONE budget. A new question
+// yields if a question slot is OCCUPIED on any channel — a voice request in-flight
+// (accepted, not yet posted) OR a posted-but-unanswered active escalation — or another
+// question fired within the gap. Stamped synchronously when a question is about to fire
+// (a failed voice still counts as one occupancy — no retry spam). The dark report is
+// posted independently by the report/doctrine paths, so holding the white-text question
+// never swallows information. Priority is the existing tick/call order (HQ → doctrine →
+// report → director must-ask); higher-priority PREEMPTION of a lower pending question is
+// deliberately deferred (flag).
+const QUESTION_BUDGET_GAP_SEC = 15;
+const questionBudget = {
+  lastQuestionAt: -Infinity, // sim time the last must-ask question committed (any channel/source)
+};
+
+function resetQuestionBudget(): void {
+  questionBudget.lastQuestionAt = -Infinity;
+}
+
+/** True if a question slot is occupied on ANY real staff channel — either a voice request
+ *  is in flight (accepted but not yet posted) OR an unexpired active escalation is awaiting
+ *  a reply. Checking in-flight (not just the posted/active state) closes the race where a
+ *  slow voice request would let a second question slip past the gap before the first posts. */
+function anyQuestionOccupied(now: number): boolean {
+  return (["ops", "logistics", "combat"] as Channel[]).some(
+    (ch) => escalationState.inFlight[ch] || getActiveEscalation(ch, now) !== null,
+  );
+}
+
 // ── Step 7c.2a: director beat → proactive STATEMENT (Chen front pressure / Emily supply) ──
 // The war-room "someone in HQ is reading the battle" layer. A director beat is voiced as
 // ONE in-character STATEMENT — never a question, never an active escalation, never queued.
@@ -201,6 +231,10 @@ function consumeProactiveBudget(now: number): void {
 // collectStrategicSituations; feint_suspicion still deferred.)
 const PROACTIVE_EVAL_INTERVAL_SEC = 8;   // how often we even READ the director (compute throttle, NOT a broadcast cadence)
 const PROACTIVE_TOPIC_COOLDOWN_SEC = 45; // same beat (kind+front) won't re-voice within this
+// 7d: a cross_front_dilemma (no free squad → steadying it means pulling committed forces
+// off another line) UPGRADES from a proactive statement to a must-ask QUESTION only when
+// its survival estimate is this urgent; a slower dilemma (60–90s) stays a statement.
+const DILEMMA_MUST_ASK_SEC = 60;
 const PROACTIVE_BEAT_KINDS: ReadonlySet<DirectorBeatKind> = new Set<DirectorBeatKind>([
   "front_collapse", "cross_front_dilemma", "supply_strain",
 ]); // Chen (combat) + Emily (logistics) beats only. Marcus speaks via collectStrategicSituations (7c.2b), not this set; feint_suspicion stays deferred.
@@ -345,6 +379,16 @@ function escalateCrisisToConversation(
   // if the capture genuinely advances or becomes actionable.
   if (facFacts && !facilityContestWorthAsking(facFacts)) return false;
 
+  // 7d: global one-question-at-a-time gate. Yield (the caller's dark report still shows)
+  // if a question slot is already occupied on any channel — in-flight (accepted, voice
+  // request not yet posted) OR active (posted, awaiting a reply) — or another question
+  // fired within the gap. Checking in-flight too closes the slow-voice-request race that
+  // could otherwise post a second question alongside the first. Checked AFTER the
+  // per-topic/inFlight/worthiness gates; stamped only in the reserve below — so a failed
+  // voice still counts as one occupancy.
+  if (anyQuestionOccupied(now)) return false;
+  if (now - questionBudget.lastQuestionAt < QUESTION_BUDGET_GAP_SEC) return false;
+
   // Reserve synchronously so we don't re-fire, but DO NOT setActiveEscalation yet —
   // correlation activates only once the question is visible (see postQuestion).
   escalationState.topicCooldown.set(topicKey, now);
@@ -352,8 +396,11 @@ function escalateCrisisToConversation(
   // 7c.2-pre: question priority — stamp the global statement budget synchronously
   // here (past every guard, so it only stamps when the question truly commits) so a
   // deferred llm_advice STATEMENT this tick yields. The question itself is NOT gated
-  // by the budget; it only stamps. (Question-vs-question arbitration is Step 7d.)
+  // by the statement budget; it only stamps.
   consumeProactiveBudget(now);
+  // 7d: stamp the global question budget too — the single occupancy that makes the next
+  // must-ask yield until the gap passes AND this question is answered/expired.
+  questionBudget.lastQuestionAt = now;
   const reqSession = escalationState.session;
   const actionId = makeActionId();
 
@@ -1114,6 +1161,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetProactiveBudget();
     resetProactiveDirectorState();
     resetRecentReports();
+    resetQuestionBudget();
     clearMessages();
     clearThreads();
     addMessage("info", "等待指令...", 0, "ops", "system", "system");
@@ -1160,6 +1208,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetProactiveBudget();
     resetProactiveDirectorState();
     resetRecentReports();
+    resetQuestionBudget();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
@@ -1708,106 +1757,136 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           .catch(() => {}); // advisor trigger brief failure is silent
       }
 
-      // 7c.2a/7c.2b: director-driven proactive STATEMENT. Runs AFTER this tick's
-      // escalations AND the deferred llm_advice, so questions + old advice claim the
-      // global budget first (proactive yields same-tick). Triggered by a beat/situation
-      // (none eligible → silence), never a question, never setActiveEscalation, never
-      // queued — if nothing is eligible we drop it and re-read the live board next cadence.
-      //
-      // We MERGE Chen/Emily DirectorBeats (collectDirectorBeats — its ranking/scoring is
-      // untouched) with Marcus strategic situations (collectStrategicSituations — report
-      // aggregation), sort by severity, and voice the FIRST eligible one. A blocked
-      // higher-ranked candidate (active escalation / topic cooldown on its OWN channel)
-      // steps aside so a lower one can still surface. At most ONE statement per cadence.
+      // 7c.2a/7c.2b/7d: director-driven proactive layer. Runs AFTER this tick's
+      // escalations AND the deferred llm_advice. At most ONE interrupt per cadence, two
+      // possible outcomes: (7d) a sufficiently urgent cross_front_dilemma UPGRADES to a
+      // must-ask QUESTION via the unified escalateCrisisToConversation entry; otherwise
+      // (7c.2a/b) we voice ONE proactive STATEMENT — the first eligible of the merged
+      // Chen/Emily beats + Marcus strategic situations, ranked by severity. A blocked
+      // candidate steps aside so a lower one can still surface; none eligible → silence.
       if (
         !state.gameOver &&
         !proactiveDirectorState.inFlight &&
         state.time - proactiveDirectorState.lastEvalTime >= PROACTIVE_EVAL_INTERVAL_SEC
       ) {
         proactiveDirectorState.lastEvalTime = state.time;
-
-        // Unified candidate list: Chen/Emily front/supply beats + Marcus strategic
-        // situations. Each carries its channel, a ranking severity, a cooldown topicKey,
-        // and a lazy facts builder (built only for the one we actually voice).
-        const candidates: Array<{
-          channel: Channel;
-          severity: number;
-          topicKey: string;
-          cooldownSec: number;
-          buildFacts: () => string;
-        }> = [];
-        for (const beat of collectDirectorBeats(state, proactiveDirectorState.prevSnapshot)) {
-          if (!PROACTIVE_BEAT_KINDS.has(beat.kind)) continue; // Chen/Emily beats only; feint deferred
-          candidates.push({
-            channel: beat.channel,
-            severity: beat.severity,
-            topicKey: `${beat.kind}:${beat.frontId ?? "global"}`,
-            cooldownSec: PROACTIVE_TOPIC_COOLDOWN_SEC,
-            buildFacts: () => buildProactiveMiniFacts(beat),
-          });
-        }
-        for (const sit of collectStrategicSituations(state, recentReports)) {
-          candidates.push({
-            channel: sit.channel, // always "ops" (Marcus)
-            severity: sit.severity,
-            topicKey: sit.topicKey,
-            // Marcus situations cool down for the FULL window, NOT the global 45s: a
-            // one-time keypoint_loss (and any situation whose source events linger in the
-            // window after it resolves) must voice at most ONCE per window, never get
-            // re-recited every PROACTIVE_TOPIC_COOLDOWN_SEC. Chen/Emily keep the short cd.
-            cooldownSec: STRATEGIC_WINDOW_SEC,
-            buildFacts: () => buildStrategicMiniFacts(sit),
-          });
-        }
+        const beats = collectDirectorBeats(state, proactiveDirectorState.prevSnapshot);
         proactiveDirectorState.prevSnapshot = snapshotForDirector(state); // for next tick's trend
-        candidates.sort((a, b) => b.severity - a.severity);
 
-        // Global gate: one proactive statement per budget window, across all channels.
-        if (proactiveBudgetAllowsStatement(state.time)) {
-          for (const c of candidates) {
-            // Per-candidate, per-channel gates: a pending/in-flight QUESTION on the
-            // candidate's OWN channel silences IT (a question on a different channel does
-            // not — the global budget still spaces them out, and proactive is always a
-            // statement, never a question).
-            if (getActiveEscalation(c.channel, state.time) !== null) continue;
-            if (escalationState.inFlight[c.channel]) continue;
-            const lastTopic = proactiveDirectorState.lastTopicAt.get(c.topicKey) ?? -Infinity;
-            if (state.time - lastTopic < c.cooldownSec) continue;
+        // 7d: must-ask UPGRADE — the most urgent cross_front_dilemma (no free squad, so
+        // steadying it means pulling committed forces off another line) becomes a Chen
+        // QUESTION on combat (an executable channel), NOT a statement. It goes through the
+        // SAME escalateCrisisToConversation entry + question budget (a question outranks
+        // statements; it is not gated by the statement budget). If it fires, that's this
+        // cadence's single interrupt; if it's held (occupied slot elsewhere / gap /
+        // cooldown / worthiness) we fall through to the statement scan so the dilemma
+        // still surfaces as a heads-up. Engine decides whether to ask; the LLM only voices.
+        // Tradeoff (deferred): the outer !proactiveDirectorState.inFlight gate also skips
+        // this must-ask while a proactive STATEMENT voice is in flight — a brief (≤ one
+        // cadence) delay; splitting must-ask out of that gate is left to a follow-up.
+        const dilemma = beats.find(
+          (b) =>
+            b.kind === "cross_front_dilemma" &&
+            b.frontId !== null &&
+            b.estimatedCollapseSeconds !== null &&
+            b.estimatedCollapseSeconds <= DILEMMA_MUST_ASK_SEC,
+        );
+        let asked = false;
+        if (dilemma && dilemma.frontId) {
+          const synth: CrisisEvent = {
+            type: "DOCTRINE_BREACH",
+            severity: "critical",
+            doctrineId: "__director_dilemma__",
+            locationTag: dilemma.frontId,
+            message: `${dilemma.frontName ?? dilemma.frontId} 态势需要决断`,
+            time: state.time,
+          };
+          asked = escalateCrisisToConversation(state, synth, "combat", `DIRECTOR_DILEMMA:${dilemma.frontId}`);
+        }
 
-            // First eligible candidate wins. Reserve the slot synchronously (before the
-            // async voice), like escalation does, then voice exactly this one and stop.
-            proactiveDirectorState.lastTopicAt.set(c.topicKey, state.time);
-            consumeProactiveBudget(state.time);
-            proactiveDirectorState.inFlight = true;
-            const reqSession = proactiveDirectorState.session;
-            const ch = c.channel;
-            const miniFacts = c.buildFacts();
-            fetch(`${API_URL}/api/brief`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ digest: miniFacts, channel: ch, mode: "proactive" }),
-            })
-              .then((r) => r.json())
-              .then((data) => {
-                if (reqSession !== proactiveDirectorState.session) return; // restart → discard
-                if (state.gameOver) return;
-                const voiced =
-                  typeof data?.brief === "string" && data.brief.trim() ? data.brief.trim() : null;
-                // Statement only: drop a question-shaped line so proactive never reads as
-                // an unanswerable interrogative. Failure is silent — no fallback (this
-                // layer is optional presence, not a must-say). source="proactive" renders
-                // as the persona speaking (conversation), NOT a report; no setActiveEscalation.
-                if (voiced && !/[？?]/.test(voiced)) {
-                  addMessage("info", voiced, state.time, ch, undefined, "proactive");
-                }
+        if (!asked) {
+          // Unified candidate list: Chen/Emily front/supply beats + Marcus strategic
+          // situations. Each carries its channel, a ranking severity, a cooldown topicKey,
+          // and a lazy facts builder (built only for the one we actually voice).
+          const candidates: Array<{
+            channel: Channel;
+            severity: number;
+            topicKey: string;
+            cooldownSec: number;
+            buildFacts: () => string;
+          }> = [];
+          for (const beat of beats) {
+            if (!PROACTIVE_BEAT_KINDS.has(beat.kind)) continue; // Chen/Emily beats only; feint deferred
+            candidates.push({
+              channel: beat.channel,
+              severity: beat.severity,
+              topicKey: `${beat.kind}:${beat.frontId ?? "global"}`,
+              cooldownSec: PROACTIVE_TOPIC_COOLDOWN_SEC,
+              buildFacts: () => buildProactiveMiniFacts(beat),
+            });
+          }
+          for (const sit of collectStrategicSituations(state, recentReports)) {
+            candidates.push({
+              channel: sit.channel, // always "ops" (Marcus)
+              severity: sit.severity,
+              topicKey: sit.topicKey,
+              // Marcus situations cool down for the FULL window, NOT the global 45s: a
+              // one-time keypoint_loss (and any situation whose source events linger in the
+              // window after it resolves) must voice at most ONCE per window, never get
+              // re-recited every PROACTIVE_TOPIC_COOLDOWN_SEC. Chen/Emily keep the short cd.
+              cooldownSec: STRATEGIC_WINDOW_SEC,
+              buildFacts: () => buildStrategicMiniFacts(sit),
+            });
+          }
+          candidates.sort((a, b) => b.severity - a.severity);
+
+          // Global gate: one proactive statement per budget window, across all channels.
+          if (proactiveBudgetAllowsStatement(state.time)) {
+            for (const c of candidates) {
+              // Per-candidate, per-channel gates: a pending/in-flight QUESTION on the
+              // candidate's OWN channel silences IT (a question on a different channel does
+              // not — the global budget still spaces them out, and proactive is always a
+              // statement, never a question).
+              if (getActiveEscalation(c.channel, state.time) !== null) continue;
+              if (escalationState.inFlight[c.channel]) continue;
+              const lastTopic = proactiveDirectorState.lastTopicAt.get(c.topicKey) ?? -Infinity;
+              if (state.time - lastTopic < c.cooldownSec) continue;
+
+              // First eligible candidate wins. Reserve the slot synchronously (before the
+              // async voice), like escalation does, then voice exactly this one and stop.
+              proactiveDirectorState.lastTopicAt.set(c.topicKey, state.time);
+              consumeProactiveBudget(state.time);
+              proactiveDirectorState.inFlight = true;
+              const reqSession = proactiveDirectorState.session;
+              const ch = c.channel;
+              const miniFacts = c.buildFacts();
+              fetch(`${API_URL}/api/brief`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ digest: miniFacts, channel: ch, mode: "proactive" }),
               })
-              .catch(() => {}) // network failure → silent, no fallback
-              .finally(() => {
-                if (reqSession === proactiveDirectorState.session) {
-                  proactiveDirectorState.inFlight = false;
-                }
-              });
-            break; // one proactive statement per cadence
+                .then((r) => r.json())
+                .then((data) => {
+                  if (reqSession !== proactiveDirectorState.session) return; // restart → discard
+                  if (state.gameOver) return;
+                  const voiced =
+                    typeof data?.brief === "string" && data.brief.trim() ? data.brief.trim() : null;
+                  // Statement only: drop a question-shaped line so proactive never reads as
+                  // an unanswerable interrogative. Failure is silent — no fallback (this
+                  // layer is optional presence, not a must-say). source="proactive" renders
+                  // as the persona speaking (conversation), NOT a report; no setActiveEscalation.
+                  if (voiced && !/[？?]/.test(voiced)) {
+                    addMessage("info", voiced, state.time, ch, undefined, "proactive");
+                  }
+                })
+                .catch(() => {}) // network failure → silent, no fallback
+                .finally(() => {
+                  if (reqSession === proactiveDirectorState.session) {
+                    proactiveDirectorState.inFlight = false;
+                  }
+                });
+              break; // one proactive statement per cadence
+            }
           }
         }
       }
