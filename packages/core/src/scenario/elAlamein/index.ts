@@ -133,6 +133,7 @@ export function createElAlameinState(): GameState {
     doctrineCooldowns: {},
     tasks: [],
     battleMarkers: [],
+    decisionReviews: [],
     recentDeaths: [],
     battleMarkerScanAccum: 0,
     battleMarkerDeathCursor: 0,

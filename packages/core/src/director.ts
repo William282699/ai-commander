@@ -178,8 +178,11 @@ function isEnemyVisible(state: GameState, x: number, y: number): boolean {
  * DPS uses the engine's one canonical definition, attackDamage / attackInterval
  * (same as combat.ts / crisisResponse.ts). Enemy units are fog-gated to "what the
  * player can actually see", matching updateFrontPower's convention.
+ *
+ * Exported (7e) so decisionReview reuses the ONE power-ratio definition instead
+ * of forking a copy. Logic unchanged.
  */
-function freshFrontPowerRatio(state: GameState, front: Front): number | null {
+export function freshFrontPowerRatio(state: GameState, front: Front): number | null {
   const bboxes = frontRegionBboxes(state, front);
   if (bboxes.length === 0) return null;
 
@@ -227,8 +230,11 @@ function visibleEnemyCount(state: GameState, front: Front): number {
  * enemy-only or undefended-facility fights — hence this explicit presence check.
  * (An undefended player facility being overrun IS a real loss, but it belongs to
  * the FACILITY_CONTESTED/LOST report path, not a committed-force collapse beat.)
+ *
+ * Exported (7e) so decisionReview applies the SAME presence gate before reading
+ * tCollapse (the tCollapse=0 fake fires there too). Logic unchanged.
  */
-function hasPlayerCombatPresence(state: GameState, front: Front): boolean {
+export function hasPlayerCombatPresence(state: GameState, front: Front): boolean {
   const bboxes = frontRegionBboxes(state, front);
   if (bboxes.length === 0) return false;
   for (const u of state.units.values()) {

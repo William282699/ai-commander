@@ -271,6 +271,7 @@ export function createInitialGameState(scenarioId: ScenarioId = "dual_island"): 
     doctrineCooldowns: {},
     tasks: [],
     battleMarkers: [],
+    decisionReviews: [],
     recentDeaths: [],
     battleMarkerScanAccum: 0,
     battleMarkerDeathCursor: 0,

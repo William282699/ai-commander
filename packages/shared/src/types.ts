@@ -478,6 +478,71 @@ export interface ReportEvent {
   actionRequired?: boolean; // true = ASK_DECISION (staff-ask), false/undefined = REPORT_ONLY
 }
 
+// --- Decision Review (Step 7e: battle-time decision retrospect) ---
+// Minimal serializable record shapes ONLY — they live on GameState, so they
+// must be defined here (shared never imports core). All capture/assess logic
+// lives in packages/core/src/decisionReview.ts.
+
+/** Intent types 7e records for review. produce/trade/recon/patrol/hold are
+ *  deliberately excluded in 7e.1 (economy review deferred; tiny dispatches
+ *  aren't decisions worth a retrospect). */
+export type DecisionReviewKind = "attack" | "defend" | "retreat" | "capture" | "sabotage";
+
+/** Per-front mini snapshot at decision time (cross-front delta baseline). */
+export interface DecisionFrontSnapshot {
+  frontId: string;
+  engagementIntensity: number;
+  /** Survival estimate (sec) of our committed force there; null = stable or no committed force. */
+  collapseSeconds: number | null;
+}
+
+/** Baseline captured at decision time. Engine-read values only, serializable. */
+export interface DecisionReviewBaseline {
+  fuel: number;
+  ammo: number;
+  money: number;
+  /** Count of resolved assigned units alive at decision time (casualty basis). */
+  assignedAlive: number;
+  front?: {
+    engagementIntensity: number;
+    collapseSeconds: number | null;
+    powerRatio: number | null;
+  };
+  facility?: {
+    team: Team;
+    captureProgress: number;
+    hp: number;
+  };
+  /** ALL fronts at decision time (anchor included; cross-front delta uses the others). */
+  fronts: DecisionFrontSnapshot[];
+  /** Keypoint/objective facility owners at decision time (facilityId → team). */
+  keypointOwners: Record<string, Team>;
+}
+
+/**
+ * One recorded player decision awaiting engine review (Step 7e). The web
+ * layer records these from the main ChatPanel command path after orders
+ * dispatch; the engine reviews the outcome ~90s later. `assignedUnitIds` are
+ * the units resolveIntent assigned, filtered to living player units at
+ * decision time ("resolved assigned units") — NOT a claim about what
+ * applyOrders finally applied (it returns void; some may still be skipped).
+ */
+export interface DecisionReviewRecord {
+  id: string;
+  /** Correlation id of the escalation question this decision answered, if any. */
+  escalateId?: string;
+  /** Channel the command was given on. */
+  channel: Channel;
+  kind: DecisionReviewKind;
+  createdAt: number; // game time
+  dueAt: number;     // game time the engine reviews the outcome
+  /** Battlefield anchor — at least one is set (anchorless decisions are never recorded). */
+  frontId?: string;
+  facilityId?: string;
+  assignedUnitIds: number[];
+  baseline: DecisionReviewBaseline;
+}
+
 // --- Diagnostics (engine → UI message channel) ---
 
 export interface DiagnosticEntry {
@@ -561,6 +626,8 @@ export interface GameState {
   doctrineCooldowns: Record<string, number>; // doctrineId → last alert game time
   tasks: TaskCard[];
   battleMarkers: BattleMarker[];
+  /** Step 7e: recorded player decisions awaiting engine review (queue, capped). */
+  decisionReviews: DecisionReviewRecord[];
   recentDeaths: { x: number; y: number; time: number }[];
   battleMarkerScanAccum: number;
   battleMarkerDeathCursor: number;

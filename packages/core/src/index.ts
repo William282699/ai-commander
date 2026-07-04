@@ -41,3 +41,6 @@ export type { DirectorBeat, DirectorBeatKind, DirectorStake, DirectorTrend, Dire
 // Step 7c.2b — Marcus strategic aggregation (pure; report-driven situations)
 export { collectStrategicSituations, STRATEGIC_WINDOW_SEC } from "./director";
 export type { StrategicSituation, StrategicSituationKind } from "./director";
+// Step 7e — decision review (pure; engine judges outcomes + routes the persona, LLM only voices)
+export { captureDecisionReview, enqueueDecisionReview, assessDecisionReview, describeDecisionReview, buildRetrospectMiniFacts, isReviewableIntentType, REVIEW_TUNING } from "./decisionReview";
+export type { DecisionCaptureArgs, DecisionReviewFacts, FrontOutcome, FacilityOutcome, CasualtyLevel, CrossFrontFact } from "./decisionReview";
