@@ -57,6 +57,9 @@ import {
   frontEscalationFacts,
   facilityEscalationFacts,
   facilityContestWorthAsking,
+  assessDecisionReview,
+  describeDecisionReview,
+  REVIEW_TUNING,
   updateTasks,
   updateBattleMarkers,
   resetEngagementCache,
@@ -253,6 +256,23 @@ function resetProactiveDirectorState(): void {
   proactiveDirectorState.lastTopicAt.clear();
   proactiveDirectorState.inFlight = false;
   proactiveDirectorState.session++;
+}
+
+// ── Step 7e.1: decision-review scanner state ──
+// The review QUEUE lives on GameState (state.decisionReviews — restart swaps it
+// away with the state object); this module state only throttles the scan and
+// guards the (7e.1c) async voice. 7e.1b is observe-only: assess → console.
+const REVIEW_SCAN_INTERVAL_SEC = 2;
+const decisionReviewState = {
+  lastScanTime: 0,
+  inFlight: false, // one retrospect voice at a time (7e.1c)
+  session: 0,      // bumped on restart; stale async responses discarded
+};
+
+function resetDecisionReviewState(): void {
+  decisionReviewState.lastScanTime = 0;
+  decisionReviewState.inFlight = false;
+  decisionReviewState.session++;
 }
 
 // 7c.2b: caller-owned rolling buffer of recent reports for Marcus's strategic
@@ -1162,6 +1182,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetProactiveDirectorState();
     resetRecentReports();
     resetQuestionBudget();
+    resetDecisionReviewState();
     clearMessages();
     clearThreads();
     addMessage("info", "等待指令...", 0, "ops", "system", "system");
@@ -1209,6 +1230,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetProactiveDirectorState();
     resetRecentReports();
     resetQuestionBudget();
+    resetDecisionReviewState();
 
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
@@ -1888,6 +1910,20 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
               break; // one proactive statement per cadence
             }
           }
+        }
+      }
+
+      // ── Step 7e.1b: decision-review scanner (observe-only; voice lands in 7e.1c) ──
+      // Due records get ONE engine assessment (assessDecisionReview, pure) and a
+      // console line, then are consumed. The engine judged what/when/who — no LLM,
+      // no message, no orders in this sub-step.
+      if (!state.gameOver && state.time - decisionReviewState.lastScanTime >= REVIEW_SCAN_INTERVAL_SEC) {
+        decisionReviewState.lastScanTime = state.time;
+        const dueRec = state.decisionReviews.find((r) => state.time >= r.dueAt);
+        if (dueRec) {
+          const facts = assessDecisionReview(state, dueRec);
+          console.log(describeDecisionReview(facts));
+          state.decisionReviews = state.decisionReviews.filter((r) => r !== dueRec);
         }
       }
 

@@ -17,7 +17,7 @@ declare global {
   }
 }
 import { OrgTree } from "./OrgTree";
-import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine } from "@ai-commander/core";
+import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
@@ -662,7 +662,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const selectedIdsSnapshotRef = useRef<number[] | undefined>(undefined);
 
   // Fix #2: execution context bound to each response (+ requestId for approve validation)
-  type ExecContext = { channel: Channel; threadId?: string; requestId?: string };
+  // 7e.1: also carries escalateId — processAdvisorData clears the active escalation
+  // BEFORE handleApprove runs (setTimeout / manual click / pending-confirm), so the
+  // decision-review record can only learn "this answered a staff question" through
+  // this context. All four approve paths (auto, bucket-A, manual, high_impact
+  // confirm) receive the same execCtx, so the correlation survives every route.
+  type ExecContext = { channel: Channel; threadId?: string; requestId?: string; escalateId?: string };
   const responseExecCtxRef = useRef<ExecContext | null>(null);
   // Tracks the latest valid requestId — approve buttons capture a snapshot of execCtx at
   // render time and pass it in; handleApprove compares against this ref to reject stale approvals.
@@ -1256,7 +1261,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           : { auto: false };
 
         const requestId = crypto.randomUUID();
-        const execCtx: ExecContext = { channel: ch, threadId: activeThreadOnChannel?.id, requestId };
+        const execCtx: ExecContext = { channel: ch, threadId: activeThreadOnChannel?.id, requestId, escalateId };
         latestRequestIdRef.current = requestId;
 
         if (gate.auto && (data.options as AdvisorOption[]).length >= 1) {
@@ -1602,6 +1607,29 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           doctrineId: linkedDoctrine?.id,
         };
         state.tasks.push(newTask);
+      }
+
+      // ── Step 7e.1: record this decision for the engine's later outcome review ──
+      // ONLY this main command path records. handleThreadApprove (the OTHER
+      // applyOrders call site, dormant since 6a), right-click manual orders and
+      // produce/trade are deliberately NOT recorded (deferred — see decisionReview.ts).
+      // The engine gates recording (battlefield anchor + unit floor) and later
+      // decides whether/who reviews; nothing here executes or voices anything.
+      // assignedUnitIds are resolveIntent's picks filtered to living units
+      // ("resolved assigned units") — applyOrders returns void, so this is NOT a
+      // claim about what was finally applied.
+      const reviewIntent = intents.find((i) => isReviewableIntentType(i.type));
+      if (reviewIntent && isReviewableIntentType(reviewIntent.type)) {
+        const record = captureDecisionReview(state, {
+          id: crypto.randomUUID(),
+          channel: ch,
+          kind: reviewIntent.type,
+          facilityHint: reviewIntent.targetFacility,
+          frontHint: reviewIntent.toFront ?? reviewIntent.targetRegion ?? reviewIntent.fromFront,
+          assignedUnitIds: Array.from(new Set(allAssignedUnitIds)),
+          escalateId: execCtx?.escalateId,
+        });
+        if (record) enqueueDecisionReview(state, record);
       }
 
       if (execCtx?.threadId) {
