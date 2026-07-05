@@ -176,10 +176,15 @@ export interface DecisionCaptureArgs {
   id: string;
   channel: Channel;
   kind: DecisionReviewKind;
-  /** Raw anchor hints straight from the executed intent (already soft-fixed
-   *  by the web layer, so they resolve or are absent). */
+  /** intent.targetFacility, when set (already soft-fixed by the web layer). */
   facilityHint?: string;
-  frontHint?: string;
+  /** Target-LOCATION hint from the executed intent: toFront ?? targetRegion.
+   *  May legitimately hold a front, tag, region, OR facility name — the
+   *  command-parse prompt explicitly allows facility names in toFront and the
+   *  planner normalizes that on an internal copy, so the pre-normalization
+   *  intent we see here still has it in the location field. NEVER fromFront:
+   *  the source front is not an outcome anchor. */
+  targetHint?: string;
   /** Unit ids resolveIntent assigned (deduped by the caller). */
   assignedUnitIds: number[];
   /** Escalation correlation id when this decision answered a staff question. */
@@ -199,21 +204,51 @@ export function captureDecisionReview(
   const minUnits = args.escalateId ? 1 : REVIEW_TUNING.MIN_UNITS;
   if (alive.length < minUnits) return null;
 
-  // Anchor: facility → front → dominant front of the assigned units.
+  // Anchor resolution — mirrors the ENGINE's own location convention
+  // (tacticalPlanner resolveTarget / normalizeIntentLocations) instead of
+  // forking a weaker copy. Playtest bug this fixes: "进攻阿拉曼镇" where the
+  // LLM put the town in toFront → facility anchor never resolved → captured
+  // town never entered the facts, and the dominant-front fallback anchored
+  // the review to the units' SOURCE front ("出发地没人了" review).
   let facilityId: string | undefined;
   let frontId: string | undefined;
   if (args.facilityHint) {
     facilityId = findFacilityById(state, args.facilityHint)?.id;
   }
-  if (args.frontHint) {
-    frontId = findFront(state, args.frontHint)?.id;
+  if (!facilityId && args.targetHint) {
+    const hint = args.targetHint;
+    // Order matters: front → tag → region → facility-fuzzy LAST, because
+    // findFacilityById substring-matches names (a front-ish hint like "北线"
+    // must not get eaten by a facility named "北线前哨").
+    const front = findFront(state, hint);
+    if (front) {
+      frontId = front.id;
+    } else {
+      const tag = state.tags.find((t) => t.id === hint || t.name === hint);
+      if (tag) {
+        frontId = frontForPosition(state, tag.position.x, tag.position.y)?.id;
+      }
+      if (!frontId) {
+        const region = state.regions.get(hint);
+        if (region) frontId = state.fronts.find((f) => f.regionIds.includes(region.id))?.id;
+      }
+      if (!frontId) {
+        facilityId = findFacilityById(state, hint)?.id;
+      }
+    }
   }
   if (facilityId && !frontId) {
     const fac = state.facilities.get(facilityId);
     if (fac) frontId = frontForFacilityRegion(state, fac.regionId)?.id;
   }
   if (!facilityId && !frontId) {
-    frontId = dominantFrontForUnits(state, alive)?.id;
+    // No target anchor resolved. The units' CURRENT front is only a valid
+    // anchor for kinds that act WHERE the force stands (defend in place /
+    // retreat from here). For attack/capture/sabotage it is the SOURCE, not
+    // the outcome — those record nothing rather than review the wrong place.
+    if (args.kind === "defend" || args.kind === "retreat") {
+      frontId = dominantFrontForUnits(state, alive)?.id;
+    }
   }
   if (!facilityId && !frontId) return null; // no anchor → not a reviewable decision
 

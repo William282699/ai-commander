@@ -1625,7 +1625,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           channel: ch,
           kind: reviewIntent.type,
           facilityHint: reviewIntent.targetFacility,
-          frontHint: reviewIntent.toFront ?? reviewIntent.targetRegion ?? reviewIntent.fromFront,
+          // toFront/targetRegion only — fromFront is the SOURCE, never an
+          // outcome anchor (core resolves the hint as front/tag/region/facility).
+          targetHint: reviewIntent.toFront ?? reviewIntent.targetRegion,
           assignedUnitIds: Array.from(new Set(allAssignedUnitIds)),
           escalateId: execCtx?.escalateId,
         });
