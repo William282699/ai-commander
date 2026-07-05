@@ -199,8 +199,13 @@ app.post("/api/brief", async (req, res) => {
 
   // 7c.1: mode="escalation" voices a decision question from the beat facts.
   // 7c.2a: mode="proactive" voices a one-line situational statement from the beat
-  // facts (never a question). Anything else keeps the legacy statement-style brief.
-  const briefMode = mode === "escalation" ? "escalation" : mode === "proactive" ? "proactive" : "brief";
+  // facts (never a question). 7e: mode="retrospect" voices a one-line decision-review
+  // statement from the engine's outcome facts. Anything else keeps the legacy brief.
+  const briefMode =
+    mode === "escalation" ? "escalation"
+    : mode === "proactive" ? "proactive"
+    : mode === "retrospect" ? "retrospect"
+    : "brief";
   const result = await callLightBrief(digest, channel, briefMode);
   if (!result) {
     res.status(502).json({ error: "简报生成失败" });

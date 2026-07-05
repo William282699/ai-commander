@@ -53,9 +53,21 @@ import { findFront, findFacilityById } from "./tacticalPlanner";
 export const REVIEW_TUNING = {
   /** Seconds after the decision before the engine reviews its outcome. */
   REVIEW_DELAY_SEC: 90,
-  /** A due-but-blocked (question pending / budget spent) review may retry this
-   *  long past due before it is dropped — facts older than this are stale. */
+  /** A due-but-blocked review may retry this long past due before it is
+   *  dropped, when the block is a FAST-clearing one (statement budget ≤12s /
+   *  a voice already in flight). Safe to wait: facts are re-assessed fresh on
+   *  every retry, so a late voice still states current deltas. */
   REVIEW_EXPIRY_GRACE_SEC: 60,
+  /** When the block is a QUESTION occupancy on the target channel (an active
+   *  escalation awaiting the player's answer, or an escalation voice in
+   *  flight), the review waits longer: an unanswered escalation legitimately
+   *  holds its channel for up to the web layer's ESCALATION_WINDOW_SEC (120s),
+   *  so this must exceed 120s or the review starves and drops unvoiced right
+   *  under the question (Codex blocker: Marcus reviews die here — a cross-front
+   *  keypoint loss spawns the ops question AND the ops-routed review together).
+   *  Back-to-back question chains can still outlast this — accepted: in that
+   *  much crisis, a retrospect statement is the right thing to lose. */
+  REVIEW_QUESTION_BLOCK_GRACE_SEC: 180,
   /** Non-escalation decisions need at least this many resolved assigned units
    *  (a 1-2 unit recon errand is not a decision worth a retrospect).
    *  Escalation answers only need 1 — the system asked, so we close the loop. */

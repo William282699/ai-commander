@@ -478,6 +478,32 @@ ${PROACTIVE_BASE}`,
 ${PROACTIVE_BASE}`,
 };
 
+// ── Step 7e: retrospect voice prompts (decision REVIEW statement mode) ──
+// SEPARATE from the command-parse SYSTEM_PROMPT (命门), from escalation (which asks
+// a QUESTION) and from proactive (which states a live situation). The engine hands
+// the STRUCTURED review facts for ONE earlier decision — what was decided, the
+// baseline then, the delta now, all engine-computed (incl. the neutral outcome
+// labels and who speaks). The LLM writes ONE in-character retrospective STATEMENT.
+// It never judges outcomes itself, never recommends, never asks. No example lines —
+// a concrete sample becomes a fixed template (workplan 头号陷阱 #2).
+const RETROSPECT_BASE = `你拿到的是长官早前一个决定的【复盘用结构化事实】（不是脚本）：决定是什么、当时的基线、现在的变化，全部由引擎算好。你是参谋部里替长官记着这笔账的人，此刻回头【陈述一句】那个决定后来发生了什么：
+1) 点出是哪个决定（方向 / 目标 + 大约多久前，把 decided_seconds_ago 换算成口语时间），再点出引擎给出的最要紧的一两个具体变化（守住 / 没守住、伤亡几人、夺下 / 丢了、油弹烧了多少——有数字就用数字，必须具体）；
+2) 只陈述这段窗口内已发生的事实与代价，不推断事实之外的因果，不评判长官对错，不建议下一步动作，也不发起任何决策请求。这是回顾，不是请示，更不是训话。
+**这是陈述句，不是问句：不向长官发问，结尾不用问号。**
+outcome 字段是引擎的中性判读——no_presence 只说明该方向已无我方成建制部队；是按令撤下来了还是被打散，看 decision_kind 和伤亡数自己拿捏措辞，别一律说成溃败。资源 window_delta 是这段窗口的总消耗，别把它说成全是这一个决定花的。
+用词限于战场参谋 / 前线无线电语域；不得出现开发、系统、规则、复盘机制本身一类的词，也不要把任何实现层面的概念讲给长官听。
+别煽情、别夸大：结果不好就平实说，结果好也不吹功。短、具体，每次换说法，别落定式。
+只返回 JSON：{"brief": "...", "urgency": 0.0-1.0}`;
+
+const RETROSPECT_PROMPTS: Record<string, string> = {
+  combat: `你是陈军士（Chen），湖南籍前线士官，专业冷静。全中文，一句上限，战术术语准确（压制 / 侧翼 / 纵深 / 反斜面）。对长官称「长官 / 您」，自称「我」。你复盘的是长官那次战斗决定的结果：阵地守没守住、目标打没打下来、弟兄们折了几个。
+${RETROSPECT_BASE}`,
+  logistics: `你是艾米莉中尉（LT Emily），后勤官，精确、关注代价、也接地气。全中文，一句上限。你复盘的是长官那次决定之后这段时间的资源与后勤代价：油、弹、钱烧了多少、还剩多少、够不够下一步用。
+${RETROSPECT_BASE}`,
+  ops: `你是马克斯上尉（CPT Marcus），指挥官的参谋长。你复盘的是战略取舍：长官把力量押在一个方向，这段时间别的方向付出了什么代价、押的那头换来了什么（facts 里 meanwhile_elsewhere 就是别处的代价）。只陈述取舍已发生的结果——不下战术调令、不替长官拿派不派兵的主意、不发起任何问句、不提议下一步。全中文（偶夹英文军事术语），一句上限，思考在战线 / 方向级、不到单位级。对长官称「长官 / 您」，自称「属下」或「我」。
+${RETROSPECT_BASE}`,
+};
+
 // ── Day 7 intent normalization ──
 // Maps unsupported intents to their closest Day7 equivalent.
 // Keeps VALID_INTENT_TYPES in schema.ts intact for Day10+ forward compatibility.
@@ -1030,19 +1056,23 @@ ${styleNote}
 export async function callLightBrief(
   digest: string,
   channel?: string,
-  mode: "brief" | "escalation" | "proactive" = "brief",
+  mode: "brief" | "escalation" | "proactive" | "retrospect" = "brief",
 ): Promise<LightAdvisorResponse | null> {
   try {
     // 7c.1: escalation mode voices a decision QUESTION from structured facts.
     // 7c.2a: proactive mode voices a one-line situational STATEMENT (never a question)
-    // from the director beat's structured facts. brief mode keeps the statement-style
-    // sitrep. All three are isolated from the command-parse SYSTEM_PROMPT.
+    // from the director beat's structured facts. 7e: retrospect mode voices a one-line
+    // decision-REVIEW statement from the engine's outcome facts (never a question,
+    // never advice). brief mode keeps the statement-style sitrep. All four are
+    // isolated from the command-parse SYSTEM_PROMPT.
     const prompt =
       mode === "escalation"
         ? (channel && ESCALATION_PROMPTS[channel]) || ESCALATION_PROMPTS.ops
         : mode === "proactive"
           ? (channel && PROACTIVE_PROMPTS[channel]) || PROACTIVE_PROMPTS.combat
-          : (channel && CHANNEL_PROMPTS[channel]) || LIGHT_SYSTEM_PROMPT;
+          : mode === "retrospect"
+            ? (channel && RETROSPECT_PROMPTS[channel]) || RETROSPECT_PROMPTS.combat
+            : (channel && CHANNEL_PROMPTS[channel]) || LIGHT_SYSTEM_PROMPT;
     const raw = await callDeepSeek(prompt, digest, {
       temperature: mode === "brief" ? 0.5 : 0.6,
       maxTokens: 250,

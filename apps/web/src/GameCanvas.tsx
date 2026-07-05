@@ -59,6 +59,7 @@ import {
   facilityContestWorthAsking,
   assessDecisionReview,
   describeDecisionReview,
+  buildRetrospectMiniFacts,
   REVIEW_TUNING,
   updateTasks,
   updateBattleMarkers,
@@ -267,12 +268,25 @@ const decisionReviewState = {
   lastScanTime: 0,
   inFlight: false, // one retrospect voice at a time (7e.1c)
   session: 0,      // bumped on restart; stale async responses discarded
+  // Console-dedup ONLY (Codex minor): a SPEAK-but-blocked record retries every
+  // scan and would re-log the same [review] line each time. One log per record
+  // id; zero effect on the voice/consume behavior itself.
+  lastLoggedRecordId: null as string | null,
+  // Sticky question-block memory (Codex round-2 blocker fix): which record ids
+  // have EVER been question-blocked. Evaluated per-frame, the long grace
+  // collapsed back to 60s the moment the question cleared — and the expiry
+  // check runs before the voice attempt, so any review blocked >60s past due
+  // was dropped on the very frame it finally could speak. Ids are removed when
+  // their record is consumed (voiced / silent drop / expired drop).
+  questionBlockedRecordIds: new Set<string>(),
 };
 
 function resetDecisionReviewState(): void {
   decisionReviewState.lastScanTime = 0;
   decisionReviewState.inFlight = false;
   decisionReviewState.session++;
+  decisionReviewState.lastLoggedRecordId = null;
+  decisionReviewState.questionBlockedRecordIds.clear();
 }
 
 // 7c.2b: caller-owned rolling buffer of recent reports for Marcus's strategic
@@ -1913,17 +1927,125 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         }
       }
 
-      // ── Step 7e.1b: decision-review scanner (observe-only; voice lands in 7e.1c) ──
-      // Due records get ONE engine assessment (assessDecisionReview, pure) and a
-      // console line, then are consumed. The engine judged what/when/who — no LLM,
-      // no message, no orders in this sub-step.
+      // ── Step 7e: decision-review scanner (engine reviews, ONE persona voices) ──
+      // A due record gets an engine assessment (assessDecisionReview, pure) each
+      // scan. The ENGINE decided what was recorded, when it's due, whether the
+      // outcome clears the worthiness bar, and WHO speaks (facts.channel); the LLM
+      // only re-voices the structured facts as ONE retrospective STATEMENT — never
+      // a question, never advice, and this path never reaches resolveIntent /
+      // applyOrders, so a retrospect cannot execute anything. Statement etiquette
+      // mirrors proactive: yield to a pending question on the target channel, share
+      // the global statement budget, one voice in flight, fail-silent.
       if (!state.gameOver && state.time - decisionReviewState.lastScanTime >= REVIEW_SCAN_INTERVAL_SEC) {
         decisionReviewState.lastScanTime = state.time;
         const dueRec = state.decisionReviews.find((r) => state.time >= r.dueAt);
         if (dueRec) {
           const facts = assessDecisionReview(state, dueRec);
-          console.log(describeDecisionReview(facts));
-          state.decisionReviews = state.decisionReviews.filter((r) => r !== dueRec);
+          // Observability (7e.1b line, kept) — deduped per record: a blocked record
+          // retries every scan but only its first assessment is logged.
+          if (decisionReviewState.lastLoggedRecordId !== dueRec.id) {
+            decisionReviewState.lastLoggedRecordId = dueRec.id;
+            console.log(describeDecisionReview(facts));
+          }
+          if (!facts || !facts.significant) {
+            // Anchor gone or nothing resolved / nothing worth a line → silent drop.
+            state.decisionReviews = state.decisionReviews.filter((r) => r !== dueRec);
+            decisionReviewState.questionBlockedRecordIds.delete(dueRec.id);
+          } else {
+          // Expiry depends on WHY we're blocked (Codex blocker fix, 2 rounds):
+          // a QUESTION occupancy on the target channel — an active escalation
+          // awaiting the player (TTL 120s) or an escalation voice in flight —
+          // legitimately holds the channel longer than the flat 60s grace, which
+          // starved the review and dropped it unvoiced right under the question
+          // (Marcus reviews died here: a cross-front keypoint loss spawns the
+          // ops question AND the ops-routed review together). Round 2: the long
+          // grace must be STICKY per record ("was it EVER question-blocked"),
+          // not per-frame — judged per-frame it collapsed back to 60s the moment
+          // the question cleared, and since this expiry check runs before the
+          // voice attempt, a review blocked >60s past due was dropped on the
+          // very frame it finally could speak. Waiting is safe — facts are
+          // re-assessed fresh on every retry, and decided_seconds_ago keeps the
+          // spoken timing honest. Question priority is unchanged: retrospect
+          // still never interrupts a pending question.
+          const questionBlockedNow =
+            getActiveEscalation(facts.channel, state.time) !== null ||
+            escalationState.inFlight[facts.channel];
+          if (questionBlockedNow) {
+            decisionReviewState.questionBlockedRecordIds.add(dueRec.id);
+          }
+          const everQuestionBlocked =
+            questionBlockedNow || decisionReviewState.questionBlockedRecordIds.has(dueRec.id);
+          const graceSec = everQuestionBlocked
+            ? REVIEW_TUNING.REVIEW_QUESTION_BLOCK_GRACE_SEC
+            : REVIEW_TUNING.REVIEW_EXPIRY_GRACE_SEC;
+          if (state.time > dueRec.dueAt + graceSec) {
+            // Blocked past grace — drop unvoiced (observable, so a starved
+            // review is diagnosable from the console instead of just vanishing).
+            state.decisionReviews = state.decisionReviews.filter((r) => r !== dueRec);
+            decisionReviewState.questionBlockedRecordIds.delete(dueRec.id);
+            console.log(
+              `[review] dropped unvoiced (blocked ${Math.round(state.time - dueRec.dueAt)}s past due, grace=${graceSec}s, everQuestionBlocked=${everQuestionBlocked})`,
+            );
+          } else if (
+            !questionBlockedNow &&
+            !decisionReviewState.inFlight &&
+            proactiveBudgetAllowsStatement(state.time)
+          ) {
+            // Voice it: consume the record + the statement budget synchronously.
+            state.decisionReviews = state.decisionReviews.filter((r) => r !== dueRec);
+            decisionReviewState.questionBlockedRecordIds.delete(dueRec.id);
+            consumeProactiveBudget(state.time);
+            decisionReviewState.inFlight = true;
+            const reqSession = decisionReviewState.session;
+            const ch = facts.channel;
+            const miniFacts = buildRetrospectMiniFacts(facts);
+            fetch(`${API_URL}/api/brief`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ digest: miniFacts, channel: ch, mode: "retrospect" }),
+            })
+              .then((r) => r.json())
+              .then((data) => {
+                if (reqSession !== decisionReviewState.session) return; // restart → discard
+                if (state.gameOver) return;
+                const voiced =
+                  typeof data?.brief === "string" && data.brief.trim() ? data.brief.trim() : null;
+                // Statement only — a question-shaped line is dropped (a retrospect
+                // never asks). Failure is silent: this layer is optional presence.
+                if (voiced && !/[？?]/.test(voiced)) {
+                  addMessage("info", voiced, state.time, ch, undefined, "retrospect");
+                  // [EVENT] chain: reuse the escalation's actionId when this reviewed
+                  // an escalation answer, so escalate → command(escalateId) →
+                  // retrospect share one id; standalone decisions log their record id.
+                  fetch(`${API_URL}/api/log-event`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      type: "retrospect",
+                      actionId: facts.escalateId ?? facts.recordId,
+                      channel: ch,
+                      frontId: dueRec.frontId,
+                      // Log BOTH outcomes — they legitimately diverge (e.g. town
+                      // captured while its front stays contested), and this line
+                      // is the decision↔outcome mining source; picking one lied
+                      // (Codex: facOut=captured_by_us logged as still_contested).
+                      kind: `${facts.decisionKind}:front=${facts.frontOutcome ?? "n/a"};facility=${facts.facilityOutcome ?? "n/a"}`,
+                      message: voiced,
+                      sessionId: SESSION_ID,
+                    }),
+                  }).catch(() => {});
+                }
+              })
+              .catch(() => {}) // network failure → silent, no fallback
+              .finally(() => {
+                if (reqSession === decisionReviewState.session) {
+                  decisionReviewState.inFlight = false;
+                }
+              });
+          }
+          // else: blocked (question occupancy / budget spent / voice in flight) —
+          // keep the record and retry next scan, bounded by the tiered grace above.
+          }
         }
       }
 

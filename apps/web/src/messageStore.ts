@@ -13,9 +13,10 @@ export type MessageFrom = "player" | "chen" | "marcus" | "emily" | "system";
 
 /** How the message originated. */
 // "proactive" (7c.2a): a director-beat situational STATEMENT voiced by a persona.
-// NOT in isReportMessage's denylist → renders as the persona speaking (conversation),
-// while staying distinct from command_ack for observability/filtering.
-export type MessageSource = "heartbeat" | "event_report" | "command_ack" | "player" | "system" | "proactive";
+// "retrospect" (7e): an engine-reviewed decision outcome voiced by a persona.
+// Neither is in isReportMessage's denylist → they render as the persona speaking
+// (conversation), while staying distinct from command_ack for observability.
+export type MessageSource = "heartbeat" | "event_report" | "command_ack" | "player" | "system" | "proactive" | "retrospect";
 
 /** Channel → default persona mapping. */
 export const CHANNEL_PERSONA: Record<Channel, MessageFrom> = {
