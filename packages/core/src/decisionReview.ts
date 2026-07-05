@@ -556,6 +556,9 @@ export function assessDecisionReview(
  * never the full digest, never an example sentence.
  */
 export function buildRetrospectMiniFacts(facts: DecisionReviewFacts): string {
+  const survivalTime = (seconds: number | null | undefined): string =>
+    seconds == null ? "stable" : `${Math.round(seconds)}秒`;
+
   const lines = [
     "DECISION REVIEW (voice ONE in-character STATEMENT about how the commander's earlier decision turned out — NOT a question, NOT advice):",
     `decision_kind: ${facts.decisionKind}`,
@@ -567,7 +570,7 @@ export function buildRetrospectMiniFacts(facts: DecisionReviewFacts): string {
   if (facts.frontOutcome) {
     lines.push(`front_outcome: ${facts.frontOutcome}`);
     lines.push(
-      `our_force_survival_sec_then_vs_now: ${facts.collapseThen ?? "stable"} → ${facts.collapseNow ?? "stable"}`,
+      `estimated_survival_time_then_vs_now: ${survivalTime(facts.collapseThen)} → ${survivalTime(facts.collapseNow)}`,
     );
     if (facts.powerRatioThen != null || facts.powerRatioNow != null) {
       lines.push(
@@ -590,7 +593,7 @@ export function buildRetrospectMiniFacts(facts: DecisionReviewFacts): string {
     lines.push(
       cf.kind === "keypoint_lost"
         ? `meanwhile_elsewhere: ${cf.frontName} keypoint_lost (${cf.facilityName})`
-        : `meanwhile_elsewhere: ${cf.frontName} pressure_emerged (our force survival ~${cf.collapseSecondsNow}s)`,
+        : `meanwhile_elsewhere: ${cf.frontName} pressure_emerged (estimated survival time ~${survivalTime(cf.collapseSecondsNow)})`,
     );
   }
   return lines.join("\n");
