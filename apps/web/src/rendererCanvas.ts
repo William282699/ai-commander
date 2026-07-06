@@ -367,6 +367,72 @@ export function renderFacilities(
   ctx.textBaseline = "alphabetic";
 }
 
+/**
+ * Draw capture status above units. The normal facility glow sits underneath
+ * sprites, so a contested post can be invisible exactly when units crowd it.
+ * This overlay is visual-only: the full halo means "capture in progress", while
+ * the brighter arc still tracks the true captureProgress value.
+ */
+export function renderFacilityCaptureOverlays(
+  ctx: CanvasRenderingContext2D,
+  facilities: Facility[],
+  camera: Camera,
+): void {
+  const tileScreenSize = TILE_SIZE * camera.zoom;
+
+  for (const fac of facilities) {
+    if (!fac.capturingTeam || fac.captureProgress <= 0) continue;
+
+    const screenX = (fac.position.x * TILE_SIZE - camera.x) * camera.zoom;
+    const screenY = (fac.position.y * TILE_SIZE - camera.y) * camera.zoom;
+    if (screenX < -80 || screenY < -80) continue;
+
+    const cx = screenX + tileScreenSize / 2;
+    const cy = screenY + tileScreenSize / 2;
+    const radius = Math.max(22, tileScreenSize * 1.35);
+    const lineWidth = Math.max(5, tileScreenSize * 0.18);
+    const color = fac.capturingTeam === "player" ? "#2aa8ff" : "#ff344f";
+    const start = -Math.PI / 2;
+    const progress = Math.max(0, Math.min(1, fac.captureProgress));
+
+    ctx.save();
+    ctx.lineCap = "round";
+
+    // Dark outside stroke lifts the ring off sand, labels, and unit sprites.
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.7)";
+    ctx.lineWidth = lineWidth + 5;
+    ctx.stroke();
+
+    // Full faint halo: visible even when progress is still only 1-2%.
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.28;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+
+    // True progress arc.
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, start, start + Math.PI * 2 * progress);
+    ctx.globalAlpha = 0.95;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+
+    // Small center marker gives the player a quick "who is taking it" read even
+    // when the arc is hidden behind dense sprites.
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.max(3, lineWidth * 0.7), 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.9;
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
 // ──────────────────────────────────────────────
 // Render: Units (circles with team color + HP bar)
 // ──────────────────────────────────────────────

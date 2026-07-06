@@ -3,6 +3,7 @@ import {
   renderTerrain,
   renderMinimap,
   renderFacilities,
+  renderFacilityCaptureOverlays,
   renderFrontLabels,
   renderRouteLabels,
   renderRegionLabels,
@@ -2188,6 +2189,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         state.time,
         selectedSet,
       );
+
+      // 4.5 Capture overlays — drawn above units so a contested forward post is
+      // readable even when tanks/infantry crowd the facility sprite.
+      renderFacilityCaptureOverlays(ctx, facArray, camera);
 
       // 5. Combat effects (attack lines + explosions) — drawn above units
       renderCombatEffects(ctx, state.combatEffects, camera, state.fog, state.time);
