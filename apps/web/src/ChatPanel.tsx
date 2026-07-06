@@ -392,7 +392,12 @@ function buildGateQuestion(reason: string | undefined, brief: string, staleRefs:
   }
   switch (reason) {
     case "high_impact":
-      return `${lead || "这是一次没指定范围的全军级行动"} —— 会抽空其它方向，确认要全线压上吗？（回"确认"执行）`;
+      // Polish: staff-voiced risk reminder, no robot meta-hint ("回'确认'执行").
+      // Copy only — the deterministic confirm gate (HIGH_IMPACT_CONFIRM_WORDS +
+      // pendingConfirmRef) is unchanged: an in-list affirmative executes the
+      // saved option locally; any other reply falls through to the normal
+      // command flow, so "直接改令" was already mechanically true.
+      return `${lead || "这道命令没有点名部队，全军都会被抽走"} —— 其它方向会被抽空。您若仍要全线压上，我按原令执行；要留兵，请直接改令。`;
     case "no_selected_units":
       return `您说的"选中的部队"我没看到选中任何单位 —— 请先框选，或直接说明哪支部队。`;
     case "invalid_intent_fields":
