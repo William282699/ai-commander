@@ -22,9 +22,23 @@ import { clearPathCache } from "./pathfinding";
 const AUTO_BEHAVIOR_INTERVAL = 2.0; // seconds
 let autoBehaviorTimer = 0;
 
+// BUG-2 round 2 — chase-episode anchors (unitId → home = the spot the unit
+// stood on when it FIRST fought back, i.e. its post; chaseTgt = where the
+// current chase is headed, used to tell "our own chase movement" apart from
+// "an external command redirected this unit"). Deliberately module state, NOT
+// unit.orders[0].target: sim clears one-shot orders on arrival / fuel-out /
+// A*-fail, so an order-based anchor evaporates exactly when the reaction
+// episode starts (verified in repro — that was the post→road 60-tile drift).
+interface ChaseEpisode {
+  home: Position;
+  chaseTgt: Position | null;
+}
+const chaseAnchors = new Map<number, ChaseEpisode>();
+
 /** Reset module-level timer — call on new game session. */
 export function resetAutoBehaviorTimer(): void {
   autoBehaviorTimer = 0;
+  chaseAnchors.clear();
 }
 
 const LOW_HP_THRESHOLD = 0.25;   // 25% maxHP
@@ -38,6 +52,14 @@ const RECENTLY_DAMAGED_WINDOW = 3.0;  // seconds — "recently damaged" for chas
 // blind spot — units stood and soaked shells). 15 = artillery range 12 + margin;
 // also the anti-abuse bound so nothing chases a shooter across the map.
 const CHASE_MAX_RANGE = 15;           // tiles
+// BUG-2 round 2 (playtest: unit chained chase-hops from its post to the road,
+// 60+ tiles): reactions must stay ANCHORED to the unit's post. Chase bounds are
+// measured from the chase-episode ANCHOR (not the unit's current spot), so
+// consecutive hops cannot migrate; a unit dragged beyond this leash walks back.
+// Geometry note: with CHASE_MAX_RANGE 15 and attackRange ≤ 6, a pure chase ends
+// ≥6 short of the bound, so the leash-return is a safety net for compound drift
+// (4a/4c pulls, kited shooters), not the primary limiter.
+const REACT_LEASH = 12;               // tiles from the chase anchor
 const ALLY_ASSIST_RANGE = 15;          // tiles — scan radius for fighting allies (non-defending units)
 // Defending units use a tighter assist radius — they must stay within cluster
 // cohesion of their defensive posture. A 15-tile scan would pull a HQ defender
@@ -143,6 +165,45 @@ function runAutoBehavior(state: GameState): void {
       currentAction !== "patrol";
     if (unit.orders.length > 0 && !inDefendPosture && !orderSpent) return;
 
+    // BUG-2 round 2 — chase-episode anchor management. The episode is dropped
+    // when the unit low-HP-retreats (never fight the retreat — an anchor
+    // surviving into P2 would ping-pong the wounded unit between HQ and its
+    // old post), when an EXTERNAL command redirects it (its movement target is
+    // neither our chase target nor home — player intent wins; our own chase
+    // movement must NOT be mistaken for that, hence the chaseTgt bookkeeping),
+    // or once it makes it back home (episode over).
+    let episode = chaseAnchors.get(unit.id) ?? null;
+    if (episode) {
+      const near = (p: Position | null, q: Position | null): boolean =>
+        !!p && !!q && Math.abs(p.x - q.x) <= 2 && Math.abs(p.y - q.y) <= 2;
+      const externallyRedirected =
+        unit.target !== null &&
+        !near(unit.target, episode.chaseTgt) &&
+        !near(unit.target, episode.home);
+      if (unit.state === "retreating" || externallyRedirected) {
+        chaseAnchors.delete(unit.id);
+        episode = null;
+      }
+    }
+    if (episode && (unit.state === "idle" || unit.state === "defending")) {
+      const adx = unit.position.x - episode.home.x;
+      const ady = unit.position.y - episode.home.y;
+      const anchorDist2 = adx * adx + ady * ady;
+      if (anchorDist2 <= 2 * 2) {
+        chaseAnchors.delete(unit.id); // home again — episode over
+        episode = null;
+      } else if (anchorDist2 > REACT_LEASH * REACT_LEASH) {
+        // Dragged beyond the leash — stop reacting outward, walk back to post.
+        unit.state = "moving";
+        clearPathCache(unit.id);
+        unit.target = { x: episode.home.x, y: episode.home.y };
+        unit.waypoints = [{ x: episode.home.x, y: episode.home.y }];
+        unit.attackTarget = null;
+        return;
+      }
+    }
+    const chaseAnchor = episode ? episode.home : null;
+
     // ── Priority 4: engage / patrol ──
 
     // 4a: Auto-engage — idle/patrolling/defending unit with enemy in range
@@ -160,8 +221,17 @@ function runAutoBehavior(state: GameState): void {
 
     // 4b: Chase outranging attacker — recently damaged idle unit closes distance
     if (unit.state === "idle" || unit.state === "defending") {
-      const chaseTarget = findOutrangingAttacker(unit, state);
+      const chaseTarget = findOutrangingAttacker(unit, state, chaseAnchor);
       if (chaseTarget) {
+        // First hop of an episode: pin home to where the unit stands NOW (its
+        // post) — every later hop is bounded from here, not from wherever the
+        // last chase dragged it. Always record the current chase target so the
+        // external-redirect check can tell our movement from a new command's.
+        const home = episode ? episode.home : { x: unit.position.x, y: unit.position.y };
+        chaseAnchors.set(unit.id, {
+          home,
+          chaseTgt: { x: chaseTarget.position.x, y: chaseTarget.position.y },
+        });
         unit.state = "moving";
         clearPathCache(unit.id);
         unit.target = { x: chaseTarget.position.x, y: chaseTarget.position.y };
@@ -232,8 +302,12 @@ function findNearestEnemy(unit: Unit, state: GameState, maxRange: number): Unit 
  * 4b helper: Chase outranging attacker.
  * If unit was recently damaged and is idle, find a visible enemy within
  * visionRange to close distance on. Prioritizes the unit that last attacked us.
+ * `anchor` (BUG-2 round 2) = the unit's chase-episode anchor (where it stood
+ * when it first fought back). The known-shooter chase is measured from the
+ * ANCHOR, not the unit's current spot, so consecutive hops can never migrate
+ * away from the post. null = no episode yet → measure from the unit itself.
  */
-function findOutrangingAttacker(unit: Unit, state: GameState): Unit | null {
+function findOutrangingAttacker(unit: Unit, state: GameState, anchor: Position | null): Unit | null {
   const now = state.time;
   const lastDamaged = unit.lastDamagedAt ?? 0;
   if (now - lastDamaged > RECENTLY_DAMAGED_WINDOW) return null;
@@ -259,8 +333,11 @@ function findOutrangingAttacker(unit: Unit, state: GameState): Unit | null {
     const attacker = state.units.get(unit.lastDamagedById);
     if (attacker && attacker.hp > 0 && attacker.state !== "dead"
         && attacker.team !== unit.team) {
-      const dx = attacker.position.x - unit.position.x;
-      const dy = attacker.position.y - unit.position.y;
+      // Anchored units measure the chase bound from their POST, so the total
+      // drift is capped around the post; free units measure from themselves.
+      const from = anchor ?? unit.position;
+      const dx = attacker.position.x - from.x;
+      const dy = attacker.position.y - from.y;
       const dist2 = dx * dx + dy * dy;
       if (dist2 <= CHASE_MAX_RANGE * CHASE_MAX_RANGE) {
         return attacker;
