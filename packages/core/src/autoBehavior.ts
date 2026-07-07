@@ -32,6 +32,12 @@ const ENGAGE_RANGE = 8;          // tiles
 // PATROL_RANGE removed (Day 9.5 Batch A: idle auto-patrol disabled)
 
 const RECENTLY_DAMAGED_WINDOW = 3.0;  // seconds — "recently damaged" for chase response
+// BUG-2 fix (挨炮不还手): cap for chasing the KNOWN shooter (lastDamagedById).
+// Being hit reveals the shooter, so that one attacker is exempt from the
+// passive-vision gate (main_tank vision=5 < artillery range=12 was a structural
+// blind spot — units stood and soaked shells). 15 = artillery range 12 + margin;
+// also the anti-abuse bound so nothing chases a shooter across the map.
+const CHASE_MAX_RANGE = 15;           // tiles
 const ALLY_ASSIST_RANGE = 15;          // tiles — scan radius for fighting allies (non-defending units)
 // Defending units use a tighter assist radius — they must stay within cluster
 // cohesion of their defensive posture. A 15-tile scan would pull a HQ defender
@@ -118,9 +124,24 @@ function runAutoBehavior(state: GameState): void {
     // 4a/4b/4c so they can engage incoming threats and assist neighbors.
     // combat.ts sends them back to their defend post when the engagement
     // ends — see the `defend` branch in the no-target block of processCombat.
+    //
+    // BUG-2 fix EXCEPTION 2: an order that has RUN ITS COURSE (unit settled
+    // back to "idle" — e.g. attack_move arrived, town taken, force standing
+    // around) no longer suppresses reactions: those units fall through to
+    // 4a/4b so they can answer artillery shelling them from beyond vision
+    // instead of soaking it. Deliberately EXCLUDED: `hold` (an explicit
+    // stand-fast command) and `patrol` (patrol-task units cycle through idle
+    // between assignments — reacting there would dissolve the patrol).
+    // Moving/attacking/retreating units still return here — a unit actively
+    // executing a player command is never hijacked.
     const currentAction = unit.orders[0]?.action;
     const inDefendPosture = unit.orders.length > 0 && currentAction === "defend";
-    if (unit.orders.length > 0 && !inDefendPosture) return;
+    const orderSpent =
+      unit.orders.length > 0 &&
+      unit.state === "idle" &&
+      currentAction !== "hold" &&
+      currentAction !== "patrol";
+    if (unit.orders.length > 0 && !inDefendPosture && !orderSpent) return;
 
     // ── Priority 4: engage / patrol ──
 
@@ -227,15 +248,21 @@ function findOutrangingAttacker(unit: Unit, state: GameState): Unit | null {
     return true; // enemy has local omniscience (consistent with findNearestEnemy)
   };
 
-  // First: try the specific attacker that hit us
+  // First: try the specific attacker that hit us.
+  // BUG-2 fix: NO vision gate for this one — being hit reveals the shooter
+  // (a shelled unit knows where the fire came from even without line of
+  // sight; main_tank vision=5 < artillery range=12 made units stand and soak
+  // shells forever). Bounded by CHASE_MAX_RANGE instead so nothing pursues a
+  // shooter across the map. The generic fallback below KEEPS the vision gate —
+  // enemies that never hit us are not revealed.
   if (unit.lastDamagedById !== undefined) {
     const attacker = state.units.get(unit.lastDamagedById);
     if (attacker && attacker.hp > 0 && attacker.state !== "dead"
-        && attacker.team !== unit.team && isVisible(attacker)) {
+        && attacker.team !== unit.team) {
       const dx = attacker.position.x - unit.position.x;
       const dy = attacker.position.y - unit.position.y;
       const dist2 = dx * dx + dy * dy;
-      if (dist2 <= unit.visionRange * unit.visionRange) {
+      if (dist2 <= CHASE_MAX_RANGE * CHASE_MAX_RANGE) {
         return attacker;
       }
     }
