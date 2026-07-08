@@ -60,6 +60,19 @@ const CHASE_MAX_RANGE = 15;           // tiles
 // ≥6 short of the bound, so the leash-return is a safety net for compound drift
 // (4a/4c pulls, kited shooters), not the primary limiter.
 const REACT_LEASH = 12;               // tiles from the chase anchor
+// BUG-2 round 3 — 守军纪律 (defender discipline, causal rule, no type lists):
+// an idle/defending unit may LEAVE POST only for a threat IN ACTION —
+// (1) it was hit (recentDamage → chase the revealed shooter, 4b),
+// (2) a visible enemy is actively fighting (attacking state / locked target /
+//     on a facility-strike order), or
+// (3) a visible enemy is taking a point (within this radius of a facility its
+//     team is capturing; engine capture proximity is 1.5 — 3 covers the
+//     capturers plus escorts standing at the point).
+// A merely-visible passer-by is NOT a reason to move: combat.ts already fires
+// at anything inside weapons range without leaving post. Patrolling units are
+// an active sweep by design and keep engage-on-sight (their PatrolTask governs
+// them); P0-P4 offensive waves are order-driven and untouched by this rule.
+const CAPTURE_THREAT_RADIUS = 3;      // tiles
 const ALLY_ASSIST_RANGE = 15;          // tiles — scan radius for fighting allies (non-defending units)
 // Defending units use a tighter assist radius — they must stay within cluster
 // cohesion of their defensive posture. A 15-tile scan would pull a HQ defender
@@ -206,10 +219,25 @@ function runAutoBehavior(state: GameState): void {
 
     // ── Priority 4: engage / patrol ──
 
-    // 4a: Auto-engage — idle/patrolling/defending unit with enemy in range
-    if (unit.state === "idle" || unit.state === "patrolling" || unit.state === "defending") {
+    // 4a: Auto-engage. Patrolling = active sweep → engage-on-sight (unchanged;
+    // the PatrolTask reels the unit back). idle/defending = GARRISON → 守军纪律:
+    // only a threat IN ACTION justifies leaving post (see isThreatInAction),
+    // and the move-out is episode-anchored so the leash bounds the excursion.
+    if (unit.state === "patrolling") {
       const enemy = findNearestEnemy(unit, state, ENGAGE_RANGE);
       if (enemy) {
+        unit.state = "moving";
+        clearPathCache(unit.id);
+        unit.target = { x: enemy.position.x, y: enemy.position.y };
+        unit.waypoints = [{ x: enemy.position.x, y: enemy.position.y }];
+        unit.attackTarget = null; // combat.ts will acquire target when in range
+        return;
+      }
+    }
+    if (unit.state === "idle" || unit.state === "defending") {
+      const enemy = findNearestEnemy(unit, state, ENGAGE_RANGE);
+      if (enemy && isThreatInAction(state, enemy)) {
+        pinEpisode(unit, episode, enemy.position);
         unit.state = "moving";
         clearPathCache(unit.id);
         unit.target = { x: enemy.position.x, y: enemy.position.y };
@@ -223,15 +251,7 @@ function runAutoBehavior(state: GameState): void {
     if (unit.state === "idle" || unit.state === "defending") {
       const chaseTarget = findOutrangingAttacker(unit, state, chaseAnchor);
       if (chaseTarget) {
-        // First hop of an episode: pin home to where the unit stands NOW (its
-        // post) — every later hop is bounded from here, not from wherever the
-        // last chase dragged it. Always record the current chase target so the
-        // external-redirect check can tell our movement from a new command's.
-        const home = episode ? episode.home : { x: unit.position.x, y: unit.position.y };
-        chaseAnchors.set(unit.id, {
-          home,
-          chaseTgt: { x: chaseTarget.position.x, y: chaseTarget.position.y },
-        });
+        pinEpisode(unit, episode, chaseTarget.position);
         unit.state = "moving";
         clearPathCache(unit.id);
         unit.target = { x: chaseTarget.position.x, y: chaseTarget.position.y };
@@ -248,6 +268,9 @@ function runAutoBehavior(state: GameState): void {
       const assistRange = unit.state === "defending" ? DEFENDING_ASSIST_RANGE : ALLY_ASSIST_RANGE;
       const allyTarget = findAllyBattleTarget(unit, state, assistRange);
       if (allyTarget) {
+        // Assisting a REAL fight is rule-consistent (the enemy is attacking our
+        // units) — but the excursion is episode-anchored like every reaction.
+        pinEpisode(unit, episode, allyTarget.position);
         unit.state = "moving";
         clearPathCache(unit.id);
         unit.target = { x: allyTarget.position.x, y: allyTarget.position.y };
@@ -296,6 +319,34 @@ function findNearestEnemy(unit: Unit, state: GameState, maxRange: number): Unit 
   });
 
   return best;
+}
+
+/** Pin (or refresh) a unit's chase episode: `home` = where it stood when the
+ *  episode began (its post — preserved across hops); `chaseTgt` = where THIS
+ *  reaction is headed, so the external-redirect check can tell our own
+ *  movement apart from a fresh player/AI command. */
+function pinEpisode(unit: Unit, episode: ChaseEpisode | null, tgt: Position): void {
+  const home = episode ? episode.home : { x: unit.position.x, y: unit.position.y };
+  chaseAnchors.set(unit.id, { home, chaseTgt: { x: tgt.x, y: tgt.y } });
+}
+
+/** 守军纪律 rules (2)+(3): is this enemy a threat IN ACTION rather than a
+ *  passer-by? Generic state checks only — no unit-type lists:
+ *  fighting = attacking state / locked target / executing a facility strike;
+ *  taking ground = standing at a facility its team is actively capturing.
+ *  Rule (1) — we were HIT — lives in findOutrangingAttacker (recentDamage). */
+function isThreatInAction(state: GameState, enemy: Unit): boolean {
+  if (enemy.state === "attacking" || enemy.attackTarget !== null) return true;
+  if (enemy.orders[0]?.targetFacilityId != null) return true;
+  let takingGround = false;
+  state.facilities.forEach((f) => {
+    if (takingGround) return;
+    if (f.hp <= 0 || f.capturingTeam !== enemy.team) return;
+    const dx = enemy.position.x - f.position.x;
+    const dy = enemy.position.y - f.position.y;
+    if (dx * dx + dy * dy <= CAPTURE_THREAT_RADIUS * CAPTURE_THREAT_RADIUS) takingGround = true;
+  });
+  return takingGround;
 }
 
 /**
