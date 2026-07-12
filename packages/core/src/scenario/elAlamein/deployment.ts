@@ -235,16 +235,34 @@ export function deployElAlameinUnits(): { units: Map<number, Unit>; nextUnitId: 
   placeGroup("light_tank", "enemy", [[145, 185], [155, 185]]);      // 2 light_tank
 
   // ── Axis Mobile Reserve (58, 128) — 5C-lite: replaces air wing ──
+  // EP-V1 opening tempo: the reserve's 2 main tanks + 2 of its 3 light tanks
+  // are forward-staged with the 15.Pz vanguard (see below). Rear armor needed
+  // ~115s just to reach the fist's staging point, which single-handedly pushed
+  // the first big contact past 3 minutes. Units MOVED, not added.
   placeGroup("infantry",   "enemy", blockFormation(58, 122, 2, 2));
-  placeGroup("light_tank", "enemy", blockFormation(58, 128, 3, 3));
-  placeGroup("main_tank",  "enemy", [[55, 134], [65, 134]]);
+  placeGroup("light_tank", "enemy", [[58, 128]]);
 
   // ── 15. Panzer Counter-attack Group (180, 75) — 5C-lite v2: 北部反击装甲 ──
   // Historical position: Rommel's 15. Panzer Division held in reserve
   // west of Kidney Ridge / Miteirya Ridge, ready to counter-attack
-  placeGroup("infantry",   "enemy", blockFormation(180, 71, 3, 2));
+  // EP-V1 opening tempo: the division's infantry rides at the corridor mouth
+  // WITH the armor — they are the first fist's capture element (speed 2.0
+  // matches main_tank), so pre-staging them is what lets fist #1 launch with
+  // occupiers instead of dropping them as stragglers.
+  // POSITION CONSTRAINT: must sit OUTSIDE the 15-tile garrison ring of
+  // Miteirya Ridge (230,70) — anything inside gets classified garrison by
+  // assignRoles and becomes unclaimable (first attempt at (244,71) was 13
+  // tiles out and silently froze all three as static garrison).
+  placeGroup("infantry",   "enemy", [[249, 65], [252, 65], [249, 68]]);
   placeGroup("light_tank", "enemy", lineFormation(180, 77, 3, 3));
-  placeGroup("main_tank",  "enemy", [[176, 83], [184, 83]]);
+  // EP-V1a.2 vanguard pair + EP-V1 opening tempo: Axis Mobile Reserve armor
+  // and 2 light tanks joined them (x≈245 plains band, passability verified for
+  // the pair; bench watches gather telemetry for stalls). 4 main tanks within
+  // ~30s of the ridge staging point → first fist gathered ~45s, launch ~55s,
+  // big contact ~85-95s. Still outside player opening vision (nearest player
+  // units ~x=360, vision ≤7).
+  placeGroup("main_tank",  "enemy", [[244, 78], [252, 82], [246, 86], [254, 90]]);
+  placeGroup("light_tank", "enemy", [[240, 88], [248, 94]]);
 
   // ── 21. Panzer Counter-attack Group (210, 185) — 5C-lite v2: 南部反击装甲 ──
   // Historical position: 21. Panzer Division 南部反击预备

@@ -8,7 +8,15 @@ import { getUnitCategory, UNIT_STATS } from "@ai-commander/shared";
 import { applyEnemyOrders } from "../../applyOrders";
 import { canUnitEnterTile } from "../../sim";
 import { enqueueProduction } from "../../economy";
-import { PHASE_STRATEGY, getCurrentStrategicPhase, type PhaseConfig } from "./pressureDirector";
+import {
+  PHASE_STRATEGY, getCurrentStrategicPhase, CONSOLIDATE_CONFIRM_SEC,
+  buildOperationTargets, ATTACK_CORRIDORS, OBJECTIVE_FRONT_MAP, FRONT_PLAYER_POST_MAP,
+  type PhaseConfig, type OperationTargetCandidate,
+} from "./pressureDirector";
+import {
+  reserveOperationUnits, releaseOperationUnits, isOperationReserved, clearOperationRegistry,
+} from "./operationRegistry";
+import { getFormationOffset, computeHeading, type FormationStyle } from "../../formation";
 
 // ── 5C-lite tuning history (3 rounds, cumulative) ──
 //
@@ -45,7 +53,10 @@ const HQ_GUARD_RADIUS = 20;
 
 // Cooldown durations (seconds)
 const P0_COOLDOWN_SEC = 45;
-const P1_COOLDOWN_SEC = 20;   // §4: was 30
+const HARASS_STANDOFF_TILES = 7; // P1/P3 fight around objectives; operation owns capture
+// EP-V1c 降噪: 20→45 — P1 fired near-continuously once fights were visible,
+// feeding the "很多零散小波" noise that drowned out the main assault.
+const P1_COOLDOWN_SEC = 45;
 const P2_COOLDOWN_SEC = 50;   // §4: was 60
 const TRADE_COOLDOWN_SEC = 60;
 
@@ -55,9 +66,55 @@ const P2_IDLE_PER_WAVE = 1;   // §4: was 2
 const P2_COMMIT_RATIO = 0.75;  // v3: was 0.6, commit more reserves
 const P2_MAX_ATTACK = 8; // P1 cap
 
+// ── EP-V1 final: armored-fist OPERATION (owner of the massed offensive for
+// el_alamein; the legacy massedOffensive body below only serves "legacy"
+// scenarios). Physics dictate the design: the engine has no en-route group
+// cohesion, so a perceivable fist = co-located staging + simultaneous launch.
+// light_tank (speed 3.0) launches AFTER the 2.0 core with an ETA-sync delay so
+// both arrive together instead of the lt dying alone first (playtest). ──
+const OP_CREATE_MIN_SEC = 8;         // create/claim at the t=10 tick (assembly ≠ attack;
+                                     // 8 not 10: the 5s-tick float residue left t=15.0
+                                     // fractionally under a same-valued gate). Still
+                                     // beats P4's first gather (grace 15) to the vanguard.
+const OP_FIST_MT_MIN = 4;            // launch gate: main tanks AT STAGING (spec: ≥4)
+const OP_FIST_MT_TARGET = 6;         // claim up to
+const OP_FIST_LT_TARGET = 4;         // claim up to (spec: 2-4)
+const OP_FIST_INF_TARGET = 3;        // claim up to (spec: 0-3, cheap occupiers)
+const OP_SLOT_GATHER_RADIUS = 2.5;   // "in position" = near OWN staging slot (arrival
+                                     // snaps exact; slack covers autoBehavior nudges)
+const OP_STAGING_PULLBACK = 15;      // staging = 2nd-to-last corridor wp shifted west
+const OP_FORMATION_SCALE = 0.55;     // 13-unit global wedge is ~20 tiles deep; keep this fist compact
+const OP_FIRE_STANDOFF = 4;          // tanks' endpoint line sits this short of the objective:
+                                     // outside the 1.5 capture ring (occupation is the
+                                     // infantry's job), inside main_tank range 6
+const OP_SLOT_TOTAL = 13;            // fixed slot plan (6 mt + 3 inf + 4 lt) so formation
+                                     // spacing stays stable as members trickle in
+const OP_SLOT_BAND: Record<"main_tank" | "infantry" | "light_tank", [number, number]> = {
+  main_tank: [0, 5],   // wedge tip rows
+  infantry:  [6, 8],
+  light_tank:[9, 12],  // trailing rows (they join late via the ETA-synced release)
+};
+const OP_ASSEMBLY_DEADLINE_SEC = 300;// past this: degraded launch or cancel
+const OP_DEADLINE_MIN_UNITS = 4;     // degraded launch needs at least this many gathered
+const OP_RETRY_SEC = 60;             // cancel → next create attempt
+const OP_OCCUPIER_WAIT_SEC = 20;     // mt gate passed but occupiers still walking in:
+                                     // hold the launch briefly so fists carry infantry
+                                     // (bounded — never blocks on dead/stuck occupiers)
+const OP_ARRIVE_RADIUS = 12;         // member "at formation slot" test (fire-line slots)
+const OP_CAPTURE_RING = 1.5;         // mirrors economy.ts tickFacilityCapture's dist ≤ 1.5
+const OP_CAPTURE_SLOT_R = 2;         // a slot this close to the objective IS a capture slot:
+                                     // its holder is only "arrived" INSIDE the capture ring
+                                     // (Codex: a tank idling 4 tiles out must be pushed in,
+                                     // or the point never flips)
+const OP_OCCUPY_KEEP = 3;            // ground units left to hold a captured player post
+const OP_MEMBER_MIN_HP_RATIO = 0.35; // never recycle spent/retreating units into a new fist
+
 // §3: P3 Proactive Probe
 const PROBE_START_TIME = 60;          // First probe at 60s
-const PROBE_INTERVAL_BASE = 60;       // Base interval between probes (seconds)
+// EP-V1c 降噪: 60→110 — probes every ~45-60s put 30-40 light units of pure
+// noise on the board over 10 minutes; halving the cadence keeps the "敌军在
+// 摸你" texture without the death-by-a-thousand-cuts grind on garrisons.
+const PROBE_INTERVAL_BASE = 110;      // Base interval between probes (seconds)
 const PROBE_INTERVAL_VARIANCE = 20;   // +/-20s randomness
 const PROBE_MIN_UNITS = 3;
 const PROBE_MAX_UNITS = 6;            // v3: was 5
@@ -71,13 +128,9 @@ const HQ_ASSAULT_LOST_KEYPOINTS = 2;  // Or when player has already lost the for
 // §9: Diagnostics cap
 const MAX_DIAGNOSTICS = 200;
 
-// Objective → front mapping (H6/H11)
-const OBJECTIVE_FRONT_MAP: Record<string, string> = {
-  ea_kidney_ridge: "front_ridge",
-  ea_miteirya_ridge: "front_ridge",
-  ea_alamein_town: "front_coastal",
-  ea_himeimat: "front_south",
-};
+// Objective → front mapping (H6/H11): moved to pressureDirector (EP-V1 final —
+// the operation target candidates carry frontId, so the tables live with the
+// candidate builder). Imported above.
 
 // P2 priority order (H6): deterministic target selection
 const P2_OBJECTIVE_PRIORITY = [
@@ -127,6 +180,45 @@ const reinforcingIds = new Set<number>();
 let probeCooldownUntil = 0;
 let probeCount = 0;
 
+// ── EP-V1 final: operation module state (owner: this file's operation layer).
+// Ownership ledger shared with P4 lives in operationRegistry (single Set, this
+// module is the only writer). Two slots per spec: at most ONE launched op in
+// the field, ONE assembling behind it.
+interface Operation {
+  seq: number;
+  phase: "assembling" | "launched";
+  kind: "fist" | "degraded";
+  targetId: string;
+  frontId: string;
+  targetPos: Position;
+  corridor: Position[];
+  formation: FormationStyle;          // wedge = take player post, encircle = recapture
+  staging: Position;
+  memberIds: Set<number>;
+  ltIds: Set<number>;                 // light tanks held back for ETA-synced release
+  slotTargets: Map<number, Position>; // launched: per-member formation endpoint
+  stagingSlots: Map<number, Position>;// assembling: per-member formation slot at staging
+  slotIdx: Map<number, number>;       // stable formation index (staging AND endpoint use
+                                      // the same index → the wedge translates in parallel
+                                      // and stays readable en route)
+  createdAt: number;
+  launchedAt: number;
+  ltReleaseAt: number;
+  ltReleased: boolean;
+  lastGatherLog: string;              // gather telemetry dedup key (bench diagnosis)
+  mtReadyAt: number;                  // when the ≥4-mt launch gate first passed (occupier wait anchor)
+}
+let fieldOperation: Operation | null = null;
+let assemblingOperation: Operation | null = null;
+let opSeq = 0;
+let opLaunchCooldownUntil = 0;
+let opRecreateAfter = 0;
+let opCaptureConfirmAt = 0;   // capture debounce clock for fieldOperation's target
+// Captured PLAYER posts we hold: postId → owned defender ids (stay in registry).
+// assignRoles doesn't classify captured friendlyKeypoints as garrison, so
+// without this explicit ownership the hold force would drain back into reserve.
+const occupationGarrisons = new Map<string, Set<number>>();
+
 // Cooldown timestamps (state.time based)
 const p0Cooldowns = new Map<string, number>(); // per objective
 let p1CooldownUntil = 0;
@@ -151,6 +243,15 @@ export function resetDefensiveAITimer(): void {
   reinforcingIds.clear();   // §6
   probeCooldownUntil = 0;   // §3
   probeCount = 0;           // §3
+  // EP-V1 final: operation layer
+  fieldOperation = null;
+  assemblingOperation = null;
+  opSeq = 0;
+  opLaunchCooldownUntil = 0;
+  opRecreateAfter = 0;
+  opCaptureConfirmAt = 0;
+  occupationGarrisons.clear();
+  clearOperationRegistry();
 }
 
 export function processDefensiveAI(state: GameState, dt: number): void {
@@ -168,11 +269,16 @@ export function processDefensiveAI(state: GameState, dt: number): void {
 function runDefensiveAI(state: GameState): void {
   // H8: cleanup before role assignment
   cleanupActiveAttackers(state);
-  assignRoles(state);
+  operationMaintain(state);       // EP-V1: prune fates + capture/occupation upkeep (releases
+                                  // re-classify via assignRoles THIS tick)
+  assignRoles(state);             // skips operation-reserved ids
+  operationClaim(state);          // EP-V1: create/top-up/production demand — BEFORE
+                                  // manageEconomy (queue priority) and P0/P1/P3 (claim priority)
   manageEconomy(state);
   reactiveCounterattack(state);   // P0
   opportunisticAttack(state);     // P1
-  massedOffensive(state);         // P2
+  operationLaunch(state);         // P2 slot: gather-check → fist launch; lt ETA release
+  massedOffensive(state);         // P2 legacy body (non-el_alamein scenarios only)
   proactiveProbe(state);          // P3 (§3)
   garrisonBehavior(state);
   reissueAttackerOrders(state);  // Re-order idle attackers that haven't reached target
@@ -299,6 +405,844 @@ function cleanupActiveAttackers(state: GameState): void {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// EP-V1 final: armored-fist operation layer (owner of the el_alamein massed
+// offensive). Cycle: create → claim from reserve → assemble at staging →
+// launch as one co-located strike (wedge/encircle endpoint slots) → capture →
+// occupy → release; the NEXT op is created the tick after launch so the
+// cadence never pays a from-zero organization tax.
+//
+// Ownership: every member id sits in operationRegistry from claim until
+// death / retreat / cancel / operation end. assignRoles skips reserved ids
+// (so P0/P1/P3/garrison, which all draw from reserveIds, can never poach),
+// P4's pool gathering skips them in-module, and reissueAttackerOrders skips
+// them so no generic nearest-enemy retarget ever hijacks a fist member.
+// ══════════════════════════════════════════════════════════════
+
+function opLog(state: GameState, msg: string): void {
+  pushDiagnostic(state, `OP ${msg}`);
+}
+
+function opReleaseMember(op: Operation, id: number): void {
+  op.memberIds.delete(id);
+  op.ltIds.delete(id);
+  op.slotTargets.delete(id);
+  op.stagingSlots.delete(id);
+  op.slotIdx.delete(id);   // frees the formation index for a replacement claim
+  releaseOperationUnits([id]);
+}
+
+/** Formation offset shrunk toward its center by OP_FORMATION_SCALE (the raw
+ *  13-unit wedge is ~20 tiles deep — too loose to read as one fist). */
+function scaledFormationOffset(
+  center: Position, idx: number, style: FormationStyle, heading: number,
+): Position {
+  const raw = getFormationOffset(center, idx, OP_SLOT_TOTAL, style, heading);
+  return {
+    x: Math.round(center.x + (raw.x - center.x) * OP_FORMATION_SCALE),
+    y: Math.round(center.y + (raw.y - center.y) * OP_FORMATION_SCALE),
+  };
+}
+
+/** Assign a stable formation index (per-type band) + its staging slot. The
+ *  staging shape is always a wedge pointed at the target — members assemble
+ *  INTO formation instead of stacking on one coordinate (playtest: "堆成一团").
+ *  Impassable ideal tiles resolve to the nearest free passable one. */
+function assignStagingSlot(state: GameState, op: Operation, u: Unit): void {
+  const band = OP_SLOT_BAND[u.type as "main_tank" | "infantry" | "light_tank"] ?? [0, OP_SLOT_TOTAL - 1];
+  const used = new Set(op.slotIdx.values());
+  let idx = band[0];
+  while (idx <= band[1] && used.has(idx)) idx++;
+  if (idx > band[1]) idx = OP_SLOT_TOTAL + op.slotIdx.size; // band overflow (shouldn't happen under claim caps)
+  op.slotIdx.set(u.id, idx);
+
+  const heading = computeHeading(op.staging, op.targetPos);
+  const ideal = scaledFormationOffset(op.staging, idx, "wedge", heading);
+  const takenTiles = new Set([...op.stagingSlots.values()].map(p => `${p.x},${p.y}`));
+  op.stagingSlots.set(u.id, resolveSlotTile(state, u, ideal, takenTiles, op.staging));
+}
+
+/** Recompute every member's staging slot (staging point or heading changed). */
+function reassignStagingSlots(state: GameState, op: Operation): void {
+  const heading = computeHeading(op.staging, op.targetPos);
+  op.stagingSlots.clear();
+  const takenTiles = new Set<string>();
+  for (const [id, idx] of op.slotIdx) {
+    const u = state.units.get(id);
+    if (!u) continue;
+    const ideal = scaledFormationOffset(op.staging, idx, "wedge", heading);
+    op.stagingSlots.set(id, resolveSlotTile(state, u, ideal, takenTiles, op.staging));
+  }
+}
+
+/** The next fist is ready and the old mission has used its launch window.
+ *  Release ownership but keep surviving units in the existing attacker ledger:
+ *  they may finish the local fight, while the hard cap still counts them. */
+function handoffFieldOperation(state: GameState, op: Operation): void {
+  for (const id of Array.from(op.memberIds)) releaseOperationUnits([id]);
+  fieldOperation = null;
+  opCaptureConfirmAt = 0;
+  opLog(state, `#${op.seq} handoff (next fist ready; survivors remain local attackers)`);
+}
+
+/** Drop dead / retreating members (retreat was ordered by cleanupActiveAttackers
+ *  at <35% HP, or by autoBehavior — either way the unit has left the fight). */
+function pruneOperationMembers(state: GameState, op: Operation): void {
+  for (const id of Array.from(op.memberIds)) {
+    const u = state.units.get(id);
+    if (!u || u.state === "dead" || u.hp <= 0) {
+      opReleaseMember(op, id);
+      opLog(state, `#${op.seq} member ${id} died`);
+      continue;
+    }
+    if (u.state === "retreating") {
+      opReleaseMember(op, id);
+      opLog(state, `#${op.seq} member ${id} retreated`);
+    }
+  }
+}
+
+/** Target is still worth marching on iff the facility stands and is not ours. */
+function isOperationTargetValid(state: GameState, op: Operation): boolean {
+  const fac = state.facilities.get(op.targetId);
+  return !!fac && fac.hp > 0 && fac.team !== "enemy";
+}
+
+/** The rear assembly should not duplicate the field operation's locked target.
+ *  Deconfliction here is what lets op N+1 stage on another axis while op N is
+ *  still fighting, rather than crossing the map only after the first capture. */
+function selectAssemblyTarget(state: GameState): OperationTargetCandidate | undefined {
+  const occupiedTarget = fieldOperation?.targetId;
+  const candidates = buildOperationTargets(state);
+  return candidates.find((candidate) => candidate.targetId !== occupiedTarget)
+    ?? candidates[0]; // one legal axis left: assemble a relief wave on the same target
+}
+
+/** Staging = 2nd-to-last corridor waypoint pulled OP_STAGING_PULLBACK west
+ *  (outside player opening vision, past the minefield lane). The point anchors
+ *  a ~±6-tile slot footprint, so demand a CLEAR CROSS (±2, tank-passable)
+ *  around it — a bare-point check once parked the ridge staging on the edge of
+ *  the Devil's Gardens and half the wedge slots fell in the swamp. */
+function deriveStaging(state: GameState, cand: OperationTargetCandidate): Position {
+  const corr = cand.corridor;
+  const base = corr.length >= 2 ? corr[corr.length - 2]
+    : (corr[0] ?? { x: Math.max(2, cand.position.x - 60), y: cand.position.y });
+  // For recapture targets in Axis territory, never assemble east of (and march
+  // through) the objective: every El Alamein ground unit can capture, so that
+  // would dissolve the operation one unit at a time before launch.
+  const desiredX = Math.min(
+    base.x - OP_STAGING_PULLBACK,
+    cand.position.x - OP_STAGING_PULLBACK,
+  );
+  for (let k = 0; k <= 5; k++) {
+    for (const dy of [0, 2, -2, 4, -4]) {
+      const x = Math.round(desiredX - k * 5);
+      const y = Math.round(base.y + dy);
+      if (x < 4 || y < 4 || y >= state.mapHeight - 4) continue;
+      const clear = canUnitEnterTile("main_tank", x, y, state)
+        && canUnitEnterTile("main_tank", x - 2, y, state)
+        && canUnitEnterTile("main_tank", x + 2, y, state)
+        && canUnitEnterTile("main_tank", x, y - 2, state)
+        && canUnitEnterTile("main_tank", x, y + 2, state);
+      if (clear) return { x, y };
+    }
+  }
+  return { x: Math.round(base.x), y: Math.round(base.y) };
+}
+
+/** Deterministic near-ideal probe: first tile that is passable for THIS unit
+ *  and not already someone else's slot. Members must never silently share a
+ *  tile (the "堆成一团" bug was exactly this fallback stacking). */
+const SLOT_PROBE_OFFSETS: [number, number][] = [
+  [0, 0], [-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [-1, 1], [1, -1], [1, 1],
+  [-2, 0], [2, 0], [0, -2], [0, 2], [-2, -1], [-2, 1], [2, -1], [2, 1],
+  [-3, 0], [0, -3], [0, 3], [-3, -1], [-3, 1], [-4, 0],
+];
+function resolveSlotTile(
+  state: GameState, u: Unit, ideal: Position, takenTiles: Set<string>,
+  anchor: Position, avoid?: { pos: Position; r: number },
+): Position {
+  const usable = (x: number, y: number): boolean => {
+    if (x < 1 || y < 1 || x >= state.mapWidth - 1 || y >= state.mapHeight - 1) return false;
+    if (takenTiles.has(`${x},${y}`)) return false;
+    if (avoid) {
+      const adx = x - avoid.pos.x, ady = y - avoid.pos.y;
+      if (adx * adx + ady * ady <= avoid.r * avoid.r) return false; // e.g. tanks stay OUT of the capture ring
+    }
+    return canUnitEnterTile(u.type, x, y, state);
+  };
+  for (const [ox, oy] of SLOT_PROBE_OFFSETS) {
+    if (usable(ideal.x + ox, ideal.y + oy)) {
+      takenTiles.add(`${ideal.x + ox},${ideal.y + oy}`);
+      return { x: ideal.x + ox, y: ideal.y + oy };
+    }
+  }
+  // Local spiral exhausted (slot fell into sea/minefield — e.g. the coastal
+  // staging's deep wedge rows reach the shoreline). Walk the ideal→anchor line
+  // back toward the formation anchor: its neighborhood is the cross-verified
+  // staging pocket / approach lane, so this terminates on good ground instead
+  // of marching blindly west into more water.
+  const steps = Math.max(1, Math.ceil(Math.hypot(anchor.x - ideal.x, anchor.y - ideal.y)));
+  for (let s = 1; s <= steps + 3; s++) {
+    const bx = Math.round(ideal.x + (anchor.x - ideal.x) * Math.min(1, s / steps));
+    const by = Math.round(ideal.y + (anchor.y - ideal.y) * Math.min(1, s / steps));
+    for (const [jx, jy] of [[0, 0], [0, -1], [0, 1], [-1, 0], [1, 0], [-1, -1], [-1, 1], [1, -1], [1, 1]]) {
+      if (usable(bx + jx, by + jy)) {
+        takenTiles.add(`${bx + jx},${by + jy}`);
+        return { x: bx + jx, y: by + jy };
+      }
+    }
+  }
+  // Codex hardening: never silently hand back an unverified/duplicate tile —
+  // log it so the bench can assert this path is NEVER taken.
+  opLog(state, `slot-overflow id=${u.id} ideal=(${ideal.x},${ideal.y})`);
+  return { ...ideal };
+}
+
+/** March one claimed unit to its STAGING SLOT along the corridor prefix
+ *  (minefield bypass); only waypoints ahead of the unit and short of staging
+ *  apply. Members assemble into wedge positions, not onto one point. */
+function orderToStaging(state: GameState, op: Operation, u: Unit): void {
+  const slot = op.stagingSlots.get(u.id) ?? op.staging;
+  const route = op.corridor.filter(wp => wp.x > u.position.x && wp.x < op.staging.x);
+  applyEnemyOrders(state, [{
+    unitIds: [u.id],
+    action: "attack_move",
+    target: { ...slot },
+    waypoints: [...route.map(p => ({ ...p })), { ...slot }],
+    priority: "medium",
+  }]);
+}
+
+/** Is this member standing on (within slack of) its own staging slot? */
+function isAtStagingSlot(op: Operation, u: Unit): boolean {
+  const slot = op.stagingSlots.get(u.id) ?? op.staging;
+  const dx = u.position.x - slot.x, dy = u.position.y - slot.y;
+  return dx * dx + dy * dy <= OP_SLOT_GATHER_RADIUS * OP_SLOT_GATHER_RADIUS;
+}
+
+function getOperationLaunchLeg(op: Operation): Position[] {
+  return op.corridor
+    .filter(wp => wp.x > op.staging.x && wp.x < op.targetPos.x - 5)
+    .map(p => ({ ...p }));
+}
+
+function routeDistance(start: Position, points: Position[]): number {
+  let total = 0;
+  let prev = start;
+  for (const point of points) {
+    total += Math.hypot(point.x - prev.x, point.y - prev.y);
+    prev = point;
+  }
+  return total;
+}
+
+/** Rejoin an operation member to the remaining strategic corridor, never to a
+ *  generic nearest-visible-enemy target. */
+function orderFieldMember(state: GameState, op: Operation, u: Unit, slot: Position): void {
+  const leg = getOperationLaunchLeg(op).filter(wp => wp.x > u.position.x);
+  applyEnemyOrders(state, [{
+    unitIds: [u.id],
+    action: "attack_move",
+    target: { ...slot },
+    waypoints: [...leg, { ...slot }],
+    priority: "high",
+  }]);
+}
+
+function retargetAssembly(state: GameState, op: Operation, next: OperationTargetCandidate): void {
+  op.targetId = next.targetId;
+  op.frontId = next.frontId;
+  op.targetPos = { ...next.position };
+  op.corridor = next.corridor;
+  op.formation = next.kind === "recapture" ? "encircle" : "wedge";
+  op.staging = deriveStaging(state, next);
+  reassignStagingSlots(state, op);   // staging point + heading moved with the target
+  opLog(state, `#${op.seq} retarget → ${op.targetId} (${next.kind}) staging=(${op.staging.x},${op.staging.y})`);
+  for (const id of op.memberIds) {
+    const u = state.units.get(id);
+    if (u && u.hp > 0 && u.state !== "dead") orderToStaging(state, op, u);
+  }
+}
+
+function cancelOperation(state: GameState, op: Operation, reason: string): void {
+  for (const id of Array.from(op.memberIds)) {
+    activeAttackerIds.delete(id);
+    attackerTargets.delete(id);
+    attackerWaypoints.delete(id);
+    opReleaseMember(op, id);
+  }
+  if (assemblingOperation === op) assemblingOperation = null;
+  if (fieldOperation === op) { fieldOperation = null; opCaptureConfirmAt = 0; }
+  opRecreateAfter = state.time + OP_RETRY_SEC;
+  opLog(state, `#${op.seq} cancel (${reason})`);
+}
+
+/** Operation end. On a captured PLAYER post, keep an explicit hold force
+ *  (occupation ownership — assignRoles never garrisons friendlyKeypoints);
+ *  a recaptured AXIS objective needs none: assignRoles' normal garrison
+ *  radius takes over the moment the released units re-classify. */
+function completeOperation(state: GameState, op: Operation, captured: boolean): void {
+  const isPlayerPost = (state.scenarioWinConfig?.friendlyKeypoints ?? []).includes(op.targetId);
+  if (captured && isPlayerPost) {
+    const near: Unit[] = [];
+    for (const id of op.memberIds) {
+      const u = state.units.get(id);
+      if (!u || u.hp <= 0 || u.state === "dead") continue;
+      const dx = u.position.x - op.targetPos.x, dy = u.position.y - op.targetPos.y;
+      if (dx * dx + dy * dy <= 25 * 25) near.push(u);
+    }
+    // Cheap holders first: infantry (entrench) > light_tank > main_tank —
+    // armor flows back to the next fist instead of standing static guard.
+    // Hard cap: at most ONE main_tank ever stays (seed 7: an all-tank keep
+    // parked 3 mt on the post and starved the next fist into degraded; a thin
+    // hold force is topped up with reserve infantry within a few ticks).
+    const pref: Record<string, number> = { infantry: 0, light_tank: 1, main_tank: 2 };
+    near.sort((a, b) => ((pref[a.type] ?? 3) - (pref[b.type] ?? 3)) || (a.id - b.id));
+    const keep: Unit[] = [];
+    for (const u of near) {
+      if (keep.length >= OP_OCCUPY_KEEP) break;
+      if (u.type === "main_tank" && keep.some(k => k.type === "main_tank")) continue;
+      keep.push(u);
+    }
+    if (keep.length > 0) {
+      const keepSet = new Set(keep.map(u => u.id));
+      occupationGarrisons.set(op.targetId, keepSet);
+      applyEnemyOrders(state, keep.map(u => ({
+        unitIds: [u.id], action: "defend" as const, target: { ...op.targetPos }, priority: "low" as const,
+      })));
+      for (const id of keepSet) {
+        // stays in the registry — occupation ownership continues
+        op.memberIds.delete(id);
+        op.ltIds.delete(id);
+        op.slotTargets.delete(id);
+        activeAttackerIds.delete(id);
+        attackerTargets.delete(id);
+        attackerWaypoints.delete(id);
+      }
+      opLog(state, `#${op.seq} occupy ${op.targetId} keep=[${keep.map(u => u.id).join(",")}]`);
+    }
+  }
+  for (const id of Array.from(op.memberIds)) {
+    activeAttackerIds.delete(id);
+    attackerTargets.delete(id);
+    attackerWaypoints.delete(id);
+    opReleaseMember(op, id);
+  }
+  if (fieldOperation === op) { fieldOperation = null; opCaptureConfirmAt = 0; }
+  opLog(state, `#${op.seq} complete${captured ? " (captured)" : " (target gone)"}`);
+}
+
+function maintainOccupationGarrisons(state: GameState): void {
+  for (const [postId, ids] of occupationGarrisons) {
+    for (const id of Array.from(ids)) {
+      const u = state.units.get(id);
+      if (!u || u.state === "dead" || u.hp <= 0) {
+        ids.delete(id);
+        releaseOperationUnits([id]);
+      }
+    }
+    const fac = state.facilities.get(postId);
+    if (!fac || fac.hp <= 0 || fac.team !== "enemy") {
+      // Post lost or destroyed — the hold force returns to the pool.
+      releaseOperationUnits(ids);
+      occupationGarrisons.delete(postId);
+      opLog(state, `occupation ${postId} released (post lost)`);
+    }
+  }
+}
+
+/** Tick step 1 (before assignRoles): fates, capture handoff, march upkeep. */
+function operationMaintain(state: GameState): void {
+  maintainOccupationGarrisons(state);
+
+  const asm = assemblingOperation;
+  if (asm) {
+    pruneOperationMembers(state, asm);
+    if (!isOperationTargetValid(state, asm)) {
+      const next = selectAssemblyTarget(state);
+      if (next) retargetAssembly(state, asm, next);
+      else cancelOperation(state, asm, "no_valid_target");
+    } else {
+      for (const id of asm.memberIds) {
+        const u = state.units.get(id);
+        if (!u) continue;
+        const atSlot = isAtStagingSlot(asm, u);
+        if ((u.state === "idle" || (u.state === "defending" && !u.target)) && atSlot) {
+          // Stand fast with HOLD, not defend. A defend posture falls through
+          // to autoBehavior's assist rules by design — and 4c projects an
+          // ally's STALE cross-map attack lock into the cluster (seed 7: the
+          // whole gathered fist got siphoned 180 tiles back to the coastal
+          // fight at t=416, one leash round-trip per member, forever). HOLD is
+          // the committed "explicit stand-fast" order: exempt from 4a/4b/4c,
+          // while in-range return fire (combat.ts) and the low-HP retreat
+          // override (autoBehavior priority 2) both still apply.
+          if (u.orders[0]?.action !== "hold") {
+            applyEnemyOrders(state, [{ unitIds: [id], action: "hold", target: null, priority: "low" }]);
+          }
+        } else if ((u.state === "idle" || (u.state === "defending" && !u.target)) && !atSlot) {
+          // Fell out of the march (A* hiccup / autoBehavior episode over) —
+          // push it back onto its staging slot. Never a generic enemy chase.
+          orderToStaging(state, asm, u);
+        }
+      }
+
+      // Gather telemetry (bench diagnosis; dedup so it only logs on change).
+      let gMt = 0, gAll = 0;
+      for (const id of asm.memberIds) {
+        const u = state.units.get(id);
+        if (!u || u.hp <= 0 || u.state === "dead") continue;
+        if (isAtStagingSlot(asm, u)) {
+          gAll++;
+          if (u.type === "main_tank") gMt++;
+        }
+      }
+      const gatherKey = `${gMt}/${gAll}`;
+      if (gatherKey !== asm.lastGatherLog) {
+        asm.lastGatherLog = gatherKey;
+        opLog(state, `#${asm.seq} gather mt=${gMt} units=${gAll}`);
+      }
+    }
+  }
+
+  const op = fieldOperation;
+  if (!op) return;
+  pruneOperationMembers(state, op);
+  if (op.memberIds.size === 0) {
+    opLog(state, `#${op.seq} wiped`);
+    fieldOperation = null;
+    opCaptureConfirmAt = 0;
+    return;
+  }
+  const fac = state.facilities.get(op.targetId);
+  if (!fac || fac.hp <= 0) {
+    completeOperation(state, op, false);
+    return;
+  }
+  if (fac.team === "enemy") {
+    // Captured (maybe by us, maybe a P4 wave got there first — either way the
+    // fist inherits the prize). Confirm past the blip window, then hand off.
+    if (opCaptureConfirmAt === 0) opCaptureConfirmAt = state.time;
+    if (state.time - opCaptureConfirmAt >= CONSOLIDATE_CONFIRM_SEC) {
+      completeOperation(state, op, true);
+    }
+    return;
+  }
+  opCaptureConfirmAt = 0;
+
+  // Fix C fallback: occupation is the infantry's job, but if every occupier is
+  // gone while the target still stands, the nearest survivor takes the breach
+  // slot — tanks MAY capture here (all El Alamein ground units can).
+  const hasAliveInf = [...op.memberIds].some(id => {
+    const u = state.units.get(id);
+    return !!u && u.hp > 0 && u.state !== "dead" && u.type === "infantry";
+  });
+  if (!hasAliveInf) {
+    const hasBreachSlot = [...op.slotTargets.values()].some(p => {
+      const dx = p.x - op.targetPos.x, dy = p.y - op.targetPos.y;
+      return dx * dx + dy * dy <= 1.5 * 1.5;
+    });
+    if (!hasBreachSlot) {
+      let nearest: Unit | null = null;
+      let nd = Infinity;
+      for (const id of op.memberIds) {
+        const u = state.units.get(id);
+        if (!u || u.hp <= 0 || u.state === "dead" || u.state === "retreating") continue;
+        const dx = u.position.x - op.targetPos.x, dy = u.position.y - op.targetPos.y;
+        const d = dx * dx + dy * dy;
+        if (d < nd) { nd = d; nearest = u; }
+      }
+      if (nearest) {
+        op.slotTargets.set(nearest.id, { ...op.targetPos });
+        if (nearest.state === "idle") {
+          orderFieldMember(state, op, nearest, op.targetPos);
+          activeAttackerIds.add(nearest.id);
+          attackerTargets.set(nearest.id, { ...op.targetPos });
+        }
+        opLog(state, `#${op.seq} fallback-capture id=${nearest.id} (no infantry left)`);
+      }
+    }
+  }
+
+  // March upkeep: idle short of the slot → re-push to the SLOT only (spec: no
+  // nearest-visible-enemy retarget for operation members, ever).
+  // Arrival is slot-type aware: a CAPTURE slot (within OP_CAPTURE_SLOT_R of
+  // the objective) only counts as reached INSIDE the capture ring — this is
+  // also what guarantees a fallback-capture unit that was moving/attacking
+  // when its slot was rewritten gets pushed into the ring once it idles.
+  for (const id of op.memberIds) {
+    if (op.ltIds.has(id) && !op.ltReleased) continue; // still staged, waiting on ETA sync
+    const u = state.units.get(id);
+    if (!u || u.state !== "idle") continue;
+    const slot = op.slotTargets.get(id) ?? op.targetPos;
+    const sdx = slot.x - op.targetPos.x, sdy = slot.y - op.targetPos.y;
+    const isCaptureSlot = sdx * sdx + sdy * sdy <= OP_CAPTURE_SLOT_R * OP_CAPTURE_SLOT_R;
+    if (isCaptureSlot) {
+      const tdx = u.position.x - op.targetPos.x, tdy = u.position.y - op.targetPos.y;
+      if (tdx * tdx + tdy * tdy <= OP_CAPTURE_RING * OP_CAPTURE_RING) continue; // capturing
+    } else {
+      const dx = u.position.x - slot.x, dy = u.position.y - slot.y;
+      if (dx * dx + dy * dy <= OP_ARRIVE_RADIUS * OP_ARRIVE_RADIUS) continue; // holding at slot
+    }
+    orderFieldMember(state, op, u, slot);
+    activeAttackerIds.add(id);
+    attackerTargets.set(id, { ...slot });
+  }
+}
+
+/** Tick step 2 (after assignRoles, BEFORE manageEconomy and P0/P1/P3):
+ *  create the next op, claim from reserve, voice production demand. Claiming
+ *  strictly consumes reserveIds — assignRoles' output is the single
+ *  role-eligibility truth (no rescanning state.units). */
+function operationClaim(state: GameState): void {
+  const phase = getCurrentStrategicPhase(state);
+  if (phase === "legacy") return;
+  if (state.time < OP_CREATE_MIN_SEC) return;
+
+  if (phase === "endgame_defense") {
+    // 总防: no offensive operations. Stand the assembly down (field op, if
+    // any, runs to its end; occupation holds are defensive and stay).
+    if (assemblingOperation) cancelOperation(state, assemblingOperation, "endgame_defense");
+  } else if (!assemblingOperation && state.time >= opRecreateAfter) {
+    const best = selectAssemblyTarget(state);
+    if (best) {
+      opSeq++;
+      const staging = deriveStaging(state, best);
+      assemblingOperation = {
+        seq: opSeq, phase: "assembling", kind: "fist",
+        targetId: best.targetId, frontId: best.frontId,
+        targetPos: { ...best.position }, corridor: best.corridor,
+        formation: best.kind === "recapture" ? "encircle" : "wedge",
+        staging,
+        memberIds: new Set(), ltIds: new Set(), slotTargets: new Map(),
+        stagingSlots: new Map(), slotIdx: new Map(),
+        createdAt: state.time, launchedAt: 0, ltReleaseAt: 0, ltReleased: false,
+        lastGatherLog: "", mtReadyAt: 0,
+      };
+      opLog(state, `#${opSeq} create target=${best.targetId} kind=${best.kind} front=${best.frontId} staging=(${staging.x},${staging.y})`);
+    }
+  }
+
+  const asm = assemblingOperation;
+  if (asm) {
+    // Current composition
+    let haveMt = 0, haveLt = 0, haveInf = 0;
+    for (const id of asm.memberIds) {
+      const u = state.units.get(id);
+      if (!u || u.hp <= 0) continue;
+      if (u.type === "main_tank") haveMt++;
+      else if (u.type === "light_tank") haveLt++;
+      else if (u.type === "infantry") haveInf++;
+    }
+
+    // Reserve pool by type (liveness mirror of getReserveUnitsNear)
+    const pool: Record<"main_tank" | "light_tank" | "infantry", Unit[]> =
+      { main_tank: [], light_tank: [], infantry: [] };
+    for (const id of reserveIds) {
+      const u = state.units.get(id);
+      if (!u || u.state === "dead" || u.hp <= 0) continue;
+      if (u.hp / u.maxHp < OP_MEMBER_MIN_HP_RATIO) continue;
+      if (u.state !== "idle" && u.state !== "defending" && u.state !== "patrolling") continue;
+      if (u.type === "main_tank" || u.type === "light_tank" || u.type === "infantry") {
+        pool[u.type].push(u);
+      }
+    }
+    const byDistToStaging = (a: Unit, b: Unit) => {
+      const da = (a.position.x - asm.staging.x) ** 2 + (a.position.y - asm.staging.y) ** 2;
+      const db = (b.position.x - asm.staging.x) ** 2 + (b.position.y - asm.staging.y) ** 2;
+      return (da - db) || (a.id - b.id);
+    };
+    const claims: Unit[] = [];
+    const take = (arr: Unit[], n: number) => {
+      if (n <= 0) return;
+      arr.sort(byDistToStaging);
+      for (const u of arr.slice(0, n)) claims.push(u);
+    };
+    take(pool.main_tank, OP_FIST_MT_TARGET - haveMt);
+    take(pool.light_tank, OP_FIST_LT_TARGET - haveLt);
+    take(pool.infantry, OP_FIST_INF_TARGET - haveInf);
+
+    if (claims.length > 0) {
+      reserveOperationUnits(claims.map(u => u.id));
+      for (const u of claims) {
+        asm.memberIds.add(u.id);
+        if (u.type === "light_tank") asm.ltIds.add(u.id);
+        reserveIds.delete(u.id);   // out of THIS tick's P0/P1/P3/garrison pool too
+        assignStagingSlot(state, asm, u);  // fix B: assemble INTO formation
+        orderToStaging(state, asm, u);
+      }
+      opLog(state, `#${asm.seq} claim +${claims.length} (mt=${haveMt + claims.filter(u => u.type === "main_tank").length}/${OP_FIST_MT_TARGET})`);
+    }
+
+    // Production demand — runs BEFORE manageEconomy's random fill, so the
+    // fist's armor gap owns the queue slots (restrained: ≤2 mt queued).
+    const mtTotal = haveMt + claims.filter(u => u.type === "main_tank").length;
+    if (mtTotal < OP_FIST_MT_TARGET) {
+      const queuedMt = state.productionQueue.enemy.filter(p => p.unitType === "main_tank").length;
+      if (queuedMt < 2 && state.productionQueue.enemy.length < 4
+          && state.economy.enemy.resources.money >= UNIT_STATS.main_tank.cost) {
+        const r = enqueueProduction(state, "enemy", "main_tank");
+        if (r.ok) opLog(state, `#${asm.seq} demand main_tank (have=${mtTotal}, queued=${queuedMt + 1})`);
+      }
+    }
+  }
+
+  // Occupation top-up: ≥2 holders per captured player post. Infantry only —
+  // never drain fist armor into static guard duty.
+  for (const [postId, ids] of occupationGarrisons) {
+    const fac = state.facilities.get(postId);
+    if (!fac || fac.team !== "enemy") continue;
+    let alive = 0;
+    for (const id of ids) {
+      const u = state.units.get(id);
+      if (u && u.hp > 0 && u.state !== "dead") alive++;
+    }
+    if (alive >= 2) continue;
+    const inf: Unit[] = [];
+    for (const id of reserveIds) {
+      const u = state.units.get(id);
+      if (!u || u.type !== "infantry" || u.hp <= 0 || u.state === "dead") continue;
+      if (u.hp / u.maxHp < OP_MEMBER_MIN_HP_RATIO) continue;
+      if (u.state !== "idle" && u.state !== "defending" && u.state !== "patrolling") continue;
+      inf.push(u);
+    }
+    inf.sort((a, b) => {
+      const da = (a.position.x - fac.position.x) ** 2 + (a.position.y - fac.position.y) ** 2;
+      const db = (b.position.x - fac.position.x) ** 2 + (b.position.y - fac.position.y) ** 2;
+      return (da - db) || (a.id - b.id);
+    });
+    const add = inf.slice(0, 2 - alive);
+    if (add.length === 0) continue;
+    reserveOperationUnits(add.map(u => u.id));
+    for (const u of add) {
+      ids.add(u.id);
+      reserveIds.delete(u.id);
+    }
+    applyEnemyOrders(state, add.map(u => ({
+      unitIds: [u.id], action: "defend" as const, target: { ...fac.position }, priority: "medium" as const,
+    })));
+    opLog(state, `occupation ${postId} +${add.length} inf`);
+  }
+}
+
+/** Tick step 3 (the P2 slot): ETA-synced lt release + the launch decision. */
+function operationLaunch(state: GameState): void {
+  // Light-tank release: lts (3.0) depart once the 2.0 core has the head start
+  // that lands both together — delay = D/2.0 − D/3.0 = D/6 (speeds from
+  // UNIT_STATS; per spec no complex flank machine, just ETA sync).
+  const fop = fieldOperation;
+  if (fop && !fop.ltReleased && state.time >= fop.ltReleaseAt) {
+    fop.ltReleased = true;
+    const ltOrders: Order[] = [];
+    for (const id of fop.ltIds) {
+      const u = state.units.get(id);
+      if (!u || u.hp <= 0 || u.state === "dead") continue;
+      const slot = fop.slotTargets.get(id) ?? fop.targetPos;
+      const leg = getOperationLaunchLeg(fop);
+      ltOrders.push({
+        unitIds: [id], action: "attack_move", target: { ...slot },
+        waypoints: [...leg, { ...slot }], priority: "high",
+      });
+      activeAttackerIds.add(id);
+      attackerTargets.set(id, { ...slot });
+    }
+    if (ltOrders.length > 0) {
+      applyEnemyOrders(state, ltOrders);
+      opLog(state, `#${fop.seq} lt-release n=${ltOrders.length}`);
+    }
+  }
+
+  const asm = assemblingOperation;
+  if (!asm) return;
+  const cfg = getPhaseConfig(state);
+  if (state.time < cfg.p2Grace) return;
+  if (state.time < opLaunchCooldownUntil) return;
+
+  const gathered: Unit[] = [];
+  for (const id of asm.memberIds) {
+    const u = state.units.get(id);
+    if (!u || u.hp <= 0 || u.state === "dead" || u.state === "retreating") continue;
+    if (isAtStagingSlot(asm, u)) gathered.push(u);
+  }
+  const gatheredMt = gathered.filter(u => u.type === "main_tank").length;
+
+  let kind: "fist" | "degraded" | null = null;
+  if (gatheredMt >= OP_FIST_MT_MIN) kind = "fist";
+  else if (state.time - asm.createdAt >= OP_ASSEMBLY_DEADLINE_SEC) {
+    if (gathered.length >= OP_DEADLINE_MIN_UNITS) kind = "degraded";
+    else {
+      cancelOperation(state, asm, `deadline gathered=${gathered.length}`);
+      return;
+    }
+  }
+  if (!kind) return;
+
+  // Fix C: don't launch the fist tank-only while its occupiers are seconds
+  // out — hold up to OP_OCCUPIER_WAIT_SEC for at least one infantry to reach
+  // its slot. Bounded, and skipped entirely when no live occupier remains.
+  if (kind === "fist") {
+    const gatheredInf = gathered.filter(u => u.type === "infantry").length;
+    const hasLiveOccupier = [...asm.memberIds].some(id => {
+      const u = state.units.get(id);
+      return !!u && u.hp > 0 && u.state !== "dead" && u.state !== "retreating"
+        && u.type === "infantry";
+    });
+    if (gatheredInf === 0 && hasLiveOccupier) {
+      if (asm.mtReadyAt === 0) asm.mtReadyAt = state.time;
+      if (state.time - asm.mtReadyAt < OP_OCCUPIER_WAIT_SEC) return;
+    }
+  }
+
+  if (fieldOperation) {
+    const fieldTarget = state.facilities.get(fieldOperation.targetId);
+    // A just-captured target is inside the 20s ownership debounce. Let that
+    // complete and establish its occupation garrison instead of discarding it.
+    if (fieldTarget?.team === "enemy") return;
+    handoffFieldOperation(state, fieldOperation);
+  }
+
+  // Hard cap: the WHOLE strike (incl. the lt wing releasing seconds later)
+  // must fit under MAX_ACTIVE_ATTACKERS_HARD — if it doesn't, WAIT; never
+  // shrink the fist below spec to sneak under the cap.
+  if (activeAttackerIds.size + gathered.length > MAX_ACTIVE_ATTACKERS_HARD) {
+    opLog(state, `#${asm.seq} hold (cap ${activeAttackerIds.size}+${gathered.length}>${MAX_ACTIVE_ATTACKERS_HARD})`);
+    return;
+  }
+
+  launchOperation(state, asm, gathered, kind, cfg);
+}
+
+function launchOperation(
+  state: GameState,
+  op: Operation,
+  gathered: Unit[],
+  kind: "fist" | "degraded",
+  cfg: PhaseConfig,
+): void {
+  // Stragglers (claimed, still marching in) return to the pool — the next op,
+  // created next tick, re-claims them from wherever they stand (closer now).
+  const gatheredIds = new Set(gathered.map(u => u.id));
+  for (const id of Array.from(op.memberIds)) {
+    if (!gatheredIds.has(id)) opReleaseMember(op, id);
+  }
+
+  // Endpoint slots preserve each member's STAGING index → the staging wedge
+  // and the endpoint wedge are parallel translations of the same shape, so the
+  // formation stays readable the whole march (fix B), instead of re-shuffling
+  // members across the axis at launch.
+  //
+  // Occupation doctrine (fix C): every El Alamein ground unit CAN capture
+  // (economy.ts blacklist rule), so slot GEOMETRY decides who does. Gathered
+  // infantry take the capture slots ON the objective (≤1.5 ring); tanks form
+  // the fire line OP_FIRE_STANDOFF short of it — outside the capture ring,
+  // inside main_tank range 6. Only with no infantry gathered does the
+  // lowest-index tank take the breach slot itself.
+  const typeOrder: Record<string, number> = { main_tank: 0, infantry: 1, light_tank: 2 };
+  const ordered = [...gathered].sort((a, b) =>
+    ((typeOrder[a.type] ?? 3) - (typeOrder[b.type] ?? 3)) || (a.id - b.id));
+  const heading = computeHeading(op.staging, op.targetPos);
+  const hx = Math.cos(heading), hy = Math.sin(heading);
+  const infs = gathered.filter(u => u.type === "infantry")
+    .sort((a, b) => (op.slotIdx.get(a.id) ?? 99) - (op.slotIdx.get(b.id) ?? 99));
+  const nonInf = gathered.filter(u => u.type !== "infantry");
+  const fireCenter: Position = op.formation === "encircle"
+    ? { ...op.targetPos }   // encircle slots already ring the target at ~5-6 tiles
+    : { x: op.targetPos.x - hx * OP_FIRE_STANDOFF, y: op.targetPos.y - hy * OP_FIRE_STANDOFF };
+
+  op.slotTargets.clear();
+  const endpointTaken = new Set<string>();
+  infs.forEach((u, k) => {
+    // Capture slots: the objective itself ± 1 tile perpendicular — every one
+    // inside the 1.5 capture ring.
+    const slot = {
+      x: Math.round(op.targetPos.x + (k === 1 ? -hy : k === 2 ? hy : 0)),
+      y: Math.round(op.targetPos.y + (k === 1 ? hx : k === 2 ? -hx : 0)),
+    };
+    op.slotTargets.set(u.id, slot);
+    endpointTaken.add(`${slot.x},${slot.y}`);
+  });
+  // No occupiers → the lowest-index tank takes the breach slot itself; every
+  // OTHER non-inf slot is verified passable, unique, AND outside the capture
+  // ring (Codex: geometry, not luck, keeps tanks out of the occupation zone).
+  const breachId = infs.length === 0 && nonInf.length > 0
+    ? [...nonInf].sort((a, b) =>
+        (op.slotIdx.get(a.id) ?? 99) - (op.slotIdx.get(b.id) ?? 99))[0].id
+    : null;
+  for (const u of nonInf) {
+    if (u.id === breachId) {
+      op.slotTargets.set(u.id, { ...op.targetPos });
+      endpointTaken.add(`${op.targetPos.x},${op.targetPos.y}`);
+      continue;
+    }
+    const idx = op.slotIdx.get(u.id) ?? 0;
+    const ideal = scaledFormationOffset(fireCenter, idx, op.formation, heading);
+    op.slotTargets.set(u.id, resolveSlotTile(state, u, ideal, endpointTaken,
+      fireCenter, { pos: op.targetPos, r: OP_CAPTURE_SLOT_R }));
+  }
+  for (const [id, p] of op.slotTargets) {
+    op.slotTargets.set(id, {
+      x: Math.max(0, Math.min(state.mapWidth - 1, p.x)),
+      y: Math.max(0, Math.min(state.mapHeight - 1, p.y)),
+    });
+  }
+
+  // Launch leg: corridor waypoints strictly BETWEEN staging and target — the
+  // old full-corridor dispatch marched fists through a dogleg past the post
+  // (seed42: the (380,50) wp dragged the ridge fist into the coastal fight).
+  const leg = getOperationLaunchLeg(op);
+
+  op.ltIds = new Set(ordered.filter(u => u.type === "light_tank").map(u => u.id));
+  const core = ordered.filter(u => !op.ltIds.has(u.id));
+
+  const orders: Order[] = core.map(u => ({
+    unitIds: [u.id],
+    action: "attack_move" as const,
+    target: { ...op.slotTargets.get(u.id)! },
+    waypoints: [...leg.map(p => ({ ...p })), { ...op.slotTargets.get(u.id)! }],
+    priority: "high" as const,
+  }));
+  const res = applyEnemyOrders(state, orders);
+  let applied = 0;
+  core.forEach((u, i) => {
+    if ((res.appliedPerOrder[i] ?? 0) > 0) {
+      applied++;
+      activeAttackerIds.add(u.id);
+      attackerTargets.set(u.id, { ...op.slotTargets.get(u.id)! });
+    }
+  });
+  if (applied === 0 && core.length > 0) {
+    cancelOperation(state, op, "dispatch_failed");
+    return;
+  }
+
+  const D = routeDistance(op.staging, [...leg, op.targetPos]);
+  op.phase = "launched";
+  op.kind = kind;
+  op.launchedAt = state.time;
+  op.ltReleaseAt = state.time + D * (
+    1 / UNIT_STATS.main_tank.speed - 1 / UNIT_STATS.light_tank.speed
+  );
+  op.ltReleased = op.ltIds.size === 0;
+
+  fieldOperation = op;
+  assemblingOperation = null;
+  opCaptureConfirmAt = 0;
+  opLaunchCooldownUntil = state.time + cfg.p2CooldownSec;
+
+  const mt = core.filter(u => u.type === "main_tank").length;
+  const inf = core.filter(u => u.type === "infantry").length;
+  opLog(state,
+    `#${op.seq} LAUNCH kind=${kind} mt=${mt} inf=${inf} lt=${op.ltIds.size} form=${op.formation} target=${op.targetId} tgt=(${Math.round(op.targetPos.x)},${Math.round(op.targetPos.y)}) ids=[${ordered.map(u => u.id).join(",")}]`);
+  // Endpoint-slot audit line (bench asserts: unique, passable, non-inf outside
+  // the capture ring). Same tick as LAUNCH so the bench sees launch state.
+  const slotAudit = ordered.map(u => {
+    const p = op.slotTargets.get(u.id)!;
+    const t = u.type === "main_tank" ? "mt" : u.type === "light_tank" ? "lt" : "inf";
+    return `${u.id}:${t}:${p.x},${p.y}`;
+  }).join(" ");
+  opLog(state, `#${op.seq} endpoints ${slotAudit}`);
+}
+
 // ── Role assignment (H5, H8, H10) ──
 
 function assignRoles(state: GameState): void {
@@ -353,6 +1297,10 @@ function assignRoles(state: GameState): void {
     // Active attackers and reinforcing units keep their role
     if (activeAttackerIds.has(u.id)) return;
     if (reinforcingIds.has(u.id)) return;  // §6
+    // EP-V1: operation / occupation property never enters the reserve pool —
+    // this single gate is what keeps P0/P1/P3/garrison (all reserve-fed) from
+    // poaching fist members.
+    if (isOperationReserved(u.id)) return;
 
     // Check garrison: within GARRISON_RADIUS of any enemy objective
     let isGarrison = false;
@@ -575,7 +1523,8 @@ function opportunisticAttack(state: GameState): void {
     const attackers = reserves.slice(0, Math.min(cfg.p1MaxAttack, reserves.length, p1Budget));
     if (attackers.length === 0) continue;
     const leadType = getLeadType(attackers);
-    const { target: finalTarget, corridor } = getTargetPosition(state, front, leadType);
+    const { target: rawTarget, corridor } = getTargetPosition(state, front, leadType);
+    const finalTarget = getHarassmentApproachTarget(state, rawTarget, attackers);
     const applied = dispatchAttack(state, attackers, finalTarget, corridor, "high");
     if (applied === 0) continue;
 
@@ -591,6 +1540,10 @@ function opportunisticAttack(state: GameState): void {
 
 function massedOffensive(state: GameState): void {
   const cfg = getPhaseConfig(state);
+  // EP-V1 final: for el_alamein the massed offensive is OWNED by the operation
+  // layer above (operationClaim/operationLaunch). This legacy body is the
+  // committed pre-EP baseline, kept 1:1 for non-keypoint scenarios only.
+  if (getCurrentStrategicPhase(state) !== "legacy") return;
   if (state.time < cfg.p2Grace) return; // V3: phase-gated grace (was hardcoded 60)
   if (state.time < p2CooldownUntil) return;
   if (activeAttackerIds.size >= MAX_ACTIVE_ATTACKERS_HARD) return;  // v3: P2 uses hard cap (32)
@@ -778,11 +1731,24 @@ function garrisonBehavior(state: GameState): void {
 
     if (garrisonCount >= 2) continue; // Garrison is healthy
 
-    // Search for reserves: local first, then global fallback
-    let reserves = getReserveUnitsNear(state, fac.position, 120);
+    // Search for reserves: local first, then global fallback.
+    // EP-V1b polish (playtest: six forward MBTs drove home across the map for
+    // rear garrison duty — pure fuel waste that also stripped the front of its
+    // only armor): garrison reinforcement is a REAR-AREA job. Only units
+    // standing closer to our HQ than to the player's qualify (generic, no map
+    // coordinates), and among them the NEAREST go — getReserveUnitsNear's
+    // HP-desc sort is an assault heuristic that otherwise always recalls the
+    // fattest tanks regardless of distance. If no rear reserve exists, the
+    // post stays thin and P0 reacts on contact instead.
+    let reserves = getReserveUnitsNear(state, fac.position, 120).filter(u => isRearUnit(state, u));
     if (reserves.length === 0) {
-      reserves = getReserveUnitsNear(state, fac.position, 9999);
+      reserves = getReserveUnitsNear(state, fac.position, 9999).filter(u => isRearUnit(state, u));
     }
+    reserves.sort((a, b) => {
+      const da = (a.position.x - fac.position.x) ** 2 + (a.position.y - fac.position.y) ** 2;
+      const db = (b.position.x - fac.position.x) ** 2 + (b.position.y - fac.position.y) ** 2;
+      return da - db;
+    });
 
     const reinforcements = reserves.slice(0, Math.min(3, reserves.length));
     if (reinforcements.length === 0) continue;
@@ -809,6 +1775,10 @@ function garrisonBehavior(state: GameState): void {
 
 function reissueAttackerOrders(state: GameState): void {
   for (const id of activeAttackerIds) {
+    // EP-V1: operation members are re-issued by operationMaintain toward their
+    // own formation slot ONLY — the phase-2 nearest-visible-enemy retarget
+    // below must never hijack a fist member off its axis.
+    if (isOperationReserved(id)) continue;
     const u = state.units.get(id);
     if (!u || u.state === "dead" || u.hp <= 0) continue;
     if (u.state !== "idle") continue; // still moving/fighting
@@ -903,6 +1873,24 @@ function getReserveUnitsNear(state: GameState, pos: Position, radius: number): U
     return a.id - b.id;
   });
   return units;
+}
+
+/** EP-V1b polish: is this unit in our REAR half — closer to our own HQ than to
+ *  the player's? Generic geometric test, no hardcoded coordinates. Used to keep
+ *  garrison recalls from stripping forward-committed units. */
+function isRearUnit(state: GameState, u: Unit): boolean {
+  let ownHQ: Position | null = null;
+  let playerHQ: Position | null = null;
+  state.facilities.forEach(f => {
+    if (f.type !== "headquarters" || f.hp <= 0) return;
+    if (f.team === "enemy") ownHQ = f.position;
+    else if (f.team === "player") playerHQ = f.position;
+  });
+  if (!ownHQ || !playerHQ) return true; // degenerate map — don't block reinforcement
+  const o = ownHQ as Position, p = playerHQ as Position;
+  const dOwn = (u.position.x - o.x) ** 2 + (u.position.y - o.y) ** 2;
+  const dPlayer = (u.position.x - p.x) ** 2 + (u.position.y - p.y) ** 2;
+  return dOwn < dPlayer;
 }
 
 function getFrontCenter(state: GameState, front: typeof state.fronts[0]): Position | null {
@@ -1017,44 +2005,50 @@ const FRONT_OBJECTIVE_MAP: Record<string, string[]> = {
   front_south:   ["ea_himeimat"],
 };
 
-// 5C-lite: when the Axis already owns its objectives, pressure the Allied
-// forward posts instead of falling through to player HQ. This keeps the match
-// centered on the three-post tug-of-war until late game / player collapse.
-const FRONT_PLAYER_POST_MAP: Record<string, string> = {
-  front_coastal: "ea_player_coastal_post",
-  front_ridge:   "ea_player_central_post",
-  front_center:  "ea_player_central_post",
-  front_south:   "ea_player_south_post",
-};
-
-// Multi-waypoint attack corridors (west→east, bypassing Devil's Gardens minefield)
-const ATTACK_CORRIDORS: Record<string, Position[]> = {
-  front_coastal: [
-    { x: 200, y: 30 },   // coastal highway start
-    { x: 300, y: 25 },   // north of minefield
-    { x: 380, y: 35 },   // approach player area
-  ],
-  front_ridge: [
-    { x: 200, y: 80 },   // ridge direction
-    { x: 320, y: 60 },   // through ridge gap
-    { x: 380, y: 50 },   // approach objective
-  ],
-  front_center: [
-    { x: 200, y: 140 },  // central start
-    { x: 320, y: 150 },  // south of minefield
-    { x: 370, y: 140 },  // approach player
-  ],
-  front_south: [
-    { x: 200, y: 200 },  // southern desert
-    { x: 320, y: 210 },  // open desert march
-    { x: 380, y: 200 },  // approach Himeimat
-  ],
-};
+// FRONT_PLAYER_POST_MAP + ATTACK_CORRIDORS: moved to pressureDirector (EP-V1
+// final — single source shared with the operation target candidates). Imported
+// at the top of this file; P1/P3's fallback chain below is unchanged.
 
 /** v3: Result of getTargetPosition */
 interface AttackTargetResult {
   target: Position;        // Final destination (objective, forward post, visible enemy, or HQ)
   corridor: Position[];    // Corridor waypoints to prepend (may be empty)
+}
+
+/** P1/P3 are harassment, not seizure. If their strategic target is exactly a
+ * capturable objective, stop on the attackers' side of its capture circle.
+ * Tactical deviations toward a visible unit remain untouched. */
+function getHarassmentApproachTarget(
+  state: GameState,
+  target: Position,
+  attackers: Unit[],
+): Position {
+  if (state.scenarioId !== "el_alamein" || attackers.length === 0) return target;
+  const objectiveIds = [
+    ...(state.scenarioWinConfig?.friendlyKeypoints ?? []),
+    ...(state.captureObjectives ?? []),
+  ];
+  const objective = objectiveIds
+    .map((id) => state.facilities.get(id))
+    .find((facility) => {
+      if (!facility || facility.hp <= 0 || facility.team === "enemy") return false;
+      const dx = facility.position.x - target.x;
+      const dy = facility.position.y - target.y;
+      return dx * dx + dy * dy <= 2 * 2;
+    });
+  if (!objective) return target;
+
+  const centroid = {
+    x: attackers.reduce((sum, unit) => sum + unit.position.x, 0) / attackers.length,
+    y: attackers.reduce((sum, unit) => sum + unit.position.y, 0) / attackers.length,
+  };
+  const dx = centroid.x - objective.position.x;
+  const dy = centroid.y - objective.position.y;
+  const length = Math.hypot(dx, dy) || 1;
+  return {
+    x: objective.position.x + (dx / length) * HARASS_STANDOFF_TILES,
+    y: objective.position.y + (dy / length) * HARASS_STANDOFF_TILES,
+  };
 }
 
 /**
@@ -1286,13 +2280,15 @@ function proactiveProbe(state: GameState): void {
   if (probeUnits.length < PROBE_MIN_UNITS) return;
 
   const leadType = getLeadType(probeUnits);
-  const { target: finalTarget, corridor } = getTargetPosition(state, front, leadType);
+  const { target: rawTarget, corridor } = getTargetPosition(state, front, leadType);
+  const finalTarget = getHarassmentApproachTarget(state, rawTarget, probeUnits);
   const applied = dispatchAttack(state, probeUnits, finalTarget, corridor, "medium");
   if (applied === 0) return;
 
   probeCount++;
-  // Interval decreases slightly over time (more aggressive later), min 45s
-  const interval = Math.max(45, PROBE_INTERVAL_BASE - probeCount * 3)
+  // Interval decreases slightly over time (more aggressive later).
+  // EP-V1c 降噪: floor 45→90, shrink 3→2 — see PROBE_INTERVAL_BASE note.
+  const interval = Math.max(90, PROBE_INTERVAL_BASE - probeCount * 2)
     + (Math.random() * 2 - 1) * PROBE_INTERVAL_VARIANCE;
   probeCooldownUntil = state.time + interval;
 
