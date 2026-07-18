@@ -189,8 +189,11 @@ export function estimateTravelTime(
 /**
  * Estimate average travel time for a squad (group of unit IDs) to a target.
  * Uses the slowest unit's estimate (bottleneck determines squad arrival).
+ * Exported (battlefield-info-v2 V1b): frontEscalationPayload uses this SAME
+ * estimator for reinforcement ETAs. Contract: straight-line terrain sampling
+ * per member, slowest member wins — an estimate, NOT an A* path ETA.
  */
-function estimateSquadTravelTime(
+export function estimateSquadTravelTime(
   state: GameState,
   unitIds: number[],
   target: Position,
