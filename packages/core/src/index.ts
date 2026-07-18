@@ -33,7 +33,7 @@ export { selectDirectorBeat, collectDirectorBeats, snapshotForDirector, describe
 export { selectEscalationEvent } from "./director";
 // Step 7c.1 — escalation grounding facts (pure; for LLM voice, not a template)
 export { frontEscalationFacts } from "./director";
-export { buildFrontEscalationPayload, buildReinforceOptions, spatialGroups, CLUSTER_DIAMETER_CAP } from "./frontEscalationPayload";
+export { buildFrontEscalationPayload } from "./frontEscalationPayload";
 export type { EscalationFacts } from "./director";
 // Step 7c.1 stabilization — facility-contest grounding facts + worthiness gate (pure)
 export { facilityEscalationFacts, facilityContestWorthAsking } from "./director";

@@ -447,7 +447,7 @@ function escalateCrisisToConversation(
 
   // Structured mini-facts for ONE situation — NOT the full battlefield digest, NO
   // option menu, NO question text. The LLM writes the question from these.
-  const miniFacts = facFacts
+  const miniFacts = (facFacts
     ? [
         "SITUATION (voice ONE in-character line for THIS single point only):",
         "type: facility_contested",
@@ -460,11 +460,9 @@ function escalateCrisisToConversation(
         `nearby_forces_ours_vs_enemy_visible: ${facFacts.nearbyPlayerUnits} vs ${facFacts.nearbyEnemyVisibleUnits}`,
         `idle_reinforcement_available: ${facFacts.idleReinforcementAvailable}`,
         `raw_signal: ${crisis.message}`,
-      ].join("\n")
-    : // V1b: front escalation payload comes from the ONE core builder (same
-      // function the A/B bench calls). Legacy five lines byte-identical; the
-      // old idle_reinforcement_available boolean is now a candidates block.
-      buildFrontEscalationPayload(state, crisis);
+      ]
+    : // V1b: front payload from the ONE core builder (shared with the A/B bench)
+      buildFrontEscalationPayload(state, crisis).split("\n")).join("\n");
 
   // Neutral fallback — one open question, no defensive assumption, no option menu.
   const fallback =

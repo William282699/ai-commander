@@ -46,9 +46,11 @@ const CLUSTER_LINK_TILES = 10;
  *  merged diameter within this cap, so the bound holds by construction. */
 const CLUSTER_DIAMETER_MAX_TILES = 20;
 
-/** Naming radius (tiles): a group is "near <facility>" only within this range.
- *  Beyond it we fall back to the nearest front's name ("<front>方向") instead
- *  of claiming proximity to a place the group is not actually near. */
+/** Naming radius (tiles): a candidate is "near <place>" (or "en route to
+ *  <place>") only within this range of a standing facility or front center.
+ *  Beyond it the location phrase is OMITTED — proximity is never approximated
+ *  and there is no unbounded fallback (P1-1: a fabricated place is worse than
+ *  silence). */
 const NAME_RADIUS_TILES = 12;
 
 /** Combat-evidence window (seconds): fired or took damage this recently ⇒
@@ -72,6 +74,10 @@ export interface ReinforceOption {
   composition: string;
   /** Alive members only: Σhp / Σ maxHp of ALIVE members (dead excluded from both sides). */
   hpPct: number;
+  /** Contract v3 §3: all-static → "X附近" (place within NAME_RADIUS); all-moving
+   *  with resolvable destination → "向X行进中"; mixed/unresolvable → null and
+   *  the phrase is omitted. Groups carry the phrase inside their label instead. */
+  location: string | null;
   task: ReinforceTaskStatus;
   /** Straight-line terrain-sampled slowest-member estimate (NOT A*); null = unknown. */
   etaSec: number | null;
@@ -81,6 +87,10 @@ export interface ReinforceOptionsResult {
   options: ReinforceOption[]; // full set, sorted (无任务 first, then eta asc)
   shown: ReinforceOption[];   // first DISPLAY_BUDGET
   omitted: number;            // options.length - shown.length (true count)
+  /** ALL alive friendly units outside the crisis front — any kind, including
+   *  commanders, manual-only and squad-locked members. Grounds the empty-set
+   *  wording: "no candidates" must never read as "no friendlies" (F1). */
+  outsideFriendlyCount: number;
 }
 
 // ── Geometry helpers (front bboxes; local on purpose — the only crisisResponse
@@ -176,7 +186,9 @@ function compositionOf(members: Unit[]): string {
 function etaOf(state: GameState, memberIds: number[], anchor: Position | null): number | null {
   if (!anchor) return null;
   const t = estimateSquadTravelTime(state, memberIds, anchor);
-  return Number.isFinite(t) && t > 0 ? Math.round(t) : null;
+  // ceil, not round: a sub-second estimate must surface as 1 — never a fake 0
+  // (P1-2: Math.round(0.4) === 0 slipped past the t > 0 guard).
+  return Number.isFinite(t) && t > 0 ? Math.ceil(t) : null;
 }
 
 // ── Deterministic spatial grouping with a hard diameter cap ──
@@ -228,28 +240,54 @@ export function spatialGroups(units: Unit[]): Unit[][] {
   return groups;
 }
 
-/** Name a group AFTER grouping — naming never merges. Within NAME_RADIUS of a
- *  standing facility → "「名」附近"; else nearest front → "「名」方向"; else a
- *  neutral numbered label (fabricating a place is forbidden). */
-function groupLabel(state: GameState, centroid: Position, ordinal: number): string {
-  let bestFac: { name: string; d: number } | null = null;
+// ── Location phrase (contract v3 §3; shared by squads and groups) ──
+
+/** Nearest named place (standing facility or front center) within NAME_RADIUS;
+ *  null beyond it. Used both for static naming and destination resolution. */
+function nearestPlaceWithin(state: GameState, p: Position): string | null {
+  let best: { name: string; d: number } | null = null;
   state.facilities.forEach((f) => {
     if (f.hp <= 0) return;
-    const d = dist(centroid, f.position);
-    if (!bestFac || d < bestFac.d) bestFac = { name: f.name, d };
+    const d = dist(p, f.position);
+    if (!best || d < best.d) best = { name: f.name, d };
   });
-  if (bestFac !== null && (bestFac as { name: string; d: number }).d <= NAME_RADIUS_TILES) {
-    return `${(bestFac as { name: string; d: number }).name}附近未编组群`;
-  }
-  let bestFront: { name: string; d: number } | null = null;
   for (const fr of state.fronts) {
     const c = frontCenterPos(state, fr);
     if (!c) continue;
-    const d = dist(centroid, c);
-    if (!bestFront || d < bestFront.d) bestFront = { name: fr.name, d };
+    const d = dist(p, c);
+    if (!best || d < best.d) best = { name: fr.name, d };
   }
-  if (bestFront !== null) return `${(bestFront as { name: string; d: number }).name}方向未编组群`;
-  return `未编组群${ordinal}`;
+  const b = best as { name: string; d: number } | null;
+  return b !== null && b.d <= NAME_RADIUS_TILES ? b.name : null;
+}
+
+function centroidOf(points: Position[]): Position {
+  const x = points.reduce((s, p) => s + p.x, 0) / points.length;
+  const y = points.reduce((s, p) => s + p.y, 0) / points.length;
+  return { x, y };
+}
+
+/**
+ * Location phrase for a candidate's members (P1-1):
+ *  - all static                          → "X附近" (place within radius, else null)
+ *  - all moving, destination resolvable  → "向X行进中"
+ *  - mixed motion / unresolvable         → null (phrase omitted)
+ * A force walking AWAY from a place must not be pinned to it, and uncertainty
+ * is omitted rather than guessed — fabricating a place is forbidden.
+ */
+function locationPhraseFor(state: GameState, members: Unit[]): string | null {
+  const moving = members.filter((u) => u.state === "moving");
+  if (moving.length === 0) {
+    const place = nearestPlaceWithin(state, centroidOf(members.map((u) => u.position)));
+    return place !== null ? `${place}附近` : null;
+  }
+  if (moving.length === members.length) {
+    const targets = members.map((u) => u.target).filter((t): t is Position => t !== null);
+    if (targets.length === 0) return null;
+    const place = nearestPlaceWithin(state, centroidOf(targets));
+    return place !== null ? `向${place}行进中` : null;
+  }
+  return null;
 }
 
 // ── Candidate collection ──
@@ -270,7 +308,14 @@ export function buildReinforceOptions(
 
   // Dispatchable pool (friendly-only; commanders and manual-only excluded).
   const pool = new Map<number, Unit>();
+  // Separately: EVERY alive friendly outside the front, no eligibility filter —
+  // the empty-set wording must distinguish "no friendlies at all" from
+  // "friendlies exist but none forms a listable candidate" (F1 lesson).
+  let outsideFriendlyCount = 0;
   state.units.forEach((u) => {
+    if (u.team === "player" && u.hp > 0 && u.state !== "dead" && outsideFront(u.position)) {
+      outsideFriendlyCount++;
+    }
     if (u.hp <= 0 || u.type === "commander") return;
     if (!isDispatchablePlayerUnit(u)) return;
     pool.set(u.id, u);
@@ -293,6 +338,7 @@ export function buildReinforceOptions(
       unitCount: members.length,
       composition: compositionOf(members),
       hpPct: hpPctOf(members),
+      location: locationPhraseFor(state, members),
       task: groupTaskStatus(state, members, sq.currentMission),
       etaSec: etaOf(state, members.map((u) => u.id), anchor),
     });
@@ -304,13 +350,20 @@ export function buildReinforceOptions(
   );
   let ordinal = 1;
   for (const group of spatialGroups(unassigned)) {
-    const cx = group.reduce((s, u) => s + u.position.x, 0) / group.length;
-    const cy = group.reduce((s, u) => s + u.position.y, 0) / group.length;
+    // The location phrase IS the group's speakable handle, so it folds into
+    // the label; unresolvable → neutral numbered label, never a fabricated place.
+    const phrase = locationPhraseFor(state, group);
+    const label =
+      phrase === null ? `未编组群${ordinal}`
+      : phrase.startsWith("向") ? `${phrase}的未编组群`
+      : `${phrase}未编组群`;
+    ordinal++;
     options.push({
-      label: groupLabel(state, { x: cx, y: cy }, ordinal++),
+      label,
       unitCount: group.length,
       composition: compositionOf(group),
       hpPct: hpPctOf(group),
+      location: null, // already carried by the label
       task: groupTaskStatus(state, group, null),
       etaSec: etaOf(state, group.map((u) => u.id), anchor),
     });
@@ -328,22 +381,31 @@ export function buildReinforceOptions(
   });
 
   const shown = options.slice(0, DISPLAY_BUDGET);
-  return { options, shown, omitted: options.length - shown.length };
+  return { options, shown, omitted: options.length - shown.length, outsideFriendlyCount };
 }
 
 // ── Serialization ──
 
 function serializeOptions(result: ReinforceOptionsResult): string[] {
   if (result.options.length === 0) {
-    // Empty set ≠ "no idle troops anywhere". Say precisely what is true:
-    // there is no dispatchable friendly force outside the crisis front at all.
-    return ["reinforcement_options: none (crisis front 外无可派遣友军)"];
+    // Empty set ≠ "no idle troops anywhere" (the F1 lie). Two reachable truths
+    // (Codex round-4): either the field outside the crisis front is literally
+    // empty, or friendlies exist there but none forms a listable candidate
+    // right now (manual-only/commander units, squads straddling the crisis
+    // front, …). The second wording stays GENERIC on purpose — asserting a
+    // fixed reason would manufacture a new wrong conclusion.
+    if (result.outsideFriendlyCount === 0) {
+      return ["reinforcement_options: none (战场上无其他友军)"];
+    }
+    return [
+      `reinforcement_options: none (front 外有${result.outsideFriendlyCount}个友军单位, 但当前无可单列的增援候选)`,
+    ];
   }
   const lines = ["reinforcement_options:"];
   for (const o of result.shown) {
     const eta = o.etaSec !== null ? `${o.etaSec}` : "unknown";
     lines.push(
-      `- ${o.label}: ${o.unitCount}units(${o.composition}) hp=${o.hpPct}% ${o.task} eta_est_sec=${eta}`,
+      `- ${o.label}: ${o.unitCount}units(${o.composition}) hp=${o.hpPct}%${o.location !== null ? ` ${o.location}` : ""} ${o.task} eta_est_sec=${eta}`,
     );
   }
   if (result.omitted > 0) {

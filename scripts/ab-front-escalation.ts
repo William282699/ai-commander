@@ -16,14 +16,16 @@
 //     scripts/ab-front-escalation.ts --synthetic
 // ============================================================
 
+import { createInitialGameState, frontEscalationFacts } from "@ai-commander/core";
+// Bench-only symbols come from the module FILE directly — core/index.ts stays
+// builder-only for production (Codex round-4 P1-4). Same source file as prod,
+// so "same builder" still holds.
 import {
-  createInitialGameState,
   buildFrontEscalationPayload,
   buildReinforceOptions,
   spatialGroups,
   CLUSTER_DIAMETER_CAP,
-  frontEscalationFacts,
-} from "@ai-commander/core";
+} from "../packages/core/src/frontEscalationPayload";
 import type { GameState, Unit, Squad, CrisisEvent, Front } from "@ai-commander/shared";
 
 // ── Helpers ──
@@ -259,11 +261,82 @@ function runSynthetic(): void {
     check("truncation: payload states 另有2股", payload.includes("(另有2股候选未列出)"));
   }
 
-  // 7) Empty set wording is precise (no friendly force outside the front ≠ "no idle troops").
+  // 7) Empty-set THREE-branch wording (Codex round-4):
+  //    A: zero friendlies outside the front       → 战场上无其他友军
+  //    B: friendlies outside but none listable    → generic "无可单列的增援候选"
+  //    C: dispatchable members locked in a squad STRADDLING the crisis front —
+  //       the same generic wording must stay true for this path too.
   {
+    const sA = emptyBattlefield();
+    const pA = buildFrontEscalationPayload(sA, makeCrisis(sA.fronts[0]));
+    check("empty A: 战场上无其他友军", pA.includes("reinforcement_options: none (战场上无其他友军)"));
+
+    const sB = emptyBattlefield();
+    const frB = sB.fronts[0];
+    addUnit(sB, 5, 5, { type: "commander" });
+    const rB = buildReinforceOptions(sB, frB);
+    const pB = buildFrontEscalationPayload(sB, makeCrisis(frB));
+    check("empty B: no candidates but friendly counted", rB.options.length === 0 && rB.outsideFriendlyCount === 1,
+      `opts=${rB.options.length} outside=${rB.outsideFriendlyCount}`);
+    check("empty B: generic wording", pB.includes("front 外有1个友军单位, 但当前无可单列的增援候选"));
+
+    const sC = emptyBattlefield();
+    const frC = sC.fronts[0];
+    const bboxC = sC.regions.get(frC.regionIds[0])!.bbox;
+    const inside = addUnit(sC, Math.round((bboxC[0] + bboxC[2]) / 2), Math.round((bboxC[1] + bboxC[3]) / 2));
+    const outside = addUnit(sC, bboxC[2] + 8, Math.round((bboxC[1] + bboxC[3]) / 2));
+    addSquad(sC, [inside.id, outside.id], { id: "SX", leaderName: "Straddle" });
+    const rC = buildReinforceOptions(sC, frC);
+    const pC = buildFrontEscalationPayload(sC, makeCrisis(frC));
+    check("empty C: straddling squad yields no candidates", rC.options.length === 0, `opts=${rC.options.length}`);
+    check("empty C: wording true for straddle path", pC.includes("但当前无可单列的增援候选"));
+  }
+
+  // 7b) P1-1 probes: motion-aware naming — no fabricated proximity.
+  {
+    // A unit right NEXT to a facility but moving away must NOT be pinned to it.
     const s = emptyBattlefield();
-    const payload = buildFrontEscalationPayload(s, makeCrisis(s.fronts[0]));
-    check("empty: precise none-line", payload.includes("reinforcement_options: none (crisis front 外无可派遣友军)"));
+    let fac: { position: { x: number; y: number } } | null = null;
+    s.facilities.forEach((f) => { if (!fac && f.hp > 0) fac = f; });
+    const fp = (fac as unknown as { position: { x: number; y: number } }).position;
+    addUnit(s, fp.x + 1, fp.y, { state: "moving", target: { x: fp.x + 60, y: fp.y + 60 } });
+    const r = buildReinforceOptions(s, null);
+    const label = r.options[0]?.label ?? "";
+    check("moving-away: label never 附近", !label.includes("附近"), label);
+
+    // Moving WITH a resolvable destination → 向X行进中
+    const s2 = emptyBattlefield();
+    let fac2: { position: { x: number; y: number } } | null = null;
+    s2.facilities.forEach((f) => { if (!fac2 && f.hp > 0) fac2 = f; });
+    const fp2 = (fac2 as unknown as { position: { x: number; y: number } }).position;
+    addUnit(s2, fp2.x + 40, fp2.y + 40, { state: "moving", target: { x: fp2.x, y: fp2.y } });
+    const r2 = buildReinforceOptions(s2, null);
+    check("moving-resolvable: 向…行进中", (r2.options[0]?.label ?? "").includes("行进中"), r2.options[0]?.label ?? "");
+
+    // Squads carry the phrase as a separate location token
+    const s3 = emptyBattlefield();
+    let fac3: { position: { x: number; y: number } } | null = null;
+    s3.facilities.forEach((f) => { if (!fac3 && f.hp > 0) fac3 = f; });
+    const fp3 = (fac3 as unknown as { position: { x: number; y: number } }).position;
+    const a = addUnit(s3, fp3.x + 1, fp3.y);
+    const b = addUnit(s3, fp3.x + 2, fp3.y);
+    addSquad(s3, [a.id, b.id], { id: "SL", leaderName: "Loc" });
+    const r3 = buildReinforceOptions(s3, null);
+    check("squad static location token 附近", (r3.options[0]?.location ?? "").endsWith("附近"), String(r3.options[0]?.location));
+  }
+
+  // 7c) P1-2 probe: sub-second travel must surface as ≥1, never 0.
+  {
+    let probed: number | null = null;
+    for (let dx = 2; dx <= 6 && probed === null; dx++) {
+      const st = emptyBattlefield();
+      const front = st.fronts.find((f) => f.id === "front_center")!;
+      const bbox = st.regions.get(front.regionIds[0])!.bbox;
+      addUnit(st, bbox[2] + dx, Math.round((bbox[1] + bbox[3]) / 2), { moveSpeed: 9999 });
+      const r = buildReinforceOptions(st, front);
+      if (r.options.length === 1 && r.options[0].etaSec !== null) probed = r.options[0].etaSec;
+    }
+    check("eta ceil: fast unit gets ≥1, never 0", probed !== null && probed >= 1, String(probed));
   }
 
   // 8) Fog safety: the options block must be byte-identical when a hidden enemy

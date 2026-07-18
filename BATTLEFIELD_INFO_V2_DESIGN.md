@@ -19,7 +19,7 @@
 
 - `front / stake / our_committed_force_survival_sec / local_power_ratio_ours_to_visible_enemy / raw_signal` 五行**字节级原样**；唯一变化 = `idle_reinforcement_available` 一行替换为 `reinforcement_options` 块。
 - **候选全集先生成 → 排序（无任务优先，其后 ETA 升序）→ 展示截 3 → 计算真实省略数。** "3"只是序列化展示预算：不参与分组、不构成候选池上限、绝不影响实际可调兵。
-- 空集措辞区分两种情况："战场上无其他友军" vs "有 N 股但均交战中/更远"（F1 事故 = 混淆此二者）。
+- 空集**三分支**（Codex 第四轮收紧；原"均交战中/更远"措辞在候选语义下不可达，作废）：候选 >0 → 正常列；front 外存活友军 =0 → "战场上无其他友军"；front 外友军 >0 且候选 =0 → "front 外有N个友军单位, 但当前无可单列的增援候选"——第二句**保持通用不断言原因**（手控/指挥官、跨 front 混编等多路径均可导致，固定原因会再造错误结论，F1 教训）。
 - ETA 非有限数或无法估算 → `unknown`；禁止输出 Infinity、禁止假 0 秒。
 - fog：候选块只读友军（天然 fog-safe）；任何涉及敌军的判断必须显式 `state.fog === "visible"`，或改用不依赖敌军的自身证据。
 
@@ -37,11 +37,11 @@
   4. 全部成员无 mission/order 且 idle → `无任务`；
   5. 成员状态混杂或无法解析 → `unknown`（**禁多数票猜测**）。
 - **HP%**：分子 = Σ存活成员当前 hp；分母 = Σ**存活成员** maxHp（阵亡不计入分母；规模用 unit 数另行如实给出）。
-- **位置命名**：静止 → 半径内最近命名地点；移动且目的地可解析 → "向 X 行进中"；不可解析 → 省略位置短语，**禁止伪造地点**。
+- **位置命名（适用于编组与未编组候选）**：全员静止 → 半径内最近命名地点（设施/战线中心）"X附近"；全员移动且目的地质心可解析 → "向 X 行进中"；混合/不可解析 → 省略位置短语，**禁止伪造地点、禁止无界兜底**。编组候选位置作行内独立 token；未编组候选位置并入 label（它是该群的口头指代柄）。
 
 ## 4. 验收
 
-1. **合成断言**（`--synthetic`）：分桶三案、任务状态五级、ETA unknown、截断与省略数、空集两措辞、fog 不变性 —— fog 断言**只针对新增 reinforcement_options 块**（旧 `estimateCollapseTime` 现仍读取迷雾内敌军，本轮不顺手修，不宣称整 payload 逐字节不变）。
+1. **合成断言**（`--synthetic`）：分桶三案（含链式直径上限）、任务状态五级、ETA unknown、**ETA ceil 永不为 0（快速单位探针）**、截断与省略数、**空集三分支（含跨 front 混编路径）**、**移动单位不得标"附近"/可解析目的地标"行进中"/编组位置 token**、fog 不变性 —— fog 断言**只针对新增 reinforcement_options 块**（旧 `estimateCollapseTime` 现仍读取迷雾内敌军，本轮不顺手修，不宣称整 payload 逐字节不变）。
 2. **LLM A/B**（`--ab`）：合成战局（必含 el_alamein 开局 74 未编组单位案）同一 builder 出新旧两版 payload，各喂 LLM 3 次人工判读；冻结生产抓包当"改前"参照（真实时刻战局未存盘，不能严格重放，如实声明）。
 3. **手测（1 次）**：等**自动 escalation** 触发，检查 Chen 主动问句与 Network 中 `/api/brief` 实发 payload。**不得**用事后聊天"有增援吗"代替 —— 那走 `/api/command-stream` 普通聊天 digest，不是本链。
 4. typecheck 全过。
