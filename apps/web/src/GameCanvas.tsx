@@ -56,6 +56,7 @@ import {
   STRATEGIC_WINDOW_SEC,
   snapshotForDirector,
   frontEscalationFacts,
+  buildFrontEscalationPayload,
   facilityEscalationFacts,
   facilityContestWorthAsking,
   assessDecisionReview,
@@ -446,7 +447,7 @@ function escalateCrisisToConversation(
 
   // Structured mini-facts for ONE situation — NOT the full battlefield digest, NO
   // option menu, NO question text. The LLM writes the question from these.
-  const miniFacts = (facFacts
+  const miniFacts = facFacts
     ? [
         "SITUATION (voice ONE in-character line for THIS single point only):",
         "type: facility_contested",
@@ -459,20 +460,11 @@ function escalateCrisisToConversation(
         `nearby_forces_ours_vs_enemy_visible: ${facFacts.nearbyPlayerUnits} vs ${facFacts.nearbyEnemyVisibleUnits}`,
         `idle_reinforcement_available: ${facFacts.idleReinforcementAvailable}`,
         `raw_signal: ${crisis.message}`,
-      ]
-    : [
-        "SITUATION (voice ONE in-character line for THIS single point only):",
-        `front: ${place}`,
-        `stake: ${logStake}`,
-        `our_committed_force_survival_sec: ${frontFacts?.estimatedCollapseSeconds ?? "unknown"}`,
-        `local_power_ratio_ours_to_visible_enemy: ${frontFacts?.powerRatio ?? "unknown"}`,
-        `idle_reinforcement_available: ${
-          frontFacts?.freeReinforcement
-            ? `${frontFacts.freeReinforcement.leaderName}, ${frontFacts.freeReinforcement.aliveCount} men`
-            : "none"
-        }`,
-        `raw_signal: ${crisis.message}`,
-      ]).join("\n");
+      ].join("\n")
+    : // V1b: front escalation payload comes from the ONE core builder (same
+      // function the A/B bench calls). Legacy five lines byte-identical; the
+      // old idle_reinforcement_available boolean is now a candidates block.
+      buildFrontEscalationPayload(state, crisis);
 
   // Neutral fallback — one open question, no defensive assumption, no option menu.
   const fallback =
