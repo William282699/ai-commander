@@ -34,11 +34,17 @@ import { frontCenterPos, estimateSquadTravelTime } from "./crisisResponse";
 
 // ── Tunables (explicit, no defaults hidden in call sites) ──
 
-/** Spatial-grouping adjacency (tiles): units within this distance of each other
- *  form ONE unorganized group (connected components). Same order of magnitude
- *  as the facility NEAR_RADIUS (12) — "moves as one local force". Grouping is
- *  deterministic; naming happens AFTER grouping and never merges groups. */
-const CLUSTER_RADIUS_TILES = 10;
+/** Spatial-grouping link distance (tiles): two groups may merge only if their
+ *  CLOSEST members are within this range — "moves as one local force", same
+ *  order of magnitude as the facility NEAR_RADIUS (12). */
+const CLUSTER_LINK_TILES = 10;
+
+/** Hard cap on a group's DIAMETER (max pairwise member distance). Pure
+ *  connected-component expansion lets chains (A–B≤10, B–C≤10, …) snowball
+ *  into one "force" with unbounded span — a fake force no commander would
+ *  treat as one body (Codex round-3 boundary). Every merge must keep the
+ *  merged diameter within this cap, so the bound holds by construction. */
+const CLUSTER_DIAMETER_MAX_TILES = 20;
 
 /** Naming radius (tiles): a group is "near <facility>" only within this range.
  *  Beyond it we fall back to the nearest front's name ("<front>方向") instead
@@ -173,27 +179,53 @@ function etaOf(state: GameState, memberIds: number[], anchor: Position | null): 
   return Number.isFinite(t) && t > 0 ? Math.round(t) : null;
 }
 
-// ── Deterministic spatial grouping (union-find over id-sorted members) ──
+// ── Deterministic spatial grouping with a hard diameter cap ──
+//
+// Greedy agglomerative, smallest link first. A merge happens only when BOTH
+// hold: (a) closest members of the two groups are within CLUSTER_LINK_TILES,
+// (b) the merged group's diameter stays ≤ CLUSTER_DIAMETER_MAX_TILES. (b) is
+// the invariant that stops chain snowballing (A–B≤10, B–C≤10, A–C≫10 must
+// NOT become one group once its span exceeds the cap). Deterministic: groups
+// are kept sorted by smallest member id; candidate scan order + strict
+// "better (link, diam)" comparison make tie-breaks order-independent.
 
-function spatialGroups(units: Unit[]): Unit[][] {
-  const sorted = [...units].sort((a, b) => a.id - b.id);
-  const parent = sorted.map((_, i) => i);
-  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
-  for (let i = 0; i < sorted.length; i++) {
-    for (let j = i + 1; j < sorted.length; j++) {
-      if (dist(sorted[i].position, sorted[j].position) <= CLUSTER_RADIUS_TILES) {
-        parent[find(i)] = find(j);
+/** Exported for the bench: groups whose max pairwise distance must stay ≤ cap. */
+export const CLUSTER_DIAMETER_CAP = CLUSTER_DIAMETER_MAX_TILES;
+
+export function spatialGroups(units: Unit[]): Unit[][] {
+  let groups: Unit[][] = [...units]
+    .sort((a, b) => a.id - b.id)
+    .map((u) => [u]);
+
+  for (;;) {
+    let best: { i: number; j: number; link: number; diam: number } | null = null;
+    for (let i = 0; i < groups.length; i++) {
+      for (let j = i + 1; j < groups.length; j++) {
+        let link = Infinity;
+        let diam = 0;
+        const merged = [...groups[i], ...groups[j]];
+        for (let x = 0; x < merged.length; x++) {
+          for (let y = x + 1; y < merged.length; y++) {
+            const d = dist(merged[x].position, merged[y].position);
+            if (d > diam) diam = d;
+            const cross =
+              (x < groups[i].length) !== (y < groups[i].length); // one from each side
+            if (cross && d < link) link = d;
+          }
+        }
+        if (link > CLUSTER_LINK_TILES || diam > CLUSTER_DIAMETER_MAX_TILES) continue;
+        if (!best || link < best.link || (link === best.link && diam < best.diam)) {
+          best = { i, j, link, diam };
+        }
       }
     }
+    if (!best) break;
+    const merged = [...groups[best.i], ...groups[best.j]].sort((a, b) => a.id - b.id);
+    groups = groups.filter((_, k) => k !== best.i && k !== best.j);
+    groups.push(merged);
+    groups.sort((ga, gb) => ga[0].id - gb[0].id);
   }
-  const groups = new Map<number, Unit[]>();
-  for (let i = 0; i < sorted.length; i++) {
-    const root = find(i);
-    const g = groups.get(root) ?? [];
-    g.push(sorted[i]);
-    groups.set(root, g);
-  }
-  return Array.from(groups.values());
+  return groups;
 }
 
 /** Name a group AFTER grouping — naming never merges. Within NAME_RADIUS of a
