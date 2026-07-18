@@ -313,6 +313,31 @@ function runSynthetic(): void {
     const r2 = buildReinforceOptions(s2, null);
     check("moving-resolvable: 向…行进中", (r2.options[0]?.label ?? "").includes("行进中"), r2.options[0]?.label ?? "");
 
+    // Round-5: RETREATING is movement too (engine sim.ts gate) — a unit
+    // retreating away from a facility must not be pinned to it.
+    const s2b = emptyBattlefield();
+    let fac2b: { position: { x: number; y: number } } | null = null;
+    s2b.facilities.forEach((f) => { if (!fac2b && f.hp > 0) fac2b = f; });
+    const fp2b = (fac2b as unknown as { position: { x: number; y: number } }).position;
+    addUnit(s2b, fp2b.x + 1, fp2b.y, { state: "retreating", target: { x: fp2b.x + 70, y: fp2b.y + 70 } });
+    const r2b = buildReinforceOptions(s2b, null);
+    check("retreating-away: label never 附近", !(r2b.options[0]?.label ?? "").includes("附近"), r2b.options[0]?.label ?? "");
+
+    // Round-5: all members moving but ANY member without a target → one
+    // member's destination must not speak for the group → phrase omitted.
+    const s2c = emptyBattlefield();
+    let fac2c: { position: { x: number; y: number } } | null = null;
+    s2c.facilities.forEach((f) => { if (!fac2c && f.hp > 0) fac2c = f; });
+    const fp2c = (fac2c as unknown as { position: { x: number; y: number } }).position;
+    addUnit(s2c, fp2c.x + 40, fp2c.y + 40, { state: "moving", target: { x: fp2c.x, y: fp2c.y } });
+    addUnit(s2c, fp2c.x + 41, fp2c.y + 40, { state: "moving", target: null });
+    const r2c = buildReinforceOptions(s2c, null);
+    check(
+      "all-moving one target=null: phrase omitted",
+      /^未编组群\d+$/.test(r2c.options[0]?.label ?? ""),
+      r2c.options[0]?.label ?? "",
+    );
+
     // Squads carry the phrase as a separate location token
     const s3 = emptyBattlefield();
     let fac3: { position: { x: number; y: number } } | null = null;

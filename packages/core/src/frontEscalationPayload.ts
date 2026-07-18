@@ -267,23 +267,36 @@ function centroidOf(points: Position[]): Position {
   return { x, y };
 }
 
+/** The engine's OWN movement gate (sim.ts tick step 1) — a unit in any of
+ *  these states physically moves this tick. Kept in sync with sim.ts; a
+ *  retreating/patrolling unit is just as "not here anymore" as a moving one
+ *  (Codex round-5). */
+function isActuallyMoving(u: Unit): boolean {
+  return (
+    u.state === "moving" ||
+    u.state === "retreating" ||
+    u.state === "patrolling" ||
+    (u.state === "defending" && u.target !== null)
+  );
+}
+
 /**
- * Location phrase for a candidate's members (P1-1):
- *  - all static                          → "X附近" (place within radius, else null)
- *  - all moving, destination resolvable  → "向X行进中"
- *  - mixed motion / unresolvable         → null (phrase omitted)
- * A force walking AWAY from a place must not be pinned to it, and uncertainty
- * is omitted rather than guessed — fabricating a place is forbidden.
+ * Location phrase for a candidate's members (P1-1, round-5 tightened):
+ *  - no member actually moving                     → "X附近" (place within radius, else null)
+ *  - ALL members moving AND ALL have a target      → "向X行进中" (targets centroid resolvable)
+ *  - mixed motion / any missing target / unresolvable → null (phrase omitted)
+ * A force leaving a place must not be pinned to it, and one member's target
+ * must not speak for the whole group — uncertainty is omitted, never guessed.
  */
 function locationPhraseFor(state: GameState, members: Unit[]): string | null {
-  const moving = members.filter((u) => u.state === "moving");
+  const moving = members.filter(isActuallyMoving);
   if (moving.length === 0) {
     const place = nearestPlaceWithin(state, centroidOf(members.map((u) => u.position)));
     return place !== null ? `${place}附近` : null;
   }
   if (moving.length === members.length) {
     const targets = members.map((u) => u.target).filter((t): t is Position => t !== null);
-    if (targets.length === 0) return null;
+    if (targets.length !== members.length) return null;
     const place = nearestPlaceWithin(state, centroidOf(targets));
     return place !== null ? `向${place}行进中` : null;
   }
