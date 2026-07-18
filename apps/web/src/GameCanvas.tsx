@@ -2192,7 +2192,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
 
       // 4.5 Capture overlays — drawn above units so a contested forward post is
       // readable even when tanks/infantry crowd the facility sprite.
-      renderFacilityCaptureOverlays(ctx, facArray, camera);
+      renderFacilityCaptureOverlays(ctx, facArray, camera, state.fog);
 
       // 5. Combat effects (attack lines + explosions) — drawn above units
       renderCombatEffects(ctx, state.combatEffects, camera, state.fog, state.time);

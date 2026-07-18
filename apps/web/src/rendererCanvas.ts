@@ -377,11 +377,23 @@ export function renderFacilityCaptureOverlays(
   ctx: CanvasRenderingContext2D,
   facilities: Facility[],
   camera: Camera,
+  fog: Visibility[][],
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
 
   for (const fac of facilities) {
     if (!fac.capturingTeam || fac.captureProgress <= 0) continue;
+
+    // Fog gate: capture progress is LIVE enemy activity, not static map
+    // knowledge (facility labels stay always-visible by policy). A ring on a
+    // fogged neutral/enemy post leaks enemy transit routes through the fog.
+    // Exception: player-owned facilities always show — the garrison reports
+    // it, and the engine already emits FACILITY_CONTESTED for them.
+    if (fac.team !== "player") {
+      const tx = Math.floor(fac.position.x);
+      const ty = Math.floor(fac.position.y);
+      if (fog[ty]?.[tx] !== "visible") continue;
+    }
 
     const screenX = (fac.position.x * TILE_SIZE - camera.x) * camera.zoom;
     const screenY = (fac.position.y * TILE_SIZE - camera.y) * camera.zoom;
