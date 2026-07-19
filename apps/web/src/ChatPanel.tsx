@@ -607,6 +607,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     phase: "voicing" | "awaiting_reply";
     channel: Channel;
     sessionId: string;
+    /** Game-run identity at creation — a contract never crosses a restart. */
+    epoch: number;
     createdAt: number;
     expiresAt: number;
     opt: AdvisorOption;
@@ -804,6 +806,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
   // Poll war declaration eligibility + clear panel on game over + detect restart + production state
   const lastSeenTimeRef = useRef(0);
+  // Game-run identity: bumped whenever a restart is detected (time jumps
+  // backwards). Pending contracts record their epoch; every consumption path
+  // requires it to match the CURRENT epoch.
+  const gameEpochRef = useRef(0);
   const [canDeclareWar, setCanDeclareWar] = useState(false);
   useEffect(() => {
     const id = setInterval(() => {
@@ -820,6 +826,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       }
       if (s && s.time < lastSeenTimeRef.current - 5) {
         channelContextRef.current = createEmptyChannelContext();
+        // Restart guard (Codex 地基三-fix): a new battle invalidates any
+        // pending high-impact contract from the old one — bump the epoch and
+        // drop the contract so no stale voice/confirm can cross battles.
+        gameEpochRef.current++;
+        pendingContractRef.current = null;
       }
       if (s) lastSeenTimeRef.current = s.time;
     }, 200);
@@ -1161,7 +1172,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     // pendingDecision, judged fail-closed in processAdvisorData.
     const pendingNow = pendingContractRef.current;
     if (pendingNow) {
-      if (state.time > pendingNow.expiresAt) {
+      if (pendingNow.epoch !== gameEpochRef.current) {
+        pendingContractRef.current = null; // old-battle contract — dead on arrival
+      } else if (state.time > pendingNow.expiresAt) {
         pendingContractRef.current = null; // expired — plain cleanup, no consumption
       } else if (pendingNow.channel === ch && pendingNow.phase === "awaiting_reply") {
         if (isConfirmReply(userMsg)) {
@@ -1250,10 +1263,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       // responses never consume — the contract survives them.
       if (!data.error) {
         const pcNow = pendingContractRef.current;
+        // Restart guard: an old-battle contract is presented to the judge as
+        // nonexistent (→ stale → fully inert) and dropped on the spot.
+        if (pcNow && pcNow.epoch !== gameEpochRef.current) {
+          pendingContractRef.current = null;
+        }
+        const pcSameEpoch = pcNow && pcNow.epoch === gameEpochRef.current ? pcNow : null;
         const verdict = judgePendingConsumption({
           requestTag: pendingTag,
-          current: pcNow
-            ? { id: pcNow.id, channel: pcNow.channel, sessionId: pcNow.sessionId, phase: pcNow.phase, expiresAt: pcNow.expiresAt }
+          current: pcSameEpoch
+            ? { id: pcSameEpoch.id, channel: pcSameEpoch.channel, sessionId: pcSameEpoch.sessionId, phase: pcSameEpoch.phase, expiresAt: pcSameEpoch.expiresAt }
             : null,
           now: state.time,
           decision: parsePendingDecision((data as Record<string, unknown>).pendingDecision),
@@ -1270,11 +1289,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           // AND expired — a newer contract registered mid-flight, or one with
           // a colliding id from another channel/session, is never touched.
           if (
-            pcNow && pendingTag &&
-            pcNow.id === pendingTag.pendingId &&
-            pcNow.channel === pendingTag.channel &&
-            pcNow.sessionId === pendingTag.sessionId &&
-            state.time > pcNow.expiresAt
+            pcSameEpoch && pendingTag &&
+            pcSameEpoch.id === pendingTag.pendingId &&
+            pcSameEpoch.channel === pendingTag.channel &&
+            pcSameEpoch.sessionId === pendingTag.sessionId &&
+            state.time > pcSameEpoch.expiresAt
           ) {
             pendingContractRef.current = null;
           }
@@ -1296,8 +1315,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           const line = (data.brief as string) || fallbackLine;
           addMessage(verdict === "protocol_failure" ? "warning" : "info", line, state.time, ch, undefined, "command_ack");
           pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
-          if (route.executeOldContract && pcNow) {
-            handleApprove(pcNow.opt, 0, "auto", pcNow.execCtx, pcNow.data);
+          if (route.executeOldContract && pcSameEpoch) {
+            handleApprove(pcSameEpoch.opt, 0, "auto", pcSameEpoch.execCtx, pcSameEpoch.data);
           }
           return;
         }
@@ -1429,6 +1448,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
                 phase: "voicing",
                 channel: ch,
                 sessionId: SESSION_ID,
+                epoch: gameEpochRef.current,
                 createdAt: state.time,
                 expiresAt: state.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC,
                 opt: opt0,
@@ -1457,21 +1477,31 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
               const voicedContractId = contractForVoice.id;
               const factsPayload = serializePreflightFacts(concernFacts);
               const engineFallback = buildPreflightFallbackLine(concernFacts);
+              const voicedEpoch = gameEpochRef.current;
               const postConcern = (line: string) => {
-                // Async guards: post + flip ONLY if the very contract we
-                // started voicing (same id) is still alive, still voicing and
-                // unexpired. A replaced/consumed/expired contract discards the
-                // voice silently. (state.time is the send-time snapshot — a
-                // few seconds conservative against the 120s window; id+phase
-                // are the hard guards, session is constant per page.)
+                // Async guards (Codex 地基三-fix): post + flip ONLY if the very
+                // contract we started voicing is still alive — same id, same
+                // channel, same session, SAME GAME EPOCH (a restart mid-voice
+                // discards the concern: it belongs to a battle that no longer
+                // exists), still voicing, and unexpired against the FRESH clock.
                 const pcLive = pendingContractRef.current;
-                if (!pcLive || pcLive.id !== voicedContractId || pcLive.phase !== "voicing") return;
-                if (state.time > pcLive.expiresAt) {
+                const sNow = getState();
+                if (
+                  !pcLive ||
+                  pcLive.id !== voicedContractId ||
+                  pcLive.phase !== "voicing" ||
+                  pcLive.channel !== ch ||
+                  pcLive.sessionId !== SESSION_ID ||
+                  pcLive.epoch !== voicedEpoch ||
+                  pcLive.epoch !== gameEpochRef.current ||
+                  !sNow
+                ) return;
+                if (sNow.time > pcLive.expiresAt) {
                   pendingContractRef.current = null;
                   return;
                 }
-                addMessage("warning", line, state.time, ch, undefined, "command_ack");
-                pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
+                addMessage("warning", line, sNow.time, ch, undefined, "command_ack");
+                pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: sNow.time });
                 pendingContractRef.current = { ...pcLive, phase: "awaiting_reply" };
               };
               const ac = new AbortController();

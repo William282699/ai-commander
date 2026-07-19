@@ -420,6 +420,21 @@ function runSynthetic(): void {
       staleVerdict === "stale" &&
       !staleRoute.executeOldContract && !staleRoute.processResponse);
 
+    // Restart guard (地基三-fix): ChatPanel maps an old-battle contract
+    // (epoch mismatch) to current:null before the judge — the exact protocol
+    // below. An old-game contract + authorize + actionable options must be
+    // stale and fully inert: no display, no old contract, no new intents.
+    const restartVerdict = judgePendingConsumption({
+      requestTag: tag,
+      current: null, // epoch mismatch ⇒ contract presented as nonexistent
+      now: 50,
+      decision: parsePendingDecision("authorize"),
+    });
+    const restartRoute = pendingVerdictRoute(restartVerdict);
+    check("restart guard: old-battle contract + authorize → stale, zero executions",
+      restartVerdict === "stale" &&
+      !restartRoute.executeOldContract && !restartRoute.processResponse);
+
     // step2-fix-2: the ChatPanel expiry-cleanup guard is a THREE-way match —
     // an expired contract sharing the id but differing on channel or session
     // is a foreign contract: still stale, and must never be cleaned as "ours".
