@@ -303,6 +303,25 @@ function locationPhraseFor(state: GameState, members: Unit[]): string | null {
   return null;
 }
 
+
+// ── Compass-octant fallback (voice-polish v1, Codex-approved) ──
+// For groups with NO resolvable place: pure geometry relative to MAP CENTER —
+// a direction is not a proximity claim, so the P1-1 contract holds. Same-octant
+// collisions get deterministic 第一/第二… suffixes (counting order = group
+// order, sorted by smallest member id) so the payload never carries two
+// identical candidate names.
+const OCTANT_NAMES = ["东", "东北", "北", "西北", "西", "西南", "南", "东南"] as const;
+const CN_ORDINALS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"] as const;
+
+function compassOctant(state: GameState, p: Position): string {
+  const cx = state.mapWidth / 2;
+  const cy = state.mapHeight / 2;
+  // Screen coordinates: y grows southward, so north = -dy. 0 rad = east.
+  const ang = Math.atan2(-(p.y - cy), p.x - cx);
+  const idx = ((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8;
+  return OCTANT_NAMES[idx];
+}
+
 // ── Candidate collection ──
 
 /**
@@ -361,16 +380,34 @@ export function buildReinforceOptions(
   const unassigned = Array.from(pool.values()).filter(
     (u) => !inAnySquad.has(u.id) && outsideFront(u.position),
   );
-  let ordinal = 1;
-  for (const group of spatialGroups(unassigned)) {
+  const groups = spatialGroups(unassigned);
+  const phrases = groups.map((g) => locationPhraseFor(state, g));
+  // Unresolvable-place groups fall back to compass octants; count per octant
+  // first so same-direction groups get 第一/第二… (deterministic, no duplicates).
+  const octants = groups.map((g, i) =>
+    phrases[i] === null ? compassOctant(state, centroidOf(g.map((u) => u.position))) : null,
+  );
+  const octantTotals = new Map<string, number>();
+  for (const o of octants) if (o !== null) octantTotals.set(o, (octantTotals.get(o) ?? 0) + 1);
+  const octantSeen = new Map<string, number>();
+  for (let i = 0; i < groups.length; i++) {
+    const group = groups[i];
+    const phrase = phrases[i];
     // The location phrase IS the group's speakable handle, so it folds into
-    // the label; unresolvable → neutral numbered label, never a fabricated place.
-    const phrase = locationPhraseFor(state, group);
-    const label =
-      phrase === null ? `未编组群${ordinal}`
-      : phrase.startsWith("向") ? `${phrase}的未编组群`
-      : `${phrase}未编组群`;
-    ordinal++;
+    // the label; unresolvable → compass direction, never a fabricated place.
+    let label: string;
+    if (phrase !== null) {
+      label = phrase.startsWith("向") ? `${phrase}的未编组群` : `${phrase}未编组群`;
+    } else {
+      const o = octants[i]!;
+      if ((octantTotals.get(o) ?? 0) <= 1) {
+        label = `${o}方向未编组群`;
+      } else {
+        const k = (octantSeen.get(o) ?? 0) + 1;
+        octantSeen.set(o, k);
+        label = `${o}方向第${CN_ORDINALS[Math.min(k, CN_ORDINALS.length) - 1]}未编组群`;
+      }
+    }
     options.push({
       label,
       unitCount: group.length,

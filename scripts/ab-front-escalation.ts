@@ -332,10 +332,24 @@ function runSynthetic(): void {
     addUnit(s2c, fp2c.x + 40, fp2c.y + 40, { state: "moving", target: { x: fp2c.x, y: fp2c.y } });
     addUnit(s2c, fp2c.x + 41, fp2c.y + 40, { state: "moving", target: null });
     const r2c = buildReinforceOptions(s2c, null);
+    const labelC = r2c.options[0]?.label ?? "";
     check(
-      "all-moving one target=null: phrase omitted",
-      /^未编组群\d+$/.test(r2c.options[0]?.label ?? ""),
-      r2c.options[0]?.label ?? "",
+      "all-moving one target=null: phrase omitted (compass fallback)",
+      labelC.includes("方向") && labelC.endsWith("未编组群") && !labelC.includes("附近") && !labelC.includes("行进中"),
+      labelC,
+    );
+
+    // Voice-polish: two no-place groups in the SAME octant must get distinct
+    // deterministic names (第一/第二…) — never two identical candidate labels.
+    const s2d = emptyBattlefield();
+    addUnit(s2d, 15, 230); addUnit(s2d, 16, 230);
+    addUnit(s2d, 50, 230); addUnit(s2d, 51, 230);
+    const r2d = buildReinforceOptions(s2d, null);
+    const labels2d = r2d.options.map((o) => o.label);
+    check(
+      "same-octant fallback groups: distinct ordinal labels",
+      labels2d.length === 2 && labels2d[0] !== labels2d[1] && labels2d.every((l) => /第[一二三四五六七八九十]未编组群$/.test(l)),
+      labels2d.join(" | "),
     );
 
     // Squads carry the phrase as a separate location token

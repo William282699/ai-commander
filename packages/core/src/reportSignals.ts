@@ -194,14 +194,14 @@ function detectUnderAttack(state: GameState): void {
   });
 
   for (const frontId of damagedFronts) {
-    if (canFire(state, `UNDER_ATTACK:${frontId}`, 15)) {
+    if (canFire(state, `UNDER_ATTACK:${frontId}`, 30)) { // voice-polish: match the documented 30s (was 15, spammy)
       const front = state.fronts.find((f) => f.id === frontId);
       const name = front?.name ?? frontId;
       const squadSet = damagedSquadsByFront.get(frontId);
       const squadTag = squadSet && squadSet.size > 0
         ? ` [战斗中: ${Array.from(squadSet).join(",")}]`
         : "";
-      emit(state, "UNDER_ATTACK", `${name} 遭到攻击！${squadTag}`, "warning", frontId);
+      emit(state, "UNDER_ATTACK", `${name} 遇袭，正在接战。${squadTag}`, "warning", frontId);
     }
   }
 }
@@ -386,7 +386,7 @@ function detectPositionCritical(state: GameState): void {
       emit(
         state,
         "POSITION_CRITICAL",
-        `${front.name} 即将失守。战力比 ${(ratio * 100).toFixed(0)}%，承受重火力。${squadTag}`,
+        `${front.name} 快顶不住了——战力比 ${(ratio * 100).toFixed(0)}%，正承受重火力。${squadTag}`,
         "critical",
         front.id,
         true, // actionRequired

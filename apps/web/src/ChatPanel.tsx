@@ -397,7 +397,7 @@ function buildGateQuestion(reason: string | undefined, brief: string, staleRefs:
       // pendingConfirmRef) is unchanged: an in-list affirmative executes the
       // saved option locally; any other reply falls through to the normal
       // command flow, so "直接改令" was already mechanically true.
-      return `${lead || "这道命令没有点名部队，全军都会被抽走"} —— 其它方向会被抽空。您若仍要全线压上，我按原令执行；要留兵，请直接改令。`;
+      return `${lead || "这道命令没点名部队，会抽动全军"}，其它方向就空了。照打还是留兵，您一句话。`;
     case "no_selected_units":
       return `您说的"选中的部队"我没看到选中任何单位 —— 请先框选，或直接说明哪支部队。`;
     case "invalid_intent_fields":
@@ -1322,7 +1322,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
               };
             }
             const q = buildGateQuestion(reason, (data.brief as string) || "", staleRefs);
-            setClarification(q);
+            // Voice-polish v1 (Codex-approved): the question renders ONCE as a
+            // chat bubble — no parallel clarification banner with the same
+            // text. pushContext + pendingConfirmRef above stay unchanged.
+            setClarification(null);
             addMessage("warning", q, state.time, ch, undefined, "command_ack");
             pushContext(channelContextRef.current, ch, { role: "assistant", text: q, time: state.time });
           }

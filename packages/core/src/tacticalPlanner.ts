@@ -233,6 +233,28 @@ function resolveIntentInner(
 // Intent resolvers
 // ============================================================
 
+
+// ── Voice-polish v1: execution-receipt target naming (display only) ──
+// Chat receipts must never leak raw coordinates. Fixed resolution order
+// (Codex): facility name → player map-tag name → region name → front name →
+// "目标区域". Pure read for the log string — Order generation untouched.
+function describeTargetForLog(intent: Intent, state: GameState): string {
+  if (intent.targetFacility) {
+    const fac = findFacilityById(state, intent.targetFacility);
+    if (fac) return fac.name;
+  }
+  for (const ref of [intent.toFront, intent.targetRegion]) {
+    if (!ref) continue;
+    const tag = state.tags?.find((t) => t.id === ref || t.name === ref);
+    if (tag) return tag.name;
+    const region = state.regions.get(ref);
+    if (region) return region.name;
+    const front = findFront(state, ref);
+    if (front) return front.name;
+  }
+  return "目标区域";
+}
+
 function resolveAttack(
   intent: Intent,
   state: GameState,
@@ -350,7 +372,7 @@ function resolveAttack(
     }
   }
 
-  let log = `调度 ${spread.orders.length} 个单位向 (${Math.round(target.x)},${Math.round(target.y)}) 发起进攻`;
+  let log = `调度 ${spread.orders.length} 个单位进攻${describeTargetForLog(intent, state)}`;
   if (spread.degradedCount > 0) {
     log += ` (${spread.degradedCount} 个已调整目标)`;
     pushDiagnostic(state, "DEGRADED_TARGET",
@@ -579,7 +601,7 @@ function resolveRecon(
     return { orders: [], log: "侦察目标不可达", degraded: true };
   }
 
-  let log = `派出 ${spread.orders.length} 个单位侦察 (${Math.round(target.x)},${Math.round(target.y)})`;
+  let log = `派出 ${spread.orders.length} 个单位侦察${describeTargetForLog(intent, state)}`;
   if (spread.degradedCount > 0) {
     log += ` (${spread.degradedCount} 个已调整目标)`;
   }
