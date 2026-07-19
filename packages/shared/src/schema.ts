@@ -227,6 +227,31 @@ export function judgePendingConsumption(args: {
   return decision;
 }
 
+/**
+ * Consumption-layer routing table (Codex step2-fix): what each verdict is
+ * allowed to execute. The UI layer must obey this table verbatim — it is the
+ * single bench-testable truth for "stale executes NOTHING" (no old contract,
+ * no new options, no doctrine; a stale duplicate delivery — e.g. a stream
+ * that already processed options, errored, and re-entered via the fallback
+ * path — must be inert the second time).
+ */
+export function pendingVerdictRoute(v: PendingVerdict): {
+  /** Execute the CAPTURED old contract (authorize only). */
+  executeOldContract: boolean;
+  /** Process THIS response normally (options / NOOP / doctrine). */
+  processResponse: boolean;
+} {
+  switch (v) {
+    case "authorize":        return { executeOldContract: true,  processResponse: false };
+    case "amend":            return { executeOldContract: false, processResponse: true };
+    case "cancel":           return { executeOldContract: false, processResponse: false };
+    case "protocol_failure": return { executeOldContract: false, processResponse: false };
+    case "stale":            return { executeOldContract: false, processResponse: false };
+    case "unrelated":        return { executeOldContract: false, processResponse: true };
+    case "no_pending":       return { executeOldContract: false, processResponse: true };
+  }
+}
+
 export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
   if (!data || typeof data !== "object") return null;
   const obj = data as Record<string, unknown>;

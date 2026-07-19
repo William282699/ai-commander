@@ -21,7 +21,7 @@ import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduct
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
-import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision } from "@ai-commander/shared";
+import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
 import {
   addMessage,
@@ -1242,11 +1242,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const processAdvisorData = (data: any) => {
       // ── 地基二: pending semantic consumption, judged BEFORE anything else.
-      // Protocol table (Codex hard constraints): authorize → ONLY the captured
-      // old contract (new intents ignored); amend → ONLY the new intents;
-      // cancel → neither; explicit null → normal flow (contract stays until
-      // expiry); field missing/invalid while tagged → execute NOTHING.
-      // Error responses never consume — the contract survives them.
+      // The verdict maps through pendingVerdictRoute — the ONE bench-testable
+      // table of what may execute. stale (wrong id / cross-channel / expired /
+      // duplicate delivery such as a stream that errored after processing and
+      // re-entered via the fallback path) is fully fail-closed: no old
+      // contract, no new options, no doctrine (Codex step2-fix). Error
+      // responses never consume — the contract survives them.
       if (!data.error) {
         const pcNow = pendingContractRef.current;
         const verdict = judgePendingConsumption({
@@ -1257,43 +1258,40 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           now: state.time,
           decision: parsePendingDecision((data as Record<string, unknown>).pendingDecision),
         });
-        if (verdict === "authorize" && pcNow) {
+        const route = pendingVerdictRoute(verdict);
+
+        // Contract lifecycle per verdict. Expiry cleanup may ONLY clear the
+        // very contract this request was tagged with — never a newer one that
+        // was registered while this response was in flight.
+        if (verdict === "authorize" || verdict === "cancel" || verdict === "amend") {
           pendingContractRef.current = null;
+        } else if (
+          verdict === "stale" && pcNow && pendingTag &&
+          pcNow.id === pendingTag.pendingId && state.time > pcNow.expiresAt
+        ) {
+          pendingContractRef.current = null;
+        }
+
+        if (!route.processResponse) {
           setResponse(null);
           setError(null);
-          const line = (data.brief as string) || "依令行事。";
-          addMessage("info", line, state.time, ch, undefined, "command_ack");
-          pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
-          handleApprove(pcNow.opt, 0, "auto", pcNow.execCtx, pcNow.data);
+          const fallbackLine =
+            verdict === "authorize" ? "依令行事。"
+            : verdict === "cancel" ? "行，那就不动。"
+            : verdict === "protocol_failure" ? "……(指令未定，请再说一遍)"
+            : ""; // stale duplicate: silent unless the model said something
+          const line = (data.brief as string) || fallbackLine;
+          if (line) {
+            addMessage(verdict === "protocol_failure" ? "warning" : "info", line, state.time, ch, undefined, "command_ack");
+            pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
+          }
+          if (route.executeOldContract && pcNow) {
+            handleApprove(pcNow.opt, 0, "auto", pcNow.execCtx, pcNow.data);
+          }
           return;
         }
-        if (verdict === "cancel") {
-          pendingContractRef.current = null;
-          setResponse(null);
-          setError(null);
-          const line = (data.brief as string) || "行，那就不动。";
-          addMessage("info", line, state.time, ch, undefined, "command_ack");
-          pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
-          return;
-        }
-        if (verdict === "protocol_failure") {
-          // The model broke the contract protocol → NOTHING executes on either
-          // side (Codex: 缺失或非法字段两边都不执行). Brief display only; the
-          // contract stays for a clearer reply or expiry.
-          setResponse(null);
-          setError(null);
-          const line = (data.brief as string) || "……(指令未定，请再说一遍)";
-          addMessage("warning", line, state.time, ch, undefined, "command_ack");
-          pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
-          return;
-        }
-        if (verdict === "amend") {
-          // Old contract is dead; ONLY the new intents below may execute.
-          pendingContractRef.current = null;
-        } else if (verdict === "stale" && pcNow && state.time > pcNow.expiresAt) {
-          pendingContractRef.current = null; // expired-contract cleanup
-        }
-        // no_pending / unrelated / remaining stale → normal flow below.
+        // amend / unrelated / no_pending → normal flow below (amend's old
+        // contract is already cleared: ONLY the new intents may execute).
       }
       if (data.error) {
         setError(data.error as string);

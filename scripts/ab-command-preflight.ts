@@ -27,6 +27,7 @@ import {
 import {
   parsePendingDecision,
   judgePendingConsumption,
+  pendingVerdictRoute,
   validateAdvisorResponse,
 } from "@ai-commander/shared";
 import type { GameState, Unit, Intent, ScenarioId } from "@ai-commander/shared";
@@ -380,6 +381,44 @@ function runSynthetic(): void {
       judgePendingConsumption({ requestTag: tag, current: live, now: 200, decision: "authorize" }) === "stale");
     check("judge: voicing phase never authorizes", j({ phase: "voicing" as const }, "authorize") === "stale");
     check("judge: contract gone → stale", j(null, "authorize") === "stale");
+
+    // Consumption-layer routing table (Codex step2-fix): stale executes
+    // NOTHING — no old contract, no new options, no doctrine — even when the
+    // response carries a (misjudged) authorize AND actionable options.
+    const r = pendingVerdictRoute;
+    check("route: authorize → old contract only",
+      r("authorize").executeOldContract && !r("authorize").processResponse);
+    check("route: amend → new intents only",
+      !r("amend").executeOldContract && r("amend").processResponse);
+    check("route: cancel executes nothing",
+      !r("cancel").executeOldContract && !r("cancel").processResponse);
+    check("route: protocol_failure executes nothing",
+      !r("protocol_failure").executeOldContract && !r("protocol_failure").processResponse);
+    check("route: stale executes nothing",
+      !r("stale").executeOldContract && !r("stale").processResponse);
+    check("route: unrelated/no_pending → normal flow, never old contract",
+      !r("unrelated").executeOldContract && r("unrelated").processResponse &&
+      !r("no_pending").executeOldContract && r("no_pending").processResponse);
+
+    // End-to-end regression: stale tag + authorize decision + a response that
+    // DOES carry actionable options → judge says stale, route forbids both
+    // sides → execution count is provably 0.
+    const staleResp = validateAdvisorResponse({
+      brief: "b",
+      options: [{ label: "A", description: "d", intents: [{ type: "attack", toFront: "front_center", quantity: "all" }] }],
+      pendingDecision: "authorize",
+    });
+    const staleVerdict = judgePendingConsumption({
+      requestTag: tag,
+      current: { ...live, id: "pf-OTHER" }, // wrong id — e.g. duplicate delivery after re-registration
+      now: 50,
+      decision: staleResp?.pendingDecision,
+    });
+    const staleRoute = pendingVerdictRoute(staleVerdict);
+    check("consumption regression: stale+authorize+actionable options → zero executions",
+      staleResp !== null && staleResp.options.length === 1 &&
+      staleVerdict === "stale" &&
+      !staleRoute.executeOldContract && !staleRoute.processResponse);
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);
