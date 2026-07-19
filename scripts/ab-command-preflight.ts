@@ -435,6 +435,17 @@ function runSynthetic(): void {
       restartVerdict === "stale" &&
       !restartRoute.executeOldContract && !restartRoute.processResponse);
 
+    // fix-2 RACE coverage: right after a restart the poll may not have run —
+    // new clock is 0, nothing has expired, epoch not yet bumped. The guard
+    // that still fires is OBJECT IDENTITY: two runs of the same scenario are
+    // byte-identical in content yet distinct objects, so `getState() !==
+    // capturedState` discriminates a replaced battle even in that window
+    // (ChatPanel drops the whole response / voice on this exact comparison).
+    const runA = createInitialGameState("el_alamein");
+    const runB = createInitialGameState("el_alamein");
+    check("restart race: replaced GameState is caught by identity, not time/epoch",
+      runA !== runB && snapshot(runA) === snapshot(runB) && runB.time === 0);
+
     // step2-fix-2: the ChatPanel expiry-cleanup guard is a THREE-way match —
     // an expired contract sharing the id but differing on channel or session
     // is a foreign contract: still stale, and must never be cleaned as "ours".

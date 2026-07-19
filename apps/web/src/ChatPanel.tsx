@@ -806,10 +806,26 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
 
   // Poll war declaration eligibility + clear panel on game over + detect restart + production state
   const lastSeenTimeRef = useRef(0);
-  // Game-run identity: bumped whenever a restart is detected (time jumps
-  // backwards). Pending contracts record their epoch; every consumption path
-  // requires it to match the CURRENT epoch.
+  // Game-run identity: bumped whenever the GameState OBJECT is replaced.
+  // Pending contracts record their epoch; every consumption path requires it
+  // to match the CURRENT epoch.
   const gameEpochRef = useRef(0);
+  const lastGameStateRef = useRef<GameState | null>(null);
+  // Synchronous restart detection by OBJECT IDENTITY (Codex 地基三-fix-2):
+  // the 200ms poll alone leaves a race window after restart. This runs at the
+  // head of every consumption path, so a replaced GameState invalidates old
+  // contracts BEFORE anything can consume them — even when the new clock is
+  // 0 and nothing has expired.
+  const syncGameEpoch = (s: GameState): number => {
+    if (lastGameStateRef.current !== s) {
+      if (lastGameStateRef.current !== null) {
+        gameEpochRef.current++;
+        pendingContractRef.current = null;
+      }
+      lastGameStateRef.current = s;
+    }
+    return gameEpochRef.current;
+  };
   const [canDeclareWar, setCanDeclareWar] = useState(false);
   useEffect(() => {
     const id = setInterval(() => {
@@ -824,13 +840,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         setApprovedIdx(null);
         setClarification(null);
       }
+      if (s) syncGameEpoch(s); // object-identity restart guard (authoritative)
       if (s && s.time < lastSeenTimeRef.current - 5) {
         channelContextRef.current = createEmptyChannelContext();
-        // Restart guard (Codex 地基三-fix): a new battle invalidates any
-        // pending high-impact contract from the old one — bump the epoch and
-        // drop the contract so no stale voice/confirm can cross battles.
-        gameEpochRef.current++;
-        pendingContractRef.current = null;
       }
       if (s) lastSeenTimeRef.current = s.time;
     }, 200);
@@ -1132,6 +1144,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   // ── sendCommand (0.4: migrated from CommandPanel) ──
   const sendCommand = async () => {
     const state = getState();
+    if (state) syncGameEpoch(state); // synchronous — closes the poll race before the fast path
     if (!state || !message.trim()) return;
 
     const userMsg = message.trim();
@@ -1254,6 +1267,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     // Helper: process a completed AdvisorResponse (shared by streaming & non-streaming paths)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const processAdvisorData = (data: any) => {
+      // Restart guard (Codex 地基三-fix-2): if the battle this request was
+      // sent from no longer exists, the WHOLE response is dropped silently —
+      // its digest, gate decisions and intents all described a replaced
+      // GameState. Object identity, not time: catches the poll race even at
+      // new-game time 0.
+      if (getState() !== state) {
+        syncGameEpoch(getState() ?? state);
+        return;
+      }
       // ── 地基二: pending semantic consumption, judged BEFORE anything else.
       // The verdict maps through pendingVerdictRoute — the ONE bench-testable
       // table of what may execute. stale (wrong id / cross-channel / expired /
@@ -1486,6 +1508,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
                 // exists), still voicing, and unexpired against the FRESH clock.
                 const pcLive = pendingContractRef.current;
                 const sNow = getState();
+                // Object identity first (fix-2): the voice belongs to the very
+                // battle it was computed from; a replaced GameState discards it
+                // even before the poll or epoch has caught up.
+                if (sNow !== state) {
+                  if (sNow) syncGameEpoch(sNow);
+                  return;
+                }
                 if (
                   !pcLive ||
                   pcLive.id !== voicedContractId ||
