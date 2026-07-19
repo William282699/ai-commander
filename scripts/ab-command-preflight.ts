@@ -419,6 +419,24 @@ function runSynthetic(): void {
       staleResp !== null && staleResp.options.length === 1 &&
       staleVerdict === "stale" &&
       !staleRoute.executeOldContract && !staleRoute.processResponse);
+
+    // step2-fix-2: the ChatPanel expiry-cleanup guard is a THREE-way match —
+    // an expired contract sharing the id but differing on channel or session
+    // is a foreign contract: still stale, and must never be cleaned as "ours".
+    check("cleanup guard: same id, wrong channel, expired → stale (foreign contract)",
+      judgePendingConsumption({
+        requestTag: tag,
+        current: { ...live, channel: "ops" },
+        now: 200,
+        decision: "authorize",
+      }) === "stale");
+    check("cleanup guard: same id, wrong session, expired → stale (foreign contract)",
+      judgePendingConsumption({
+        requestTag: tag,
+        current: { ...live, sessionId: "s2" },
+        now: 200,
+        decision: "authorize",
+      }) === "stale");
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);

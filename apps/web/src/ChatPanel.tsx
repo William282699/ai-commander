@@ -1265,11 +1265,25 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         // was registered while this response was in flight.
         if (verdict === "authorize" || verdict === "cancel" || verdict === "amend") {
           pendingContractRef.current = null;
-        } else if (
-          verdict === "stale" && pcNow && pendingTag &&
-          pcNow.id === pendingTag.pendingId && state.time > pcNow.expiresAt
-        ) {
-          pendingContractRef.current = null;
+        } else if (verdict === "stale") {
+          // Expiry cleanup strictly THREE-way matched (id + channel + session)
+          // AND expired — a newer contract registered mid-flight, or one with
+          // a colliding id from another channel/session, is never touched.
+          if (
+            pcNow && pendingTag &&
+            pcNow.id === pendingTag.pendingId &&
+            pcNow.channel === pendingTag.channel &&
+            pcNow.sessionId === pendingTag.sessionId &&
+            state.time > pcNow.expiresAt
+          ) {
+            pendingContractRef.current = null;
+          }
+          // Truly inert (Codex step2-fix-2): a stale delivery — duplicate
+          // stream-fallback re-entry, expired or cross-channel — displays
+          // NOTHING and writes NOTHING; no second receipt, no context echo.
+          setResponse(null);
+          setError(null);
+          return;
         }
 
         if (!route.processResponse) {
@@ -1278,13 +1292,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
           const fallbackLine =
             verdict === "authorize" ? "依令行事。"
             : verdict === "cancel" ? "行，那就不动。"
-            : verdict === "protocol_failure" ? "……(指令未定，请再说一遍)"
-            : ""; // stale duplicate: silent unless the model said something
+            : "……(指令未定，请再说一遍)"; // protocol_failure
           const line = (data.brief as string) || fallbackLine;
-          if (line) {
-            addMessage(verdict === "protocol_failure" ? "warning" : "info", line, state.time, ch, undefined, "command_ack");
-            pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
-          }
+          addMessage(verdict === "protocol_failure" ? "warning" : "info", line, state.time, ch, undefined, "command_ack");
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
           if (route.executeOldContract && pcNow) {
             handleApprove(pcNow.opt, 0, "auto", pcNow.execCtx, pcNow.data);
           }
