@@ -2,18 +2,24 @@
 // AI Commander — Command Preflight (V1 地基一: concern facts)
 //
 // Turns a pure HighImpactPreview into the STATED FACTS behind Chen's
-// in-character concern: how many units actually dispatch, from which named
-// places, and what every touched front is left with. All numbers are
-// engine-computed from the preview's final assignedUnitIds — the LLM only
-// voices them, never computes. Friendly-only reads; zero state mutation.
+// in-character concern: how many units mobilize, where they currently are,
+// and what every front actually LOSES. All numbers are engine-computed from
+// the preview's final per-unit order targets — the LLM only voices them.
+// Friendly-only reads; zero state mutation.
+//
+// 收到命令 ≠ 离开战线 (Codex 复核阻断-1): a unit whose current position AND
+// final order target are both inside the same front is fighting locally and
+// never leaves — it must not be subtracted from that front's balance. Only
+// units with current position in F and final target OUTSIDE F count as
+// leaving F.
 //
 // Codex three-tier wording gate (round-2 hard constraint #1):
 //   emptied        aliveBefore>0 && aliveAfter===0            → 战线将空
 //   drained        aliveAfter>0 && dispatchableBefore>0
 //                                && dispatchableAfter===0      → 可调兵力将被抽空
-//   reduced        anything else with drafted members          → 数字如实,不用重词
+//   reduced        anything else that loses members            → 数字如实
 //   already_empty  aliveBefore===0 — CANNOT be attributed to this order; such
-//                  fronts have nothing to draft, so they never enter the list
+//                  fronts have no one to lose, so they never enter the list
 //                  by construction (bench asserts this).
 // ============================================================
 
@@ -31,7 +37,8 @@ export interface PreflightFrontDelta {
   dispatchableBefore: number;
   aliveAfter: number;
   dispatchableAfter: number;
-  draftedFromHere: number;
+  /** Units currently in this front whose final order target lies OUTSIDE it. */
+  leavingFromHere: number;
   status: PreflightFrontStatus;
 }
 
@@ -39,9 +46,9 @@ export interface PreflightConcernFacts {
   targetName: string;
   totalDispatched: number;
   skippedCount: number;
-  /** Named origins of the drafted force (spatial groups → place names). */
+  /** Named CURRENT locations of the mobilized force (they may not all leave). */
   sources: { place: string; count: number }[];
-  /** Only fronts that LOSE members to this order (draftedFromHere > 0). */
+  /** Only fronts that actually LOSE members (leavingFromHere > 0). */
   frontDeltas: PreflightFrontDelta[];
 }
 
@@ -69,15 +76,17 @@ export function buildPreflightConcernFacts(
   state: GameState,
   preview: HighImpactPreview,
 ): PreflightConcernFacts {
-  const drafted = new Set(preview.assignedUnitIds);
-  const draftedUnits = preview.assignedUnitIds
-    .map((id) => state.units.get(id))
+  const targetByUnit = new Map<number, Position>();
+  for (const a of preview.assignments) targetByUnit.set(a.unitId, a.target);
+  const mobilizedUnits = preview.assignments
+    .map((a) => state.units.get(a.unitId))
     .filter((u): u is Unit => u !== undefined);
 
-  // Sources: spatial groups of the drafted force, named exactly like
-  // reinforcement candidates (place within radius, else compass direction).
+  // Sources: spatial groups of the mobilized force at its CURRENT positions,
+  // named exactly like reinforcement candidates (place within radius, else
+  // compass direction).
   const placeCounts = new Map<string, number>();
-  for (const group of spatialGroups(draftedUnits)) {
+  for (const group of spatialGroups(mobilizedUnits)) {
     const c = centroidOf(group);
     const place = nearestPlaceWithin(state, c) ?? `${compassOctant(state, c)}方向`;
     placeCounts.set(place, (placeCounts.get(place) ?? 0) + group.length);
@@ -86,26 +95,28 @@ export function buildPreflightConcernFacts(
     .map(([place, count]) => ({ place, count }))
     .sort((a, b) => b.count - a.count || a.place.localeCompare(b.place));
 
-  // Front deltas: only fronts that actually lose members to this order.
-  // (aliveBefore===0 fronts have nothing to draft → excluded by construction,
-  // which is exactly the "不得归因于本次命令" rule.)
+  // Front deltas: subtract ONLY true leavers (current position inside the
+  // front, final order target outside it). Locally-fighting units stay in
+  // the balance. aliveBefore===0 fronts have no one to lose → excluded by
+  // construction, which is exactly the "不得归因于本次命令" rule.
   const frontDeltas: PreflightFrontDelta[] = [];
   for (const front of state.fronts) {
     const bboxes = frontBboxes(state, front);
     if (bboxes.length === 0) continue;
     let aliveBefore = 0;
     let dispatchableBefore = 0;
-    let draftedFromHere = 0;
+    let leavingFromHere = 0;
     state.units.forEach((u) => {
       if (u.team !== "player" || u.hp <= 0 || u.state === "dead") return;
       if (!insideBboxes(bboxes, u.position)) return;
       aliveBefore++;
       if (isDispatchablePlayerUnit(u)) dispatchableBefore++;
-      if (drafted.has(u.id)) draftedFromHere++;
+      const dest = targetByUnit.get(u.id);
+      if (dest !== undefined && !insideBboxes(bboxes, dest)) leavingFromHere++;
     });
-    if (draftedFromHere === 0) continue;
-    const aliveAfter = aliveBefore - draftedFromHere;
-    const dispatchableAfter = dispatchableBefore - draftedFromHere; // drafted ⊆ dispatchable
+    if (leavingFromHere === 0) continue;
+    const aliveAfter = aliveBefore - leavingFromHere;
+    const dispatchableAfter = dispatchableBefore - leavingFromHere; // leavers ⊆ dispatchable
     const status: PreflightFrontStatus =
       aliveAfter === 0 ? "emptied"
       : dispatchableBefore > 0 && dispatchableAfter === 0 ? "drained"
@@ -117,14 +128,14 @@ export function buildPreflightConcernFacts(
       dispatchableBefore,
       aliveAfter,
       dispatchableAfter,
-      draftedFromHere,
+      leavingFromHere,
       status,
     });
   }
 
   return {
     targetName: preview.targetName,
-    totalDispatched: preview.assignedUnitIds.length,
+    totalDispatched: preview.assignments.length,
     skippedCount: preview.skippedCount,
     sources,
     frontDeltas,
@@ -145,7 +156,7 @@ export function serializePreflightFacts(f: PreflightConcernFacts): string {
   ];
   if (f.skippedCount > 0) lines.push(`units_unreachable_skipped: ${f.skippedCount}`);
   if (f.sources.length > 0) {
-    lines.push(`drafted_from: ${f.sources.map((s) => `${s.place}×${s.count}`).join(", ")}`);
+    lines.push(`units_currently_at: ${f.sources.map((s) => `${s.place}×${s.count}`).join(", ")}`);
   }
   for (const d of f.frontDeltas) {
     lines.push(
@@ -164,5 +175,5 @@ export function buildPreflightFallbackLine(f: PreflightConcernFacts): string {
     emptied.length > 0 ? `，${emptied.map((d) => d.frontName).join("、")}将空`
     : drained.length > 0 ? `，${drained.map((d) => d.frontName).join("、")}可调兵力将被抽空`
     : "";
-  return `此令将抽调 ${f.totalDispatched} 个单位前往${f.targetName}${tail}，是否继续？`;
+  return `此令将调动 ${f.totalDispatched} 个单位前往${f.targetName}${tail}，是否继续？`;
 }

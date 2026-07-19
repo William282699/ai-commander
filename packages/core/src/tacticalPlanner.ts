@@ -284,33 +284,51 @@ function describeTargetForLog(intent: Intent, state: GameState): string {
   return "目标区域";
 }
 
-function resolveAttack(
+// ── Shared pure planning (preflight blocker-2: ONE pipeline, two callers) ──
+//
+// planAttack / planSabotage own the ENTIRE selection + realization control
+// flow (target → source → filters → quantity → sortByDistance → spread).
+// resolveAttack / resolveSabotage AND previewHighImpactIntent all call them —
+// there is no second copy of the pipeline to drift. Pure: no diagnostics, no
+// missions, no order mutation (tagging stays in the resolvers).
+
+type PlannedSpread = { orders: Order[]; degradedCount: number; skippedCount: number };
+
+type AttackPlan =
+  | { ok: false; fail: "no_target" }
+  | { ok: false; fail: "no_source"; error: string }
+  | { ok: false; fail: "no_units"; unitTypeBypassed: boolean }
+  | { ok: false; fail: "impassable"; unitTypeBypassed: boolean }
+  | {
+      ok: true;
+      target: Position;
+      spread: PlannedSpread;
+      requestedCount: number;
+      /** Enemy non-capture-objective facility target → sabotage-action branch. */
+      sabotageFacility: import("@ai-commander/shared").Facility | null;
+      unitTypeBypassed: boolean;
+    };
+
+function planAttack(
   intent: Intent,
   state: GameState,
   style: StyleParams,
   exclude?: ReadonlySet<number>,
   selectedUnitIds?: readonly number[],
-): Omit<ResolveResult, "assignedUnitIds"> {
+): AttackPlan {
   const target = resolveTarget(intent, state);
-  if (!target) {
-    const msg = "无法确定攻击目标位置";
-    pushDiagnostic(state, "NO_VISIBLE_TARGET", msg);
-    return { orders: [], log: msg, degraded: true };
-  }
+  if (!target) return { ok: false, fail: "no_target" };
 
   const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
-  if (source.error) {
-    pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
-    return { orders: [], log: source.error, degraded: true };
-  }
+  if (source.error) return { ok: false, fail: "no_source", error: source.error };
 
   let units = source.units;
+  let unitTypeBypassed = false;
   if (intent.unitType) {
     const filtered = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
     if (filtered.length === 0 && intent.fromSquad && units.length > 0) {
       // fromSquad set but unitType filter wiped all units → bypass filter
-      pushDiagnostic(state, "UNITTYPE_FILTER_BYPASSED",
-        `分队 ${intent.fromSquad} 无 ${intent.unitType} 类型单位，已忽略类型筛选`);
+      unitTypeBypassed = true;
     } else {
       units = filtered;
     }
@@ -327,56 +345,24 @@ function resolveAttack(
   );
   units = sortByDistance(units, target).slice(0, count);
 
-  if (units.length === 0) {
-    return { orders: [], log: "无可用单位执行进攻", degraded: true };
+  if (units.length === 0) return { ok: false, fail: "no_units", unitTypeBypassed };
+
+  // ── If targeting a facility, use sabotage orders so damage is applied ──
+  // BUT: skip sabotage for capture objectives — combat.ts would instantly clear
+  // them. Capture objectives are attacked with attack_move.
+  const fac = intent.targetFacility ? findFacilityById(state, intent.targetFacility) : undefined;
+  const isCaptureObj = fac && state.captureObjectives?.includes(fac.id);
+  if (fac && fac.team !== "player" && !isCaptureObj) {
+    const spread = createOrdersWithSpread(
+      units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
+      undefined, intent.routeId, intent.routeIds,
+    );
+    if (spread.orders.length === 0) return { ok: false, fail: "impassable", unitTypeBypassed };
+    return { ok: true, target, spread, requestedCount: units.length, sabotageFacility: fac, unitTypeBypassed };
   }
 
-  // ── If targeting a facility, emit sabotage orders so damage is actually applied ──
-  // BUT: skip sabotage for capture objectives — combat.ts would instantly clear them.
-  // Capture objectives should be attacked with attack_move (kill defenders, then capture).
-  if (intent.targetFacility) {
-    const fac = findFacilityById(state, intent.targetFacility);
-    const isCaptureObj = fac && state.captureObjectives?.includes(fac.id);
-    if (fac && fac.team !== "player" && !isCaptureObj) {
-      const spread = createOrdersWithSpread(
-        units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
-        undefined, intent.routeId, intent.routeIds,
-      );
-      if (spread.orders.length === 0) {
-        const msg = "目标地形不可达，无可用单位执行进攻";
-        pushDiagnostic(state, "IMPASSABLE_TARGET", msg);
-        return { orders: [], log: msg, degraded: true };
-      }
-      // Mark orders with targetFacilityId for combat layer facility damage
-      for (const order of spread.orders) {
-        order.targetFacilityId = fac.id;
-        // Phase C: crisis reinforcement dedup tag
-        if (intent.excludeFront) order.crisisFrontId = intent.excludeFront;
-      }
-      // Create sabotage mission for tracking
-      const actualUnitIds = spread.orders.flatMap((o) => o.unitIds);
-      const squadId = intent.fromSquad || undefined;
-      createMission(state, "sabotage", {
-        name: `摧毁${fac.name}`,
-        description: `派遣 ${actualUnitIds.length} 个单位摧毁目标设施`,
-        targetFacilityId: fac.id,
-        assignedUnitIds: actualUnitIds,
-        etaSec: 120,
-        squadId,
-      });
-      let log = `调度 ${spread.orders.length} 个单位摧毁 ${fac.name}`;
-      if (spread.degradedCount > 0) {
-        log += ` (${spread.degradedCount} 个已调整目标)`;
-      }
-      return { orders: spread.orders, log, degraded: false };
-    }
-  }
-
-  // ④ + ③: spread targets + passability degradation (replaces filterByTargetPassability)
-  // Look up squad formation style if dispatching from a squad
-  // Resolve by squad ID OR leaderName — matches resolveIntent injection's pattern.
-  // Without name fallback, LLM passing "Aiden" (leader name) misses the squad and
-  // formationStyle is lost → createOrdersWithSpread falls back to circular spreadTarget.
+  // ④ + ③: spread targets + passability degradation. Squad formation style is
+  // resolved by squad ID OR leaderName — matches resolveIntent injection.
   const squad = intent.fromSquad
     ? state.squads.find(s => s.id === intent.fromSquad || s.leaderName === intent.fromSquad)
     : undefined;
@@ -385,16 +371,76 @@ function resolveAttack(
     units, target, state, "attack_move", mapUrgency(intent.urgency), 1.5, formation,
     intent.routeId, intent.routeIds,
   );
+  if (spread.orders.length === 0) return { ok: false, fail: "impassable", unitTypeBypassed };
+  return { ok: true, target, spread, requestedCount: units.length, sabotageFacility: null, unitTypeBypassed };
+}
 
-  if (spread.orders.length === 0) {
-    const msg = "目标地形不可达，无可用单位执行进攻";
-    pushDiagnostic(state, "IMPASSABLE_TARGET", msg);
-    return { orders: [], log: msg, degraded: true };
+function resolveAttack(
+  intent: Intent,
+  state: GameState,
+  style: StyleParams,
+  exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
+): Omit<ResolveResult, "assignedUnitIds"> {
+  const plan = planAttack(intent, state, style, exclude, selectedUnitIds);
+
+  // Bypass note surfaces exactly where the old inline filter emitted it.
+  // (Only the post-source variants carry the flag, so the `in` check suffices.)
+  if ("unitTypeBypassed" in plan && plan.unitTypeBypassed) {
+    pushDiagnostic(state, "UNITTYPE_FILTER_BYPASSED",
+      `分队 ${intent.fromSquad} 无 ${intent.unitType} 类型单位，已忽略类型筛选`);
+  }
+
+  if (!plan.ok) {
+    switch (plan.fail) {
+      case "no_target": {
+        const msg = "无法确定攻击目标位置";
+        pushDiagnostic(state, "NO_VISIBLE_TARGET", msg);
+        return { orders: [], log: msg, degraded: true };
+      }
+      case "no_source": {
+        pushDiagnostic(state, "NO_AVAILABLE_UNITS", plan.error);
+        return { orders: [], log: plan.error, degraded: true };
+      }
+      case "no_units":
+        return { orders: [], log: "无可用单位执行进攻", degraded: true };
+      case "impassable": {
+        const msg = "目标地形不可达，无可用单位执行进攻";
+        pushDiagnostic(state, "IMPASSABLE_TARGET", msg);
+        return { orders: [], log: msg, degraded: true };
+      }
+    }
+  }
+
+  const { spread } = plan;
+
+  if (plan.sabotageFacility) {
+    const fac = plan.sabotageFacility;
+    // Mark orders with targetFacilityId for combat layer facility damage
+    for (const order of spread.orders) {
+      order.targetFacilityId = fac.id;
+      // Phase C: crisis reinforcement dedup tag
+      if (intent.excludeFront) order.crisisFrontId = intent.excludeFront;
+    }
+    // Create sabotage mission for tracking
+    const actualUnitIds = spread.orders.flatMap((o) => o.unitIds);
+    const squadId = intent.fromSquad || undefined;
+    createMission(state, "sabotage", {
+      name: `摧毁${fac.name}`,
+      description: `派遣 ${actualUnitIds.length} 个单位摧毁目标设施`,
+      targetFacilityId: fac.id,
+      assignedUnitIds: actualUnitIds,
+      etaSec: 120,
+      squadId,
+    });
+    let log = `调度 ${spread.orders.length} 个单位摧毁 ${fac.name}`;
+    if (spread.degradedCount > 0) {
+      log += ` (${spread.degradedCount} 个已调整目标)`;
+    }
+    return { orders: spread.orders, log, degraded: false };
   }
 
   // Phase C: tag orders with crisisFrontId for reinforcement dedup.
-  // When excludeFront is set, this is a crisis reinforcement — mark orders
-  // so scanBattlefield can skip units already en-route to this front.
   if (intent.excludeFront) {
     for (const order of spread.orders) {
       order.crisisFrontId = intent.excludeFront;
@@ -416,21 +462,19 @@ function resolveAttack(
 
 // ── Command-Preflight V1: pure preview of a high-impact dispatch ──
 //
-// STRICT mirror of the SELECTION + REALIZATION pipeline of resolveAttack /
-// resolveSabotage, for exactly the ChatPanel high-impact gate scope: a single
-// UNSCOPED attack/sabotage with quantity all|most. It reuses the SAME private
-// helpers in the SAME order (normalizeIntentLocations → source → filters →
-// quantity → sortByDistance → createOrdersWithSpread) and skips everything
-// impure (pushDiagnostic / createMission / order tagging / formation lookup —
-// unscoped intents have no squad, so formation is undefined on both sides).
-// ZERO state mutation — the preflight bench asserts byte-identical snapshots.
-// Out of scope or unresolvable → null: the caller falls back to the static
-// concern and costs are NEVER guessed off-mirror.
+// Runs the SAME planAttack/planSabotage pipeline the real resolvers run —
+// single source, no drift — and skips everything impure (no diagnostics, no
+// missions, no order tagging). ZERO state mutation (bench asserts identical
+// snapshots). Out of the gate scope (single unscoped attack/sabotage with
+// quantity all|most) or unplannable → null: the caller falls back to the
+// static concern and costs are NEVER guessed off-mirror.
 
 export interface HighImpactPreview {
   /** Target display name (same naming as execution receipts). */
   targetName: string;
-  /** Units that would actually receive orders (after passability skips). */
+  /** Final per-unit order targets — the ground truth for "who actually goes
+   *  where". A unit ordered to a point inside its own front is NOT leaving. */
+  assignments: { unitId: number; target: Position }[];
   assignedUnitIds: number[];
   /** Selected count after quantity resolution, before passability. */
   requestedCount: number;
@@ -450,72 +494,24 @@ export function previewHighImpactIntent(
   // Mirror resolveIntent's entry: locations normalized before dispatch.
   const intent = normalizeIntentLocations(rawIntent, state);
 
-  if (intent.type === "sabotage") {
-    // Mirror of resolveSabotage (selection + realization only)
-    if (!intent.targetFacility) return null;
-    const target = findFacilityPosition(state, intent.targetFacility);
-    if (!target) return null;
-    const source = resolveSourceUnits(intent, state, undefined, undefined);
-    if (source.error) return null;
-    let units = source.units;
-    const saboteurs = units.filter(
-      (u) => u.type === "infantry" || u.type === "light_tank",
-    );
-    units = saboteurs.length > 0 ? saboteurs : units;
-    const count = resolveQuantity(intent.quantity ?? "some", units.length, style);
-    units = sortByDistance(units, target).slice(0, count);
-    if (units.length === 0) return null;
-    const spread = createOrdersWithSpread(
-      units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
-    );
-    if (spread.orders.length === 0) return null;
-    return {
-      targetName: describeTargetForLog(intent, state),
-      assignedUnitIds: spread.orders.flatMap((o) => o.unitIds),
-      requestedCount: units.length,
-      skippedCount: spread.skippedCount,
-    };
-  }
+  const plan =
+    intent.type === "sabotage"
+      ? planSabotage(intent, state, style, undefined, undefined)
+      : planAttack(intent, state, style, undefined, undefined);
+  if (!plan.ok) return null;
 
-  // Mirror of resolveAttack (selection + realization only)
-  const target = resolveTarget(intent, state);
-  if (!target) return null;
-  const source = resolveSourceUnits(intent, state, undefined, undefined);
-  if (source.error) return null;
-  let units = source.units;
-  if (intent.unitType) {
-    // Unscoped ⇒ the fromSquad bypass branch is unreachable; the filter applies.
-    units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
-  }
-  const isScoped = false; // gate scope: no fromSquad, chat path has no box-select
-  const count = resolveQuantity(
-    isScoped ? intent.quantity : (intent.quantity ?? "some"),
-    units.length, style,
+  const assignments = plan.spread.orders.flatMap((o) =>
+    o.target !== null ? o.unitIds.map((id) => ({ unitId: id, target: o.target! })) : [],
   );
-  units = sortByDistance(units, target).slice(0, count);
-  if (units.length === 0) return null;
-
-  const fac = intent.targetFacility ? findFacilityById(state, intent.targetFacility) : undefined;
-  const isCaptureObj = fac && state.captureObjectives?.includes(fac.id);
-  const spread =
-    fac && fac.team !== "player" && !isCaptureObj
-      ? createOrdersWithSpread(
-          units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
-          undefined, intent.routeId, intent.routeIds,
-        )
-      : createOrdersWithSpread(
-          units, target, state, "attack_move", mapUrgency(intent.urgency), 1.5, undefined,
-          intent.routeId, intent.routeIds,
-        );
-  if (spread.orders.length === 0) return null;
+  if (assignments.length === 0) return null;
   return {
     targetName: describeTargetForLog(intent, state),
-    assignedUnitIds: spread.orders.flatMap((o) => o.unitIds),
-    requestedCount: units.length,
-    skippedCount: spread.skippedCount,
+    assignments,
+    assignedUnitIds: assignments.map((a) => a.unitId),
+    requestedCount: plan.requestedCount,
+    skippedCount: plan.spread.skippedCount,
   };
 }
-
 
 function resolveDefend(
   intent: Intent,
@@ -937,38 +933,39 @@ function resolvePatrol(
   };
 }
 
-// ── Day 11: sabotage resolver ──
+// ── Day 11: sabotage resolver (planning shared with preflight preview) ──
 
-function resolveSabotage(
+type SabotagePlan =
+  | { ok: false; fail: "no_facility_hint" }
+  | { ok: false; fail: "no_facility_pos" }
+  | { ok: false; fail: "no_source"; error: string }
+  | { ok: false; fail: "no_units" }
+  | { ok: false; fail: "impassable" }
+  | {
+      ok: true;
+      target: Position;
+      fac: import("@ai-commander/shared").Facility | undefined;
+      spread: PlannedSpread;
+      requestedCount: number;
+    };
+
+function planSabotage(
   intent: Intent,
   state: GameState,
   style: StyleParams,
   exclude?: ReadonlySet<number>,
   selectedUnitIds?: readonly number[],
-): Omit<ResolveResult, "assignedUnitIds"> {
+): SabotagePlan {
   // Target must be a facility
-  const facilityHint = intent.targetFacility;
-  if (!facilityHint) {
-    const msg = "破坏命令未指定目标设施";
-    pushDiagnostic(state, "SABOTAGE_NO_TARGET", msg);
-    return { orders: [], log: msg, degraded: true };
-  }
-
-  const target = findFacilityPosition(state, facilityHint);
-  if (!target) {
-    const msg = `无法定位目标设施: ${facilityHint}`;
-    pushDiagnostic(state, "SABOTAGE_NO_TARGET", msg);
-    return { orders: [], log: msg, degraded: true };
-  }
+  if (!intent.targetFacility) return { ok: false, fail: "no_facility_hint" };
+  const target = findFacilityPosition(state, intent.targetFacility);
+  if (!target) return { ok: false, fail: "no_facility_pos" };
 
   // Resolve facility for mission creation
-  const fac = findFacilityById(state, facilityHint);
+  const fac = findFacilityById(state, intent.targetFacility);
 
   const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
-  if (source.error) {
-    pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
-    return { orders: [], log: source.error, degraded: true };
-  }
+  if (source.error) return { ok: false, fail: "no_source", error: source.error };
 
   let units = source.units;
 
@@ -981,21 +978,53 @@ function resolveSabotage(
   const count = resolveQuantity(intent.quantity ?? "some", units.length, style);
   units = sortByDistance(units, target).slice(0, count);
 
-  if (units.length === 0) {
-    return { orders: [], log: "无可用单位执行破坏任务", degraded: true };
-  }
-
-  // Squad ID for mission linkage (if fromSquad was provided)
-  const squadId = intent.fromSquad || undefined;
+  if (units.length === 0) return { ok: false, fail: "no_units" };
 
   // Issue sabotage orders to the facility (action: "sabotage" — NOT attack_move)
   const spread = createOrdersWithSpread(
     units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
   );
+  if (spread.orders.length === 0) return { ok: false, fail: "impassable" };
+  return { ok: true, target, fac, spread, requestedCount: units.length };
+}
 
-  if (spread.orders.length === 0) {
-    return { orders: [], log: "目标地形不可达，无法执行破坏", degraded: true };
+function resolveSabotage(
+  intent: Intent,
+  state: GameState,
+  style: StyleParams,
+  exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
+): Omit<ResolveResult, "assignedUnitIds"> {
+  const plan = planSabotage(intent, state, style, exclude, selectedUnitIds);
+
+  if (!plan.ok) {
+    switch (plan.fail) {
+      case "no_facility_hint": {
+        const msg = "破坏命令未指定目标设施";
+        pushDiagnostic(state, "SABOTAGE_NO_TARGET", msg);
+        return { orders: [], log: msg, degraded: true };
+      }
+      case "no_facility_pos": {
+        const msg = `无法定位目标设施: ${intent.targetFacility}`;
+        pushDiagnostic(state, "SABOTAGE_NO_TARGET", msg);
+        return { orders: [], log: msg, degraded: true };
+      }
+      case "no_source": {
+        pushDiagnostic(state, "NO_AVAILABLE_UNITS", plan.error);
+        return { orders: [], log: plan.error, degraded: true };
+      }
+      case "no_units":
+        return { orders: [], log: "无可用单位执行破坏任务", degraded: true };
+      case "impassable":
+        return { orders: [], log: "目标地形不可达，无法执行破坏", degraded: true };
+    }
   }
+
+  const { spread, fac } = plan;
+  const facilityHint = intent.targetFacility!;
+
+  // Squad ID for mission linkage (if fromSquad was provided)
+  const squadId = intent.fromSquad || undefined;
 
   // Mark orders with targetFacilityId for combat layer facility damage
   for (const order of spread.orders) {
