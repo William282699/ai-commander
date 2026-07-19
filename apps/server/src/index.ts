@@ -203,6 +203,7 @@ app.post("/api/brief", async (req, res) => {
   // statement from the engine's outcome facts. Anything else keeps the legacy brief.
   const briefMode =
     mode === "escalation" ? "escalation"
+    : mode === "preflight" ? "preflight"
     : mode === "proactive" ? "proactive"
     : mode === "retrospect" ? "retrospect"
     : "brief";

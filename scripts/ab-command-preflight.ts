@@ -443,9 +443,79 @@ function runSynthetic(): void {
   process.exit(failCount === 0 ? 0 : 1);
 }
 
+// ── --ab: real-model negative corpus gate (地基三) ──
+//
+// The ONLY layer that can bound SEMANTIC misreads (Codex round-2 #3): feed
+// the real command-parse endpoint a live ---PENDING_CONTRACT--- context plus
+// negative utterances (否定/犹豫/反问/修改/无关) ×3 each. Launch gate:
+// ZERO "authorize" among negatives. These utterances are TEST CORPUS, not
+// runtime keywords — the runtime judges by model semantics alone.
+
+const NEGATIVE_CORPUS: { group: string; utterances: string[] }[] = [
+  { group: "否定", utterances: ["不行，别动", "不同意，取消这道命令", "停，不打了"] },
+  { group: "犹豫", utterances: ["让我再想想", "等一下", "唔……先缓缓"] },
+  { group: "反问", utterances: ["全压上去的话南边怎么办？", "你觉得真守得住吗？", "为什么要全军出动？"] },
+  { group: "修改", utterances: ["只派一半过去", "改成让步兵上", "先派十个探探路"] },
+  { group: "无关", utterances: ["现在燃油还剩多少", "Blake在哪个位置", "让Carter去侦察北边"] },
+];
+const POSITIVE_CORPUS = ["没问题，相信我，平推吧", "按原令执行"];
+
+async function runAB(): Promise<void> {
+  const base = process.env.COMMAND_URL ?? "http://localhost:3001/api/command";
+  const s = createInitialGameState("el_alamein");
+  // Real digest + the exact ---PENDING_CONTRACT--- shape ChatPanel injects.
+  const { buildDigest } = await import("@ai-commander/core");
+  const digest =
+    buildDigest(s, [], [], []) +
+    `\n---PENDING_CONTRACT---\n待确认命令(id=pf-ab-1): A: 全军进攻中央战线 — 调动全部可用部队压上中央战线。\n指挥官下面这句话可能是对这份待确认命令的答复。`;
+
+  const ask = async (message: string): Promise<string> => {
+    const res = await fetch(base, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ digest, message, styleNote: "risk=0.50 focus=0.50 obj=0.50 cas=0.50", channel: "combat", sessionId: "ab-preflight" }),
+    });
+    const body = (await res.json()) as { pendingDecision?: unknown };
+    const d = parsePendingDecision(body.pendingDecision);
+    return d === undefined ? "MISSING" : d === null ? "null" : d;
+  };
+
+  let falseAuthorize = 0;
+  let calls = 0;
+  console.log("== 地基三 real-model negative corpus (×3 each; gate = ZERO authorize) ==");
+  for (const { group, utterances } of NEGATIVE_CORPUS) {
+    for (const u of utterances) {
+      const results: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        try {
+          const d = await ask(u);
+          results.push(d);
+          calls++;
+          if (d === "authorize") falseAuthorize++;
+        } catch (e) {
+          console.log(`FETCH FAILED (${(e as Error).message}) — is the server running?`);
+          process.exit(1);
+        }
+      }
+      const bad = results.filter((r) => r === "authorize").length;
+      console.log(`${bad > 0 ? "FAIL" : "PASS"} [${group}] "${u}" → ${results.join(",")}`);
+    }
+  }
+  console.log("---- positive control (not gating) ----");
+  for (const u of POSITIVE_CORPUS) {
+    const results: string[] = [];
+    for (let i = 0; i < 3; i++) results.push(await ask(u));
+    console.log(`INFO [授权] "${u}" → ${results.join(",")}`);
+  }
+  console.log(`\ncalls=${calls} falseAuthorize=${falseAuthorize}`);
+  console.log(falseAuthorize === 0 ? "GATE PASS — zero false authorize" : "GATE FAIL");
+  process.exit(falseAuthorize === 0 ? 0 : 1);
+}
+
 const mode = process.argv[2];
 if (mode === "--synthetic") runSynthetic();
+else if (mode === "--ab") void runAB();
 else {
-  console.log("usage: tsx scripts/ab-command-preflight.ts --synthetic   (--ab arrives with 地基二/三)");
+  console.log("usage: tsx scripts/ab-command-preflight.ts --synthetic | --ab");
   process.exit(2);
 }

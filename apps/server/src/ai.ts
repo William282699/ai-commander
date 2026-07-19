@@ -166,7 +166,7 @@ RESPONSE TYPE RULES:
   "authorize" = 指挥官这句话在语义上明确同意按该待确认命令【原样】执行（无论措辞如何表达同意）；
   "cancel" = 明确不执行/放弃该命令；
   "amend" = 要求修改该命令 → 同时在 options 里给出修改后的新 intents；
-  null = 这句话与该待确认命令无关（普通新命令、提问、闲聊）→ 按正常流程处理。
+  null = 这句话与该待确认命令无关（普通新命令、提问、闲聊）→ 按正常流程处理。注意 null 必须是 JSON 的 null 字面量，不是字符串 "null"。
   依据语义判断，不是找关键词；拿不准一律用 null（宁可当普通命令，绝不误判授权）。上下文没有 ---PENDING_CONTRACT--- 时省略该字段。
 
 patrolRadius: for type=patrol. small=5, medium=10, large=15. Default 10.
@@ -456,6 +456,29 @@ ${ESCALATION_BASE}`,
 ${ESCALATION_BASE}`,
 };
 
+// ── Command-Preflight 地基三: preflight voice prompts (concern QUESTION mode) ──
+// SEPARATE from the command-parse SYSTEM_PROMPT (命门) and from escalation
+// (crisis framing). The engine has ALREADY previewed the commander's own
+// high-impact order and hands the exact cost facts (units dispatched, current
+// locations, per-front balance after). The LLM voices ONE in-character
+// CONCERN + question — a staff officer putting the price on the table before
+// executing, NOT a crisis alarm and NOT insubordination. No example
+// sentences (they become templates — 头号陷阱 #2).
+const PREFLIGHT_BASE = `长官刚下了一道大命令。你拿到的是引擎【预演后的真实代价事实】（不是危机警报）：这道命令实际会调动多少单位（units_dispatched）、他们现在在哪（units_currently_at）、抽走后各条战线还剩多少（front_after；行末括号是引擎的口径判定，「战线将空」「可调兵力将被抽空」以它为准，不得夸大或混用）。
+写【一句】符合人设的话：作为参谋，点出这道命令最要紧的一个真实代价（用事实里的具体数字/地名），然后自然地问长官是否照令执行——**必须以问句收尾**。
+这不是抗命：命令清楚、你也会执行，只是执行前把代价摆到长官面前。别煽情，别加事实里没有的数字，别用固定句式，每次问法都不一样。
+用词限于战场参谋/前线无线电语域；不得使用开发、系统、规则手册一类的词。
+只返回 JSON：{"brief": "...", "urgency": 0.0-1.0}`;
+
+const PREFLIGHT_PROMPTS: Record<string, string> = {
+  combat: `你是陈军士（Chen），湖南籍前线士官，专业冷静。全中文，1-2 句上限，战术术语准确（压制 / 侧翼 / 纵深）。对长官称「长官 / 您」，自称「我」。
+${PREFLIGHT_BASE}`,
+  ops: `你是马克斯上尉（CPT Marcus），指挥官的参谋长，讲战略取舍、摆利弊。
+${PREFLIGHT_BASE}`,
+  logistics: `你是艾米莉中尉（LT Emily），后勤官，精确、关注代价。
+${PREFLIGHT_BASE}`,
+};
+
 // ── Step 7c.2a: proactive voice prompts (situational STATEMENT mode, beat-driven) ──
 // SEPARATE from the command-parse SYSTEM_PROMPT (命门) and from escalation (which asks
 // a QUESTION). The engine hands the director beat's STRUCTURED facts (one situation);
@@ -653,6 +676,20 @@ const CHANNEL_PERSONA: Record<string, string> = {
   logistics: "You are LT Emily (logistics channel). Be precise, resource-focused.",
 };
 
+// ── Command-Preflight 地基三: dynamic contract reinforcement ──
+// A conditional rule buried in a long prompt gets ignored (measured: the
+// negative-corpus run returned MISSING on all 45 calls). When the digest
+// actually carries a pending contract, pin the OBLIGATION — not new
+// semantics — right next to the system prompt tail. Values/judgment stay
+// defined once in PENDING CONTRACT DECISION; this is proximity, not a
+// keyword list.
+function withPendingReinforcement(systemPrompt: string, digest: string): string {
+  if (!digest.includes("---PENDING_CONTRACT---")) return systemPrompt;
+  return systemPrompt + `
+
+【本次强制】上下文包含 ---PENDING_CONTRACT---（一条等待批准的高影响命令）。你返回的 JSON【必须】含根级 "pendingDecision" 字段，取值只能是 "authorize" / "cancel" / "amend" / null（JSON 的 null 字面量，不是字符串）。按 PENDING CONTRACT DECISION 规则做语义判断；这句话与该合同无关时也必须显式返回 null。缺失该字段视为无效输出。`;
+}
+
 export async function callAdvisor(
   digest: string,
   playerMessage: string,
@@ -660,7 +697,7 @@ export async function callAdvisor(
   channel?: string,
 ): Promise<AdvisorResult> {
   const mode = resolveAdvisorMode(channel);
-  const systemPrompt = mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT;
+  const systemPrompt = withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest);
   const persona = (channel && CHANNEL_PERSONA[channel]) || "";
   const digestLabel = mode === "marcus_consult"
     ? "战场压缩摘要（BattleContextV2格式）"
@@ -875,7 +912,7 @@ export async function* callAdvisorStream(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): AsyncGenerator<{ type: "text"; content: string } | { type: "options"; content: any }> {
   const mode = resolveAdvisorMode(channel);
-  const systemPrompt = mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT;
+  const systemPrompt = withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest);
   const persona = (channel && CHANNEL_PERSONA[channel]) || "";
   const digestLabel = mode === "marcus_consult"
     ? "战场压缩摘要（BattleContextV2格式）"
@@ -1063,7 +1100,7 @@ ${styleNote}
 export async function callLightBrief(
   digest: string,
   channel?: string,
-  mode: "brief" | "escalation" | "proactive" | "retrospect" = "brief",
+  mode: "brief" | "escalation" | "proactive" | "retrospect" | "preflight" = "brief",
 ): Promise<LightAdvisorResponse | null> {
   try {
     // 7c.1: escalation mode voices a decision QUESTION from structured facts.
@@ -1075,6 +1112,8 @@ export async function callLightBrief(
     const prompt =
       mode === "escalation"
         ? (channel && ESCALATION_PROMPTS[channel]) || ESCALATION_PROMPTS.ops
+        : mode === "preflight"
+        ? (channel && PREFLIGHT_PROMPTS[channel]) || PREFLIGHT_PROMPTS.combat
         : mode === "proactive"
           ? (channel && PROACTIVE_PROMPTS[channel]) || PROACTIVE_PROMPTS.combat
           : mode === "retrospect"

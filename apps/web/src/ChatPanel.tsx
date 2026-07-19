@@ -17,7 +17,7 @@ declare global {
   }
 }
 import { OrgTree } from "./OrgTree";
-import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType } from "@ai-commander/core";
+import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
@@ -1437,17 +1437,77 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
                 summary: `${opt0.label} — ${opt0.description}`,
               };
             }
-            const q = buildGateQuestion(reason, (data.brief as string) || "", staleRefs);
-            // Voice-polish v1 (Codex-approved): the question renders ONCE as a
-            // chat bubble — no parallel clarification banner with the same
-            // text. pushContext + the pending contract above stay unchanged.
-            setClarification(null);
-            addMessage("warning", q, state.time, ch, undefined, "command_ack");
-            pushContext(channelContextRef.current, ch, { role: "assistant", text: q, time: state.time });
-            if (reason === "high_impact" && pendingContractRef.current?.phase === "voicing") {
-              // The concern is now VISIBLE — only from this moment may a reply
-              // consume the contract (no informed consent before display).
-              pendingContractRef.current = { ...pendingContractRef.current, phase: "awaiting_reply" };
+            // ── 地基三: preflight VOICE for single-intent high-impact contracts.
+            // The engine previews the order (pure), hands the exact cost facts
+            // to the dedicated mode:"preflight" channel, and Chen voices the
+            // concern in character. Outside the preview scope (multi-intent /
+            // preview null) the static gate question stays — cost claims are
+            // never made off-mirror. While the voice is in flight the contract
+            // stays "voicing": nothing can consume it (no informed consent
+            // before the concern is visible).
+            const contractForVoice = reason === "high_impact" ? pendingContractRef.current : null;
+            const voiceIntents = opt0?.intents?.length ? opt0.intents : (opt0?.intent ? [opt0.intent] : []);
+            const concernFacts = (() => {
+              if (!contractForVoice || voiceIntents.length !== 1) return null;
+              const pv = previewHighImpactIntent(voiceIntents[0], state, state.style);
+              return pv ? buildPreflightConcernFacts(state, pv) : null;
+            })();
+            if (contractForVoice && concernFacts) {
+              setClarification(null);
+              const voicedContractId = contractForVoice.id;
+              const factsPayload = serializePreflightFacts(concernFacts);
+              const engineFallback = buildPreflightFallbackLine(concernFacts);
+              const postConcern = (line: string) => {
+                // Async guards: post + flip ONLY if the very contract we
+                // started voicing (same id) is still alive, still voicing and
+                // unexpired. A replaced/consumed/expired contract discards the
+                // voice silently. (state.time is the send-time snapshot — a
+                // few seconds conservative against the 120s window; id+phase
+                // are the hard guards, session is constant per page.)
+                const pcLive = pendingContractRef.current;
+                if (!pcLive || pcLive.id !== voicedContractId || pcLive.phase !== "voicing") return;
+                if (state.time > pcLive.expiresAt) {
+                  pendingContractRef.current = null;
+                  return;
+                }
+                addMessage("warning", line, state.time, ch, undefined, "command_ack");
+                pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
+                pendingContractRef.current = { ...pcLive, phase: "awaiting_reply" };
+              };
+              const ac = new AbortController();
+              const voiceTimer = setTimeout(() => ac.abort(), 6000);
+              fetch(`${API_URL}/api/brief`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ digest: factsPayload, channel: ch, mode: "preflight" }),
+                signal: ac.signal,
+              })
+                .then((r) => r.json())
+                .then((resp: { brief?: unknown }) => {
+                  clearTimeout(voiceTimer);
+                  const briefText = typeof resp?.brief === "string" ? resp.brief.trim() : "";
+                  // 问号校验: the concern MUST be a question; anything else →
+                  // engine fallback with the real numbers.
+                  const line = briefText.length > 0 && /[？?]\s*$/.test(briefText) ? briefText : engineFallback;
+                  postConcern(line);
+                })
+                .catch(() => {
+                  clearTimeout(voiceTimer);
+                  postConcern(engineFallback);
+                });
+            } else {
+              const q = buildGateQuestion(reason, (data.brief as string) || "", staleRefs);
+              // Voice-polish v1 (Codex-approved): the question renders ONCE as a
+              // chat bubble — no parallel clarification banner with the same
+              // text. pushContext + the pending contract above stay unchanged.
+              setClarification(null);
+              addMessage("warning", q, state.time, ch, undefined, "command_ack");
+              pushContext(channelContextRef.current, ch, { role: "assistant", text: q, time: state.time });
+              if (reason === "high_impact" && pendingContractRef.current?.phase === "voicing") {
+                // The concern is now VISIBLE — only from this moment may a reply
+                // consume the contract (no informed consent before display).
+                pendingContractRef.current = { ...pendingContractRef.current, phase: "awaiting_reply" };
+              }
             }
           }
         }
