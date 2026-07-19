@@ -244,7 +244,7 @@ export function spatialGroups(units: Unit[]): Unit[][] {
 
 /** Nearest named place (standing facility or front center) within NAME_RADIUS;
  *  null beyond it. Used both for static naming and destination resolution. */
-function nearestPlaceWithin(state: GameState, p: Position): string | null {
+export function nearestPlaceWithin(state: GameState, p: Position): string | null {
   let best: { name: string; d: number } | null = null;
   state.facilities.forEach((f) => {
     if (f.hp <= 0) return;
@@ -317,7 +317,7 @@ const CN_ORDINALS = ["一", "二", "三", "四", "五", "六", "七", "八", "�
  *  read 东) — such groups are named 中央 instead (Codex polish round-2 #3). */
 const CENTER_DEADZONE_TILES = 10;
 
-function compassOctant(state: GameState, p: Position): string {
+export function compassOctant(state: GameState, p: Position): string {
   const cx = state.mapWidth / 2;
   const cy = state.mapHeight / 2;
   const dx = p.x - cx;

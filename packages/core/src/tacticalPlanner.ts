@@ -414,6 +414,109 @@ function resolveAttack(
   return { orders: spread.orders, log, degraded: false };
 }
 
+// ── Command-Preflight V1: pure preview of a high-impact dispatch ──
+//
+// STRICT mirror of the SELECTION + REALIZATION pipeline of resolveAttack /
+// resolveSabotage, for exactly the ChatPanel high-impact gate scope: a single
+// UNSCOPED attack/sabotage with quantity all|most. It reuses the SAME private
+// helpers in the SAME order (normalizeIntentLocations → source → filters →
+// quantity → sortByDistance → createOrdersWithSpread) and skips everything
+// impure (pushDiagnostic / createMission / order tagging / formation lookup —
+// unscoped intents have no squad, so formation is undefined on both sides).
+// ZERO state mutation — the preflight bench asserts byte-identical snapshots.
+// Out of scope or unresolvable → null: the caller falls back to the static
+// concern and costs are NEVER guessed off-mirror.
+
+export interface HighImpactPreview {
+  /** Target display name (same naming as execution receipts). */
+  targetName: string;
+  /** Units that would actually receive orders (after passability skips). */
+  assignedUnitIds: number[];
+  /** Selected count after quantity resolution, before passability. */
+  requestedCount: number;
+  skippedCount: number;
+}
+
+export function previewHighImpactIntent(
+  rawIntent: Intent,
+  state: GameState,
+  style: StyleParams,
+): HighImpactPreview | null {
+  const qty = rawIntent.quantity;
+  if (rawIntent.fromSquad) return null;
+  if (qty !== "all" && qty !== "most") return null;
+  if (rawIntent.type !== "attack" && rawIntent.type !== "sabotage") return null;
+
+  // Mirror resolveIntent's entry: locations normalized before dispatch.
+  const intent = normalizeIntentLocations(rawIntent, state);
+
+  if (intent.type === "sabotage") {
+    // Mirror of resolveSabotage (selection + realization only)
+    if (!intent.targetFacility) return null;
+    const target = findFacilityPosition(state, intent.targetFacility);
+    if (!target) return null;
+    const source = resolveSourceUnits(intent, state, undefined, undefined);
+    if (source.error) return null;
+    let units = source.units;
+    const saboteurs = units.filter(
+      (u) => u.type === "infantry" || u.type === "light_tank",
+    );
+    units = saboteurs.length > 0 ? saboteurs : units;
+    const count = resolveQuantity(intent.quantity ?? "some", units.length, style);
+    units = sortByDistance(units, target).slice(0, count);
+    if (units.length === 0) return null;
+    const spread = createOrdersWithSpread(
+      units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
+    );
+    if (spread.orders.length === 0) return null;
+    return {
+      targetName: describeTargetForLog(intent, state),
+      assignedUnitIds: spread.orders.flatMap((o) => o.unitIds),
+      requestedCount: units.length,
+      skippedCount: spread.skippedCount,
+    };
+  }
+
+  // Mirror of resolveAttack (selection + realization only)
+  const target = resolveTarget(intent, state);
+  if (!target) return null;
+  const source = resolveSourceUnits(intent, state, undefined, undefined);
+  if (source.error) return null;
+  let units = source.units;
+  if (intent.unitType) {
+    // Unscoped ⇒ the fromSquad bypass branch is unreachable; the filter applies.
+    units = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
+  }
+  const isScoped = false; // gate scope: no fromSquad, chat path has no box-select
+  const count = resolveQuantity(
+    isScoped ? intent.quantity : (intent.quantity ?? "some"),
+    units.length, style,
+  );
+  units = sortByDistance(units, target).slice(0, count);
+  if (units.length === 0) return null;
+
+  const fac = intent.targetFacility ? findFacilityById(state, intent.targetFacility) : undefined;
+  const isCaptureObj = fac && state.captureObjectives?.includes(fac.id);
+  const spread =
+    fac && fac.team !== "player" && !isCaptureObj
+      ? createOrdersWithSpread(
+          units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
+          undefined, intent.routeId, intent.routeIds,
+        )
+      : createOrdersWithSpread(
+          units, target, state, "attack_move", mapUrgency(intent.urgency), 1.5, undefined,
+          intent.routeId, intent.routeIds,
+        );
+  if (spread.orders.length === 0) return null;
+  return {
+    targetName: describeTargetForLog(intent, state),
+    assignedUnitIds: spread.orders.flatMap((o) => o.unitIds),
+    requestedCount: units.length,
+    skippedCount: spread.skippedCount,
+  };
+}
+
+
 function resolveDefend(
   intent: Intent,
   state: GameState,
