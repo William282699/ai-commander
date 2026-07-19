@@ -693,6 +693,38 @@ export interface AdvisorOption {
 
 export type ResponseType = "EXECUTE" | "CONFIRM" | "ASK" | "NOOP";
 
+// ── Command-Preflight 地基二: pending semantic decision ──
+// The LLM's verdict on a player reply while a high-impact contract awaits
+// approval. STRICT four-value contract: undefined (field missing/invalid)
+// is a PROTOCOL FAILURE — distinct from explicit null ("unrelated command").
+export type PendingDecision = "authorize" | "cancel" | "amend" | null;
+export type PendingPhase = "voicing" | "awaiting_reply";
+/** Captured at REQUEST time; the response is only consumed if it still matches. */
+export interface PendingRequestTag {
+  pendingId: string;
+  channel: string;
+  sessionId: string;
+}
+/** Read-only view of the live contract for the pure consumption judge. */
+export interface PendingContractView {
+  id: string;
+  channel: string;
+  sessionId: string;
+  phase: PendingPhase;
+  expiresAt: number;
+}
+export type PendingVerdict =
+  | "no_pending"        // request carried no tag → field ignored, normal flow
+  | "stale"             // tag no longer matches a live awaiting contract (wrong
+                        //   id/channel/session, expired, or still voicing) —
+                        //   the contract must NOT execute
+  | "unrelated"         // explicit null → normal flow; contract stays till expiry
+  | "authorize"         // execute ONLY the captured old contract
+  | "amend"             // execute ONLY the new intents
+  | "cancel"            // execute neither; drop the contract
+  | "protocol_failure"; // field missing/invalid while a contract was tagged →
+                        //   execute NOTHING on either side
+
 export interface AdvisorResponse {
   brief: string;
   options: AdvisorOption[];
@@ -703,6 +735,10 @@ export interface AdvisorResponse {
     type: UnitType;
     reason: string;
   };
+  /** 地基二: present on BOTH schema return paths (empty & non-empty options).
+   *  undefined = field missing/invalid (protocol failure when a contract was
+   *  pending); null = model explicitly判定为普通新命令. */
+  pendingDecision?: PendingDecision;
   standingOrder?: {
     type: string;
     locationTag: string;

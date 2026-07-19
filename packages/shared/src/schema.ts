@@ -4,7 +4,17 @@
 // Single source of truth for action/intent whitelists
 // ============================================================
 
-import type { AdvisorResponse, AdvisorOption, LightAdvisorResponse, OrderAction, ResponseType } from "./types";
+import type {
+  AdvisorResponse,
+  AdvisorOption,
+  LightAdvisorResponse,
+  OrderAction,
+  ResponseType,
+  PendingDecision,
+  PendingRequestTag,
+  PendingContractView,
+  PendingVerdict,
+} from "./types";
 import type { IntentType, Intent, UrgencyLevel, UnitCategoryHint } from "./intents";
 
 const VALID_RESPONSE_TYPES: readonly ResponseType[] = ["EXECUTE", "CONFIRM", "ASK", "NOOP"];
@@ -173,6 +183,50 @@ export function sanitizeIntent(raw: unknown): Intent | null {
  * Validate an AdvisorResponse from LLM.
  * Returns sanitized response or null if invalid.
  */
+// ── Command-Preflight 地基二: pending decision parsing + consumption judge ──
+
+/** STRICT literal parse — exactly "authorize"|"cancel"|"amend"|null. Anything
+ *  else (missing, wrong case, synonyms) → undefined = protocol failure when a
+ *  contract was pending. NEVER EXPAND — semantic judgment lives in the model,
+ *  not in string normalization here. */
+export function parsePendingDecision(v: unknown): PendingDecision | undefined {
+  if (v === null) return null;
+  if (v === "authorize" || v === "cancel" || v === "amend") return v;
+  return undefined;
+}
+
+/**
+ * Pure consumption judge (Codex 地基二 hard constraints): a response may only
+ * consume a pending contract when the REQUEST was tagged and the tag still
+ * matches the live contract on id + channel + session, the contract is in
+ * awaiting_reply (voicing must never authorize — no informed consent before
+ * the concern is visible), and it has not expired. Everything else degrades
+ * safely: stale tags reject the contract; a missing/invalid decision while
+ * tagged executes NOTHING on either side.
+ */
+export function judgePendingConsumption(args: {
+  requestTag: PendingRequestTag | null;
+  current: PendingContractView | null;
+  now: number;
+  decision: PendingDecision | undefined;
+}): PendingVerdict {
+  const { requestTag, current, now, decision } = args;
+  if (!requestTag) return "no_pending";
+  if (
+    !current ||
+    current.id !== requestTag.pendingId ||
+    current.channel !== requestTag.channel ||
+    current.sessionId !== requestTag.sessionId ||
+    current.phase !== "awaiting_reply" ||
+    now > current.expiresAt
+  ) {
+    return "stale";
+  }
+  if (decision === undefined) return "protocol_failure";
+  if (decision === null) return "unrelated";
+  return decision;
+}
+
 export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
   if (!data || typeof data !== "object") return null;
   const obj = data as Record<string, unknown>;
@@ -203,6 +257,10 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
     ? obj.cancelDoctrine
     : undefined;
 
+  // 地基二: parsed ONCE, carried through BOTH return paths below (empty and
+  // non-empty options) — the decision must never be dropped by either path.
+  const pendingDecision = parsePendingDecision(obj.pendingDecision);
+
   // Day 13 Layer B: LLM may return empty options[] to reject invalid commands.
   // Phase 2: NOOP responseType with options:[] is a valid conversational response.
   if (obj.options.length === 0) {
@@ -217,6 +275,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
       responseType,
       standingOrder,
       cancelDoctrine: cancelDoctrineId,
+      pendingDecision,
     };
   }
 
@@ -283,6 +342,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
       : undefined,
     standingOrder,
     cancelDoctrine: cancelDoctrineId,
+    pendingDecision,
   };
 }
 

@@ -145,7 +145,8 @@ RESPONSE FORMAT — always valid JSON:
     "priority": "low|normal|high|critical",
     "allowAutoReinforce": false
   },
-  "cancelDoctrine": "doctrine_id" /* OPTIONAL root-level — to cancel an existing doctrine; see DOCTRINE SYSTEM */
+  "cancelDoctrine": "doctrine_id" /* OPTIONAL root-level — to cancel an existing doctrine; see DOCTRINE SYSTEM */,
+  "pendingDecision": "authorize|cancel|amend|null" /* ONLY when ---PENDING_CONTRACT--- present in context; see PENDING CONTRACT DECISION */
 }
 
 RESPONSE TYPE RULES:
@@ -161,6 +162,12 @@ RESPONSE TYPE RULES:
        ✅ "我们要不要派 Aiden 进攻？" → NOOP + 给分析
        ✅ "派 Aiden 进攻" → EXECUTE（纯祈使）
 - **SHORT FOLLOW-UP RESOLUTION** — when the latest commander message is a short confirmation, rejection, or correction, resolve it against the immediately preceding assistant question in ---CONTEXT---. If that prior assistant question proposed a concrete executable action with unit + target + task, a confirmation authorizes that action → responseType:"EXECUTE" with matching intents. If the reply rejects or modifies the proposal, update the plan accordingly or ask for the missing detail.
+- **PENDING CONTRACT DECISION** — 当上下文出现 ---PENDING_CONTRACT---（一条等待指挥官批准的高影响命令）时，你【必须】返回根级 pendingDecision 字段，且只能取四值之一：
+  "authorize" = 指挥官这句话在语义上明确同意按该待确认命令【原样】执行（无论措辞如何表达同意）；
+  "cancel" = 明确不执行/放弃该命令；
+  "amend" = 要求修改该命令 → 同时在 options 里给出修改后的新 intents；
+  null = 这句话与该待确认命令无关（普通新命令、提问、闲聊）→ 按正常流程处理。
+  依据语义判断，不是找关键词；拿不准一律用 null（宁可当普通命令，绝不误判授权）。上下文没有 ---PENDING_CONTRACT--- 时省略该字段。
 
 patrolRadius: for type=patrol. small=5, medium=10, large=15. Default 10.
 

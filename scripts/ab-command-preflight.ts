@@ -24,6 +24,11 @@ import {
   serializePreflightFacts,
   buildPreflightFallbackLine,
 } from "@ai-commander/core";
+import {
+  parsePendingDecision,
+  judgePendingConsumption,
+  validateAdvisorResponse,
+} from "@ai-commander/shared";
 import type { GameState, Unit, Intent, ScenarioId } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
 
@@ -326,6 +331,55 @@ function runSynthetic(): void {
     check("fallback: contains real dispatch number", line.includes(`${facts.totalDispatched} 个单位`), line);
     check("fallback: is a question", line.endsWith("是否继续？"), line);
     check("fallback: 调动 wording, never 抽调", line.includes("调动") && !line.includes("抽调"), line);
+  }
+
+  // 8) 地基二 PROTOCOL LAYER (pure; semantic-misread risk is bounded ONLY by
+  //    the real-model --ab corpus, never claimed here — Codex round-2 #3).
+  {
+    // Strict literal parse — NEVER EXPAND at the type level.
+    check("parse: authorize", parsePendingDecision("authorize") === "authorize");
+    check("parse: explicit null", parsePendingDecision(null) === null);
+    check("parse: missing → undefined", parsePendingDecision(undefined) === undefined);
+    check("parse: wrong case rejected", parsePendingDecision("AUTHORIZE") === undefined);
+    check("parse: synonym rejected", parsePendingDecision("yes") === undefined);
+
+    // Schema passthrough on BOTH return paths.
+    const emptyResp = validateAdvisorResponse({ brief: "b", options: [], pendingDecision: "cancel" });
+    check("schema: empty-options path carries pendingDecision", emptyResp?.pendingDecision === "cancel");
+    const fullResp = validateAdvisorResponse({
+      brief: "b",
+      options: [{ label: "A", description: "d", intents: [{ type: "attack", toFront: "front_center" }] }],
+      pendingDecision: "amend",
+    });
+    check("schema: non-empty path carries pendingDecision", fullResp?.pendingDecision === "amend");
+    const nullResp = validateAdvisorResponse({ brief: "b", options: [], pendingDecision: null });
+    check("schema: explicit null preserved (≠ missing)", nullResp !== null && nullResp.pendingDecision === null);
+    const missingResp = validateAdvisorResponse({ brief: "b", options: [] });
+    check("schema: missing stays undefined", missingResp !== null && missingResp.pendingDecision === undefined);
+
+    // Consumption judge — fail-closed on every mismatch.
+    const tag = { pendingId: "pf-1", channel: "combat", sessionId: "s1" };
+    const live = { id: "pf-1", channel: "combat", sessionId: "s1", phase: "awaiting_reply" as const, expiresAt: 100 };
+    const j = (over: Partial<typeof live> | null, decision: unknown, useTag = true) =>
+      judgePendingConsumption({
+        requestTag: useTag ? tag : null,
+        current: over === null ? null : { ...live, ...over },
+        now: 50,
+        decision: parsePendingDecision(decision),
+      });
+    check("judge: authorize", j({}, "authorize") === "authorize");
+    check("judge: cancel", j({}, "cancel") === "cancel");
+    check("judge: amend", j({}, "amend") === "amend");
+    check("judge: explicit null → unrelated", j({}, null) === "unrelated");
+    check("judge: missing field → protocol_failure", j({}, undefined) === "protocol_failure");
+    check("judge: no tag → no_pending (decision ignored)", j({}, "authorize", false) === "no_pending");
+    check("judge: wrong id authorize rejected", j({ id: "pf-2" }, "authorize") === "stale");
+    check("judge: wrong channel authorize rejected", j({ channel: "ops" }, "authorize") === "stale");
+    check("judge: wrong session authorize rejected", j({ sessionId: "s2" }, "authorize") === "stale");
+    check("judge: expired authorize rejected",
+      judgePendingConsumption({ requestTag: tag, current: live, now: 200, decision: "authorize" }) === "stale");
+    check("judge: voicing phase never authorizes", j({ phase: "voicing" as const }, "authorize") === "stale");
+    check("judge: contract gone → stale", j(null, "authorize") === "stale");
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);

@@ -21,7 +21,8 @@ import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduct
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
-import { CHANNEL_LABELS, collectUnitsUnder } from "@ai-commander/shared";
+import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision } from "@ai-commander/shared";
+import type { PendingRequestTag } from "@ai-commander/shared";
 import {
   addMessage,
   getActiveChannel,
@@ -353,6 +354,10 @@ function canAutoExecute(
 // (user-specified). A pending high_impact action executes directly on a confirm
 // word — with NO fresh LLM call, which would re-emit the same unscoped intent and
 // re-trigger high_impact (the confirm loop). A cancel word drops the pending.
+// NEVER EXPAND — semantic fallback owns natural language (Codex preflight
+// round-2 #4). These are a CLOSED literal shortcut for instant local confirm;
+// ANY word-list miss goes to the LLM pendingDecision pass. No new synonyms,
+// no regex, no additions on test failure — ever.
 const HIGH_IMPACT_CONFIRM_WORDS = ["确认", "是", "对", "执行", "同意", "可以", "行", "yes", "ok"];
 const HIGH_IMPACT_CANCEL_WORDS = ["不", "否", "取消", "算了", "no", "cancel"];
 const HIGH_IMPACT_CONFIRM_WINDOW_SEC = 120;
@@ -394,7 +399,7 @@ function buildGateQuestion(reason: string | undefined, brief: string, staleRefs:
     case "high_impact":
       // Polish: staff-voiced risk reminder, no robot meta-hint ("回'确认'执行").
       // Copy only — the deterministic confirm gate (HIGH_IMPACT_CONFIRM_WORDS +
-      // pendingConfirmRef) is unchanged: an in-list affirmative executes the
+      // pendingContractRef) is unchanged: an in-list affirmative executes the
       // saved option locally; any other reply falls through to the normal
       // command flow, so "直接改令" was already mechanically true.
       {
@@ -592,7 +597,25 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
   const pendingGroupResponsesRef = useRef<{ data: DisplayResponse; channel: Channel; requestId: string }[]>([]);
   // Step 5: a high_impact action awaiting the player's local confirm word. Resolved
   // in sendCommand without a fresh LLM call (avoids the high_impact confirm loop).
-  const pendingConfirmRef = useRef<{ opt: AdvisorOption; data: DisplayResponse; execCtx: ExecContext; channel: Channel; expiresAt: number } | null>(null);
+  // 地基二: FULL pending contract with a phase machine. "voicing" = the concern
+  // is not yet visible → NOTHING may consume (no informed consent before the
+  // player has seen the warning); "awaiting_reply" = the only phase where the
+  // literal fast path or the LLM pendingDecision may consume. Unique id +
+  // channel + session are re-verified at consumption (judgePendingConsumption).
+  const pendingContractRef = useRef<{
+    id: string;
+    phase: "voicing" | "awaiting_reply";
+    channel: Channel;
+    sessionId: string;
+    createdAt: number;
+    expiresAt: number;
+    opt: AdvisorOption;
+    data: DisplayResponse;
+    execCtx: ExecContext;
+    summary: string;
+  } | null>(null);
+  const pendingSeqRef = useRef(0);
+  const makePendingId = () => `pf-${Date.now().toString(36)}-${++pendingSeqRef.current}`;
   const [error, setError] = useState<string | null>(null);
   const [approvedIdx, setApprovedIdx] = useState<number | null>(null);
   const [clarification, setClarification] = useState<string | null>(null);
@@ -1131,26 +1154,31 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     // ── Single commander path ──
     const ch = primaryChannel;
 
-    // Step 5 — resolve a pending high_impact confirm locally, with NO fresh LLM call
-    // (which would re-emit the same unscoped intent and re-trigger high_impact → the
-    // confirm loop). Any new command consumes the pending; only a same-channel,
-    // in-window confirm word executes the saved option; a cancel word drops it.
-    const pendingConfirm = pendingConfirmRef.current;
-    if (pendingConfirm) {
-      pendingConfirmRef.current = null;
-      if (pendingConfirm.channel === ch && state.time <= pendingConfirm.expiresAt) {
+    // Step 5 (地基二 rework) — pending high-impact contract handling.
+    // The literal fast path stays instant and CLOSED (see NEVER EXPAND above);
+    // a word-list miss no longer destroys the contract — it rides to the LLM
+    // as a tagged ---PENDING_CONTRACT--- context and comes back as a semantic
+    // pendingDecision, judged fail-closed in processAdvisorData.
+    const pendingNow = pendingContractRef.current;
+    if (pendingNow) {
+      if (state.time > pendingNow.expiresAt) {
+        pendingContractRef.current = null; // expired — plain cleanup, no consumption
+      } else if (pendingNow.channel === ch && pendingNow.phase === "awaiting_reply") {
         if (isConfirmReply(userMsg)) {
-          handleApprove(pendingConfirm.opt, 0, "auto", pendingConfirm.execCtx, pendingConfirm.data);
+          pendingContractRef.current = null;
+          handleApprove(pendingNow.opt, 0, "auto", pendingNow.execCtx, pendingNow.data);
           setLoading(false);
           return;
         }
         if (isCancelReply(userMsg)) {
+          pendingContractRef.current = null;
           addMessage("info", "行，那就不动。", state.time, ch, undefined, "command_ack");
           setLoading(false);
           return;
         }
+        // word-list miss → contract STAYS; the semantic pass below owns it.
       }
-      // off-channel / expired / neither word → fall through to the normal LLM flow.
+      // voicing phase / off-channel: no consumption of any kind here.
     }
 
     // Capture persona once for the entire stream. selectedCommanders[0]
@@ -1187,7 +1215,18 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     commanderMemoryRef.current[ch].playerIntent = userMsg;
     const baseDigest = buildDigestForChannel(state, ch, commanderMemoryRef.current[ch]);
     const contextSuffix = formatContext(channelContextRef.current, ch);
-    const digest = baseDigest + contextSuffix + threadContext + escalationContext;
+    // 地基二: tag the request with the live contract ONLY when it is visible
+    // (awaiting_reply), same channel, unexpired. voicing is never tagged — a
+    // reply the player typed before seeing the concern cannot authorize it.
+    const pcAtSend = pendingContractRef.current;
+    const pendingTag: PendingRequestTag | null =
+      pcAtSend && pcAtSend.channel === ch && pcAtSend.phase === "awaiting_reply" && state.time <= pcAtSend.expiresAt
+        ? { pendingId: pcAtSend.id, channel: ch, sessionId: SESSION_ID }
+        : null;
+    const pendingContext = pendingTag && pcAtSend
+      ? `\n---PENDING_CONTRACT---\n待确认命令(id=${pcAtSend.id}): ${pcAtSend.summary}\n指挥官下面这句话可能是对这份待确认命令的答复。`
+      : "";
+    const digest = baseDigest + contextSuffix + threadContext + escalationContext + pendingContext;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
     // Append declined context if player is refining a rejected proposal
@@ -1202,6 +1241,60 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     // Helper: process a completed AdvisorResponse (shared by streaming & non-streaming paths)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const processAdvisorData = (data: any) => {
+      // ── 地基二: pending semantic consumption, judged BEFORE anything else.
+      // Protocol table (Codex hard constraints): authorize → ONLY the captured
+      // old contract (new intents ignored); amend → ONLY the new intents;
+      // cancel → neither; explicit null → normal flow (contract stays until
+      // expiry); field missing/invalid while tagged → execute NOTHING.
+      // Error responses never consume — the contract survives them.
+      if (!data.error) {
+        const pcNow = pendingContractRef.current;
+        const verdict = judgePendingConsumption({
+          requestTag: pendingTag,
+          current: pcNow
+            ? { id: pcNow.id, channel: pcNow.channel, sessionId: pcNow.sessionId, phase: pcNow.phase, expiresAt: pcNow.expiresAt }
+            : null,
+          now: state.time,
+          decision: parsePendingDecision((data as Record<string, unknown>).pendingDecision),
+        });
+        if (verdict === "authorize" && pcNow) {
+          pendingContractRef.current = null;
+          setResponse(null);
+          setError(null);
+          const line = (data.brief as string) || "依令行事。";
+          addMessage("info", line, state.time, ch, undefined, "command_ack");
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
+          handleApprove(pcNow.opt, 0, "auto", pcNow.execCtx, pcNow.data);
+          return;
+        }
+        if (verdict === "cancel") {
+          pendingContractRef.current = null;
+          setResponse(null);
+          setError(null);
+          const line = (data.brief as string) || "行，那就不动。";
+          addMessage("info", line, state.time, ch, undefined, "command_ack");
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
+          return;
+        }
+        if (verdict === "protocol_failure") {
+          // The model broke the contract protocol → NOTHING executes on either
+          // side (Codex: 缺失或非法字段两边都不执行). Brief display only; the
+          // contract stays for a clearer reply or expiry.
+          setResponse(null);
+          setError(null);
+          const line = (data.brief as string) || "……(指令未定，请再说一遍)";
+          addMessage("warning", line, state.time, ch, undefined, "command_ack");
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
+          return;
+        }
+        if (verdict === "amend") {
+          // Old contract is dead; ONLY the new intents below may execute.
+          pendingContractRef.current = null;
+        } else if (verdict === "stale" && pcNow && state.time > pcNow.expiresAt) {
+          pendingContractRef.current = null; // expired-contract cleanup
+        }
+        // no_pending / unrelated / remaining stale → normal flow below.
+      }
       if (data.error) {
         setError(data.error as string);
         setResponse(null);
@@ -1318,21 +1411,35 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
             // high_impact (the loop). Bucket B still resolves via the LLM's SHORT
             // FOLLOW-UP RESOLUTION. Nothing executes here.
             if (reason === "high_impact" && opt0) {
-              pendingConfirmRef.current = {
+              // 地基二: register the FULL contract BEFORE the concern is voiced
+              // (phase "voicing" — nothing can consume it yet). 地基三 will slot
+              // the async preflight voice between this registration and the
+              // awaiting_reply flip below.
+              pendingContractRef.current = {
+                id: makePendingId(),
+                phase: "voicing",
+                channel: ch,
+                sessionId: SESSION_ID,
+                createdAt: state.time,
+                expiresAt: state.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC,
                 opt: opt0,
                 data: data as DisplayResponse,
                 execCtx,
-                channel: ch,
-                expiresAt: state.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC,
+                summary: `${opt0.label} — ${opt0.description}`,
               };
             }
             const q = buildGateQuestion(reason, (data.brief as string) || "", staleRefs);
             // Voice-polish v1 (Codex-approved): the question renders ONCE as a
             // chat bubble — no parallel clarification banner with the same
-            // text. pushContext + pendingConfirmRef above stay unchanged.
+            // text. pushContext + the pending contract above stay unchanged.
             setClarification(null);
             addMessage("warning", q, state.time, ch, undefined, "command_ack");
             pushContext(channelContextRef.current, ch, { role: "assistant", text: q, time: state.time });
+            if (reason === "high_impact" && pendingContractRef.current?.phase === "voicing") {
+              // The concern is now VISIBLE — only from this moment may a reply
+              // consume the contract (no informed consent before display).
+              pendingContractRef.current = { ...pendingContractRef.current, phase: "awaiting_reply" };
+            }
           }
         }
       }
