@@ -313,11 +313,18 @@ function locationPhraseFor(state: GameState, members: Unit[]): string | null {
 const OCTANT_NAMES = ["东", "东北", "北", "西北", "西", "西南", "南", "东南"] as const;
 const CN_ORDINALS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"] as const;
 
+/** Within this radius of map center an octant is noise (dead-center would
+ *  read 东) — such groups are named 中央 instead (Codex polish round-2 #3). */
+const CENTER_DEADZONE_TILES = 10;
+
 function compassOctant(state: GameState, p: Position): string {
   const cx = state.mapWidth / 2;
   const cy = state.mapHeight / 2;
+  const dx = p.x - cx;
+  const dy = p.y - cy;
+  if (Math.sqrt(dx * dx + dy * dy) <= CENTER_DEADZONE_TILES) return "中央";
   // Screen coordinates: y grows southward, so north = -dy. 0 rad = east.
-  const ang = Math.atan2(-(p.y - cy), p.x - cx);
+  const ang = Math.atan2(-dy, dx);
   const idx = ((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8;
   return OCTANT_NAMES[idx];
 }
@@ -405,7 +412,10 @@ export function buildReinforceOptions(
       } else {
         const k = (octantSeen.get(o) ?? 0) + 1;
         octantSeen.set(o, k);
-        label = `${o}方向第${CN_ORDINALS[Math.min(k, CN_ORDINALS.length) - 1]}未编组群`;
+        // 1-10 use Chinese ordinals; beyond that, real numbers — labels must
+        // stay ABSOLUTELY unique, never saturate at 第十 (round-2 #3).
+        const ord = k <= CN_ORDINALS.length ? CN_ORDINALS[k - 1] : String(k);
+        label = `${o}方向第${ord}未编组群`;
       }
     }
     options.push({

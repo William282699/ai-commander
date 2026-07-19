@@ -239,18 +239,47 @@ function resolveIntentInner(
 // (Codex): facility name → player map-tag name → region name → front name →
 // "目标区域". Pure read for the log string — Order generation untouched.
 function describeTargetForLog(intent: Intent, state: GameState): string {
+  // STRICT mirror of resolveTarget() — the receipt must name the SAME thing
+  // the units actually march to (Codex polish round-2 #1). Order:
+  // _targetPos → targetFacility → targetRegion(tag→region→front) → toFront
+  // → fromFront → fuzzy-facility last resort → "目标区域". Lookup semantics
+  // mirror the resolver's helpers (fuzzy includes), not exact-id only.
+  if (intent._targetPos) return "目标区域"; // internal coordinate override — no name to claim
   if (intent.targetFacility) {
     const fac = findFacilityById(state, intent.targetFacility);
     if (fac) return fac.name;
   }
-  for (const ref of [intent.toFront, intent.targetRegion]) {
-    if (!ref) continue;
-    const tag = state.tags?.find((t) => t.id === ref || t.name === ref);
+  if (intent.targetRegion) {
+    const tag = state.tags?.find((t) => t.id === intent.targetRegion);
     if (tag) return tag.name;
-    const region = state.regions.get(ref);
+    // Mirrors getRegionCenter's lookup: exact id, then id/name includes.
+    let region = state.regions.get(intent.targetRegion);
+    if (!region) {
+      const lower = intent.targetRegion.toLowerCase();
+      for (const [, r] of state.regions) {
+        if (r.id.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower)) {
+          region = r;
+          break;
+        }
+      }
+    }
     if (region) return region.name;
-    const front = findFront(state, ref);
+    const front = findFront(state, intent.targetRegion);
     if (front) return front.name;
+  }
+  if (intent.toFront) {
+    const front = findFront(state, intent.toFront);
+    if (front) return front.name;
+  }
+  if (intent.fromFront) {
+    const front = findFront(state, intent.fromFront);
+    if (front) return front.name;
+  }
+  for (const val of [intent.toFront, intent.targetRegion, intent.fromFront]) {
+    if (val) {
+      const fac = findFacilityById(state, val);
+      if (fac) return fac.name;
+    }
   }
   return "目标区域";
 }
@@ -438,7 +467,7 @@ function resolveDefend(
     if (spread.orders.length === 0) {
       return { orders: [], log: "目标地形不可达，无可用单位执行防御", degraded: true };
     }
-    let log = `${spread.orders.length} 个单位转入防御态势`;
+    let log = `${spread.orders.length} 个单位前往${describeTargetForLog(intent, state)}设防`;
     if (spread.degradedCount > 0) {
       log += ` (${spread.degradedCount} 个已调整位置)`;
     }
@@ -452,7 +481,7 @@ function resolveDefend(
     target: null,
     priority: mapUrgency(intent.urgency),
   }];
-  return { orders, log: `${units.length} 个单位转入防御态势`, degraded: false };
+  return { orders, log: `${units.length} 个单位就地设防`, degraded: false };
 }
 
 function resolveRetreat(

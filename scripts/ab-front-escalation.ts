@@ -352,6 +352,33 @@ function runSynthetic(): void {
       labels2d.join(" | "),
     );
 
+    // Round-2 #3a: ELEVEN same-octant groups — labels must stay absolutely
+    // unique past 第十 (arabic numerals from the 11th on).
+    const s2e = emptyBattlefield();
+    // Exact -45° diagonal from the RUNTIME map center → every point is in the
+    // 西南 octant by construction, regardless of map dimensions; 9√2≈12.7 tile
+    // spacing keeps the 11 units as 11 separate spatial groups.
+    const cxE = Math.round(s2e.mapWidth / 2);
+    const cyE = Math.round(s2e.mapHeight / 2);
+    for (let k = 0; k < 11; k++) { addUnit(s2e, cxE - 40 - 9 * k, cyE + 40 + 9 * k); }
+    const r2e = buildReinforceOptions(s2e, null);
+    const labels2e = r2e.options.map((o) => o.label);
+    check(
+      "11 same-octant groups: all labels unique incl. >第十",
+      labels2e.length === 11 && new Set(labels2e).size === 11 && labels2e.some((l) => /第11未编组群$/.test(l)),
+      labels2e.slice(-3).join(" | "),
+    );
+
+    // Round-2 #3b: dead-center group must read 中央, not a spurious octant.
+    const s2f = emptyBattlefield();
+    addUnit(s2f, Math.round(s2f.mapWidth / 2), Math.round(s2f.mapHeight / 2), { state: "moving", target: null });
+    const r2f = buildReinforceOptions(s2f, null);
+    check(
+      "dead-center group: 中央方向 label",
+      (r2f.options[0]?.label ?? "").startsWith("中央方向"),
+      r2f.options[0]?.label ?? "",
+    );
+
     // Squads carry the phrase as a separate location token
     const s3 = emptyBattlefield();
     let fac3: { position: { x: number; y: number } } | null = null;
