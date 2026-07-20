@@ -13,7 +13,8 @@
 //   ./node_modules/.bin/tsx scripts/ab-battle-board.ts --synthetic
 // ============================================================
 
-import { createInitialGameState } from "@ai-commander/core";
+import { createInitialGameState, buildDigest } from "@ai-commander/core";
+import { generateDigestV1 } from "@ai-commander/shared";
 import {
   buildBattleBoard,
   boardToDigestLines,
@@ -290,8 +291,60 @@ function runSynthetic(): void {
     );
   }
 
+  // L) DigestV1 wiring (step 2): the no-board render stays legacy-shaped; the
+  //    board render extends SQUADS lines append-only (parser-contract prefix)
+  //    and swaps bare UNASSIGNED counts for group lines. Same section skeleton.
+  {
+    const s = createInitialGameState("el_alamein");
+    s.time = 100;
+    const survivor = addUnit(s, 30, 30, { hp: 8, lastDamagedAt: 97 } as Partial<Unit>);
+    addSquad(s, [survivor.id], { id: "I1", leaderName: "Aiden" });
+
+    const neu = buildDigest(s, [], [], []); // mutates front power first…
+    const old = generateDigestV1(s, [], [], []); // …then legacy render on the same state
+
+    check("digest legacy: no board tokens", !old.includes(" task=") && !old.includes(" loc="));
+    const oldUnassigned = sectionLines(old, "---UNASSIGNED_UNITS---");
+    check("digest legacy: bare type counts", oldUnassigned.length > 0 && oldUnassigned.every((l) => /^\d+×/.test(l)),
+      oldUnassigned.join(" | "));
+
+    const oldLeaders = old.split("\n").filter((l) => l.includes(",leader)"));
+    const neuLines = neu.split("\n");
+    check(
+      "digest: every legacy leader line is a byte-exact prefix of its board line",
+      oldLeaders.length > 0 && oldLeaders.every((ol) => neuLines.some((nl) => nl.startsWith(ol))),
+    );
+    const aidenLine = neuLines.find((l) => l.includes("(I1,leader)"));
+    check("digest Aiden: squad id + mission token kept + task=交战中 appended",
+      aidenLine !== undefined && aidenLine.includes("mission=idle") && aidenLine.includes("task=交战中"),
+      aidenLine);
+
+    const neuUnassigned = sectionLines(neu, "---UNASSIGNED_UNITS---");
+    check("digest board: group lines, no bare counts",
+      neuUnassigned.length > 0 && neuUnassigned.every((l) => l.startsWith("- ") || l.startsWith("...+")) &&
+        neuUnassigned.some((l) => l.includes("units(")),
+      neuUnassigned.join(" | "));
+
+    const headers = (d: string) => d.split("\n").filter((l) => l.startsWith("---"));
+    check("digest: section skeleton unchanged", JSON.stringify(headers(old)) === JSON.stringify(headers(neu)),
+      `old=${headers(old).join(",")} new=${headers(neu).join(",")}`);
+  }
+
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);
   process.exit(failCount === 0 ? 0 : 1);
+}
+
+/** Lines of one ---SECTION--- (exclusive of the header, up to the next header). */
+function sectionLines(digest: string, header: string): string[] {
+  const lines = digest.split("\n");
+  const start = lines.indexOf(header);
+  if (start === -1) return [];
+  const out: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i].startsWith("---")) break;
+    if (lines[i] !== "") out.push(lines[i]);
+  }
+  return out;
 }
 
 // ── Entry ──

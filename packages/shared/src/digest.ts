@@ -8,14 +8,30 @@ import { isManualOnlyUnit } from "./types";
 import { collectUnitsUnder } from "./squadHierarchy";
 
 /**
+ * Precomputed battle-board lines (board-v1a). Built in core/battleBoard.ts and
+ * received here as PLAIN STRINGS — shared must never import core, so this type
+ * lives in this file and core matches it structurally.
+ */
+export interface DigestBoardLines {
+  /** squadId → suffix appended verbatim to that squad's SQUADS leader line
+   *  (existing tokens stay a byte-exact prefix — the fromSquad parser contract). */
+  squadLineSuffixById: Record<string, string>;
+  /** Rendered spatial-group lines replacing the bare type counts under
+   *  ---UNASSIGNED_UNITS--- (already truncated with a true remainder line). */
+  unassignedGroupLines: string[];
+}
+
+/**
  * Generate a DigestV1 text summary from GameState.
  * This is what the LLM sees — no raw tiles, no full unit lists.
+ * Without `board` the output is byte-identical to pre-board-v1a.
  */
 export function generateDigestV1(
   state: GameState,
   playerSelectedUnitIds: number[],
   markedTargets: { id: string; position: [number, number] }[],
   recentEvents: string[],
+  board?: DigestBoardLines,
 ): string {
   const t = formatTime(state.time);
   const ph = state.phase;
@@ -187,7 +203,8 @@ export function generateDigestV1(
           if (alive.length === 0) continue;
           const types = summarizeSquadTypes(alive, state);
           const pos = squadAvgPos(alive, state);
-          digest += `  ${sq.leaderName}(${sq.id},leader) parent:${parentLabel} ${alive.length}units(${types}) @(${pos.x},${pos.y}) morale=${sq.morale.toFixed(1)} mission=${sq.currentMission || "idle"}\n`;
+          const boardSuffix = board?.squadLineSuffixById[sq.id] ?? "";
+          digest += `  ${sq.leaderName}(${sq.id},leader) parent:${parentLabel} ${alive.length}units(${types}) @(${pos.x},${pos.y}) morale=${sq.morale.toFixed(1)} mission=${sq.currentMission || "idle"}${boardSuffix}\n`;
         }
         lineCount++;
       }
@@ -216,7 +233,18 @@ export function generateDigestV1(
   }
 
   // Unassigned units summary — dispatchable unit types outside squads
-  {
+  if (board) {
+    // board-v1a: spatial-group lines with speakable place handles, precomputed
+    // in core. Pool is dispatchable-only (§3.1), so manualOverride units are
+    // no longer listed here — intentional alignment with this section's stated
+    // purpose, see BATTLEFIELD_BOARD_V1A_PROPOSAL.md.
+    if (board.unassignedGroupLines.length > 0) {
+      digest += `---UNASSIGNED_UNITS---\n`;
+      for (const line of board.unassignedGroupLines) {
+        digest += `${line}\n`;
+      }
+    }
+  } else {
     const assignedIds = new Set<number>();
     for (const sq of state.squads) {
       for (const id of sq.unitIds) assignedIds.add(id);

@@ -6,6 +6,7 @@
 
 import type { GameState } from "@ai-commander/shared";
 import { generateDigestV1 } from "@ai-commander/shared";
+import { buildBattleBoard, boardToDigestLines } from "./battleBoard";
 
 /**
  * Compute player/enemy power per front from actual unit positions.
@@ -60,6 +61,8 @@ function updateFrontPower(state: GameState): void {
 /**
  * Build the DigestV1 text to send to the LLM.
  * Updates front power from current unit positions before generating.
+ * board-v1a: the battle board is computed here (core) and handed to the
+ * shared renderer as precomputed lines — shared never imports core.
  */
 export function buildDigest(
   state: GameState,
@@ -68,5 +71,6 @@ export function buildDigest(
   recentEvents: string[],
 ): string {
   updateFrontPower(state);
-  return generateDigestV1(state, selectedUnitIds, markedTargets, recentEvents);
+  const board = boardToDigestLines(buildBattleBoard(state));
+  return generateDigestV1(state, selectedUnitIds, markedTargets, recentEvents, board);
 }
