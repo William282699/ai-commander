@@ -472,9 +472,11 @@ async function runAB(): Promise<void> {
 
   // 1) Parser regression fixtures (proposal §6.4). GATE: NEW digest, 9 calls,
   //    zero misses. OLD digest runs as a recorded control, not a gate.
-  const fixtures: { utterance: string; kind: "dispatch" | "consult" }[] = [
-    { utterance: "派 Aiden 去 Coastal", kind: "dispatch" },
-    { utterance: "派 I1 去 Coastal", kind: "dispatch" },
+  // EXACT contract per proposal §6.4 (Codex ruling): the name form must parse
+  // to the leader name, the id form to the squad id — "either" is NOT enough.
+  const fixtures: { utterance: string; kind: "dispatch" | "consult"; expect?: string }[] = [
+    { utterance: "派 Aiden 去 Coastal", kind: "dispatch", expect: "Aiden" },
+    { utterance: "派 I1 去 Coastal", kind: "dispatch", expect: "I1" },
     { utterance: "Aiden 那边怎么样", kind: "consult" },
   ];
   let gateMisses = 0;
@@ -490,8 +492,8 @@ async function runAB(): Promise<void> {
           let detail: string;
           if (f.kind === "dispatch") {
             const squads = intents.map((it) => it.fromSquad).filter((v): v is string => typeof v === "string");
-            ok = squads.length > 0 && squads.every((v) => v === "Aiden" || v === "I1");
-            detail = `fromSquad=[${squads.join(",")}]`;
+            ok = squads.length > 0 && squads.every((v) => v === f.expect);
+            detail = `fromSquad=[${squads.join(",")}] expect=${f.expect}`;
           } else {
             ok = intents.length === 0;
             detail = intents.length === 0
