@@ -145,7 +145,7 @@ function orderTaskOf(u: Unit): ReinforceTaskStatus | null {
  *  4. all members idle with no orders       → 无任务
  *  5. mixed / unresolvable                  → unknown  (majority vote forbidden)
  */
-function groupTaskStatus(state: GameState, members: Unit[], missionId: string | null): ReinforceTaskStatus {
+export function groupTaskStatus(state: GameState, members: Unit[], missionId: string | null): ReinforceTaskStatus {
   const now = state.time;
   if (members.some((u) => isEngaged(u, now))) return "交战中";
 
@@ -163,7 +163,7 @@ function groupTaskStatus(state: GameState, members: Unit[], missionId: string | 
   return "unknown";
 }
 
-function hpPctOf(members: Unit[]): number {
+export function hpPctOf(members: Unit[]): number {
   let hp = 0;
   let max = 0;
   for (const u of members) {
@@ -288,7 +288,7 @@ function isActuallyMoving(u: Unit): boolean {
  * A force leaving a place must not be pinned to it, and one member's target
  * must not speak for the whole group — uncertainty is omitted, never guessed.
  */
-function locationPhraseFor(state: GameState, members: Unit[]): string | null {
+export function locationPhraseFor(state: GameState, members: Unit[]): string | null {
   const moving = members.filter(isActuallyMoving);
   if (moving.length === 0) {
     const place = nearestPlaceWithin(state, centroidOf(members.map((u) => u.position)));

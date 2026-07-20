@@ -16,6 +16,8 @@ export type { FormationStyle } from "./formation";
 export type { ResolveResult } from "./tacticalPlanner";
 export { buildDigest } from "./intelDigest";
 export { buildBattleContextV2 } from "./battleContext";
+export { buildBattleBoard } from "./battleBoard";
+export type { BattleBoard, BoardSquadRow, BoardGroupRow } from "./battleBoard";
 export { processReportSignals, drainReportEvents, resetReportSignals } from "./reportSignals";
 export { createInitialGameState } from "./scenario";
 export { processDefensiveAI, resetDefensiveAITimer } from "./scenario/elAlamein";
