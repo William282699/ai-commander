@@ -188,7 +188,7 @@ export function buildBattleContextV2(
   // The SAME battle board DigestV1 consumes, projected compactly: Marcus gets
   // real force rows (who/where/doing what/how strong) instead of a bare
   // reserve count. Engaged-first four-tier order, budget 8, true remainder.
-  lines.push("---FORCES---");
+  lines.push("---FORCES--- (group labels are NOT valid fromSquad)");
   for (const l of boardToForcesLines(buildBattleBoard(state))) {
     lines.push(l);
   }

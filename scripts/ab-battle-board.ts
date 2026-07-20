@@ -325,7 +325,13 @@ function runSynthetic(): void {
         neuUnassigned.some((l) => l.includes("units(")),
       neuUnassigned.join(" | "));
 
-    const headers = (d: string) => d.split("\n").filter((l) => l.startsWith("---"));
+    // Compare section NAME tokens — board headers may append a one-line
+    // annotation after the ---NAME--- token; the skeleton (names + order)
+    // must stay identical.
+    const headers = (d: string) =>
+      d.split("\n")
+        .map((l) => l.match(/^---[A-Z_0-9()]+---/)?.[0])
+        .filter((h): h is string => h !== undefined);
     check("digest: section skeleton unchanged", JSON.stringify(headers(old)) === JSON.stringify(headers(neu)),
       `old=${headers(old).join(",")} new=${headers(neu).join(",")}`);
   }
@@ -380,10 +386,11 @@ function runSynthetic(): void {
   process.exit(failCount === 0 ? 0 : 1);
 }
 
-/** Lines of one ---SECTION--- (exclusive of the header, up to the next header). */
+/** Lines of one ---SECTION--- (exclusive of the header, up to the next header).
+ *  Prefix match: headers may carry a one-line annotation after the name token. */
 function sectionLines(digest: string, header: string): string[] {
   const lines = digest.split("\n");
-  const start = lines.indexOf(header);
+  const start = lines.findIndex((l) => l.startsWith(header));
   if (start === -1) return [];
   const out: string[] = [];
   for (let i = start + 1; i < lines.length; i++) {
@@ -393,14 +400,141 @@ function sectionLines(digest: string, header: string): string[] {
   return out;
 }
 
+// ── --ab (real model via /api/command; server must be running) ──
+
+interface AdvisorRespLite {
+  brief?: string;
+  responseType?: string;
+  options?: { intents?: IntentLite[]; intent?: IntentLite }[];
+}
+interface IntentLite {
+  type?: string;
+  fromSquad?: string;
+}
+
+function allIntents(resp: AdvisorRespLite): IntentLite[] {
+  const out: IntentLite[] = [];
+  for (const o of resp.options ?? []) {
+    if (Array.isArray(o.intents)) out.push(...o.intents);
+    else if (o.intent) out.push(o.intent);
+  }
+  return out;
+}
+
+/** OLD ops context = current context minus the FORCES tail (last section). */
+function stripForces(ctx: string): string {
+  const lines = ctx.split("\n");
+  const i = lines.findIndex((l) => l.startsWith("---FORCES---"));
+  return i === -1 ? ctx : lines.slice(0, i).join("\n");
+}
+
+async function runAB(): Promise<void> {
+  const cmdUrl = process.env.COMMAND_URL ?? "http://localhost:3001/api/command";
+
+  // A/B fixture: el_alamein opening + the Aiden empirical case (1 survivor,
+  // hp 8, under fire) — the state whose OLD digest lies (mission=idle).
+  const s = createInitialGameState("el_alamein");
+  s.time = 100;
+  const survivor = addUnit(s, 30, 30, { hp: 8, lastDamagedAt: 97 } as Partial<Unit>);
+  addSquad(s, [survivor.id], { id: "I1", leaderName: "Aiden" });
+  const newDigest = buildDigest(s, [], [], []); // board render (mutates front power first)
+  const oldDigest = generateDigestV1(s, [], [], []); // legacy render on the same state
+  const ctxNew = buildBattleContextV2(s, "ops", { playerIntent: "", openCommitments: [] });
+  const ctxOld = stripForces(ctxNew);
+
+  // Parser fixture: a HEALTHY idle Aiden squad. Run-1 lesson: with the dying
+  // engaged squad, the board digest made the model (correctly) refuse or
+  // substitute forces for "派 I1 去 Coastal" — that measures judgment, not
+  // parsing. Parsing is gated on a state where the order is sane; the dying
+  // case stays in the A/B judgment probes above.
+  const sParse = createInitialGameState("el_alamein");
+  sParse.time = 100;
+  const healthy = Array.from({ length: 5 }, (_, i) => addUnit(sParse, 30 + i, 30));
+  addSquad(sParse, healthy.map((u) => u.id), { id: "I1", leaderName: "Aiden" });
+  const parseNew = buildDigest(sParse, [], [], []);
+  const parseOld = generateDigestV1(sParse, [], [], []);
+
+  const ask = async (digest: string, message: string, channel: string): Promise<AdvisorRespLite> => {
+    const res = await fetch(cmdUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        digest,
+        message,
+        styleNote: "risk=0.50 focus=0.50 obj=0.50 cas=0.50",
+        channel,
+        sessionId: "ab-board",
+      }),
+    });
+    return (await res.json()) as AdvisorRespLite;
+  };
+
+  // 1) Parser regression fixtures (proposal §6.4). GATE: NEW digest, 9 calls,
+  //    zero misses. OLD digest runs as a recorded control, not a gate.
+  const fixtures: { utterance: string; kind: "dispatch" | "consult" }[] = [
+    { utterance: "派 Aiden 去 Coastal", kind: "dispatch" },
+    { utterance: "派 I1 去 Coastal", kind: "dispatch" },
+    { utterance: "Aiden 那边怎么样", kind: "consult" },
+  ];
+  let gateMisses = 0;
+  for (const variant of ["NEW", "OLD"] as const) {
+    const digest = variant === "NEW" ? parseNew : parseOld;
+    console.log(`\n== parser fixtures on ${variant} digest ==`);
+    for (const f of fixtures) {
+      for (let i = 0; i < 3; i++) {
+        try {
+          const resp = await ask(digest, f.utterance, "combat");
+          const intents = allIntents(resp);
+          let ok: boolean;
+          let detail: string;
+          if (f.kind === "dispatch") {
+            const squads = intents.map((it) => it.fromSquad).filter((v): v is string => typeof v === "string");
+            ok = squads.length > 0 && squads.every((v) => v === "Aiden" || v === "I1");
+            detail = `fromSquad=[${squads.join(",")}]`;
+          } else {
+            ok = intents.length === 0;
+            detail = intents.length === 0
+              ? `responseType=${resp.responseType} (no intents)`
+              : `UNEXPECTED intents=${JSON.stringify(intents)}`;
+          }
+          if (variant === "NEW" && !ok) gateMisses++;
+          console.log(`${ok ? "PASS" : "FAIL"} [${variant}] "${f.utterance}" #${i + 1} — ${detail}`);
+        } catch (e) {
+          console.log(`FAIL [${variant}] "${f.utterance}" #${i + 1} — FETCH: ${(e as Error).message} — server running?`);
+          process.exit(1);
+        }
+      }
+    }
+  }
+
+  // 2) Three-question A/B for HUMAN judgment (proposal §6.5): print, don't gate.
+  const abProbes: { label: string; message: string; channel: string; old: string; neu: string }[] = [
+    { label: "Chen/combat Aiden", message: "Aiden 那边怎么样了", channel: "combat", old: oldDigest, neu: newDigest },
+    { label: "Marcus/ops Aiden", message: "Aiden 那边怎么样了", channel: "ops", old: ctxOld, neu: ctxNew },
+    { label: "Marcus/ops reserves", message: "预备队都在哪", channel: "ops", old: ctxOld, neu: ctxNew },
+  ];
+  for (const p of abProbes) {
+    console.log(`\n== A/B ${p.label}: "${p.message}" ==`);
+    for (const [tag, digest] of [["OLD", p.old], ["NEW", p.neu]] as const) {
+      for (let i = 0; i < 3; i++) {
+        const resp = await ask(digest, p.message, p.channel);
+        console.log(`[${p.label} ${tag} #${i + 1}] ${resp.brief ?? JSON.stringify(resp)}`);
+      }
+    }
+  }
+
+  console.log(gateMisses === 0
+    ? "\nPARSER GATE PASS (NEW digest: 9/9)"
+    : `\nPARSER GATE FAIL (NEW digest misses: ${gateMisses})`);
+  process.exit(gateMisses === 0 ? 0 : 1);
+}
+
 // ── Entry ──
 
 const mode = process.argv[2];
 if (mode === "--synthetic") runSynthetic();
-else if (mode === "--ab") {
-  console.log("--ab (real-model A/B + parser fixtures) lands in step 4");
-  process.exit(2);
-} else {
+else if (mode === "--ab") void runAB();
+else {
   console.log("usage: tsx scripts/ab-battle-board.ts --synthetic | --ab");
   process.exit(2);
 }

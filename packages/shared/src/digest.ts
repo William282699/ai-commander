@@ -239,7 +239,10 @@ export function generateDigestV1(
     // no longer listed here — intentional alignment with this section's stated
     // purpose, see BATTLEFIELD_BOARD_V1A_PROPOSAL.md.
     if (board.unassignedGroupLines.length > 0) {
-      digest += `---UNASSIGNED_UNITS---\n`;
+      // Header annotation (semantic, one line — ab run-1 showed the model
+      // putting group labels into fromSquad, which the engine cannot resolve):
+      // group labels are observation handles, not order-addressable units.
+      digest += `---UNASSIGNED_UNITS--- (spatial groups, observation only — group labels are NOT valid fromSquad)\n`;
       for (const line of board.unassignedGroupLines) {
         digest += `${line}\n`;
       }
