@@ -13,7 +13,7 @@
 //   ./node_modules/.bin/tsx scripts/ab-battle-board.ts --synthetic
 // ============================================================
 
-import { createInitialGameState, buildDigest } from "@ai-commander/core";
+import { createInitialGameState, buildDigest, buildBattleContextV2 } from "@ai-commander/core";
 import { generateDigestV1 } from "@ai-commander/shared";
 import {
   buildBattleBoard,
@@ -328,6 +328,52 @@ function runSynthetic(): void {
     const headers = (d: string) => d.split("\n").filter((l) => l.startsWith("---"));
     check("digest: section skeleton unchanged", JSON.stringify(headers(old)) === JSON.stringify(headers(neu)),
       `old=${headers(old).join(",")} new=${headers(neu).join(",")}`);
+  }
+
+  // M) FORCES wiring (step 3): BattleContextV2 carries the SAME board rows
+  //    (same-source, byte-level), four-tier deterministic order, and honest
+  //    truncation — Aiden fixture must be inside the 8-line budget AND on
+  //    the wire; the remainder line carries the true omitted count.
+  {
+    const s = createInitialGameState("el_alamein");
+    s.time = 100;
+    const survivor = addUnit(s, 30, 30, { hp: 8, lastDamagedAt: 97 } as Partial<Unit>);
+    addSquad(s, [survivor.id], { id: "I1", leaderName: "Aiden" });
+
+    const ctx = buildBattleContextV2(s, "ops", { playerIntent: "", openCommitments: [] });
+    const wired = sectionLines(ctx, "---FORCES---");
+    const direct = boardToForcesLines(buildBattleBoard(s));
+    check("FORCES same-source: context section == direct projection",
+      JSON.stringify(wired) === JSON.stringify(direct));
+    check("FORCES: Aiden row on the wire, engaged-first", wired[0]?.includes("Aiden(I1)") === true, wired[0]);
+
+    // four-tier order on a constructed state: 交战中 → 无任务 → 守卫/巡逻 → unknown
+    const s2 = emptyBattlefield();
+    s2.time = 100;
+    const fire = addUnit(s2, 20, 20, { lastDamagedAt: 97 } as Partial<Unit>);
+    addSquad(s2, [fire.id], { id: "E1", leaderName: "Afire" });
+    const guard = addUnit(s2, 40, 40, { state: "defending" });
+    addSquad(s2, [guard.id], { id: "D1", leaderName: "Dug" });
+    const lost = addUnit(s2, 60, 60);
+    addSquad(s2, [lost.id], { id: "U1", leaderName: "Vague", currentMission: "msn-gone" });
+    addUnit(s2, 80, 10); // unassigned idle → 无任务 group
+    const order = boardToForcesLines(buildBattleBoard(s2));
+    const idx = (needle: string) => order.findIndex((l) => l.includes(needle));
+    check("FORCES tiers: 交战中 → 无任务 → 守卫 → unknown",
+      idx("Afire(E1)") === 0 && idx("Afire(E1)") < idx("未编组群") &&
+        idx("未编组群") < idx("Dug(D1)") && idx("Dug(D1)") < idx("Vague(U1)"),
+      order.join(" | "));
+
+    // truncation honesty: Aiden + 9 idle groups = 10 entries → 8 shown +2 omitted
+    const s3 = emptyBattlefield();
+    s3.time = 100;
+    const a3 = addUnit(s3, 30, 30, { lastDamagedAt: 97 } as Partial<Unit>);
+    addSquad(s3, [a3.id], { id: "I1", leaderName: "Aiden" });
+    for (const x of [5, 45, 83]) for (const y of [5, 45, 83]) addUnit(s3, x, y);
+    const f3 = boardToForcesLines(buildBattleBoard(s3));
+    check("FORCES truncation: 8 shown + true remainder", f3.length === 9 && f3[8] === "...+2 more",
+      `len=${f3.length} last=${f3[f3.length - 1]}`);
+    check("FORCES truncation: Aiden still first", f3[0]?.includes("Aiden(I1)") === true, f3[0]);
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);

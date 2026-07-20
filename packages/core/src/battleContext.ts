@@ -5,6 +5,7 @@
 
 import type { GameState, Channel, CommanderMemory } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
+import { buildBattleBoard, boardToForcesLines } from "./battleBoard";
 
 // ── Tier helpers (pure, not exported) ──
 
@@ -182,6 +183,15 @@ export function buildBattleContextV2(
   lines.push("---PLAYER_INTENT---");
   const intent = (memory.playerIntent || "No standing intent").trim();
   lines.push(intent.slice(0, MAX_INTENT_CHARS));
+
+  // --- FORCES (board-v1a) ---
+  // The SAME battle board DigestV1 consumes, projected compactly: Marcus gets
+  // real force rows (who/where/doing what/how strong) instead of a bare
+  // reserve count. Engaged-first four-tier order, budget 8, true remainder.
+  lines.push("---FORCES---");
+  for (const l of boardToForcesLines(buildBattleBoard(state))) {
+    lines.push(l);
+  }
 
   return lines.join("\n");
 }
