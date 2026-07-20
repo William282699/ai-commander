@@ -200,6 +200,11 @@ export function boardToForcesLines(board: BattleBoard): string[] {
     return `- ${e.label}: ${e.unitCount}units hp=${e.hpPct}%${task}${loc}`;
   });
   const omitted = entries.length - shown.length;
-  if (omitted > 0) lines.push(`...+${omitted} more`);
+  if (omitted > 0) {
+    // Carry the omitted UNIT total, not just the row count — manual test
+    // showed Marcus summing only the visible rows into a wrong reserve total.
+    const units = entries.slice(MAX_FORCE_LINES).reduce((sum, e) => sum + e.unitCount, 0);
+    lines.push(`...+${omitted} more (${units} units)`);
+  }
   return lines;
 }

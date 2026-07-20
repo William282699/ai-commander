@@ -377,7 +377,8 @@ function runSynthetic(): void {
     addSquad(s3, [a3.id], { id: "I1", leaderName: "Aiden" });
     for (const x of [5, 45, 83]) for (const y of [5, 45, 83]) addUnit(s3, x, y);
     const f3 = boardToForcesLines(buildBattleBoard(s3));
-    check("FORCES truncation: 8 shown + true remainder", f3.length === 9 && f3[8] === "...+2 more",
+    check("FORCES truncation: 8 shown + true remainder (rows AND units)",
+      f3.length === 9 && f3[8] === "...+2 more (2 units)",
       `len=${f3.length} last=${f3[f3.length - 1]}`);
     check("FORCES truncation: Aiden still first", f3[0]?.includes("Aiden(I1)") === true, f3[0]);
   }
