@@ -334,6 +334,12 @@ function runSynthetic(): void {
         .filter((h): h is string => h !== undefined);
     check("digest: section skeleton unchanged", JSON.stringify(headers(old)) === JSON.stringify(headers(neu)),
       `old=${headers(old).join(",")} new=${headers(neu).join(",")}`);
+
+    // Position-claim rule (live playtest: destination read as position): the
+    // board SQUADS header carries the one-line rule; legacy header stays bare.
+    check("digest legacy: SQUADS header bare", old.includes("---SQUADS---\n"));
+    check("digest board: SQUADS header carries position rule",
+      neu.split("\n").some((l) => l.startsWith("---SQUADS---") && l.includes("NOT the squad's position")));
   }
 
   // M) FORCES wiring (step 3): BattleContextV2 carries the SAME board rows

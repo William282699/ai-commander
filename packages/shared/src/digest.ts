@@ -179,7 +179,12 @@ export function generateDigestV1(
 
   // Phase 2: Squad summary with hierarchy (flat + parent field)
   if (state.squads && state.squads.length > 0) {
-    digest += `---SQUADS---\n`;
+    // Board render carries a one-line semantic rule (live playtest: Chen read a
+    // squad's mission DESTINATION as its position — "在阿拉曼镇交战" with no loc=
+    // on the wire). Legacy render stays byte-identical.
+    digest += board
+      ? `---SQUADS--- (loc= is the only verified current position; no loc= = position unverified — a mission's destination is NOT the squad's position)\n`
+      : `---SQUADS---\n`;
     const commanders: CommanderKey[] = ["chen", "marcus", "emily"];
     const cmdLabels: Record<CommanderKey, string> = { chen: "Chen(combat)", marcus: "Marcus(ops)", emily: "Emily(logistics)" };
     for (const cmd of commanders) {
