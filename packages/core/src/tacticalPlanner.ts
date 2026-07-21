@@ -813,7 +813,7 @@ function resolveProduce(
         produceBudget: intent.produceBudget,
         priority: mapUrgency(intent.urgency),
       }],
-      log: `下达生产命令: ${unitType}（按预算，件数以结算为准）`,
+      log: `下达生产命令: ${unitType}（能造多少造多少，造完报数）`,
       degraded: false,
     };
   }
