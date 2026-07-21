@@ -279,14 +279,122 @@ function runSynthetic(): void {
   process.exit(failCount === 0 ? 0 : 1);
 }
 
+// ── --ab (real model via /api/command; server must be running) ──
+
+interface RespLite {
+  brief?: string;
+  responseType?: string;
+  options?: { intents?: Record<string, unknown>[]; intent?: Record<string, unknown> }[];
+}
+
+function allIntents(resp: RespLite): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const o of resp.options ?? []) {
+    if (Array.isArray(o.intents)) out.push(...o.intents);
+    else if (o.intent) out.push(o.intent);
+  }
+  return out;
+}
+
+async function runAB(): Promise<void> {
+  const cmdUrl = process.env.COMMAND_URL ?? "http://localhost:3001/api/command";
+
+  // The empirical treasury: $3,850 / fuel 300 — main_tank 9, light_tank 19.
+  const s = createInitialGameState("el_alamein");
+  s.economy.player.resources.money = 3850;
+  s.economy.player.resources.fuel = 300;
+  const digest = buildDigest(s, [], [], []);
+
+  const ask = async (message: string): Promise<RespLite> => {
+    const res = await fetch(cmdUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        digest,
+        message,
+        styleNote: "risk=0.50 focus=0.50 obj=0.50 cas=0.50",
+        channel: "logistics",
+        sessionId: "ab-emily",
+      }),
+    });
+    return (await res.json()) as RespLite;
+  };
+
+  type Fixture = { utterance: string; judge: (r: RespLite) => { ok: boolean; detail: string } };
+  const fixtures: Fixture[] = [
+    {
+      // budget=1 AND quantity field precisely ABSENT (Codex acceptance)
+      utterance: "剩下的钱都生产主战坦克",
+      judge: (r) => {
+        const prod = allIntents(r).filter((it) => it.type === "produce");
+        const ok = prod.length > 0 && prod.every((it) => {
+          const pb = it.produceBudget as { mode?: string; fraction?: number } | undefined;
+          return it.produceType === "main_tank" && pb?.mode === "fraction_of_money" && pb.fraction === 1
+            && !("quantity" in it);
+        });
+        return { ok, detail: JSON.stringify(prod) };
+      },
+    },
+    {
+      utterance: "用一半的钱生产轻型坦克",
+      judge: (r) => {
+        const prod = allIntents(r).filter((it) => it.type === "produce");
+        const ok = prod.length > 0 && prod.every((it) => {
+          const pb = it.produceBudget as { mode?: string; fraction?: number } | undefined;
+          return it.produceType === "light_tank" && pb?.mode === "fraction_of_money" && pb.fraction === 0.5
+            && !("quantity" in it);
+        });
+        return { ok, detail: JSON.stringify(prod) };
+      },
+    },
+    {
+      // numeric regression: quantity=3 AND produceBudget precisely ABSENT
+      utterance: "生产3辆主战坦克",
+      judge: (r) => {
+        const prod = allIntents(r).filter((it) => it.type === "produce");
+        const ok = prod.length > 0 && prod.every((it) =>
+          it.produceType === "main_tank" && it.quantity === 3 && !("produceBudget" in it));
+        return { ok, detail: JSON.stringify(prod) };
+      },
+    },
+    {
+      // consultation: NOOP + options=[] + zero intents; numbers human-judged
+      // against the ledger (9 / 19 as INDEPENDENT caps, never summed).
+      utterance: "Emily，我需要更多坦克，能生产多少坦克",
+      judge: (r) => {
+        const ok = allIntents(r).length === 0 && (r.options ?? []).length === 0 && r.responseType === "NOOP";
+        return { ok, detail: `responseType=${r.responseType} options=${(r.options ?? []).length} brief=${r.brief}` };
+      },
+    },
+  ];
+
+  let misses = 0;
+  for (const f of fixtures) {
+    console.log(`\n== "${f.utterance}" ==`);
+    for (let i = 0; i < 3; i++) {
+      try {
+        const r = await ask(f.utterance);
+        const v = f.judge(r);
+        if (!v.ok) misses++;
+        console.log(`${v.ok ? "PASS" : "FAIL"} #${i + 1} — ${v.detail}`);
+        if (f.utterance.includes("能生产多少")) console.log(`   [brief] ${r.brief}`);
+      } catch (e) {
+        console.log(`FAIL #${i + 1} — FETCH: ${(e as Error).message} — server running?`);
+        process.exit(1);
+      }
+    }
+  }
+
+  console.log(misses === 0 ? "\nAB GATE PASS (12/12)" : `\nAB GATE FAIL (misses: ${misses})`);
+  process.exit(misses === 0 ? 0 : 1);
+}
+
 // ── Entry ──
 
 const mode = process.argv[2];
 if (mode === "--synthetic") runSynthetic();
-else if (mode === "--ab") {
-  console.log("--ab (real-model fixtures) lands in step 3");
-  process.exit(2);
-} else {
+else if (mode === "--ab") void runAB();
+else {
   console.log("usage: tsx scripts/ab-emily-production.ts --synthetic | --ab");
   process.exit(2);
 }
