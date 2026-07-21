@@ -6,6 +6,7 @@
 import type { GameState, Front, Resources, StyleParams, Unit, Mission, Squad, Position, CommanderKey } from "./types";
 import { isManualOnlyUnit } from "./types";
 import { collectUnitsUnder } from "./squadHierarchy";
+import { UNIT_STATS, PRODUCTION_FACILITY } from "./constants";
 
 /**
  * Precomputed battle-board lines (board-v1a). Built in core/battleBoard.ts and
@@ -24,7 +25,9 @@ export interface DigestBoardLines {
 /**
  * Generate a DigestV1 text summary from GameState.
  * This is what the LLM sees — no raw tiles, no full unit lists.
- * Without `board` the output is byte-identical to pre-board-v1a.
+ * Board-sensitive content (SQUADS suffixes, UNASSIGNED group lines) stays
+ * compatible: without `board` those render in their legacy shape. PRODUCTION
+ * is rendered on BOTH paths — it is an economy fact, not a board projection.
  */
 export function generateDigestV1(
   state: GameState,
@@ -100,6 +103,52 @@ export function generateDigestV1(
     digest += `---FACILITIES---\n`;
     for (const line of facilityLines) {
       digest += `${line}\n`;
+    }
+  }
+
+  // Emily production-contract V1: engine-computed production ledger. The LLM
+  // must never do this arithmetic (constitution: engine computes, staff only
+  // reads). Body ≤4 lines: one per category (UNIT_STATS declaration order
+  // ground→naval→air) + one queue line. Producible set = cost>0 && buildTime>0
+  // (excludes the cost=0/build=0 hero units — no division by zero); the bench
+  // asserts this set matches the ai.ts produceType schema contract. Facility
+  // gate mirrors enqueueProduction exactly: type match && team=player && hp>0.
+  // Each `now` is an INDEPENDENT affordability under the same resource
+  // snapshot (enqueue debits immediately, so queued costs are already out).
+  {
+    const money = res.money;
+    const fuelNow = res.fuel;
+    const facilityAlive = (facType: string): boolean => {
+      let alive = false;
+      state.facilities.forEach((f) => {
+        if (f.type === facType && f.team === "player" && f.hp > 0) alive = true;
+      });
+      return alive;
+    };
+    digest += `---PRODUCTION--- (now=independent affordability on the SAME snapshot, NOT additive; queued costs already deducted; max 10/order)\n`;
+    for (const cat of ["ground", "naval", "air"] as const) {
+      const facType = PRODUCTION_FACILITY[cat];
+      if (!facilityAlive(facType)) {
+        digest += `${cat}: no alive player ${facType}\n`;
+        continue;
+      }
+      const tokens: string[] = [];
+      for (const [unitType, s] of Object.entries(UNIT_STATS)) {
+        if (s.category !== cat) continue;
+        if (!(s.cost > 0 && s.buildTime > 0)) continue;
+        const byMoney = Math.floor(money / s.cost);
+        const byFuel = s.fuelCost > 0 ? Math.floor(fuelNow / s.fuelCost) : Number.POSITIVE_INFINITY;
+        const now = Math.min(byMoney, byFuel);
+        tokens.push(`${unitType}[$${s.cost}/${s.fuelCost}fu/${s.buildTime}s now=${now}]`);
+      }
+      digest += `${cat}: ${tokens.join(" ")}\n`;
+    }
+    const queued = new Map<string, number>();
+    for (const o of state.productionQueue.player) {
+      queued.set(o.unitType, (queued.get(o.unitType) ?? 0) + 1);
+    }
+    if (queued.size > 0) {
+      digest += `queued: ${Array.from(queued.entries()).map(([t, n]) => `${t}×${n}`).join(" ")}\n`;
     }
   }
 
