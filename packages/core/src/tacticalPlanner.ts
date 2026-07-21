@@ -797,6 +797,27 @@ function resolveProduce(
     return { orders: [], log: msg, degraded: true };
   }
 
+  // emily-production-v1: budget mode → ONE Order carrying the budget; the
+  // unit count is settled in applyOrders with LIVE resources. The resolver
+  // must never pre-announce a count here — its log shows in the UI before
+  // execution, and a count the settlement can't honor would be a fake
+  // execution report (Codex block #1). The receipt with real numbers comes
+  // from the PRODUCE_BUDGET diagnostic after settlement.
+  if (intent.produceBudget?.mode === "fraction_of_money") {
+    return {
+      orders: [{
+        unitIds: [],
+        action: "produce",
+        target: null,
+        produceUnitType: unitType,
+        produceBudget: intent.produceBudget,
+        priority: mapUrgency(intent.urgency),
+      }],
+      log: `下达生产命令: ${unitType}（按预算，件数以结算为准）`,
+      degraded: false,
+    };
+  }
+
   // Support quantity: number → loop, default 1
   const count = typeof intent.quantity === "number"
     ? Math.max(1, Math.min(intent.quantity, 10)) // cap 10

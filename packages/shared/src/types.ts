@@ -3,7 +3,7 @@
 // All game data models live here.
 // ============================================================
 
-import type { TradeBudget } from "./intents"; // 7b.1: Order carries the budget intent through to executeTrade
+import type { TradeBudget, ProduceBudget } from "./intents"; // 7b.1 / emily-production-v1: Orders carry budget intents through to settlement
 
 // --- Teams & Phases ---
 
@@ -247,6 +247,7 @@ export interface Order {
   provisional?: boolean; // local engine guess, will be replaced by LLM
   isPlayerCommand?: boolean; // allows player-issued orders on manualOverride units
   produceUnitType?: UnitType; // for "produce" action: which unit type to build
+  produceBudget?: ProduceBudget; // emily-production-v1: budget-scaled produce, settled in applyOrders
   tradeType?: TradeType;      // for "trade" action: which trade to execute
   tradeBudget?: TradeBudget;  // 7b.1: budget-scaled trade (absent/single = one buy)
   patrolTaskParams?: {        // Day 9.5: patrol task creation params (integer tile coords)

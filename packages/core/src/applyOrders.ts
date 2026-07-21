@@ -3,8 +3,8 @@
 // All orders flow through here → mutate GameState
 // ============================================================
 
-import type { GameState, Order, Unit, Position, TradeType, TradeBudget, PatrolTask } from "@ai-commander/shared";
-import { TRADE_COSTS } from "@ai-commander/shared";
+import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask } from "@ai-commander/shared";
+import { TRADE_COSTS, UNIT_STATS } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
 import { findPath, clearPathCache } from "./pathfinding";
 
@@ -180,14 +180,102 @@ function handleEconomyOrder(
   state: GameState,
 ): void {
   if (order.action === "produce" && order.produceUnitType) {
-    const result = enqueueProduction(state, team, order.produceUnitType);
-    if (!result.ok) {
-      pushDiagnostic(state, "PRODUCE_FAIL",
-        `生产 ${order.produceUnitType} 失败: ${result.reason}`);
+    if (order.produceBudget?.mode === "fraction_of_money") {
+      executeProduceBudget(state, team, order.produceUnitType, order.produceBudget);
+    } else {
+      const result = enqueueProduction(state, team, order.produceUnitType);
+      if (!result.ok) {
+        pushDiagnostic(state, "PRODUCE_FAIL",
+          `生产 ${order.produceUnitType} 失败: ${result.reason}`);
+      }
     }
   } else if (order.action === "trade" && order.tradeType) {
     executeTrade(state, team, order.tradeType, order.tradeBudget);
   }
+}
+
+/** Per-order cap for budget production (existing resolveProduce cap, unchanged
+ *  semantics — the receipt states the true affordable count when it bites). */
+const PRODUCE_BUDGET_ORDER_CAP = 10;
+
+/**
+ * emily-production-v1 — budget-scaled production, the executeTrade anatomy
+ * ported to produce. Settles at APPLY time with live resources: the ENGINE does
+ * all the arithmetic (count = floor(money×fraction ÷ cost), then the fuel
+ * constraint), enqueueProduction stays the single real entry (facility check +
+ * per-unit debit), and the diagnostic reports the ACTUAL enqueued count with
+ * its basis — zero-mutation honest refusals otherwise.
+ */
+function executeProduceBudget(
+  state: GameState,
+  team: "player" | "enemy",
+  unitType: UnitType,
+  budget: ProduceBudget,
+): void {
+  const stats = UNIT_STATS[unitType];
+  const eco = state.economy[team];
+
+  // Defense in depth (mirrors the facts-section predicate): a cost<=0 or
+  // buildTime<=0 type must never enter budget math — no division by zero.
+  if (!stats || stats.cost <= 0 || stats.buildTime <= 0) {
+    pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${unitType} 失败: 不可生产的单位类型`);
+    return;
+  }
+  // Defense in depth (mirrors schema.ts): only settle when fraction is a real,
+  // finite number — however the Order was built. Otherwise fall through to a
+  // single enqueue (never all-in on a bad fraction).
+  if (typeof budget.fraction !== "number" || !Number.isFinite(budget.fraction)) {
+    const r = enqueueProduction(state, team, unitType);
+    if (!r.ok) pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${unitType} 失败: ${r.reason}`);
+    return;
+  }
+
+  const fraction = Math.max(0, Math.min(1, budget.fraction));
+  if (fraction === 0) {
+    // Codex acceptance: zero budget is its own honest reason — NOT "no money".
+    if (team === "player") {
+      pushDiagnostic(state, "PRODUCE_BUDGET", `预算为零：未下任何生产单，没动钱。`);
+    }
+    return;
+  }
+
+  const budgetMoney = eco.resources.money * fraction;
+  let affordable = Math.floor(budgetMoney / stats.cost);
+  if (stats.fuelCost > 0) {
+    affordable = Math.min(affordable, Math.floor(eco.resources.fuel / stats.fuelCost));
+  }
+  if (affordable < 1) {
+    if (team === "player") {
+      pushDiagnostic(state, "PRODUCE_BUDGET",
+        `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一辆${unitType}（$${stats.cost}）都造不起，没动钱。`);
+    }
+    return;
+  }
+
+  const want = Math.min(affordable, PRODUCE_BUDGET_ORDER_CAP);
+  let done = 0;
+  let failReason: string | null = null;
+  for (let i = 0; i < want; i++) {
+    // enqueueProduction re-validates facility + resources and debits per unit —
+    // the ONLY real entry; if it refuses mid-run we stop and report truthfully.
+    const r = enqueueProduction(state, team, unitType);
+    if (!r.ok) {
+      failReason = r.reason ?? "未知原因";
+      break;
+    }
+    done++;
+  }
+
+  if (team !== "player") return;
+  if (done === 0) {
+    // One failure report with the real reason — never a success claim.
+    pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${unitType} 失败: ${failReason ?? "未知原因"}`);
+    return;
+  }
+  const capNote = affordable > want ? `（可产${affordable}，本单上限${PRODUCE_BUDGET_ORDER_CAP}）` : "";
+  const stopNote = failReason ? `（第${done + 1}辆起中止: ${failReason}）` : "";
+  pushDiagnostic(state, "PRODUCE_BUDGET",
+    `${unitType} ×${done}：花了 $${done * stats.cost}${capNote}${stopNote}，还剩 $${Math.floor(eco.resources.money)}。`);
 }
 
 /** Player-facing resource name for trade feedback. */

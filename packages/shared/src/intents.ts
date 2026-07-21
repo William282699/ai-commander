@@ -37,6 +37,19 @@ export interface TradeBudget {
   fraction?: number; // 0–1, only meaningful for fraction_of_money; engine clamps
 }
 
+/**
+ * emily-production-v1 — budget-scaled PRODUCTION, the full tradeBudget anatomy
+ * ported to produce: the LLM only classifies the budget intent ("全部钱造X" →
+ * fraction 1); ONE Order carries it and applyOrders settles with LIVE resources
+ * (unit count, spend, fuel constraint, per-order cap — never the LLM, and never
+ * the resolver, which would pre-announce counts the settlement could miss).
+ * Absent or `single` = the old numeric-quantity path (unchanged behavior).
+ */
+export interface ProduceBudget {
+  mode: "single" | "fraction_of_money";
+  fraction?: number; // 0–1, only meaningful for fraction_of_money; engine clamps
+}
+
 export interface Intent {
   type: IntentType;
 
@@ -63,6 +76,7 @@ export interface Intent {
 
   // Production / trade specifics
   produceType?: string;  // unit type to produce
+  produceBudget?: ProduceBudget; // emily-production-v1: budget-scaled produce (absent/single = numeric path)
   tradeAction?: string;  // buy_fuel, sell_ammo, etc.
   tradeBudget?: TradeBudget; // 7b.1: budget-scaled trade (absent/single = one buy)
 

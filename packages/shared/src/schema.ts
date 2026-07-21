@@ -145,6 +145,22 @@ export function sanitizeIntent(raw: unknown): Intent | null {
     //   → leave tradeBudget undefined → single (old one-shot buy) behavior
   }
 
+  // emily-production-v1: budget-scaled produce — byte-for-byte the tradeBudget
+  // sanitize pattern above. Anything malformed is omitted, which the engine
+  // treats as the old numeric-quantity path (a bad parse can never silently
+  // spend all the money). The engine, never the LLM, does the arithmetic.
+  if (obj.produceBudget && typeof obj.produceBudget === "object" && !Array.isArray(obj.produceBudget)) {
+    const pb = obj.produceBudget as Record<string, unknown>;
+    if (pb.mode === "single") {
+      intent.produceBudget = { mode: "single" };
+    } else if (pb.mode === "fraction_of_money"
+        && typeof pb.fraction === "number" && Number.isFinite(pb.fraction)) {
+      intent.produceBudget = { mode: "fraction_of_money", fraction: Math.max(0, Math.min(1, pb.fraction)) };
+    }
+    // single, fraction_of_money w/ missing|bad fraction, or any other mode
+    //   → leave produceBudget undefined → old numeric-quantity behavior
+  }
+
   // Patrol radius (Day 9.5): clamp [3, 30], integer
   if (typeof obj.patrolRadius === "number") {
     intent.patrolRadius = Math.round(Math.max(3, Math.min(30, obj.patrolRadius)));

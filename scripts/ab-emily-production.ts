@@ -16,8 +16,9 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createInitialGameState, buildDigest, enqueueProduction } from "@ai-commander/core";
-import { generateDigestV1, UNIT_STATS } from "@ai-commander/shared";
+import { createInitialGameState, buildDigest, enqueueProduction, resolveIntent, applyOrders, createDefaultStyle } from "@ai-commander/core";
+import { generateDigestV1, UNIT_STATS, sanitizeIntent } from "@ai-commander/shared";
+import type { GameState, Intent, Order } from "@ai-commander/shared";
 
 // ── Harness ──
 
@@ -146,6 +147,132 @@ function runSynthetic(): void {
       return i === -1 ? "" : d.slice(i).split("\n---")[0];
     };
     check("PRODUCTION identical on both paths", sect(withBoard) !== "" && sect(withBoard) === sect(noBoard));
+  }
+
+  // ── Step 2: produceBudget contract — every case asserts FINAL STATE ──
+
+  /** Fresh el_alamein state with a fixed treasury. */
+  function moneyState(money: number, fuel: number): GameState {
+    const s = createInitialGameState("el_alamein");
+    s.economy.player.resources.money = money;
+    s.economy.player.resources.fuel = fuel;
+    return s;
+  }
+  const style = createDefaultStyle();
+  const lastDiag = (s: GameState) => s.diagnostics[s.diagnostics.length - 1];
+  const budgetIntent = (produceType: string, fraction: number): Intent =>
+    ({ type: "produce", produceType, produceBudget: { mode: "fraction_of_money", fraction } } as Intent);
+
+  // G) fraction=1 on the empirical fixture: ONE order, no count claim in the
+  //    resolver log; settlement enqueues 9 main tanks, debits money+fuel, and
+  //    the receipt reports the actual count and remaining money.
+  {
+    const s = moneyState(3850, 300);
+    const r = resolveIntent(budgetIntent("main_tank", 1), s, style);
+    check("budget resolver: exactly one Order carrying budget",
+      r.orders.length === 1 && r.orders[0].produceBudget?.mode === "fraction_of_money");
+    check("budget resolver: log claims no count", !/×\d/.test(r.log), r.log);
+    applyOrders(s, r.orders);
+    check("fraction=1: queue +9", s.productionQueue.player.length === 9, String(s.productionQueue.player.length));
+    check("fraction=1: money 3850→250", s.economy.player.resources.money === 250, String(s.economy.player.resources.money));
+    check("fraction=1: fuel 300→210", s.economy.player.resources.fuel === 210, String(s.economy.player.resources.fuel));
+    const d = lastDiag(s);
+    check("fraction=1: receipt = actual ×9 + remaining", d.code === "PRODUCE_BUDGET" && d.message.includes("main_tank ×9") && d.message.includes("$250"), d.message);
+  }
+
+  // H) fraction=0.5: floor(1925/400)=4.
+  {
+    const s = moneyState(3850, 300);
+    applyOrders(s, resolveIntent(budgetIntent("main_tank", 0.5), s, style).orders);
+    check("fraction=0.5: queue +4, money -1600",
+      s.productionQueue.player.length === 4 && s.economy.player.resources.money === 3850 - 1600,
+      `q=${s.productionQueue.player.length} $=${s.economy.player.resources.money}`);
+  }
+
+  // I) Fuel-binding settlement (Codex seal #3): $3850 / fuel=15 / fraction=1
+  //    → exactly 1 enqueued, money −400, fuel −10.
+  {
+    const s = moneyState(3850, 15);
+    applyOrders(s, resolveIntent(budgetIntent("main_tank", 1), s, style).orders);
+    check("fuel-bound settle: queue+1, money-400, fuel-10",
+      s.productionQueue.player.length === 1 && s.economy.player.resources.money === 3450 && s.economy.player.resources.fuel === 5,
+      `q=${s.productionQueue.player.length} $=${s.economy.player.resources.money} fu=${s.economy.player.resources.fuel}`);
+  }
+
+  // J) fraction clamp at the schema gate: >1→1, <0→0 (Codex seal #3).
+  {
+    const hi = sanitizeIntent({ type: "produce", produceType: "main_tank", produceBudget: { mode: "fraction_of_money", fraction: 1.5 } });
+    const lo = sanitizeIntent({ type: "produce", produceType: "main_tank", produceBudget: { mode: "fraction_of_money", fraction: -0.2 } });
+    check("clamp: fraction 1.5→1", hi?.produceBudget?.fraction === 1, JSON.stringify(hi?.produceBudget));
+    check("clamp: fraction -0.2→0", lo?.produceBudget?.fraction === 0, JSON.stringify(lo?.produceBudget));
+  }
+
+  // K) fraction=0: zero enqueue, honest ZERO-BUDGET reason — must not read as
+  //    "insufficient money".
+  {
+    const s = moneyState(3850, 300);
+    applyOrders(s, resolveIntent(budgetIntent("main_tank", 0), s, style).orders);
+    const d = lastDiag(s);
+    check("fraction=0: zero queue + zero-budget reason",
+      s.productionQueue.player.length === 0 && d.message.includes("预算为零") && !d.message.includes("钱不够"),
+      d.message);
+    check("fraction=0: money untouched", s.economy.player.resources.money === 3850);
+  }
+
+  // L) No alive facility: zero state change, single true failure, no success claim.
+  {
+    const s = moneyState(3850, 300);
+    s.facilities.forEach((f) => { if (f.type === "barracks" && f.team === "player") f.hp = 0; });
+    applyOrders(s, resolveIntent(budgetIntent("main_tank", 1), s, style).orders);
+    const d = lastDiag(s);
+    check("dead facility: zero queue/resource change + PRODUCE_FAIL only",
+      s.productionQueue.player.length === 0 && s.economy.player.resources.money === 3850 &&
+        d.code === "PRODUCE_FAIL" && !d.message.includes("×"),
+      `${d.code}: ${d.message}`);
+  }
+
+  // M) Cap: $3850 light_tank → resource-affordable 19, enqueued 10, receipt
+  //    carries BOTH truths.
+  {
+    const s = moneyState(3850, 300);
+    applyOrders(s, resolveIntent(budgetIntent("light_tank", 1), s, style).orders);
+    const d = lastDiag(s);
+    check("cap: queue +10 of affordable 19",
+      s.productionQueue.player.length === 10 && d.message.includes("×10") && d.message.includes("可产19") && d.message.includes("上限10"),
+      d.message);
+    check("cap: money -2000", s.economy.player.resources.money === 3850 - 2000, String(s.economy.player.resources.money));
+  }
+
+  // N) Numeric path regression: mode absent + quantity=3 → exactly 3, no budget receipt.
+  {
+    const s = moneyState(3850, 300);
+    const r = resolveIntent({ type: "produce", produceType: "main_tank", quantity: 3 } as Intent, s, style);
+    check("numeric: three orders, no budget carried", r.orders.length === 3 && r.orders.every((o) => o.produceBudget === undefined));
+    applyOrders(s, r.orders);
+    check("numeric: queue +3", s.productionQueue.player.length === 3, String(s.productionQueue.player.length));
+  }
+
+  // O) Malformed budget: schema drops it (old path); a hand-built bad Order
+  //    falls to a SINGLE enqueue at settlement (defense in depth), never all-in.
+  {
+    const dropped = sanitizeIntent({ type: "produce", produceType: "main_tank", produceBudget: { mode: "fraction_of_money" } });
+    check("malformed: schema drops budget (no fraction)", dropped !== null && dropped.produceBudget === undefined,
+      JSON.stringify(dropped?.produceBudget));
+    const s = moneyState(3850, 300);
+    applyOrders(s, [{ unitIds: [], action: "produce", target: null, produceUnitType: "main_tank",
+      produceBudget: { mode: "fraction_of_money", fraction: Number.NaN }, priority: "medium" } as Order]);
+    check("malformed order: settles as single enqueue", s.productionQueue.player.length === 1 && s.economy.player.resources.money === 3450,
+      `q=${s.productionQueue.player.length} $=${s.economy.player.resources.money}`);
+  }
+
+  // P) Trade control: tradeBudget behavior untouched (buy_fuel, fraction=0.5).
+  {
+    const s = moneyState(1000, 0);
+    const r = resolveIntent({ type: "trade", tradeAction: "buy_fuel", tradeBudget: { mode: "fraction_of_money", fraction: 0.5 } } as Intent, s, style);
+    applyOrders(s, r.orders);
+    check("trade control: money decreased, fuel increased, no production queued",
+      s.economy.player.resources.money < 1000 && s.economy.player.resources.fuel > 0 && s.productionQueue.player.length === 0,
+      `$=${s.economy.player.resources.money} fu=${s.economy.player.resources.fuel}`);
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);
