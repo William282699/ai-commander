@@ -199,6 +199,19 @@ function runSynthetic(): void {
       `q=${s.productionQueue.player.length} $=${s.economy.player.resources.money} fu=${s.economy.player.resources.fuel}`);
   }
 
+  // I2) fuel=0 negative (user audit): plenty of money, zero fuel → zero
+  //     mutation, and the receipt names the TRUE constraint (fuel, not money).
+  {
+    const s = moneyState(3850, 0);
+    applyOrders(s, resolveIntent(budgetIntent("main_tank", 1), s, style).orders);
+    const d = lastDiag(s);
+    check("fuel=0: zero queue/resources + fuel-not-money reason",
+      s.productionQueue.player.length === 0 && s.economy.player.resources.money === 3850 &&
+        s.economy.player.resources.fuel === 0 &&
+        d.code === "PRODUCE_BUDGET" && d.message.includes("燃油不足") && !d.message.includes("钱不够"),
+      d.message);
+  }
+
   // J) fraction clamp at the schema gate: >1→1, <0→0 (Codex seal #3).
   {
     const hi = sanitizeIntent({ type: "produce", produceType: "main_tank", produceBudget: { mode: "fraction_of_money", fraction: 1.5 } });

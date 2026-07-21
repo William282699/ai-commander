@@ -239,15 +239,21 @@ function executeProduceBudget(
     return;
   }
 
+  // Money and fuel bounds are kept SEPARATE so a zero-unit refusal can name
+  // the TRUE binding constraint (user audit: $3850/fuel=0 must say fuel, not
+  // money — a merged min() erased which side actually bound).
   const budgetMoney = eco.resources.money * fraction;
-  let affordable = Math.floor(budgetMoney / stats.cost);
-  if (stats.fuelCost > 0) {
-    affordable = Math.min(affordable, Math.floor(eco.resources.fuel / stats.fuelCost));
-  }
+  const moneyAffordable = Math.floor(budgetMoney / stats.cost);
+  const fuelAffordable = stats.fuelCost > 0
+    ? Math.floor(eco.resources.fuel / stats.fuelCost)
+    : Number.POSITIVE_INFINITY;
+  const affordable = Math.min(moneyAffordable, fuelAffordable);
   if (affordable < 1) {
     if (team === "player") {
-      pushDiagnostic(state, "PRODUCE_BUDGET",
-        `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一辆${unitType}（$${stats.cost}）都造不起，没动钱。`);
+      const msg = fuelAffordable < 1 && moneyAffordable >= 1
+        ? `燃油不足：油料 ${Math.floor(eco.resources.fuel)}，一辆${unitType}要 ${stats.fuelCost} 燃油，没动钱。`
+        : `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一辆${unitType}（$${stats.cost}）都造不起，没动钱。`;
+      pushDiagnostic(state, "PRODUCE_BUDGET", msg);
     }
     return;
   }
