@@ -177,7 +177,8 @@ function runSynthetic(): void {
     check("fraction=1: money 3850→250", s.economy.player.resources.money === 250, String(s.economy.player.resources.money));
     check("fraction=1: fuel 300→210", s.economy.player.resources.fuel === 210, String(s.economy.player.resources.fuel));
     const d = lastDiag(s);
-    check("fraction=1: receipt = actual ×9 + remaining", d.code === "PRODUCE_BUDGET" && d.message.includes("main_tank ×9") && d.message.includes("$250"), d.message);
+    check("fraction=1: receipt = actual ×9 + remaining (display name)",
+      d.code === "PRODUCE_BUDGET" && d.message.includes("主战坦克 ×9") && d.message.includes("$250"), d.message);
   }
 
   // H) fraction=0.5: floor(1925/400)=4.

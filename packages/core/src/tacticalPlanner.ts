@@ -22,7 +22,7 @@ import type {
   QuantityHint,
   UnitCategoryHint,
 } from "@ai-commander/shared";
-import { getUnitCategory, UNIT_STATS, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit, isFootUnit } from "@ai-commander/shared";
+import { getUnitCategory, UNIT_STATS, UNIT_DISPLAY_NAME, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit, isFootUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { createMission } from "./missions";
 import { getFormationOffset, computeHeading, type FormationStyle } from "./formation";
@@ -813,7 +813,12 @@ function resolveProduce(
         produceBudget: intent.produceBudget,
         priority: mapUrgency(intent.urgency),
       }],
-      log: `下达生产命令: ${unitType}（能造多少造多少，造完报数）`,
+      // Human register, zero count claim (the count only exists after the
+      // applyOrders settlement — silence about it IS the no-claim contract;
+      // an explanatory parenthetical was the der-culprit, twice).
+      log: (intent.produceBudget.fraction ?? 0) >= 1
+        ? `全力生产${UNIT_DISPLAY_NAME[unitType]}`
+        : `按预算生产${UNIT_DISPLAY_NAME[unitType]}`,
       degraded: false,
     };
   }
@@ -836,7 +841,7 @@ function resolveProduce(
 
   return {
     orders,
-    log: `下达生产命令: ${unitType} ×${count}`,
+    log: `生产${UNIT_DISPLAY_NAME[unitType]} ×${count}`,
     degraded: false,
   };
 }

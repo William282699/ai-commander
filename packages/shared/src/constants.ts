@@ -69,6 +69,26 @@ export const UNIT_STATS: Record<UnitType, UnitStats> = {
   recon_plane:{ hp: 50,  attack: 0,  attackInterval: 0,    range: 0,  speed: 10.0,cost: 120,  fuelCost: 3,  buildTime: 5,  vision: 15, category: "air",    special: ["no_attack", "spotter"] },
 };
 
+// Player-facing Chinese display names for chat receipts (the der-culprit fix
+// family: raw engine tokens read as logs, not staff speech). Display ONLY —
+// digest/schema/parser keep the English tokens as their machine contract.
+// Closed engine type set, not keyword enumeration (Codex ruling).
+export const UNIT_DISPLAY_NAME: Record<UnitType, string> = {
+  infantry: "步兵",
+  light_tank: "轻型坦克",
+  main_tank: "主战坦克",
+  artillery: "火炮",
+  commander: "指挥官",
+  elite_guard: "精锐卫队",
+  patrol_boat: "巡逻艇",
+  destroyer: "驱逐舰",
+  cruiser: "巡洋舰",
+  carrier: "航母",
+  fighter: "战斗机",
+  bomber: "轰炸机",
+  recon_plane: "侦察机",
+};
+
 // --- Counter Matrix ---
 // Multiplier applied to base damage: attacker → defender
 // 0 means cannot attack that type

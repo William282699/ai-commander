@@ -4,7 +4,7 @@
 // ============================================================
 
 import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask } from "@ai-commander/shared";
-import { TRADE_COSTS, UNIT_STATS } from "@ai-commander/shared";
+import { TRADE_COSTS, UNIT_STATS, UNIT_DISPLAY_NAME } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
 import { findPath, clearPathCache } from "./pathfinding";
 
@@ -218,7 +218,7 @@ function executeProduceBudget(
   // Defense in depth (mirrors the facts-section predicate): a cost<=0 or
   // buildTime<=0 type must never enter budget math — no division by zero.
   if (!stats || stats.cost <= 0 || stats.buildTime <= 0) {
-    pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${unitType} 失败: 不可生产的单位类型`);
+    pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${UNIT_DISPLAY_NAME[unitType]} 失败: 不可生产的单位类型`);
     return;
   }
   // Defense in depth (mirrors schema.ts): only settle when fraction is a real,
@@ -226,7 +226,7 @@ function executeProduceBudget(
   // single enqueue (never all-in on a bad fraction).
   if (typeof budget.fraction !== "number" || !Number.isFinite(budget.fraction)) {
     const r = enqueueProduction(state, team, unitType);
-    if (!r.ok) pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${unitType} 失败: ${r.reason}`);
+    if (!r.ok) pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${UNIT_DISPLAY_NAME[unitType]} 失败: ${r.reason}`);
     return;
   }
 
@@ -251,8 +251,8 @@ function executeProduceBudget(
   if (affordable < 1) {
     if (team === "player") {
       const msg = fuelAffordable < 1 && moneyAffordable >= 1
-        ? `燃油不足：油料 ${Math.floor(eco.resources.fuel)}，一辆${unitType}要 ${stats.fuelCost} 燃油，没动钱。`
-        : `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一辆${unitType}（$${stats.cost}）都造不起，没动钱。`;
+        ? `燃油不足：油料 ${Math.floor(eco.resources.fuel)}，一辆${UNIT_DISPLAY_NAME[unitType]}要 ${stats.fuelCost} 燃油，没动钱。`
+        : `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一辆${UNIT_DISPLAY_NAME[unitType]}（$${stats.cost}）都造不起，没动钱。`;
       pushDiagnostic(state, "PRODUCE_BUDGET", msg);
     }
     return;
@@ -275,13 +275,13 @@ function executeProduceBudget(
   if (team !== "player") return;
   if (done === 0) {
     // One failure report with the real reason — never a success claim.
-    pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${unitType} 失败: ${failReason ?? "未知原因"}`);
+    pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${UNIT_DISPLAY_NAME[unitType]} 失败: ${failReason ?? "未知原因"}`);
     return;
   }
   const capNote = affordable > want ? `（可产${affordable}，本单上限${PRODUCE_BUDGET_ORDER_CAP}）` : "";
   const stopNote = failReason ? `（第${done + 1}辆起中止: ${failReason}）` : "";
   pushDiagnostic(state, "PRODUCE_BUDGET",
-    `${unitType} ×${done}：花了 $${done * stats.cost}${capNote}${stopNote}，还剩 $${Math.floor(eco.resources.money)}。`);
+    `${UNIT_DISPLAY_NAME[unitType]} ×${done}：花了 $${done * stats.cost}${capNote}${stopNote}，还剩 $${Math.floor(eco.resources.money)}。`);
 }
 
 /** Player-facing resource name for trade feedback. */
