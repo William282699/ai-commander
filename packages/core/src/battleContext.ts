@@ -6,6 +6,7 @@
 import type { GameState, Channel, CommanderMemory } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
 import { buildBattleBoard, boardToForcesLines } from "./battleBoard";
+import { buildFrontJudgmentLines } from "./commanderPresence";
 
 // ── Tier helpers (pure, not exported) ──
 
@@ -190,6 +191,13 @@ export function buildBattleContextV2(
   // reserve count. Engaged-first four-tier order, budget 8, true remainder.
   lines.push("---FORCES--- (group labels are NOT valid fromSquad)");
   for (const l of boardToForcesLines(buildBattleBoard(state))) {
+    lines.push(l);
+  }
+
+  // --- FRONT_JUDGMENT (commander-presence V1) ---
+  // Same builder DigestV1 consumes — ONE judgment frame for both routes.
+  // Appended last: everything above stays byte-identical (append-only contract).
+  for (const l of buildFrontJudgmentLines(state)) {
     lines.push(l);
   }
 

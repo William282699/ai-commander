@@ -35,6 +35,11 @@ export function generateDigestV1(
   markedTargets: { id: string; position: [number, number] }[],
   recentEvents: string[],
   board?: DigestBoardLines,
+  // Commander-presence V1: precomputed FRONT_JUDGMENT lines (built in
+  // core/commanderPresence.ts, received as plain strings — same shared-never-
+  // imports-core contract as `board`). Appended at the very END so the legacy
+  // digest stays a byte-exact prefix of the new one.
+  judgmentLines?: string[],
 ): string {
   const t = formatTime(state.time);
   const ph = state.phase;
@@ -337,6 +342,14 @@ export function generateDigestV1(
     digest += `---MARKED_TARGETS---\n`;
     for (const mt of markedTargets) {
       digest += `${mt.id}@[${mt.position.join(",")}]\n`;
+    }
+  }
+
+  // Commander-presence V1: FRONT_JUDGMENT appended last — everything above is
+  // byte-identical to the pre-presence digest (append-only contract).
+  if (judgmentLines && judgmentLines.length > 0) {
+    for (const line of judgmentLines) {
+      digest += `${line}\n`;
     }
   }
 
