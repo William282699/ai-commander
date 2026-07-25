@@ -36,9 +36,11 @@ Chen 危机时报真实增援候选+ETA，替换说谎的布尔字段。F1 已�
 `tag: emily-production-v1-done` · 提案 `EMILY_PRODUCTION_V1_PROPOSAL.md` · Codex 两轮裁决+条件批准 · bench `ab-emily-production.ts` --synthetic 38 断言（全部最终状态口径：queue 增量+钱油差值+回执；含用户审计补的燃油为零负例——零件回执必须报真实约束，钱油分界不合并）+ 真模型 12/12（fraction 时 quantity 精确缺席；咨询答"9辆主战或19辆轻型"独立上限不相加）· 手测对账：$3,500 咨询报 8/17 原数；"剩下的钱都生产主战坦克"→ queue+8×main_tank、$3,500→$300、fuel−80、回执 `main_tank ×8：花了 $3200，还剩 $300`。已合 main。
 挂账：stream 路径首答偶发不主动报数（事实已在 payload，追问即中；偶发波动非事实层缺陷，等真玩家反馈再议）。
 
-### ▶ 第 6 级 — 批准合同化（同场实证插队）【当前：提案已写待 Codex 裁决】
-escalation 问句只是软上下文非合同：实测"批准"撞上连环升级绑错对象且**误执行**（8 单位被派往未批方向）。修法 = pendingDecision 合同机制扩到 escalation 提案（问句登记具体提案，authorize 逐字执行被捕获案）；ChatPanel 代码注释早已标 `Deterministic resolve of a confirm is Tier 2, deferred`。提案 `APPROVAL_CONTRACT_V1_PROPOSAL.md`（立场=复用 preflight 机器加 origin，连环升级单槽显式替代+发送瞬间绑定，含纯上下文 vs 合同双跑对照）。
-**并入（07-21 实证）**：跨频道点名身份规则——玩家在 Chen 频道点名 emily，Chen 冒充艾米莉答英文；修法=命令 prompt 共享人设区一行语义原则（不挂例句防复读），同文件同批裁决（提案 §4b）。
+### ❄ 第 6 级 — 批准合同化【三版判退，雪藏 2026-07-24】
+v2（引擎模板问句）/v3（字符串校验）/v3.2（LLM 台词+引擎小条）连续三版：机制层全过 Codex 四轮+双跑 30/30 零错派，但用户手测判退——三个**结构病**：①会话焦点绑错（普通澄清问句插在合同后，"对的啊"误授权旧合同）②权力旁路（Bucket A 模型选兵自动执行仍在，合同不是唯一入口）③目标类型缺失（"夺回前哨"被降格成"增援战线"）；另 UI 确认件违反"对话是唯一界面"家法。**现场全部封存**：worktree `AI Commander-approval-contract` 工作分支停 `f83f032`（未获准合并），保护分支 `approval-contract-v3.2-failed-handtest`（17 实现 commit+判退全文 `HANDTEST_FAILURE_20260722.md`）。执行回到第 5 级现状：兵只听玩家自己的命令链。**将来重启=v4**，前置是第 6b 级判断执照（参谋敢提具体方案，批准才有对象）；§4b 跨频道身份规则随分支一起雪藏，重启时捞回。
+
+### ▶ 第 6b 级 — 司令感 V1（Commander Presence）【当前：提案 v2 已写，用户已批方向】
+司令感=玩家不必学精确语法：四层拆解（感知/指代/判读/意图补全），前三层引擎材料已备只差接线——**引擎是将军的脑子，LLM 只是嘴**。提案 `COMMANDER_PRESENCE_V1_PROPOSAL.md`（v2，Opus5 审查五项实锤已采纳：ReportEvent 无坐标改 unitsInBox、camera 需新建只读桥、placeNameAt 玩家 tag 优先且禁改 nearestPlaceWithin 本体）。**三步各自独立收口，禁打包**：Step A 判断执照+长度分档（拆群聊"1-3句"封印 ai.ts:774+禁下结论旧口径；三 prompt 含 GROUP_SYSTEM_PROMPT）→ Step B commanderMood 情绪温度 → Step C PLAYER_VIEW 共同视野（镜头是线索不是话题）。零执行牵连（判断只在台词）；基线=main `163d86e`，worktree `AI Commander-presence` 分支 `commander-presence-v1`；五闸=38/37/40/66+typecheck（无 ab-approval-contract）。治理：用户裁手感，Codex 只做完工安全审计（要求加可见确认件一律不采纳）。
 
 ### ⏭ 第 7 级 — Capture 停滞反馈
 实证 bug：占领圈 80% 静默卡死（半径 1.5 格+无对抗判定，战后单位散圈外，零反馈）。修法=停滞时 Chen 报一句+战后归位。Capture 雷区：必须一页纸提案先行（2026-07 大修撤回教训，归档 `~/MyProjects/_archive/capture-overhaul-20260717`）。
