@@ -135,11 +135,33 @@ function twoFrontCrisis(): GameState {
     reveal(s, e.position.x, e.position.y);
   }
 
-  // One free reinforcement squad outside both fronts (southern desert-ish)
-  const f1 = addUnit(s, 300, 140);
-  const f2 = addUnit(s, 302, 140);
+  // One free reinforcement squad outside both crisis fronts. y=150 keeps Blake
+  // strictly in southern_desert — y=140 sits ON the central_desert bbox edge
+  // ([120,80,370,140] is inclusive) and would give the central front a combat
+  // presence, hiding its no-force note.
+  const f1 = addUnit(s, 300, 150);
+  const f2 = addUnit(s, 302, 150);
   addSquad(s, [f1.id, f2.id], { id: "T5", leaderName: "Blake" });
 
+  return s;
+}
+
+/** Asymmetric crisis: coastal manned + visible enemies; central EMPTY (fallen);
+ *  ridge unmanned too; Blake free in the south. The handtest shape: the player
+ *  weighs a front the old frame silently omitted. */
+function northCrisisCenterEmpty(): GameState {
+  const s = emptyBattlefield();
+  s.time = 150;
+  const c1 = addUnit(s, COASTAL.x, COASTAL.y, { hp: 40 });
+  const c2 = addUnit(s, COASTAL.x + 2, COASTAL.y, { hp: 40 });
+  addSquad(s, [c1.id, c2.id], { id: "I1", leaderName: "Aiden" });
+  for (let i = 0; i < 5; i++) {
+    const e = addUnit(s, COASTAL.x + 4 + i, COASTAL.y + 2, { team: "enemy" } as Partial<Unit>);
+    reveal(s, e.position.x, e.position.y);
+  }
+  const f1 = addUnit(s, 300, 150);
+  const f2 = addUnit(s, 302, 150);
+  addSquad(s, [f1.id, f2.id], { id: "T5", leaderName: "Blake" });
   return s;
 }
 
@@ -158,7 +180,9 @@ function runSynthetic(): void {
     const ridge = lines.find((l) => l.startsWith("2. 山脊战线:"));
     check("A2 coastal line rendered", coastal !== undefined, lines.join(" | "));
     check("A3 ridge line rendered", ridge !== undefined, lines.join(" | "));
-    check("A4 exactly two body lines", lines.length === 3, `got ${lines.length}`);
+    // header + 2 real lines + 2 no-force notes (central fallen, axis rear);
+    // southern front (Blake, no visible enemy) stays fog-silent entirely.
+    check("A4 exactly 2 real + 2 no-force lines", lines.length === 5, `got ${lines.length}: ${lines.join(" | ")}`);
     check(
       "A5 survival+ratio tokens on both",
       [coastal, ridge].every((l) => !!l && /survival[≈=]/.test(l) && /ratio=\d/.test(l)),
@@ -176,6 +200,21 @@ function runSynthetic(): void {
       `top=${top?.label} line=${coastal}`,
     );
     check("A8 eta token engine-sourced", !!coastal && (/eta≈\d+s/.test(coastal) || coastal.includes("eta=unknown")), coastal);
+
+    // No-force notes (handtest fix): fallen/undeployed fronts appear as pure
+    // existence facts — completing the compare frame with ZERO enemy-derived
+    // data — and only ride along when at least one real judgment line exists.
+    const center = lines.find((l) => l.startsWith("3. 中央战线:"));
+    const rear = lines.find((l) => l.startsWith("5. 敌军后方:"));
+    const south = lines.find((l) => l.startsWith("4. 南部战线:"));
+    check("A9 central no-force note", center === "3. 中央战线: 无我方作战部队（增援须从后方调兵）", center);
+    check("A10 axis-rear no-force note", rear !== undefined, lines.join(" | "));
+    check(
+      "A11 no-force notes carry no engine combat data",
+      [center, rear].every((l) => !!l && !/survival|ratio=|eta|best_help/.test(l)),
+      `${center} || ${rear}`,
+    );
+    check("A12 fog-gated south stays silent", south === undefined, south);
   }
 
   // B) Presence gate: enemies visible on a front with NO committed player force
@@ -194,8 +233,13 @@ function runSynthetic(): void {
     reveal(s, e2.position.x, e2.position.y);
 
     const lines = buildFrontJudgmentLines(s);
-    check("B1 empty-front fake killed", !lines.some((l) => l.startsWith("1. 北部战线:")), lines.join(" | "));
-    check("B2 manned front still renders", lines.some((l) => l.startsWith("2. 山脊战线:")), lines.join(" | "));
+    const coastalLine = lines.find((l) => l.startsWith("1. 北部战线:"));
+    check(
+      "B1 empty-front fake killed (no-force note, zero combat data)",
+      coastalLine !== undefined && coastalLine.includes("无我方作战部队") && !/survival|ratio=|eta/.test(coastalLine),
+      coastalLine ?? lines.join(" | "),
+    );
+    check("B2 manned front still renders", lines.some((l) => l.startsWith("2. 山脊战线:") && /survival[≈=]/.test(l)), lines.join(" | "));
   }
 
   // C) Fog gate: enemy present but NOT visible → nothing to judge → no line.
@@ -285,8 +329,21 @@ interface GroupRespLite {
 
 const PUNT_MARKERS = ["看您", "由您定", "您来定", "请您决断", "您定夺", "听您的", "请指示"];
 
+// Concrete unit handles in the crisis fixtures (either script — the model
+// voices "Carter" and "卡特" interchangeably).
+const UNIT_NAMES = ["Blake", "Carter", "Aiden", "T5", "I2", "I1", "布雷克", "卡特", "艾登"];
+
 function isPunt(text: string): boolean {
   return PUNT_MARKERS.some((m) => text.includes(m));
+}
+/** First two sentences — the delivery window for the asked-for unknown.
+ *  ("长官，北线撑不过三秒。卡特最近，65秒能到。" delivers the who in sentence
+ *  two behind a natural situational lead-in; buried-at-the-end doesn't count.) */
+function deliveryWindow(text: string): string {
+  return text.split(/[。！？!?\n]/).slice(0, 2).join("。");
+}
+function namesAUnit(text: string): boolean {
+  return UNIT_NAMES.some((n) => text.includes(n));
 }
 function hasDigit(text: string): boolean {
   // Engine numbers may be voiced in Chinese numerals ("约三秒"/"六十五秒") —
@@ -294,7 +351,7 @@ function hasDigit(text: string): boolean {
   return /[0-9〇零一二三四五六七八九十百千]/.test(text);
 }
 function namesAFront(text: string): boolean {
-  return text.includes("北") || text.includes("山脊") || text.includes("沿海");
+  return text.includes("北") || text.includes("山脊") || text.includes("沿海") || text.includes("中央");
 }
 
 async function runReal(): Promise<void> {
@@ -380,6 +437,39 @@ async function runReal(): Promise<void> {
     );
     for (const r of responses) {
       console.log(`   [group #${i} ${r.from} len=${r.brief.length}] ${r.brief}`);
+    }
+  }
+
+  // 5) Deliver-the-unknown (handtest fix): "who do I send" must be answered
+  //    with a concrete unit handle IN THE FIRST SENTENCE — numbers follow as
+  //    evidence, never substitute for the asked-for unknown.
+  for (let i = 1; i <= 3; i++) {
+    const r = await ask(crisisDigestV1, "派谁去增援北部前线？", "combat");
+    const brief = r.brief ?? "";
+    const window = deliveryWindow(brief);
+    check(
+      `R5.${i} who-question → unit name delivered up front`,
+      namesAUnit(window) && !isPunt(brief),
+      `window="${window}" full=${brief.slice(0, 140)}`,
+    );
+    console.log(`   [who #${i}] ${brief}`);
+  }
+
+  // 6) Asymmetric frame (handtest shape): one front pressured, one FALLEN
+  //    (no-force note on the wire). The answer must still take a stance and
+  //    may cite the rebuild-from-rear fact; hard assert = stance + number.
+  {
+    const asym = northCrisisCenterEmpty();
+    const asymDigest = buildDigest(asym, [], [], []);
+    for (let i = 1; i <= 2; i++) {
+      const r = await ask(asymDigest, "北线吃紧，中央又丢了，先顾哪头？", "combat");
+      const brief = r.brief ?? "";
+      check(
+        `R6.${i} asymmetric → stance w/ numbers, no punt`,
+        (r.options ?? []).length === 0 && hasDigit(brief) && namesAFront(brief) && !isPunt(brief),
+        brief.slice(0, 160),
+      );
+      console.log(`   [asym #${i}] ${brief}`);
     }
   }
 

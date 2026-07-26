@@ -34,9 +34,18 @@ import { buildReinforceOptions } from "./frontEscalationPayload";
  */
 export function buildFrontJudgmentLines(state: GameState): string[] {
   const body: string[] = [];
+  // Gate-① failures get an existence note (handtest 2026-07-25: the player was
+  // weighing a fallen front the frame silently omitted — "哪条" had no second
+  // option on the wire). Deployment absence is the player's OWN state, always
+  // known, zero fog leak; the note carries NO enemy-derived data. Gate ② stays
+  // silent as before — rendering survival there would leak hidden enemy DPS.
+  const noForce: string[] = [];
 
   for (const front of state.fronts) {
-    if (!hasPlayerCombatPresence(state, front)) continue;
+    if (!hasPlayerCombatPresence(state, front)) {
+      noForce.push(`${front.name}: 无我方作战部队（增援须从后方调兵）`);
+      continue;
+    }
     const ratio = freshFrontPowerRatio(state, front);
     if (ratio === null) continue;
 
@@ -70,9 +79,14 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
     body.push(line);
   }
 
+  // No-force notes exist to COMPLETE a comparison frame; with zero real
+  // judgment lines there is nothing to compare, so the whole section stays
+  // omitted — the healthy battlefield keeps its byte-identical, non-alarmist
+  // digest (Act-0 regression guard).
   if (body.length === 0) return [];
   return [
     "---FRONT_JUDGMENT--- (engine-computed compare frame: survival=committed HP vs visible enemy DPS, eta=straight-line terrain estimate; read these numbers — do NOT hand-compute distance/time from coordinates)",
     ...body,
+    ...noForce,
   ];
 }
