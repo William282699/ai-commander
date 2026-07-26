@@ -7,38 +7,70 @@
 //
 // Constitution: candidates + costs, never conclusions. Every number here
 // is read from the ONE existing production estimator for that quantity:
-//   - survival  → assessCrisisEscalation (6a collapse math, untouched)
-//   - ratio     → freshFrontPowerRatio (7a fog-gated DPS read, untouched)
-//   - best_help → buildReinforceOptions (V1b candidate set, untouched)
+//   - survival    → assessCrisisEscalation (6a collapse math, untouched)
+//   - ratio       → freshFrontPowerRatio (7a fog-gated DPS read, untouched)
+//   - best_help   → buildReinforceOptions (V1b candidate set, untouched)
+//   - 交战中/hp%  → groupTaskStatus / hpPctOf (V1b own-evidence reads)
 // No re-implementation of any of them lives in this file.
 // ============================================================
 
-import type { GameState, CrisisEvent } from "@ai-commander/shared";
+import type { GameState, CrisisEvent, Front, Unit } from "@ai-commander/shared";
 import { assessCrisisEscalation } from "./crisisResponse";
 import { hasPlayerCombatPresence, freshFrontPowerRatio } from "./director";
-import { buildReinforceOptions } from "./frontEscalationPayload";
+import { buildReinforceOptions, groupTaskStatus, hpPctOf } from "./frontEscalationPayload";
 
 /**
- * Render the FRONT_JUDGMENT section: one line per front that has BOTH a real
- * committed player combat force AND visible enemy DPS to weigh it against.
+ * Player COMBAT units inside a front's bboxes. Mirrors the predicate inside
+ * director's hasPlayerCombatPresence (which returns only a boolean; director.ts
+ * is outside this rung's allowed change set, so the 4-line filter is repeated
+ * here). Drift between the two fails SAFE: a unit the boolean counts but this
+ * filter misses only suppresses an engaged-note — it can never leak.
+ */
+function playerCombatUnitsInFront(state: GameState, front: Front): Unit[] {
+  const bboxes: [number, number, number, number][] = [];
+  for (const rid of front.regionIds) {
+    const r = state.regions.get(rid);
+    if (r) bboxes.push(r.bbox);
+  }
+  const members: Unit[] = [];
+  if (bboxes.length === 0) return members;
+  state.units.forEach((u) => {
+    if (u.team !== "player" || u.hp <= 0 || u.state === "dead") return;
+    if (u.type === "commander" || u.attackDamage <= 0) return;
+    const inFront = bboxes.some(
+      ([x1, y1, x2, y2]) => u.position.x >= x1 && u.position.x <= x2 && u.position.y >= y1 && u.position.y <= y2,
+    );
+    if (inFront) members.push(u);
+  });
+  return members;
+}
+
+/**
+ * Render the FRONT_JUDGMENT section. Three line kinds, all fog-honest:
  *
- * Gates (both required, in this order):
- *  1. hasPlayerCombatPresence — kills the tCollapse=0 fake on empty fronts
- *     (the 7a Codex blocker; same gate decisionReview applies).
- *  2. freshFrontPowerRatio !== null — fog-honest: no VISIBLE enemy weapons in
- *     the front means nothing to judge, and rendering survival there would
- *     leak hidden-enemy DPS through the collapse estimate.
+ *  - REAL line   — front has committed player combat force AND visible enemy
+ *    DPS: survival≈/ratio=/best_help engine columns (gate ① kills the
+ *    tCollapse=0 fake — the 7a Codex blocker; gate ② keeps hidden enemy DPS
+ *    out of the survival estimate).
+ *  - ENGAGED-UNKNOWN line — gate ① passes, gate ② fails, but OUR OWN units
+ *    carry recent combat evidence (V1b isEngaged semantics via
+ *    groupTaskStatus: the unit's own fired-at / took-damage timestamps —
+ *    everything on the line is player-observable: own unit count, own hp%,
+ *    own knowledge state, own-geometry best_help). Handtest 2026-07-25 round
+ *    2: a front actively fighting under fog vanished from the frame — the
+ *    MOST urgent front was the silent one. NOT rendered from
+ *    engagementIntensity, which counts both teams and would leak enemy-only
+ *    fights the player cannot see (battleAwareness.ts:235).
+ *  - NO-FORCE note — gate ① fails: pure deployment fact (handtest round 1:
+ *    the player was weighing a fallen front the frame silently omitted).
  *
- * Empty result = section omitted entirely (宁缺勿假), so a healthy battlefield
- * carries no judgment frame and consultation answers stay non-alarmist.
+ * Notes ride along only when at least one REAL or ENGAGED-UNKNOWN line
+ * exists; a healthy battlefield (no visible enemies, no combat evidence)
+ * keeps its byte-identical, section-free digest (Act-0 guard).
  */
 export function buildFrontJudgmentLines(state: GameState): string[] {
   const body: string[] = [];
-  // Gate-① failures get an existence note (handtest 2026-07-25: the player was
-  // weighing a fallen front the frame silently omitted — "哪条" had no second
-  // option on the wire). Deployment absence is the player's OWN state, always
-  // known, zero fog leak; the note carries NO enemy-derived data. Gate ② stays
-  // silent as before — rendering survival there would leak hidden enemy DPS.
+  const engagedUnknown: string[] = [];
   const noForce: string[] = [];
 
   for (const front of state.fronts) {
@@ -47,7 +79,23 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
       continue;
     }
     const ratio = freshFrontPowerRatio(state, front);
-    if (ratio === null) continue;
+    if (ratio === null) {
+      // Gate ② (fog). If our own units are trading fire here, that fact is on
+      // the player's screen — silence would misreport the hottest front as
+      // uneventful. hp%/count are instantaneous OWN quantities (no casualty
+      // bookkeeping to invent, no cumulative-number fabrication — 07-20 口径).
+      const members = playerCombatUnitsInFront(state, front);
+      if (members.length > 0 && groupTaskStatus(state, members, null) === "交战中") {
+        let line = `${front.name}: 交战中，我方${members.length}units hp=${hpPctOf(members)}%，敌军实力未明（无法给出存活估计）`;
+        const top = buildReinforceOptions(state, front).shown[0];
+        if (top) {
+          const eta = top.etaSec !== null ? `eta≈${top.etaSec}s` : "eta=unknown";
+          line += ` best_help=${top.label}(${top.unitCount}units ${top.task} ${eta})`;
+        }
+        engagedUnknown.push(line);
+      }
+      continue;
+    }
 
     // Same synthetic-crisis pattern decisionReview uses to reach the ONE
     // collapse estimator through its exported entry point.
@@ -79,14 +127,13 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
     body.push(line);
   }
 
-  // No-force notes exist to COMPLETE a comparison frame; with zero real
-  // judgment lines there is nothing to compare, so the whole section stays
-  // omitted — the healthy battlefield keeps its byte-identical, non-alarmist
-  // digest (Act-0 regression guard).
-  if (body.length === 0) return [];
+  // Existence notes COMPLETE a comparison frame; with nothing real to compare
+  // (no numeric line, no engaged front) the whole section stays omitted.
+  if (body.length === 0 && engagedUnknown.length === 0) return [];
   return [
     "---FRONT_JUDGMENT--- (engine-computed compare frame: survival=committed HP vs visible enemy DPS, eta=straight-line terrain estimate; read these numbers — do NOT hand-compute distance/time from coordinates)",
     ...body,
+    ...engagedUnknown,
     ...noForce,
   ];
 }

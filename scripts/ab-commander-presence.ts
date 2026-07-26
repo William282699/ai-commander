@@ -165,6 +165,25 @@ function northCrisisCenterEmpty(): GameState {
   return s;
 }
 
+/** Fogged brawl: coastal units carry OWN recent combat evidence (fired /
+ *  took damage inside the 10s isEngaged window); enemies exist but are NEVER
+ *  revealed — gate ② fails while the fight is on the player's screen. */
+function foggedBrawl(opts: { staleEvidence?: boolean } = {}): GameState {
+  const s = emptyBattlefield();
+  s.time = 200;
+  const t = opts.staleEvidence ? 100 : 197; // stale = far outside the window
+  const c1 = addUnit(s, COASTAL.x, COASTAL.y, { hp: 30, lastDamagedAt: t } as Partial<Unit>);
+  const c2 = addUnit(s, COASTAL.x + 2, COASTAL.y, { hp: 50, lastAttackTime: t + 1 });
+  addSquad(s, [c1.id, c2.id], { id: "I1", leaderName: "Aiden" });
+  for (let i = 0; i < 5; i++) {
+    addUnit(s, COASTAL.x + 5 + i, COASTAL.y + 2, { team: "enemy" } as Partial<Unit>); // fog NOT revealed
+  }
+  const f1 = addUnit(s, 300, 150);
+  const f2 = addUnit(s, 302, 150);
+  addSquad(s, [f1.id, f2.id], { id: "T5", leaderName: "Blake" });
+  return s;
+}
+
 // ── --synthetic ──
 
 function runSynthetic(): void {
@@ -262,6 +281,44 @@ function runSynthetic(): void {
     check("D1 healthy → no section", buildFrontJudgmentLines(s).length === 0);
   }
 
+  // I) Engaged-unknown line (handtest round-2 fix): a front where OUR units
+  //    are trading fire under fog must never vanish from the frame. Evidence
+  //    source is the units' OWN timestamps (V1b isEngaged), never
+  //    engagementIntensity (counts both teams → would leak unseen fights).
+  {
+    const s = foggedBrawl();
+    const lines = buildFrontJudgmentLines(s);
+    const coastal = lines.find((l) => l.startsWith("1. 北部战线:"));
+    check(
+      "I1 fogged brawl renders engaged-unknown line",
+      !!coastal && coastal.includes("交战中") && coastal.includes("敌军实力未明"),
+      lines.join(" | "),
+    );
+    check(
+      "I2 own-strength tokens only (count + hp%)",
+      !!coastal && /我方2units hp=\d+%/.test(coastal) && !/survival[≈=]|ratio=/.test(coastal),
+      coastal,
+    );
+    check("I3 best_help rides (own geometry, zero enemy data)", !!coastal && /best_help=.*eta≈\d+s/.test(coastal), coastal);
+    check(
+      "I4 counts as body: no-force notes ride along",
+      lines.some((l) => l.includes("无我方作战部队")),
+      lines.join(" | "),
+    );
+    check(
+      "I5 hidden enemy count (5) leaks nowhere",
+      lines.every((l) => !l.includes("5units") && !l.includes("5×")),
+      lines.join(" | "),
+    );
+  }
+
+  // I6) Same front, evidence outside the 10s window → no line, and with no
+  //     real/engaged line anywhere the section stays omitted entirely.
+  {
+    const s = foggedBrawl({ staleEvidence: true });
+    check("I6 stale evidence → section omitted", buildFrontJudgmentLines(s).length === 0);
+  }
+
   // E) DigestV1 append-only contract: the digest WITHOUT judgment lines is a
   //    byte-exact prefix; the tail is exactly the builder's lines.
   {
@@ -273,6 +330,17 @@ function runSynthetic(): void {
     const expectedTail = judgment.map((l) => `${l}\n`).join("");
     check("E1 DigestV1 byte-prefix", newDigest.startsWith(oldDigest), "legacy digest is not a prefix");
     check("E2 DigestV1 tail = judgment lines exactly", newDigest === oldDigest + expectedTail);
+  }
+
+  // E3) Same append-only contract on the engaged-unknown path.
+  {
+    const s = foggedBrawl();
+    const newDigest = buildDigest(s, [], [], []);
+    const board = boardToDigestLines(buildBattleBoard(s));
+    const oldDigest = generateDigestV1(s, [], [], [], board);
+    const judgment = buildFrontJudgmentLines(s);
+    const expectedTail = judgment.map((l) => `${l}\n`).join("");
+    check("E3 engaged-unknown digest byte-prefix + exact tail", newDigest === oldDigest + expectedTail);
   }
 
   // F) BattleContextV2 append-only contract: judgment block sits at the very
@@ -470,6 +538,34 @@ async function runReal(): Promise<void> {
         brief.slice(0, 160),
       );
       console.log(`   [asym #${i}] ${brief}`);
+    }
+  }
+
+  // 7) Fogged brawl (handtest round-2 shape): north fighting under fog,
+  //    central in a visible crisis. The previously-vanishing front must now
+  //    be part of the comparison — the answer has to name it.
+  {
+    const s = foggedBrawl();
+    // central front, exclusive point (outside minefield/ruweisat/axis_rear):
+    // committed defenders + visible enemies → a REAL numeric line coexists
+    // with the north's engaged-unknown line.
+    const d1 = addUnit(s, 200, 130, { hp: 60 });
+    const d2 = addUnit(s, 202, 130, { hp: 60 });
+    addSquad(s, [d1.id, d2.id], { id: "I2", leaderName: "Carter" });
+    for (let i = 0; i < 4; i++) {
+      const e = addUnit(s, 204 + i, 132, { team: "enemy" } as Partial<Unit>);
+      reveal(s, e.position.x, e.position.y);
+    }
+    const digest = buildDigest(s, [], [], []);
+    for (let i = 1; i <= 2; i++) {
+      const r = await ask(digest, "先救哪条线？", "combat");
+      const brief = r.brief ?? "";
+      check(
+        `R7.${i} fogged front stays in the comparison`,
+        (r.options ?? []).length === 0 && hasDigit(brief) && brief.includes("北") && !isPunt(brief),
+        brief.slice(0, 160),
+      );
+      console.log(`   [fog #${i}] ${brief}`);
     }
   }
 
