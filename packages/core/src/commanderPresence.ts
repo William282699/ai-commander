@@ -107,21 +107,9 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
       continue;
     }
 
-    // Same synthetic-crisis pattern decisionReview uses to reach the ONE
-    // collapse estimator through its exported entry point.
-    const crisis: CrisisEvent = {
-      type: "DOCTRINE_BREACH",
-      severity: "critical",
-      doctrineId: "__presence__",
-      locationTag: front.id,
-      message: `${front.name} 判读基线`,
-      time: state.time,
-    };
-    const a = assessCrisisEscalation(state, crisis);
+    const t = frontCollapseSeconds(state, front);
     const survival =
-      a && a.tCollapse !== Infinity
-        ? `survival≈${Math.round(a.tCollapse)}s`
-        : "survival=stable";
+      t !== null && t !== Infinity ? `survival≈${Math.round(t)}s` : "survival=stable";
 
     let line = `${front.name}: ${survival} ratio=${ratio.toFixed(2)}`;
 
@@ -150,4 +138,99 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
     ...engagedUnknown,
     ...noForce,
   ];
+}
+
+/**
+ * The ONE route to the production collapse estimator — the same synthetic-crisis
+ * pattern decisionReview uses to reach it through its exported entry point.
+ * null = estimator unavailable for this front (never substitute a number).
+ */
+function frontCollapseSeconds(state: GameState, front: Front): number | null {
+  const crisis: CrisisEvent = {
+    type: "DOCTRINE_BREACH",
+    severity: "critical",
+    doctrineId: "__presence__",
+    locationTag: front.id,
+    message: `${front.name} 判读基线`,
+    time: state.time,
+  };
+  const a = assessCrisisEscalation(state, crisis);
+  return a ? a.tCollapse : null;
+}
+
+// ============================================================
+// Step B: commanderMood — battlefield temperature for the voice
+//
+// Same frame as FRONT_JUDGMENT, read for tone instead of columns. Three
+// gates, IDENTICAL sources to the three line kinds above:
+//   ① hasPlayerCombatPresence — the tCollapse=0 fake (7a Codex blocker)
+//     must not raise the voice either.
+//   ② engagement evidence = our OWN units' fired-at / took-damage
+//     timestamps (groupTaskStatus). NEVER engagementIntensity — it counts
+//     BOTH teams (battleAwareness), so a pure enemy-vs-enemy fight the
+//     player cannot see would tighten the voice; a tone jump is a sneakier
+//     leak than a number because the player can't ask where it came from.
+//   ③ collapse seconds may drive the level and appear in the reason ONLY
+//     where freshFrontPowerRatio is non-null (visible enemy DPS on the
+//     line — estimateCollapseTime counts unseen enemies, FOG-TODO in
+//     crisisResponse.ts). A fogged brawl is tense on own observable facts
+//     alone and its reason carries no seconds.
+// ============================================================
+
+export type CommanderMoodLevel = "calm" | "tense" | "critical";
+
+export interface CommanderMood {
+  level: CommanderMoodLevel;
+  /** One engine-fact line justifying the level — player-observable sources only. */
+  reason: string;
+}
+
+/** critical = a front passes all three gates AND collapse is this close (≤, sec). */
+const CRITICAL_COLLAPSE_SEC = 30;
+
+export function commanderMood(state: GameState): CommanderMood {
+  // Worst front wins: higher band first; inside a band, smaller collapse time.
+  let best: { rank: number; t: number; reason: string } | null = null;
+  const consider = (rank: number, t: number, reason: string) => {
+    if (!best || rank > best.rank || (rank === best.rank && t < best.t)) {
+      best = { rank, t, reason };
+    }
+  };
+
+  for (const front of state.fronts) {
+    if (!hasPlayerCombatPresence(state, front)) continue; // gate ①
+    const members = playerCombatUnitsInFront(state, front);
+    if (members.length === 0 || groupTaskStatus(state, members, null) !== "交战中") continue; // gate ②
+
+    const ratio = freshFrontPowerRatio(state, front);
+    if (ratio === null) {
+      // Gate ③ fog branch: own facts only, no seconds.
+      consider(1, Infinity, `${front.name}交战中，敌军实力未明`);
+      continue;
+    }
+    const t = frontCollapseSeconds(state, front);
+    if (t !== null && t <= CRITICAL_COLLAPSE_SEC) {
+      consider(2, t, `${front.name}约${Math.max(1, Math.round(t))}秒内承压加剧`);
+    } else {
+      // Engaged with a visible enemy but no imminent collapse: tense on the
+      // fight itself; the ratio is the fog-gated fact that sizes it.
+      consider(1, t ?? Infinity, `${front.name}交战中，战力比${ratio.toFixed(2)}`);
+    }
+  }
+
+  if (best === null) return { level: "calm", reason: "我方部队无接战" };
+  const b: { rank: number; t: number; reason: string } = best;
+  return { level: b.rank === 2 ? "critical" : "tense", reason: b.reason };
+}
+
+/**
+ * Envelope line for both digest routes. calm renders NOTHING — a battlefield
+ * with no engaged player force keeps its byte-identical pre-presence envelope
+ * (same Act-0 guard as FRONT_JUDGMENT); the prompts read the line's absence
+ * as the calm register.
+ */
+export function buildCommanderMoodLine(state: GameState): string | null {
+  const mood = commanderMood(state);
+  if (mood.level === "calm") return null;
+  return `mood: ${mood.level}（${mood.reason}）`;
 }

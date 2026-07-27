@@ -40,6 +40,11 @@ export function generateDigestV1(
   // imports-core contract as `board`). Appended at the very END so the legacy
   // digest stays a byte-exact prefix of the new one.
   judgmentLines?: string[],
+  // Step B: one engine-judged battlefield-temperature line ("mood: tense（…）"),
+  // computed in core/commanderPresence.ts. Appended after FRONT_JUDGMENT so
+  // everything before it stays byte-identical; absent on a calm battlefield
+  // (calm = no line — same Act-0 guard as the judgment section).
+  moodLine?: string,
 ): string {
   const t = formatTime(state.time);
   const ph = state.phase;
@@ -351,6 +356,10 @@ export function generateDigestV1(
     for (const line of judgmentLines) {
       digest += `${line}\n`;
     }
+  }
+
+  if (moodLine) {
+    digest += `${moodLine}\n`;
   }
 
   return digest;

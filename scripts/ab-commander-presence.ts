@@ -2,6 +2,8 @@
 // AI Commander — Commander Presence bench (presence-v1)
 //
 // Step A: FRONT_JUDGMENT engine section + judgment-license real-model probes.
+// Step B: commanderMood three-band thresholds (per-gate negatives) + the
+//         calm-vs-critical register probe (human-read, logged).
 //
 // Modes:
 //   --synthetic  deterministic assertions (no LLM, no server)
@@ -23,7 +25,7 @@ import {
 } from "@ai-commander/core";
 import { generateDigestV1 } from "@ai-commander/shared";
 import { boardToDigestLines } from "../packages/core/src/battleBoard";
-import { buildFrontJudgmentLines } from "../packages/core/src/commanderPresence";
+import { buildFrontJudgmentLines, commanderMood, buildCommanderMoodLine } from "../packages/core/src/commanderPresence";
 import { buildReinforceOptions } from "../packages/core/src/frontEscalationPayload";
 import type { GameState, Unit, Squad } from "@ai-commander/shared";
 
@@ -184,6 +186,55 @@ function foggedBrawl(opts: { staleEvidence?: boolean } = {}): GameState {
   return s;
 }
 
+/** twoFrontCrisis with OWN combat evidence stamped on both crisis fronts'
+ *  defenders (Blake's southern reserve untouched) — the mood gates (①presence
+ *  ②own-evidence engagement ③visible ratio) all pass. Coastal collapse ≈
+ *  80HP / 24DPS ≈ 3s, ridge ≈ 120HP / 8DPS = 15s → both critical band,
+ *  coastal tightest. */
+function crisisEngaged(): GameState {
+  const s = twoFrontCrisis();
+  s.units.forEach((u) => {
+    if (u.team === "player" && u.position.y < 100) {
+      u.lastDamagedAt = s.time - 2; // inside the 10s isEngaged window
+    }
+  });
+  return s;
+}
+
+/** Single-front boundary state: pooled defender HP vs ONE visible enemy
+ *  infantry (DPS = 6/1.5 = 4) places collapse exactly at / just past the
+ *  critical threshold: [40,40,40] → 120/4 = 30s; [40,40,48] → 128/4 = 32s. */
+function boundaryMood(defenderHp: number[]): GameState {
+  const s = emptyBattlefield();
+  s.time = 300;
+  const ids: number[] = [];
+  defenderHp.forEach((hp, i) => {
+    const u = addUnit(s, COASTAL.x + i, COASTAL.y, { hp, lastDamagedAt: s.time - 2 } as Partial<Unit>);
+    ids.push(u.id);
+  });
+  addSquad(s, ids, { id: "I1", leaderName: "Aiden" });
+  const e = addUnit(s, COASTAL.x + 8, COASTAL.y, { team: "enemy" } as Partial<Unit>);
+  reveal(s, e.position.x, e.position.y);
+  return s;
+}
+
+/** Enemy units brawling on a front with NO player force, the front's
+ *  both-teams engagementIntensity forced high — a canary: if commanderMood
+ *  ever consulted that metric, this state would read tense. */
+function enemyOnlyFight(): GameState {
+  const s = emptyBattlefield();
+  s.time = 300;
+  for (let i = 0; i < 6; i++) {
+    const e = addUnit(s, COASTAL.x + i, COASTAL.y, { team: "enemy", lastDamagedAt: s.time - 1 } as Partial<Unit>);
+    reveal(s, e.position.x, e.position.y);
+  }
+  const front = s.fronts.find((f) => f.id === "front_coastal")!;
+  front.engagementIntensity = 9.9;
+  const p = addUnit(s, 300, 150); // far-south player unit keeps the state non-degenerate
+  addSquad(s, [p.id], { id: "T5", leaderName: "Blake" });
+  return s;
+}
+
 // ── --synthetic ──
 
 function runSynthetic(): void {
@@ -319,6 +370,86 @@ function runSynthetic(): void {
     check("I6 stale evidence → section omitted", buildFrontJudgmentLines(s).length === 0);
   }
 
+  // M) Step B — commanderMood: three-band thresholds + one negative per gate.
+  //    Same three gates as the judgment line kinds; the voice may never move
+  //    on evidence the player can't see.
+  {
+    // No engagement anywhere (healthy field, collapse=Infinity on every front)
+    // → calm, and calm renders NO envelope line (Act-0 guard).
+    const s = emptyBattlefield();
+    s.time = 120;
+    const p = addUnit(s, COASTAL.x, COASTAL.y);
+    addSquad(s, [p.id], { id: "I1", leaderName: "Aiden" });
+    const m = commanderMood(s);
+    check("M1 no combat → calm", m.level === "calm", `${m.level}（${m.reason}）`);
+    check("M2 calm renders no envelope line", buildCommanderMoodLine(s) === null);
+  }
+  {
+    // Gate ① negative + engagementIntensity ban canary: an enemy-only brawl
+    // with the both-teams metric forced high must not raise the voice.
+    const m = commanderMood(enemyOnlyFight());
+    check("M3 enemy-only fight (engagementIntensity=9.9) → calm", m.level === "calm", `${m.level}（${m.reason}）`);
+  }
+  {
+    // Gate ② negatives: visible enemies massing against committed defenders
+    // but no own fired-at/took-damage evidence — content may alarm (the
+    // judgment section still renders), tone must not move until contact.
+    const m = commanderMood(twoFrontCrisis());
+    check("M4 massing without contact → calm", m.level === "calm", `${m.level}（${m.reason}）`);
+    const m2 = commanderMood(foggedBrawl({ staleEvidence: true }));
+    check("M5 stale own evidence → calm", m2.level === "calm", `${m2.level}（${m2.reason}）`);
+  }
+  {
+    // Gate ③ fog branch: engaged under fog is tense on own facts alone; the
+    // reason carries no collapse seconds (estimateCollapseTime counts unseen
+    // enemies) and no ratio; the hidden enemy count leaks nowhere.
+    const m = commanderMood(foggedBrawl());
+    check("M6 fogged brawl → tense", m.level === "tense", `${m.level}（${m.reason}）`);
+    check(
+      "M7 fog reason: own facts, no seconds/ratio",
+      m.reason.includes("交战中") && m.reason.includes("未明") && !m.reason.includes("秒") && !m.reason.includes("战力比"),
+      m.reason,
+    );
+    check("M8 hidden enemy count leaks nowhere", !m.reason.includes("5"), m.reason);
+  }
+  {
+    // Visible-branch banding at the named threshold (CRITICAL_COLLAPSE_SEC=30,
+    // inclusive): 120HP/4DPS = 30s → critical with seconds; 128HP = 32s →
+    // tense, seconds withheld, the fog-gated ratio speaks instead.
+    const mCrit = commanderMood(boundaryMood([40, 40, 40]));
+    check("M9 t=30s boundary → critical", mCrit.level === "critical", `${mCrit.level}（${mCrit.reason}）`);
+    check("M10 critical reason: front + ~seconds", mCrit.reason.includes("北部战线") && /约30秒内/.test(mCrit.reason), mCrit.reason);
+    const mTense = commanderMood(boundaryMood([40, 40, 48]));
+    check(
+      "M11 t=32s → tense w/ ratio, no seconds",
+      mTense.level === "tense" && mTense.reason.includes("战力比3.00") && !mTense.reason.includes("秒"),
+      `${mTense.level}（${mTense.reason}）`,
+    );
+  }
+  {
+    // Worst front wins (coastal 3s beats ridge 15s inside the critical band);
+    // envelope tail rides BOTH routes; healthy renders stay mood-free.
+    const s = crisisEngaged();
+    const m = commanderMood(s);
+    check("M12 two engaged fronts → critical band", m.level === "critical", `${m.level}（${m.reason}）`);
+    check("M13 reason names the tightest front", m.reason.includes("北部战线") && /约\d+秒内/.test(m.reason), m.reason);
+    const moodLine = buildCommanderMoodLine(s);
+    check("M14 mood line format", moodLine !== null && /^mood: critical（.+）$/.test(moodLine), moodLine ?? "null");
+    const d = buildDigest(s, [], [], []);
+    check("M15 DigestV1 ends with mood line", moodLine !== null && d.endsWith(`${moodLine}\n`));
+    const ctx = buildBattleContextV2(s, "ops", { playerIntent: "", openCommitments: [] });
+    check("M16 V2 ends with mood line after judgment", moodLine !== null && ctx.endsWith(moodLine) && ctx.includes("---FRONT_JUDGMENT---"));
+    const h = emptyBattlefield();
+    h.time = 120;
+    const hp = addUnit(h, COASTAL.x, COASTAL.y);
+    addSquad(h, [hp.id], { id: "I1", leaderName: "Aiden" });
+    check(
+      "M17 healthy digests carry no mood line",
+      !buildDigest(h, [], [], []).includes("mood:") &&
+        !buildBattleContextV2(h, "ops", { playerIntent: "", openCommitments: [] }).includes("mood:"),
+    );
+  }
+
   // E) DigestV1 append-only contract: the digest WITHOUT judgment lines is a
   //    byte-exact prefix; the tail is exactly the builder's lines.
   {
@@ -332,15 +463,19 @@ function runSynthetic(): void {
     check("E2 DigestV1 tail = judgment lines exactly", newDigest === oldDigest + expectedTail);
   }
 
-  // E3) Same append-only contract on the engaged-unknown path.
+  // E3) Same append-only contract on the engaged-unknown path. Step B: this
+  //     fixture is engaged → the tense mood line rides the tail after the
+  //     judgment section (twoFrontCrisis in E2 stays calm — no line, no drift).
   {
     const s = foggedBrawl();
     const newDigest = buildDigest(s, [], [], []);
     const board = boardToDigestLines(buildBattleBoard(s));
     const oldDigest = generateDigestV1(s, [], [], [], board);
     const judgment = buildFrontJudgmentLines(s);
-    const expectedTail = judgment.map((l) => `${l}\n`).join("");
-    check("E3 engaged-unknown digest byte-prefix + exact tail", newDigest === oldDigest + expectedTail);
+    const mood = buildCommanderMoodLine(s);
+    const expectedTail = [...judgment, ...(mood ? [mood] : [])].map((l) => `${l}\n`).join("");
+    check("E3 engaged-unknown digest byte-prefix + exact tail (judgment + mood)", newDigest === oldDigest + expectedTail);
+    check("E4 fog mood line is tense", mood !== null && mood.startsWith("mood: tense（"), mood ?? "null");
   }
 
   // F) BattleContextV2 append-only contract: judgment block sits at the very
@@ -652,6 +787,32 @@ async function runReal(): Promise<void> {
       const usesStale = brief.includes("8秒") || brief.includes("八秒") || brief.includes("1:6");
       check(`R12.${i} fogged front: unknown beats stale snapshot`, conveysUnknown && !usesStale, brief.slice(0, 160));
       console.log(`   [fogvoid #${i}] ${brief}`);
+    }
+  }
+
+  // 13) Step B register probe: the SAME question against a calm envelope (no
+  //     mood line) vs a critical one (mood: critical + seconds). Hard asserts
+  //     stay mechanical (no exec / no punt / critical cites digits); the
+  //     register contrast itself is a HUMAN read — lengths logged so the
+  //     judgment is recordable in the run output.
+  {
+    const critDigest = buildDigest(crisisEngaged(), [], [], []);
+    const REGISTER_Q = "现在情况怎么样？";
+    for (let i = 1; i <= 3; i++) {
+      const r = await ask(healthyDigestV1, REGISTER_Q, "combat");
+      const brief = r.brief ?? "";
+      check(`R13.${i} calm register: no exec, no punt`, (r.options ?? []).length === 0 && !isPunt(brief), brief.slice(0, 160));
+      console.log(`   [mood-calm #${i} len=${brief.length}] ${brief}`);
+    }
+    for (let i = 1; i <= 3; i++) {
+      const r = await ask(critDigest, REGISTER_Q, "combat");
+      const brief = r.brief ?? "";
+      check(
+        `R14.${i} critical register: no exec, cites digits, no punt`,
+        (r.options ?? []).length === 0 && hasDigit(brief) && !isPunt(brief),
+        brief.slice(0, 160),
+      );
+      console.log(`   [mood-critical #${i} len=${brief.length}] ${brief}`);
     }
   }
 

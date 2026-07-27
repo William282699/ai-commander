@@ -6,7 +6,7 @@
 import type { GameState, Channel, CommanderMemory } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
 import { buildBattleBoard, boardToForcesLines } from "./battleBoard";
-import { buildFrontJudgmentLines } from "./commanderPresence";
+import { buildFrontJudgmentLines, buildCommanderMoodLine } from "./commanderPresence";
 
 // ── Tier helpers (pure, not exported) ──
 
@@ -200,6 +200,11 @@ export function buildBattleContextV2(
   for (const l of buildFrontJudgmentLines(state)) {
     lines.push(l);
   }
+
+  // --- mood (commander-presence Step B) ---
+  // Same builder as DigestV1's tail line; appended last, calm renders nothing.
+  const mood = buildCommanderMoodLine(state);
+  if (mood) lines.push(mood);
 
   return lines.join("\n");
 }

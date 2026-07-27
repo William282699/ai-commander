@@ -7,7 +7,7 @@
 import type { GameState } from "@ai-commander/shared";
 import { generateDigestV1 } from "@ai-commander/shared";
 import { buildBattleBoard, boardToDigestLines } from "./battleBoard";
-import { buildFrontJudgmentLines } from "./commanderPresence";
+import { buildFrontJudgmentLines, buildCommanderMoodLine } from "./commanderPresence";
 
 /**
  * Compute player/enemy power per front from actual unit positions.
@@ -76,5 +76,7 @@ export function buildDigest(
   // Commander-presence V1: judgment lines computed here (core), appended at the
   // digest tail by the shared renderer — legacy digest stays a byte prefix.
   const judgment = buildFrontJudgmentLines(state);
-  return generateDigestV1(state, selectedUnitIds, markedTargets, recentEvents, board, judgment);
+  // Step B: mood line rides the same core→shared path (calm = no line).
+  const mood = buildCommanderMoodLine(state);
+  return generateDigestV1(state, selectedUnitIds, markedTargets, recentEvents, board, judgment, mood ?? undefined);
 }
