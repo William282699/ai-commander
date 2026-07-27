@@ -790,6 +790,15 @@ async function runReal(): Promise<void> {
     }
   }
 
+  // ⑦ 口径（audit 2026-07-27）：语域的唯一有效量法＝同信封 ± mood 行对照
+  //    （R15），不比 calm——R13/R14 两边信封内容不同，长度差被内容差污染，
+  //    只作 smoke 探针。达标＝同内容更短；基线 A=73.0/76.3 vs B=97.5/93.0。
+  // ⑤ 收口判据（结构尺，audit 2026-07-27）：平稳断言必须在同一口气里带
+  //    限定（让步/条件附着在断言上，或点名受威胁战线危险）——用手读判，
+  //    永不写成正则硬断言：calm/hedge 词表在两个方向都骗过我们（漏判
+  //    隐患/隐忧/亟需、误判"无关键风险点"），关键词穷举不收敛（家法）。
+  //    结构尺三组：修前 15/20 裸、无守则对照 6/20、修后 9/30＝对照持平。
+  //    原始采样档：~/MyProjects/_archive/presence-step-b-audit-20260727/
   // 13) Step B register probe: the SAME question against a calm envelope (no
   //     mood line) vs a critical one (mood: critical + seconds). Hard asserts
   //     stay mechanical (no exec / no punt / critical cites digits); the
@@ -814,6 +823,32 @@ async function runReal(): Promise<void> {
       );
       console.log(`   [mood-critical #${i} len=${brief.length}] ${brief}`);
     }
+  }
+
+  // 15) ⑦ same-envelope ablation — the valid register measure: ONE critical
+  //     envelope, arm A as production builds it, arm B byte-identical except
+  //     the mood line is deleted. Only hard assert: mean(A) < mean(B) (同内容
+  //     更短). Lengths + full text logged for the human read.
+  {
+    const s = crisisEngaged();
+    const ctx = buildBattleContextV2(s, "ops", { playerIntent: "", openCommitments: [] });
+    const moodLine = buildCommanderMoodLine(s);
+    const without = ctx.split("\n").filter((l) => !l.startsWith("mood: ")).join("\n");
+    const lens: { A: number[]; B: number[] } = { A: [], B: [] };
+    for (const [armName, digest] of [["A", ctx], ["B", without]] as ["A" | "B", string][]) {
+      for (let i = 1; i <= 4; i++) {
+        const r = await ask(digest, "现在情况怎么样？", "ops");
+        const brief = r.brief ?? "";
+        lens[armName].push(brief.length);
+        console.log(`   [ablate-${armName} #${i} len=${brief.length}] ${brief}`);
+      }
+    }
+    const mean = (a: number[]): number => a.reduce((x, y) => x + y, 0) / a.length;
+    check(
+      "R15 same-envelope ablation: mood line compresses (mean A < mean B)",
+      moodLine !== null && mean(lens.A) < mean(lens.B),
+      `A=${mean(lens.A).toFixed(1)} B=${mean(lens.B).toFixed(1)} line=${moodLine ?? "null"}`,
+    );
   }
 
   console.log(failCount === 0 ? "\nREAL-MODEL GATE PASS" : `\nREAL-MODEL FAILURES: ${failCount}`);
