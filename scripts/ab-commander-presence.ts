@@ -226,7 +226,7 @@ function runSynthetic(): void {
     const center = lines.find((l) => l.startsWith("3. 中央战线:"));
     const rear = lines.find((l) => l.startsWith("5. 敌军后方:"));
     const south = lines.find((l) => l.startsWith("4. 南部战线:"));
-    check("A9 central no-force note", center === "3. 中央战线: 无我方作战部队（增援须从后方调兵）", center);
+    check("A9 central no-force note", center === "3. 中央战线: 无我方作战部队（增援须从后方调兵；早先提问里引用的该线存活/战力数字已作废）", center);
     check("A10 axis-rear no-force note", rear !== undefined, lines.join(" | "));
     check(
       "A11 no-force notes carry no engine combat data",
@@ -615,6 +615,43 @@ async function runReal(): Promise<void> {
         brief.slice(0, 160),
       );
       console.log(`   [stale #${i}] ${brief}`);
+    }
+  }
+
+  // 11) Numberless-row precedence, no-force branch (round-4 live failure: a
+  //     fallen front's stale snapshot numbers were recited as current —
+  //     "全灭" reported as "还能撑1秒"). Frame truth: 中央 has NO force; the
+  //     fake snapshot claims impossible numbers for it.
+  {
+    const asym = northCrisisCenterEmpty();
+    const asymDigest = buildDigest(asym, [], [], []);
+    const staleCentral =
+      `\n---ACTIVE_ESCALATION---\n参谋刚问:「中央战线我方单位仅能支撑7秒，敌我战力比1:9。Blake部队可在999秒内抵达，是否调动？」\n指挥官下面这句是对它的回应。`;
+    for (let i = 1; i <= 2; i++) {
+      const r = await ask(asymDigest + staleCentral, "中央那边现在到底什么情况？", "combat");
+      const brief = r.brief ?? "";
+      const saysNoForce = /无|没/.test(brief) && /部队|兵力|人/.test(brief);
+      const usesStale = brief.includes("7秒") || brief.includes("七秒") || brief.includes("1:9") || brief.includes("999");
+      check(`R11.${i} fallen front: no-force beats stale snapshot`, saysNoForce && !usesStale, brief.slice(0, 160));
+      console.log(`   [void #${i}] ${brief}`);
+    }
+  }
+
+  // 12) Numberless-row precedence, engaged-unknown branch: fogged brawl has no
+  //     survival/ratio; a stale snapshot offering them must not be recited —
+  //     the honest answer conveys "can't estimate" plus own-strength facts.
+  {
+    const fog = foggedBrawl();
+    const fogDigest = buildDigest(fog, [], [], []);
+    const staleNorth =
+      `\n---ACTIVE_ESCALATION---\n参谋刚问:「北部战线我方单位仅能支撑8秒，敌我战力比1:6，是否后撤？」\n指挥官下面这句是对它的回应。`;
+    for (let i = 1; i <= 2; i++) {
+      const r = await ask(fogDigest + staleNorth, "北线现在到底什么情况？", "combat");
+      const brief = r.brief ?? "";
+      const conveysUnknown = /不明|未明|无法/.test(brief);
+      const usesStale = brief.includes("8秒") || brief.includes("八秒") || brief.includes("1:6");
+      check(`R12.${i} fogged front: unknown beats stale snapshot`, conveysUnknown && !usesStale, brief.slice(0, 160));
+      console.log(`   [fogvoid #${i}] ${brief}`);
     }
   }
 

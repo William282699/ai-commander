@@ -75,7 +75,14 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
 
   for (const front of state.fronts) {
     if (!hasPlayerCombatPresence(state, front)) {
-      noForce.push(`${front.name}: 无我方作战部队（增援须从后方调兵）`);
+      // In-row void clause (fix4 followup): a numberless row gives the header's
+      // "superseded by these" nothing to substitute, and the consultation
+      // digit mandate then pulls the model toward the ONLY number source left —
+      // a stale escalation snapshot ("全灭" recited as "还能撑1秒"). Voiding
+      // the old numbers in the row the model actually reads for this front
+      // kills that source; the categorical fact becomes the only compliant
+      // answer. Vacuously true when no snapshot ever mentioned this front.
+      noForce.push(`${front.name}: 无我方作战部队（增援须从后方调兵；早先提问里引用的该线存活/战力数字已作废）`);
       continue;
     }
     const ratio = freshFrontPowerRatio(state, front);
@@ -86,7 +93,10 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
       // bookkeeping to invent, no cumulative-number fabrication — 07-20 口径).
       const members = playerCombatUnitsInFront(state, front);
       if (members.length > 0 && groupTaskStatus(state, members, null) === "交战中") {
-        let line = `${front.name}: 交战中，我方${members.length}units hp=${hpPctOf(members)}%，敌军实力未明（无法给出存活估计）`;
+        // Same in-row void clause as the no-force note: this row has no
+        // survival/ratio either, so stale ask-time numbers would win by
+        // being the only ones on offer.
+        let line = `${front.name}: 交战中，我方${members.length}units hp=${hpPctOf(members)}%，敌军实力未明（无法给出存活估计；早先提问里引用的该线存活/战力数字已作废）`;
         const top = buildReinforceOptions(state, front).shown[0];
         if (top) {
           const eta = top.etaSec !== null ? `eta≈${top.etaSec}s` : "eta=unknown";
