@@ -131,7 +131,11 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
   // (no numeric line, no engaged front) the whole section stays omitted.
   if (body.length === 0 && engagedUnknown.length === 0) return [];
   return [
-    "---FRONT_JUDGMENT--- (engine-computed compare frame: survival=committed HP vs visible enemy DPS, eta=straight-line terrain estimate; read these numbers — do NOT hand-compute distance/time from coordinates)",
+    // Header carries the precedence rule ON THE WIRE, right next to the fresh
+    // numbers (handtest round-3 followup: Chen recited his own earlier
+    // escalation question's ask-time numbers over this frame's current ones —
+    // the stale source sits in the same envelope, so the correction must too).
+    "---FRONT_JUDGMENT--- (CURRENT values for this reply — numbers quoted in earlier questions/escalations are ask-time snapshots, superseded by these; survival=committed HP vs visible enemy DPS, eta=straight-line terrain estimate; read these numbers — do NOT hand-compute distance/time from coordinates)",
     ...body,
     ...engagedUnknown,
     ...noForce,

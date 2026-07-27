@@ -596,6 +596,28 @@ async function runReal(): Promise<void> {
     console.log(`   [greet marcus] ${bm}`);
   }
 
+  // 10) Stale-snapshot precedence (handtest round-3 followup): the envelope
+  //     carries BOTH an old escalation question (ask-time numbers) and the
+  //     current FRONT_JUDGMENT frame. Recital must use the frame's current
+  //     values, never the snapshot's. Frame truth here: coastal survival≈3s
+  //     ratio=0.33; the fake snapshot deliberately contradicts (10秒/0.88).
+  {
+    const staleBlock =
+      `\n---ACTIVE_ESCALATION---\n参谋刚问:「北部战线我方单位仅能支撑10秒，当前战力比0.88。Blake部队可在999秒内抵达，是否调动？」\n指挥官下面这句是对它的回应。`;
+    for (let i = 1; i <= 2; i++) {
+      const r = await ask(crisisDigestV1 + staleBlock, "现在情况怎么样？", "combat");
+      const brief = r.brief ?? "";
+      const usesCurrent = brief.includes("3秒") || brief.includes("三秒");
+      const usesStale = brief.includes("10秒") || brief.includes("十秒") || brief.includes("0.88") || brief.includes("999");
+      check(
+        `R10.${i} current frame beats ask-time snapshot`,
+        usesCurrent && !usesStale,
+        brief.slice(0, 160),
+      );
+      console.log(`   [stale #${i}] ${brief}`);
+    }
+  }
+
   console.log(failCount === 0 ? "\nREAL-MODEL GATE PASS" : `\nREAL-MODEL FAILURES: ${failCount}`);
   process.exit(failCount === 0 ? 0 : 1);
 }
