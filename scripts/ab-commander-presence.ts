@@ -569,6 +569,33 @@ async function runReal(): Promise<void> {
     }
   }
 
+  // 8) Casual status question (handtest round-3 ★): "情况怎么样" was eaten by
+  //    the greeting register 3/3. The exact failing utterance, crisis state:
+  //    must get a real sitrep answer, never a 1-3字 greeting reply.
+  for (let i = 1; i <= 3; i++) {
+    const r = await ask(crisisDigestV1, "现在情况怎么样？", "combat");
+    const brief = r.brief ?? "";
+    check(
+      `R8.${i} casual status question gets a real answer`,
+      (r.options ?? []).length === 0 && brief.length >= 15 && hasDigit(brief) && namesAFront(brief),
+      brief.slice(0, 160),
+    );
+    console.log(`   [casual #${i}] ${brief}`);
+  }
+
+  // 9) Counter-guard: a TRUE greeting must stay a short greeting — the
+  //    boundary line must not kill the register the other way.
+  {
+    const rc = await ask(crisisDigestV1, "你好", "combat");
+    const bc = rc.brief ?? "";
+    check("R9.1 chen greeting stays short", bc.length <= 12 && !/\d/.test(bc), bc);
+    console.log(`   [greet chen] ${bc}`);
+    const rm = await ask(crisisCtxV2, "你好", "ops");
+    const bm = rm.brief ?? "";
+    check("R9.2 marcus greeting stays short", bm.length <= 12 && !/\d/.test(bm), bm);
+    console.log(`   [greet marcus] ${bm}`);
+  }
+
   console.log(failCount === 0 ? "\nREAL-MODEL GATE PASS" : `\nREAL-MODEL FAILURES: ${failCount}`);
   process.exit(failCount === 0 ? 0 : 1);
 }
