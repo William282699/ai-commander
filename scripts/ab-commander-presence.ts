@@ -25,7 +25,16 @@ import {
 } from "@ai-commander/core";
 import { generateDigestV1 } from "@ai-commander/shared";
 import { boardToDigestLines } from "../packages/core/src/battleBoard";
-import { buildFrontJudgmentLines, commanderMood, buildCommanderMoodLine } from "../packages/core/src/commanderPresence";
+import {
+  buildFrontJudgmentLines,
+  commanderMood,
+  buildCommanderMoodLine,
+  viewportToTileBox,
+  unitsInBox,
+  placeNameAt,
+  buildPlayerViewLines,
+  type ViewportGeometry,
+} from "../packages/core/src/commanderPresence";
 import { buildReinforceOptions } from "../packages/core/src/frontEscalationPayload";
 import type { GameState, Unit, Squad } from "@ai-commander/shared";
 
@@ -512,6 +521,131 @@ function runSynthetic(): void {
       .every((l) => frontNames.has(l.slice(0, l.indexOf(":"))));
     check("H1 opening lines name real fronts only", bodyOk, lines.join(" | "));
     console.log(`   (opening state renders ${Math.max(0, lines.length - 1)} judgment line(s))`);
+  }
+
+  // ── Step C: PLAYER_VIEW synthetic assertions ──
+  console.log("\n== commander-presence Step C synthetic assertions ==");
+
+  // Helper: viewport whose tile box is centered on pt with half-extents (tiles).
+  const TILE = 32; // shared TILE_SIZE (constants.ts) — px per tile at zoom 1
+  const viewAround = (pt: { x: number; y: number }, halfW: number, halfH: number): ViewportGeometry => ({
+    x: (pt.x - halfW) * TILE,
+    y: (pt.y - halfH) * TILE,
+    zoom: 1,
+    canvasWidth: 2 * halfW * TILE,
+    canvasHeight: 2 * halfH * TILE,
+  });
+  let unnamedPoint: { x: number; y: number } | null = null;
+
+  // P1) Pixel↔tile conversion — the renderer's own formula, both zoom ends.
+  //     A wrong formula fails silent (empty view / whole-map view), so exact
+  //     numbers are pinned here.
+  {
+    const b1 = viewportToTileBox({ x: 320, y: 160, zoom: 2, canvasWidth: 640, canvasHeight: 320 });
+    check("P1 zoom=2 box exact", b1.left === 10 && b1.top === 5 && b1.right === 20 && b1.bottom === 10, JSON.stringify(b1));
+    const b2 = viewportToTileBox({ x: 0, y: 0, zoom: 0.5, canvasWidth: 640, canvasHeight: 320 });
+    check("P2 zoom=0.5 box exact", b2.left === 0 && b2.top === 0 && b2.right === 40 && b2.bottom === 20, JSON.stringify(b2));
+  }
+
+  // P3) unitsInBox boundaries: empty view → nothing; whole-map view → every
+  //     alive unit; edges inclusive; dead excluded.
+  {
+    const s = emptyBattlefield();
+    const a = addUnit(s, 50, 50);
+    addUnit(s, 52, 50); // sits exactly on the right edge of the P5 box
+    const dead = addUnit(s, 51, 50, { hp: 0, state: "dead" } as Partial<Unit>);
+    check("P3 empty view → no units", unitsInBox(s, { left: 100, top: 100, right: 110, bottom: 110 }).length === 0);
+    const all = unitsInBox(s, { left: 0, top: 0, right: s.mapWidth, bottom: s.mapHeight });
+    check("P4 whole-map view → all alive units", all.length === 2 && !all.some((u) => u.id === dead.id), `got ${all.length}`);
+    const edge = unitsInBox(s, { left: 48, top: 48, right: 52, bottom: 52 });
+    check("P5 inclusive edge", edge.length === 2 && edge.some((u) => u.id === a.id), `got ${edge.length}`);
+  }
+
+  // P6) placeNameAt: facility name resolves; a player tag WITHIN radius beats
+  //     it (planted precision outranks standing names); a far tag does not;
+  //     an unresolvable point is null, never an approximation.
+  {
+    const s = emptyBattlefield();
+    let fac: { name: string; position: { x: number; y: number } } | null = null;
+    s.facilities.forEach((f) => { if (!fac) fac = { name: f.name, position: f.position }; });
+    if (!fac) throw new Error("no facilities in el_alamein");
+    const fpos = (fac as { name: string; position: { x: number; y: number } }).position;
+    const fname = (fac as { name: string; position: { x: number; y: number } }).name;
+    check("P6 facility name resolves", placeNameAt(s, fpos) === fname, `${placeNameAt(s, fpos)} vs ${fname}`);
+    s.tags.push({ id: "tag_1", name: "司令旗", position: { x: fpos.x + 2, y: fpos.y }, createdAt: 0 });
+    check("P7 tag beats facility inside radius", placeNameAt(s, fpos) === "司令旗");
+    s.tags[0].position = { x: fpos.x + 40, y: fpos.y };
+    check("P8 far tag falls back to facility", placeNameAt(s, fpos) === fname);
+    s.tags.pop();
+    // Deterministic hunt for a genuinely unnamed point: scan a coarse grid;
+    // with no tags placeNameAt IS the shared facility/front resolver, so null
+    // here means "no standing name within radius" — assert one exists.
+    for (let y = 2; y < s.mapHeight && !unnamedPoint; y += 7) {
+      for (let x = 2; x < s.mapWidth && !unnamedPoint; x += 7) {
+        if (placeNameAt(s, { x, y }) === null) unnamedPoint = { x, y };
+      }
+    }
+    check("P9 unnamed point exists and resolves null", unnamedPoint !== null, "map fully covered by names");
+  }
+
+  // P10) buildPlayerViewLines composition: named view with friendlies; fog
+  //      keeps hidden enemies out; reveal brings them in; ≤5 lines; label is
+  //      镜头对准 (the camera stays a clue, never "你正看着" a topic).
+  {
+    const s = emptyBattlefield();
+    let fpos: { x: number; y: number } | null = null;
+    s.facilities.forEach((f) => { if (!fpos) fpos = f.position; });
+    const pt = fpos as unknown as { x: number; y: number };
+    addUnit(s, pt.x + 1, pt.y);
+    addUnit(s, pt.x - 1, pt.y, { type: "tank" } as Partial<Unit>);
+    const hidden = addUnit(s, pt.x + 3, pt.y, { team: "enemy" } as Partial<Unit>);
+    const view = viewAround(pt, 6, 6);
+
+    const lines1 = buildPlayerViewLines(s, view, []);
+    check("P10 header + 镜头对准 present", lines1[0]?.startsWith("---PLAYER_VIEW---") === true && lines1.some((l) => l.startsWith("镜头对准: ")), lines1.join(" | "));
+    check("P11 friendly summary rendered", lines1.some((l) => /^视口内我方: 2units\(/.test(l)), lines1.join(" | "));
+    check("P12 hidden enemy leaks nowhere", !lines1.some((l) => l.includes("敌军")), lines1.join(" | "));
+    check("P13 section ≤5 lines", lines1.length <= 5, `${lines1.length}`);
+    check("P14 no 你正看着 phrasing", lines1.every((l) => !l.includes("你正看着")));
+
+    reveal(s, hidden.position.x, hidden.position.y);
+    const lines2 = buildPlayerViewLines(s, view, []);
+    check("P15 revealed enemy rendered", lines2.some((l) => /^视口内可见敌军: 1units\(/.test(l)), lines2.join(" | "));
+
+    // Selected units: line renders from passed ids; dead ids drop; empty omits.
+    const sel = addUnit(s, pt.x, pt.y + 1);
+    const deadSel = addUnit(s, pt.x, pt.y + 2, { hp: 0, state: "dead" } as Partial<Unit>);
+    const lines3 = buildPlayerViewLines(s, view, [sel.id, deadSel.id]);
+    check("P16 selected line from live ids only", lines3.some((l) => l.startsWith("选中单位: ") && l.includes(`#${sel.id}(`) && !l.includes(`#${deadSel.id}(`)), lines3.join(" | "));
+    check("P17 no selected line when empty", !lines2.some((l) => l.startsWith("选中单位")));
+  }
+
+  // P18) Omission over fabrication: an unnamed empty view renders NOTHING —
+  //      no lone header (Act-0 guard).
+  {
+    const s = emptyBattlefield();
+    if (unnamedPoint) {
+      const lines = buildPlayerViewLines(s, viewAround(unnamedPoint, 4, 4), []);
+      check("P18 unnamed empty view → section omitted", lines.length === 0, lines.join(" | "));
+    } else {
+      check("P18 unnamed empty view → section omitted", false, "no unnamed point found by P9");
+    }
+  }
+
+  // P19) Route contract: PLAYER_VIEW is ChatPanel-injected — neither digest
+  //      builder may ever emit it. Watering the existing PLAYER_SELECTED pipe
+  //      changes the envelope by EXACTLY that section and nothing else.
+  {
+    const s = twoFrontCrisis();
+    const d = buildDigest(s, [], [], []);
+    const ctx = buildBattleContextV2(s, "ops", { playerIntent: "", openCommitments: [] });
+    check("P19 builders never emit PLAYER_VIEW", !d.includes("PLAYER_VIEW") && !ctx.includes("PLAYER_VIEW"));
+
+    const u = addUnit(s, 305, 150);
+    const dWithout = buildDigest(s, [], [], []);
+    const dWith = buildDigest(s, [u.id], [], []);
+    const block = `---PLAYER_SELECTED---\n#${u.id} ${u.type} hp=${u.hp}/${u.maxHp} @(${u.position.x},${u.position.y}) sq=none\n`;
+    check("P20 selected pipe waters exactly one section", dWith.includes(block) && dWith.replace(block, "") === dWithout, `has=${dWith.includes(block)}`);
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);

@@ -51,6 +51,6 @@ export type { StrategicSituation, StrategicSituationKind } from "./director";
 // Step 7e — decision review (pure; engine judges outcomes + routes the persona, LLM only voices)
 export { captureDecisionReview, enqueueDecisionReview, assessDecisionReview, describeDecisionReview, buildRetrospectMiniFacts, isReviewableIntentType, REVIEW_TUNING } from "./decisionReview";
 // Commander Presence V1 — engine judgment material (pure; LLM only voices)
-export { buildFrontJudgmentLines, commanderMood, buildCommanderMoodLine } from "./commanderPresence";
-export type { CommanderMood, CommanderMoodLevel } from "./commanderPresence";
+export { buildFrontJudgmentLines, commanderMood, buildCommanderMoodLine, viewportToTileBox, unitsInBox, placeNameAt, buildPlayerViewLines } from "./commanderPresence";
+export type { CommanderMood, CommanderMoodLevel, ViewportGeometry, TileBox } from "./commanderPresence";
 export type { DecisionCaptureArgs, DecisionReviewFacts, FrontOutcome, FacilityOutcome, CasualtyLevel, CrossFrontFact } from "./decisionReview";

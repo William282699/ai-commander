@@ -50,8 +50,9 @@ const CLUSTER_DIAMETER_MAX_TILES = 20;
  *  <place>") only within this range of a standing facility or front center.
  *  Beyond it the location phrase is OMITTED — proximity is never approximated
  *  and there is no unbounded fallback (P1-1: a fabricated place is worse than
- *  silence). */
-const NAME_RADIUS_TILES = 12;
+ *  silence). Exported (presence Step C): placeNameAt must judge tag proximity
+ *  with the SAME radius — a second constant would drift. */
+export const NAME_RADIUS_TILES = 12;
 
 /** Combat-evidence window (seconds): fired or took damage this recently ⇒
  *  the candidate is 交战中. Timestamps must be > 0 — the engine initializes

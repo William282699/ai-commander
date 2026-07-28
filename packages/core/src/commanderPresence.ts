@@ -14,10 +14,11 @@
 // No re-implementation of any of them lives in this file.
 // ============================================================
 
-import type { GameState, CrisisEvent, Front, Unit } from "@ai-commander/shared";
+import type { GameState, CrisisEvent, Front, Unit, Position } from "@ai-commander/shared";
+import { TILE_SIZE } from "@ai-commander/shared";
 import { assessCrisisEscalation } from "./crisisResponse";
 import { hasPlayerCombatPresence, freshFrontPowerRatio } from "./director";
-import { buildReinforceOptions, groupTaskStatus, hpPctOf } from "./frontEscalationPayload";
+import { buildReinforceOptions, groupTaskStatus, hpPctOf, nearestPlaceWithin, NAME_RADIUS_TILES } from "./frontEscalationPayload";
 
 /**
  * Player COMBAT units inside a front's bboxes. Mirrors the predicate inside
@@ -233,4 +234,142 @@ export function buildCommanderMoodLine(state: GameState): string | null {
   const mood = commanderMood(state);
   if (mood.level === "calm") return null;
   return `mood: ${mood.level}（${mood.reason}）`;
+}
+
+// ============================================================
+// Step C: PLAYER_VIEW — shared eyes. The staff learns where the player's
+// camera points so spatial deixis ("这边/那儿") can resolve. The camera is a
+// CLUE, never a topic: the section header carries that rule on the wire
+// (Step A fix4 precedent — the correction rides next to the data it governs).
+//
+// Layering: GameCanvas exposes RAW viewport geometry (camera px + canvas px)
+// and nothing else; every conversion and spatial query lives here, pure and
+// bench-testable. ReportEvents have no position and drain every tick, so the
+// view summary scans LIVE units (position always present) — never reports.
+// ============================================================
+
+/** Raw geometry as the render layer holds it: camera top-left in PIXELS
+ *  (tile × TILE_SIZE), zoom 0.5–2.0, canvas size in device pixels. */
+export interface ViewportGeometry {
+  x: number;
+  y: number;
+  zoom: number;
+  canvasWidth: number;
+  canvasHeight: number;
+}
+
+/** Tile-space box, fractional edges, inclusive membership. */
+export interface TileBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * Pixel viewport → tile box. The formula is the renderer's own visible-range
+ * computation (rendererCanvas renderTerrain): screen width divided by zoom is
+ * the visible pixel span, divided by TILE_SIZE is tiles. Getting this wrong
+ * doesn't crash — it renders as "nothing in view" or "everything in view" —
+ * so the bench pins both ends.
+ */
+export function viewportToTileBox(view: ViewportGeometry): TileBox {
+  return {
+    left: view.x / TILE_SIZE,
+    top: view.y / TILE_SIZE,
+    right: (view.x + view.canvasWidth / view.zoom) / TILE_SIZE,
+    bottom: (view.y + view.canvasHeight / view.zoom) / TILE_SIZE,
+  };
+}
+
+/** Alive units inside the box, edges inclusive (same convention as the front
+ *  bbox filters). Both teams — callers apply their own visibility rules. */
+export function unitsInBox(state: GameState, box: TileBox): Unit[] {
+  const out: Unit[] = [];
+  state.units.forEach((u) => {
+    if (u.hp <= 0 || u.state === "dead") return;
+    if (
+      u.position.x >= box.left && u.position.x <= box.right &&
+      u.position.y >= box.top && u.position.y <= box.bottom
+    ) out.push(u);
+  });
+  return out;
+}
+
+/**
+ * Speakable name for a point. Player-planted tags FIRST — a tag is precision
+ * the player chose to spend, so it outranks a standing facility at the same
+ * range — then the shared facility/front resolver. Same NAME_RADIUS as every
+ * other location phrase; unresolvable is null, never an approximation.
+ * (nearestPlaceWithin itself is shared with escalation/preflight and stays
+ * untouched — this wraps it.)
+ */
+export function placeNameAt(state: GameState, p: Position): string | null {
+  let bestTag: { name: string; d: number } | null = null;
+  for (const t of state.tags) {
+    const d = Math.hypot(t.position.x - p.x, t.position.y - p.y);
+    if (!bestTag || d < bestTag.d) bestTag = { name: t.name, d };
+  }
+  if (bestTag !== null && bestTag.d <= NAME_RADIUS_TILES) return bestTag.name;
+  return nearestPlaceWithin(state, p);
+}
+
+function typeBreakdown(units: Unit[]): string {
+  const counts = new Map<string, number>();
+  for (const u of units) counts.set(u.type, (counts.get(u.type) ?? 0) + 1);
+  return Array.from(counts.entries()).map(([t, n]) => `${n}×${t}`).join(",");
+}
+
+/**
+ * Render the PLAYER_VIEW section (≤5 lines, omission over fabrication):
+ *  - 镜头对准: place name at the viewport CENTER (unresolvable → line omitted).
+ *    The label is deliberately "镜头对准" and never "你正看着" — the second
+ *    phrasing would let the camera impersonate the topic.
+ *  - 选中单位: from the ids the caller passes. DigestV1 routes already carry
+ *    ---PLAYER_SELECTED--- (the pipe Step C waters), so callers pass [] there
+ *    and real ids only where the route has no such section (BattleContextV2).
+ *  - friendly / visible-enemy summaries from the live-unit scan. Enemies only
+ *    count on fog-visible tiles — a hidden force must not leak through a
+ *    view summary any more than through a mood line.
+ * No content lines → empty array (no lone header — Act-0 guard).
+ */
+export function buildPlayerViewLines(
+  state: GameState,
+  view: ViewportGeometry,
+  selectedUnitIds: number[],
+): string[] {
+  const box = viewportToTileBox(view);
+  const body: string[] = [];
+
+  const center: Position = { x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2 };
+  const place = placeNameAt(state, center);
+  if (place !== null) body.push(`镜头对准: ${place}`);
+
+  const selected: Unit[] = [];
+  for (const id of selectedUnitIds) {
+    const u = state.units.get(id);
+    if (u && u.hp > 0 && u.state !== "dead") selected.push(u);
+  }
+  if (selected.length > 0) {
+    const shown = selected.slice(0, 8).map((u) => `#${u.id}(${u.type})`).join(" ");
+    const rest = selected.length > 8 ? ` …+${selected.length - 8}` : "";
+    body.push(`选中单位: ${shown}${rest}`);
+  }
+
+  const inView = unitsInBox(state, box);
+  const friendly = inView.filter((u) => u.team === "player");
+  const visibleEnemy = inView.filter((u) => {
+    if (u.team !== "enemy") return false;
+    const tx = Math.floor(u.position.x);
+    const ty = Math.floor(u.position.y);
+    return state.fog[ty]?.[tx] === "visible";
+  });
+  if (friendly.length > 0) body.push(`视口内我方: ${friendly.length}units(${typeBreakdown(friendly)})`);
+  if (visibleEnemy.length > 0) body.push(`视口内可见敌军: ${visibleEnemy.length}units(${typeBreakdown(visibleEnemy)})`);
+
+  if (body.length === 0) return [];
+  return [
+    "---PLAYER_VIEW--- (镜头是线索不是话题：默认由对话定话题，镜头只用来消解\"这边/那儿\"这类空间指代；拿不准指哪就先问一句)",
+    ...body,
+  ];
 }
