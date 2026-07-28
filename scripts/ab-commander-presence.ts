@@ -13,6 +13,13 @@
 // Both modes read the ONE production builder (buildFrontJudgmentLines) —
 // never a re-implementation (V1b precedent).
 //
+// 家法（第四次判据教训，2026-07-28 审核判）：只读回话字面会漏"字面对、执行错"
+// —— option.label 恒对时实派单位数仍在 8/74/0 之间跳（撤兵作用域账）。凡会动兵
+// 的验收必须跑 resolveIntent 数 assignedUnitIds.length，不许看台词。本 bench 的
+// S 系列只测台词层（PLAYER_VIEW 是纯信封步、零执行牵连）；执行链级落地时判据照此。
+// 前三次同形教训：Step B 正则两向饱和 / 验收单一问法 / R12 关键词表 —— 共同
+// 形状＝判据测"说了什么"，病在"做了什么"。
+//
 // Run (from the worktree root):
 //   ./node_modules/.bin/tsx scripts/ab-commander-presence.ts --synthetic
 // ============================================================
