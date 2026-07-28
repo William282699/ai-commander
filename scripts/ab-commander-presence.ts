@@ -985,6 +985,86 @@ async function runReal(): Promise<void> {
     );
   }
 
+  // ── Step C: PLAYER_VIEW spatial-deixis probes ──
+  // 判据是【手读】(家法: Step B's keyword regex judged prose wrongly in BOTH
+  // directions — word lists are banned as acceptance criteria). Hard asserts
+  // below are mechanical only (a reply exists; the stage resolves a name);
+  // full transcripts print for the human read + the audit archive.
+  {
+    console.log("\n== Step C PLAYER_VIEW probes (transcripts = HUMAN READ) ==");
+
+    // Deixis stage: ONE fight, placed at a point the shared resolver can NAME,
+    // camera aimed straight at it. Hunt inside the coastal bbox — honest
+    // failure if the map offers no named point there.
+    const stage = emptyBattlefield();
+    stage.time = 240;
+    let aim: { x: number; y: number } | null = null;
+    for (let y = 24; y <= 53 && !aim; y += 3) {
+      for (let x = 205; x <= 485 && !aim; x += 5) {
+        if (placeNameAt(stage, { x, y }) !== null) aim = { x, y };
+      }
+    }
+    if (!aim) throw new Error("no named point inside coastal bbox — fixture impossible");
+    const aimName = placeNameAt(stage, aim)!;
+    const d1 = addUnit(stage, aim.x - 2, aim.y, { hp: 70, lastDamagedAt: stage.time - 2 } as Partial<Unit>);
+    const d2 = addUnit(stage, aim.x - 1, aim.y, { hp: 80 });
+    addSquad(stage, [d1.id, d2.id], { id: "I1", leaderName: "Aiden" });
+    for (let i = 0; i < 4; i++) {
+      const e = addUnit(stage, aim.x + 2 + i, aim.y + 1, { team: "enemy" } as Partial<Unit>);
+      reveal(stage, e.position.x, e.position.y);
+    }
+    const f1 = addUnit(stage, 300, 150);
+    const f2 = addUnit(stage, 302, 150);
+    addSquad(stage, [f1.id, f2.id], { id: "T5", leaderName: "Blake" });
+
+    const stageDigest = buildDigest(stage, [], [], []);
+    // Same assembly shape as ChatPanel: envelope + "\n" + section lines.
+    const stageView: ViewportGeometry = { x: (aim.x - 10) * 32, y: (aim.y - 7) * 32, zoom: 1, canvasWidth: 20 * 32, canvasHeight: 14 * 32 };
+    const pvLines = buildPlayerViewLines(stage, stageView, []);
+    check("S0 stage: 镜头对准 resolves", pvLines.some((l) => l === `镜头对准: ${aimName}`), pvLines.join(" | "));
+    const pv = `\n${pvLines.join("\n")}`;
+    console.log(`   [stage] aim=${aimName}@(${aim.x},${aim.y})`);
+    for (const l of pvLines) console.log(`   [pv] ${l}`);
+
+    // Five phrasings (Step B lesson: acceptance on ONE phrasing hid a 5/5
+    // hole) — status, ownership, holdability, an order with a bare pronoun,
+    // and a consultative ask.
+    const DEIXIS_QS: Array<[string, string, number]> = [
+      ["S1", "这边怎么样？", 3],
+      ["S2", "那儿是谁的？", 2],
+      ["S3", "这块守得住吗？", 2],
+      ["S4", "把他们撤回来", 2],
+      ["S5", "你觉得这边需要加把手吗？", 2],
+    ];
+    for (const [tag, q, n] of DEIXIS_QS) {
+      for (let i = 1; i <= n; i++) {
+        const r = await ask(stageDigest + pv, q, "combat");
+        const brief = r.brief ?? "";
+        check(`${tag}.${i} deixis reply exists`, brief.length > 0, JSON.stringify(r).slice(0, 120));
+        console.log(`   [${tag}.${i} "${q}" opts=${(r.options ?? []).length}] ${brief}`);
+      }
+    }
+
+    // Hijack guard: camera parked on the COASTAL fight while the DIALOGUE is
+    // about the ridge — "他们" must bind to the conversation (Carter/ridge),
+    // not the lens. Context block precedes PLAYER_VIEW, same order ChatPanel
+    // assembles them. ×3, human-read.
+    const hj = twoFrontCrisis();
+    const hjDigest = buildDigest(hj, [], [], []);
+    const hjView: ViewportGeometry = { x: (COASTAL.x - 10) * 32, y: (COASTAL.y - 7) * 32, zoom: 1, canvasWidth: 20 * 32, canvasHeight: 14 * 32 };
+    const hjPvLines = buildPlayerViewLines(hj, hjView, []);
+    const hjPv = hjPvLines.length > 0 ? `\n${hjPvLines.join("\n")}` : "";
+    console.log(`   [hijack stage] camera=北线coastal, dialogue=山脊线`);
+    for (const l of hjPvLines) console.log(`   [hj pv] ${l}`);
+    const ridgeCtx = `\n---CONTEXT---\n[指挥官] 山脊线现在什么情况？\n[参谋] 山脊线交战中，Carter的I2分队两个单位在顶，对面兵力相近。\n`;
+    for (let i = 1; i <= 3; i++) {
+      const r = await ask(hjDigest + ridgeCtx + hjPv, "他们还顶得住吗？", "combat");
+      const brief = r.brief ?? "";
+      check(`S6.${i} hijack-guard reply exists`, brief.length > 0, JSON.stringify(r).slice(0, 120));
+      console.log(`   [S6.${i}] ${brief}`);
+    }
+  }
+
   console.log(failCount === 0 ? "\nREAL-MODEL GATE PASS" : `\nREAL-MODEL FAILURES: ${failCount}`);
   process.exit(failCount === 0 ? 0 : 1);
 }
