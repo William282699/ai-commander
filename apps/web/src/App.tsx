@@ -49,6 +49,7 @@ function PanelApp() {
       <ChatPanel
         getState={bridge.getState}
         getSelectedUnitIds={bridge.getSelectedUnitIds}
+        getViewport={bridge.getViewport}
         onCreateSquad={bridge.onCreateSquad}
         canCreateSquad={bridge.canCreateSquad}
         onDeclareWar={bridge.onDeclareWar}

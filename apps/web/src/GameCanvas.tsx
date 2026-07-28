@@ -72,7 +72,7 @@ import {
   processPressureDirector,
   resetPressureDirector,
 } from "@ai-commander/core";
-import type { AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot, StrategicSituation } from "@ai-commander/core";
+import type { AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot, StrategicSituation, ViewportGeometry } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
 import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
@@ -737,6 +737,9 @@ const NON_CAPTURABLE_TYPES = new Set([
 export interface GameBridge {
   getState: () => GameState | null;
   getSelectedUnitIds: () => number[];
+  /** Presence Step C: read-only raw viewport geometry (camera px + canvas px).
+   *  All conversion/spatial work lives in core — the render layer only reports. */
+  getViewport: () => ViewportGeometry | null;
   onCreateSquad: (owner: "chen" | "marcus" | "emily") => void;
   canCreateSquad: () => boolean;
   onDeclareWar: () => void;
@@ -980,6 +983,17 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     return inputRef.current.selectedUnitIds;
   }, []);
 
+  // Presence Step C: camera is a LOCAL of the game-loop effect (a closure
+  // capture here would silently freeze the opening frame), so that effect
+  // parks the live object on this ref and the getter reads it per call.
+  const cameraRef = useRef<Camera | null>(null);
+  const getViewport = useCallback((): ViewportGeometry | null => {
+    const cam = cameraRef.current;
+    const canvas = canvasRef.current;
+    if (!cam || !canvas) return null;
+    return { x: cam.x, y: cam.y, zoom: cam.zoom, canvasWidth: canvas.width, canvasHeight: canvas.height };
+  }, []);
+
   // Stable callback: check if selected units can form a squad
   // Phase 2.5: allow already-squadded units (they will be extracted)
   const canCreateSquad = useCallback((): boolean => {
@@ -1103,6 +1117,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     window.__GAME_BRIDGE__ = {
       getState: () => stateRef.current,
       getSelectedUnitIds,
+      getViewport,
       onCreateSquad: handleCreateSquad,
       canCreateSquad,
       onDeclareWar: handleDeclareWar,
@@ -1114,7 +1129,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       messageStore: messageStoreModule,
     };
     return () => { delete window.__GAME_BRIDGE__; };
-  }, [getSelectedUnitIds, handleCreateSquad, canCreateSquad, handleDeclareWar, handleSelectUnits, handleMoveSquad, handleRemoveFromParent, handleRenameLeader, handleTransferSquad]);
+  }, [getSelectedUnitIds, getViewport, handleCreateSquad, canCreateSquad, handleDeclareWar, handleSelectUnits, handleMoveSquad, handleRemoveFromParent, handleRenameLeader, handleTransferSquad]);
 
   // Day 12: restart callback
   // Day 13: Facility context menu action handlers
@@ -1243,6 +1258,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
 
     // Camera: center on player HQ
     const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
+    cameraRef.current = camera; // live object — input listeners mutate it in place
     const hqCenter = scenarioId === "el_alamein" ? { x: 430, y: 90 } : { x: 100, y: 7 };
     centerCameraOn(camera, hqCenter.x, hqCenter.y, canvas.width, canvas.height, initialState.mapWidth, initialState.mapHeight);
 
@@ -2262,6 +2278,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     return () => {
       cancelAnimationFrame(animId);
       cleanup();
+      cameraRef.current = null;
       window.removeEventListener("resize", resize);
     };
   }, []);
@@ -2281,6 +2298,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         <ChatPanel
           getState={() => stateRef.current}
           getSelectedUnitIds={getSelectedUnitIds}
+          getViewport={getViewport}
           onCreateSquad={handleCreateSquad}
           canCreateSquad={canCreateSquad}
           onDeclareWar={handleDeclareWar}

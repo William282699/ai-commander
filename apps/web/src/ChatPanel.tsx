@@ -17,7 +17,8 @@ declare global {
   }
 }
 import { OrgTree } from "./OrgTree";
-import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine } from "@ai-commander/core";
+import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines } from "@ai-commander/core";
+import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
@@ -554,11 +555,33 @@ function CmdAvatar({ cmd, size, ring }: { cmd: Commander; size: number; ring: st
   );
 }
 
+// ── Presence Step C: PLAYER_VIEW envelope block ──
+// Assembled HERE, not inside the digest builders, so BOTH routes (DigestV1
+// and BattleContextV2) carry it while the builders' existing sections stay
+// byte-untouched. Selected ids ride the envelope's own ---PLAYER_SELECTED---
+// section wherever the route renders one; only a route without that section
+// (BattleContextV2) receives them through PLAYER_VIEW — judged by looking at
+// the built envelope itself, never by re-deriving the route decision
+// (digestHelper owns that decision alone).
+function buildPlayerViewContext(
+  state: GameState,
+  baseDigest: string,
+  view: ViewportGeometry | null,
+  selectedIds: number[],
+): string {
+  if (!view) return "";
+  const idsForView = baseDigest.includes("---PLAYER_SELECTED---") ? [] : selectedIds;
+  const lines = buildPlayerViewLines(state, view, idsForView);
+  return lines.length > 0 ? `\n${lines.join("\n")}` : "";
+}
+
 // ── Props ──
 
 interface Props {
   getState: () => GameState | null;
   getSelectedUnitIds?: () => number[];
+  /** Presence Step C: raw viewport geometry from the render layer (null until ready). */
+  getViewport?: () => ViewportGeometry | null;
   onCreateSquad?: (owner: "chen" | "marcus" | "emily") => void;
   canCreateSquad?: () => boolean;
   onDeclareWar?: () => void;
@@ -575,7 +598,7 @@ interface DisplayResponse extends AdvisorResponse {
 }
 
 
-export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCreateSquad, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
+export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
   // ── Panel collapse state ──
   const [collapsed, setCollapsed] = useState(false);
 
@@ -1091,8 +1114,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
       pushContext(channelContextRef.current, ch, { role: "user", text: userMsg, time: state.time });
     }
 
-    // Build digest from combat channel (most complete battlefield view)
-    const baseDigest = buildDigestForChannel(state, "combat", commanderMemoryRef.current.combat);
+    // Build digest from combat channel (most complete battlefield view).
+    // Step C: water the existing selected-ids pipe + append PLAYER_VIEW.
+    const groupSelectedIds = getSelectedUnitIds?.() ?? [];
+    const baseDigest = buildDigestForChannel(state, "combat", commanderMemoryRef.current.combat, groupSelectedIds);
+    const playerViewContext = buildPlayerViewContext(state, baseDigest, getViewport?.() ?? null, groupSelectedIds);
     // Compressed cross-channel context so LLM knows what was discussed before
     const groupCtx = formatGroupContext(channelContextRef.current);
 
@@ -1101,7 +1127,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          digest: baseDigest,
+          digest: baseDigest + playerViewContext,
           message: userMsg,
           styleNote,
           channelContext: groupCtx,
@@ -1239,7 +1265,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     if (activeEsc && (isCancelReply(userMsg) || isDeclineReply(userMsg))) clearEscalation(ch);
 
     commanderMemoryRef.current[ch].playerIntent = userMsg;
-    const baseDigest = buildDigestForChannel(state, ch, commanderMemoryRef.current[ch]);
+    // Step C: water the existing selected-ids pipe (DigestV1's PLAYER_SELECTED
+    // section renders from it; BattleContextV2 ignores it and gets the ids via
+    // PLAYER_VIEW below instead).
+    const cmdSelectedIds = getSelectedUnitIds?.() ?? [];
+    const baseDigest = buildDigestForChannel(state, ch, commanderMemoryRef.current[ch], cmdSelectedIds);
     const contextSuffix = formatContext(channelContextRef.current, ch);
     // 地基二: tag the request with the live contract ONLY when it is visible
     // (awaiting_reply), same channel, unexpired. voicing is never tagged — a
@@ -1252,7 +1282,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, onCreateSquad, canCrea
     const pendingContext = pendingTag && pcAtSend
       ? `\n---PENDING_CONTRACT---\n待确认命令(id=${pcAtSend.id}): ${pcAtSend.summary}\n指挥官下面这句话可能是对这份待确认命令的答复。`
       : "";
-    const digest = baseDigest + contextSuffix + threadContext + escalationContext + pendingContext;
+    // Step C: dialogue focus (---ACTIVE_ESCALATION---) and camera focus
+    // (---PLAYER_VIEW---) ride the envelope SIDE BY SIDE — the model judges
+    // which one the player's words attach to; the engine classifies nothing.
+    const playerViewContext = buildPlayerViewContext(state, baseDigest, getViewport?.() ?? null, cmdSelectedIds);
+    const digest = baseDigest + contextSuffix + threadContext + escalationContext + playerViewContext + pendingContext;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
     // Append declined context if player is refining a rejected proposal
