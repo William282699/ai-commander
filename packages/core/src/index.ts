@@ -36,7 +36,7 @@ export { selectEscalationEvent } from "./director";
 // Step 7c.1 — escalation grounding facts (pure; for LLM voice, not a template)
 export { frontEscalationFacts } from "./director";
 export { buildFrontEscalationPayload } from "./frontEscalationPayload";
-export { previewHighImpactIntent } from "./tacticalPlanner";
+export { previewHighImpactIntent, isAllFrontHint } from "./tacticalPlanner";
 export type { HighImpactPreview } from "./tacticalPlanner";
 export { buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine } from "./commandPreflight";
 export type { PreflightConcernFacts, PreflightFrontDelta, PreflightFrontStatus } from "./commandPreflight";

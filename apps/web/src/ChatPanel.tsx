@@ -17,7 +17,7 @@ declare global {
   }
 }
 import { OrgTree } from "./OrgTree";
-import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines } from "@ai-commander/core";
+import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines, isAllFrontHint } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
@@ -306,10 +306,22 @@ function canAutoExecute(
     // With fromSquad set (squad ID / leader name / commander key), resolveIntent
     // restricts "all" to units under that squad/commander — not global conscription,
     // so it's safe to auto-execute. Unscoped "all" IS a global draft → force confirm.
+    //
+    // dispatch-scope-v1 2b: retreat/defend join the list — the 74/85 full-army
+    // retreat auto-executed because the type list stopped at attack/sabotage.
+    // For these two, a NAMED fromFront (not the 全军 entrance) is real scope:
+    // since the scope fix, "all" resolves within that front, so the headline
+    // 「让北线前哨的部队都撤退」 executes in one sentence (砍卡法) while the
+    // unscoped / 全军-entrance retreat must first voice its numbers. The
+    // attack/sabotage condition is byte-unchanged on purpose — loosening their
+    // confirm for front-scoped orders is a separate, user-callable decision.
     const qty = intent.quantity;
+    const frontScoped = typeof intent.fromFront === "string" &&
+      intent.fromFront.trim().length > 0 && !isAllFrontHint(intent.fromFront);
     const isHighImpact = !intent.fromSquad &&
       (qty === "all" || qty === "most") &&
-      (intent.type === "attack" || intent.type === "sabotage");
+      ((intent.type === "attack" || intent.type === "sabotage") ||
+        ((intent.type === "retreat" || intent.type === "defend") && !frontScoped));
     if (isHighImpact) return { auto: false, reason: "high_impact" };
 
     if (intent.fromSquad) {

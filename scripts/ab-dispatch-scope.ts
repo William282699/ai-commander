@@ -269,6 +269,49 @@ function runSynthetic(): void {
       r.assignedUnitIds.length === a.allIds.length, `assigned ${r.assignedUnitIds.length}/${a.allIds.length}`);
   }
 
+  // ── Preview coverage (2b): the confirm flow can now SEE a retreat ──
+  console.log("\n== previewHighImpactIntent retreat coverage ==");
+
+  // P1) Unscoped full-army retreat previews: every dispatchable unit in the
+  //     assignments, and the preview is PURE (state byte-identical after).
+  {
+    const a = threeGroupArmy();
+    const before = JSON.stringify({
+      units: Array.from(a.state.units.values()),
+      diagnostics: a.state.diagnostics,
+      missions: a.state.missions,
+    });
+    const pv = previewHighImpactIntent({ type: "retreat", toFront: "ea_player_hq", quantity: "all" } as Intent, a.state, a.state.style);
+    const after = JSON.stringify({
+      units: Array.from(a.state.units.values()),
+      diagnostics: a.state.diagnostics,
+      missions: a.state.missions,
+    });
+    check("P1 unscoped retreat+all previews the full draft",
+      pv !== null && pv.assignedUnitIds.length === a.allIds.length,
+      `assigned ${pv?.assignedUnitIds.length ?? "null"}/${a.allIds.length}`);
+    check("P2 preview is pure (state untouched)", before === after);
+  }
+
+  // P3) Preview mirrors execution EXACTLY — same ids the real resolveIntent
+  //     would move (ONE pipeline, two callers: planRetreat).
+  {
+    const a = threeGroupArmy();
+    const intent = { type: "retreat", toFront: "ea_player_hq", quantity: "all" } as Intent;
+    const pv = previewHighImpactIntent(intent, a.state, a.state.style);
+    const r = run(a, intent);
+    const pvIds = [...(pv?.assignedUnitIds ?? [])].sort((x, y) => x - y).join(",");
+    const exIds = [...r.assignedUnitIds].sort((x, y) => x - y).join(",");
+    check("P3 preview ids === execution ids", pvIds === exIds && pvIds.length > 0, `pv=[${pvIds}] exec=[${exIds}]`);
+  }
+
+  // P4) fromSquad stays outside the preview gate (scoped = not high impact).
+  {
+    const a = threeGroupArmy();
+    const pv = previewHighImpactIntent({ type: "retreat", fromSquad: "I1", quantity: "all" } as Intent, a.state, a.state.style);
+    check("P4 fromSquad retreat never previews", pv === null);
+  }
+
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);
   process.exit(failCount === 0 ? 0 : 1);
 }

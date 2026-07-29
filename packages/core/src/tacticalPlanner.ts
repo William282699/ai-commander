@@ -101,7 +101,10 @@ function splitFrontHints(value: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-function isAllFrontHint(value: string): boolean {
+// Exported (dispatch-scope-v1 2b): the ChatPanel high-impact gate must judge
+// "is this fromFront actually the full-army entrance" with the SAME predicate
+// the resolver uses — a second copy would drift.
+export function isAllFrontHint(value: string): boolean {
   const n = normalizeFrontHint(value);
   return (
     n === "all" ||
@@ -489,10 +492,29 @@ export function previewHighImpactIntent(
   const qty = rawIntent.quantity;
   if (rawIntent.fromSquad) return null;
   if (qty !== "all" && qty !== "most") return null;
-  if (rawIntent.type !== "attack" && rawIntent.type !== "sabotage") return null;
+  // dispatch-scope-v1 2b: retreat joins the coverage list — the 74/85
+  // full-army retreat sailed through precisely because this line stopped at
+  // attack/sabotage, so the confirm flow had no numbers to voice.
+  if (rawIntent.type !== "attack" && rawIntent.type !== "sabotage" && rawIntent.type !== "retreat") return null;
 
   // Mirror resolveIntent's entry: locations normalized before dispatch.
   const intent = normalizeIntentLocations(rawIntent, state);
+
+  if (intent.type === "retreat") {
+    const plan = planRetreat(intent, state, style, undefined, undefined);
+    if (!plan.ok) return null;
+    const assignments = plan.orders.flatMap((o) =>
+      o.target !== null ? o.unitIds.map((id) => ({ unitId: id, target: o.target! })) : [],
+    );
+    if (assignments.length === 0) return null;
+    return {
+      targetName: describeTargetForLog(intent, state),
+      assignments,
+      assignedUnitIds: assignments.map((a) => a.unitId),
+      requestedCount: plan.requestedCount,
+      skippedCount: plan.skippedCount,
+    };
+  }
 
   const plan =
     intent.type === "sabotage"
@@ -583,24 +605,35 @@ function resolveDefend(
   return { orders, log: `${units.length} 个单位就地设防`, degraded: false };
 }
 
-function resolveRetreat(
+// ── Retreat planning (dispatch-scope-v1 2b): same ONE-pipeline pattern as
+// planAttack/planSabotage — resolveRetreat AND previewHighImpactIntent both
+// call planRetreat, so the preview can never drift from what executes. Pure:
+// the unitType-bypass diagnostic is returned as a flag and pushed only by the
+// resolver (preview's gate excludes fromSquad, so it never trips it anyway).
+type RetreatPlan =
+  | { ok: false; fail: "no_source"; error: string; unitTypeBypassed: boolean }
+  | { ok: false; fail: "no_units"; unitTypeBypassed: boolean }
+  | { ok: false; fail: "impassable"; unitTypeBypassed: boolean }
+  | { ok: true; orders: Order[]; requestedCount: number; skippedCount: number; unitTypeBypassed: boolean };
+
+function planRetreat(
   intent: Intent,
   state: GameState,
   style: StyleParams,
   exclude?: ReadonlySet<number>,
   selectedUnitIds?: readonly number[],
-): Omit<ResolveResult, "assignedUnitIds"> {
+): RetreatPlan {
   const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
-    return { orders: [], log: source.error, degraded: true };
+    return { ok: false, fail: "no_source", error: source.error, unitTypeBypassed: false };
   }
 
   let units = source.units;
+  let unitTypeBypassed = false;
   if (intent.unitType) {
     const filtered = units.filter((u) => matchesUnitTypeHint(u, intent.unitType!));
     if (filtered.length === 0 && intent.fromSquad && units.length > 0) {
-      pushDiagnostic(state, "UNITTYPE_FILTER_BYPASSED",
-        `分队 ${intent.fromSquad} 无 ${intent.unitType} 类型单位，已忽略类型筛选`);
+      unitTypeBypassed = true;
     } else {
       units = filtered;
     }
@@ -610,7 +643,7 @@ function resolveRetreat(
   units = units.slice(0, count);
 
   if (units.length === 0) {
-    return { orders: [], log: "无可用单位执行撤退", degraded: true };
+    return { ok: false, fail: "no_units", unitTypeBypassed };
   }
 
   // Retreat target: move towards player HQ (dynamic lookup)
@@ -642,15 +675,47 @@ function resolveRetreat(
   }
 
   if (orders.length === 0) {
-    return { orders: [], log: "撤退目标地形不可达，无可执行命令", degraded: true };
+    return { ok: false, fail: "impassable", unitTypeBypassed };
   }
 
-  const skipped = units.length - orders.length;
-  const skipNote = skipped > 0 ? `（${skipped} 个单位因地形限制未下达）` : "";
-
   return {
+    ok: true,
     orders,
-    log: `命令 ${orders.length} 个单位撤退至安全区域${skipNote}`,
+    requestedCount: units.length,
+    skippedCount: units.length - orders.length,
+    unitTypeBypassed,
+  };
+}
+
+function resolveRetreat(
+  intent: Intent,
+  state: GameState,
+  style: StyleParams,
+  exclude?: ReadonlySet<number>,
+  selectedUnitIds?: readonly number[],
+): Omit<ResolveResult, "assignedUnitIds"> {
+  const plan = planRetreat(intent, state, style, exclude, selectedUnitIds);
+
+  if (plan.unitTypeBypassed) {
+    pushDiagnostic(state, "UNITTYPE_FILTER_BYPASSED",
+      `分队 ${intent.fromSquad} 无 ${intent.unitType} 类型单位，已忽略类型筛选`);
+  }
+
+  if (!plan.ok) {
+    switch (plan.fail) {
+      case "no_source":
+        return { orders: [], log: plan.error, degraded: true };
+      case "no_units":
+        return { orders: [], log: "无可用单位执行撤退", degraded: true };
+      case "impassable":
+        return { orders: [], log: "撤退目标地形不可达，无可执行命令", degraded: true };
+    }
+  }
+
+  const skipNote = plan.skippedCount > 0 ? `（${plan.skippedCount} 个单位因地形限制未下达）` : "";
+  return {
+    orders: plan.orders,
+    log: `命令 ${plan.orders.length} 个单位撤退至安全区域${skipNote}`,
     degraded: false,
   };
 }
