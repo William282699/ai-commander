@@ -247,6 +247,28 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
       unit.waypoints = [];
       if (unit.state === "defending") {
         // Stay defending
+      } else if (
+        unit.state === "retreating" &&
+        unit.team === "player" &&
+        unit.orders[0]?.action === "retreat"
+      ) {
+        // retreat-semantics-v1 修法2: an arrived retreat HOLDS its landing
+        // point instead of falling to idle — idle gets flipped to attacking
+        // by auto-engage (combat.ts) and the unit walks straight back into
+        // the fight it just left. The one-shot retreat order becomes a
+        // persistent defend order anchored here, so the existing defend
+        // machinery applies unchanged: fight back in range, return to post
+        // when the engagement ends, never chase. Gated to PLAYER units
+        // carrying a real retreat ORDER — enemy retreats (enemyAI re-tasks
+        // from idle) and autoBehavior's stateful order-less retreats keep
+        // their legacy idle landing.
+        unit.state = "defending";
+        unit.orders = [{
+          unitIds: [unit.id],
+          action: "defend",
+          target: { ...unit.position },
+          priority: unit.orders[0].priority,
+        }];
       } else if (unit.state !== "patrolling") {
         unit.state = "idle";
         clearOneShotOrders(unit);

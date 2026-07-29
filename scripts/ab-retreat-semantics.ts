@@ -15,7 +15,7 @@
 //   --print-snapshot  print current per-verb order JSON (for snapshot refresh)
 // ============================================================
 
-import { createInitialGameState, resolveIntent, applyOrders } from "@ai-commander/core";
+import { createInitialGameState, resolveIntent, applyOrders, updateFog } from "@ai-commander/core";
 import { tick } from "../packages/core/src/sim";
 import type { GameState, Unit, Squad, Intent } from "@ai-commander/shared";
 
@@ -228,6 +228,99 @@ function runSynthetic(): void {
     check("D4 destination retreat still front-scoped",
       r.assignedUnitIds.length === ids.length && r.assignedUnitIds.every((id) => allowed.has(id)),
       `assigned=${r.assignedUnitIds.length}`);
+  }
+
+  // ── 修法2 contract: arrival holds the post; the U-turn loop is dead ──
+  console.log("\n== arrival semantics (到位守住；掉头闭环) ==");
+
+  // Production pumps fog every frame (GameCanvas); without it player units
+  // can never SEE the intruder — combat targeting is fog-gated — and A2
+  // would pass vacuously with a unit that "holds its post" only because it
+  // is blind. Refresh once per sim-second.
+  const pump = (s: GameState, seconds: number): void => {
+    const dt = 0.1;
+    let sinceFog = 1;
+    for (let t = 0; t < seconds; t += dt) {
+      if (sinceFog >= 1) { updateFog(s); sinceFog = 0; }
+      tick(s, dt);
+      sinceFog += dt;
+    }
+  };
+
+  // A1) Arrived retreat → defending, one-shot converted to a defend order
+  //     anchored at the landing point.
+  {
+    const { state, ids } = coastalArmy();
+    const r = resolveIntent({ type: "retreat", fromFront: "front_coastal", toFront: "front_south", quantity: "all" } as Intent, state, state.style);
+    applyOrders(state, r.orders);
+    pump(state, 200); // long transit: coastal → southern front (~170s at infantry speed)
+    const units = ids.map((id) => state.units.get(id)!).filter((u) => u && u.state !== "dead");
+    const arrived = units.filter((u) => u.state === "defending");
+    const converted = arrived.filter((u) => u.orders[0]?.action === "defend" && u.orders[0]?.target !== null &&
+      Math.hypot(u.orders[0].target!.x - u.position.x, u.orders[0].target!.y - u.position.y) <= 1);
+    check("A1 arrival → defending with a defend order anchored at the post",
+      units.length === ids.length && arrived.length === units.length && converted.length === arrived.length,
+      `states=${units.map((u) => u.state).join(",")} orders=${units.map((u) => u.orders[0]?.action ?? "none").join(",")}`);
+  }
+
+  // A2) U-turn loop dead (本级核心): arrive → enemy appears in perception →
+  //     pump → unit fights back AND ends near its post, never wandering back.
+  {
+    const { state, ids } = coastalArmy();
+    const r = resolveIntent({ type: "retreat", fromFront: "front_coastal", toFront: "front_south", quantity: "all" } as Intent, state, state.style);
+    applyOrders(state, r.orders);
+    pump(state, 200);
+    const posts = ids.map((id) => ({ id, post: { ...state.units.get(id)!.position } }));
+    // One weak intruder INSIDE attack range (2 tiles). Garrison discipline
+    // (守军纪律, combat/autoBehavior) deliberately ignores a merely-standing
+    // enemy beyond weapon range — the fight-back proof needs a real contact.
+    const p0 = posts[0].post;
+    const enemy = addUnit(state, p0.x + 2, p0.y, { team: "enemy", hp: 10, maxHp: 10 } as Partial<Unit>);
+    pump(state, 60);
+    const enemyAfter = state.units.get(enemy.id);
+    const enemyDead = !enemyAfter || enemyAfter.hp <= 0 || enemyAfter.state === "dead";
+    const drift = posts.map(({ id, post }) => {
+      const u = state.units.get(id)!;
+      return Math.hypot(u.position.x - post.x, u.position.y - post.y);
+    });
+    check("A2 fights back (the intruder dies)", enemyDead, `enemy hp=${enemyAfter?.hp}`);
+    check("A2b holds the post after the engagement (max drift ≤ 6 tiles)",
+      drift.every((d) => d <= 6), `drift=${drift.map((d) => d.toFixed(1)).join(",")}`);
+  }
+
+  // A3) Default (no-destination) retreat arrival converts too — the short
+  //     HQ-step landing must not fall idle and get re-engaged.
+  {
+    const { state, ids } = coastalArmy();
+    const r = resolveIntent({ type: "retreat", fromFront: "front_coastal", quantity: "all" } as Intent, state, state.style);
+    applyOrders(state, r.orders);
+    pump(state, 60);
+    const states = ids.map((id) => state.units.get(id)!.state);
+    check("A3 default retreat arrival → defending (not idle)",
+      states.every((st) => st === "defending"), `states=${states.join(",")}`);
+  }
+
+  // A4) Splash guards: an ENEMY retreat order and a non-retreat one-shot
+  //     (attack_move arrival on empty ground) keep their legacy idle landing.
+  {
+    nextId = 9000;
+    const s = emptyBattlefield();
+    s.time = 120;
+    const e = addUnit(s, 300, 30, { team: "enemy" } as Partial<Unit>);
+    e.orders = [{ unitIds: [e.id], action: "retreat", target: { x: 300, y: 20 }, priority: "medium" }];
+    e.state = "retreating";
+    e.target = { x: 300, y: 20 };
+    const p = addUnit(s, 320, 30);
+    p.orders = [{ unitIds: [p.id], action: "attack_move", target: { x: 320, y: 22 }, priority: "medium" }];
+    p.state = "moving";
+    p.target = { x: 320, y: 22 };
+    pump(s, 30);
+    check("A4 enemy retreat still lands idle (enemyAI re-tasks from idle)",
+      s.units.get(e.id)!.state === "idle" && s.units.get(e.id)!.orders.length === 0,
+      `state=${s.units.get(e.id)!.state}`);
+    check("A4b player attack_move arrival unchanged (idle, orders cleared)",
+      s.units.get(p.id)!.state === "idle" && s.units.get(p.id)!.orders.length === 0,
+      `state=${s.units.get(p.id)!.state}`);
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);
