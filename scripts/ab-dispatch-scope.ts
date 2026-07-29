@@ -19,7 +19,7 @@
 //   ./node_modules/.bin/tsx scripts/ab-dispatch-scope.ts --synthetic
 // ============================================================
 
-import { createInitialGameState, resolveIntent, previewHighImpactIntent, buildDigest } from "@ai-commander/core";
+import { createInitialGameState, resolveIntent, previewHighImpactIntent, buildDigest, findFront } from "@ai-commander/core";
 import type { GameState, Unit, Squad, Intent } from "@ai-commander/shared";
 
 // ── Harness ──
@@ -316,10 +316,121 @@ function runSynthetic(): void {
   process.exit(failCount === 0 ? 0 : 1);
 }
 
+// ── --real: LLM intents in, LOCAL resolveIntent counts out ──
+// The server only supplies the intents; every verdict below re-resolves them
+// against this worktree's engine and counts assignedUnitIds + source sets.
+// (家法: never judge from the brief/label — the transcript is logged for the
+// human read, the numbers are the assertion.)
+
+interface AdvisorOptionLite {
+  label?: string;
+  intent?: Intent;
+  intents?: Intent[];
+}
+interface AdvisorRespLite {
+  brief?: string;
+  responseType?: string;
+  options?: AdvisorOptionLite[];
+}
+
+// Membership judged with the PRODUCTION front matcher (findFront) — a bench-
+// local fuzzy copy already burned us once: "southern" missed id "front_south",
+// returned zero bboxes, and every correctly-dispatched unit counted as spilled.
+function frontBboxesOf(state: GameState, hint: string): [number, number, number, number][] {
+  const front = findFront(state, hint);
+  if (!front) throw new Error(`bench hint "${hint}" matches no front — fix the fixture, not the assertion`);
+  return front.regionIds
+    .map((rid) => state.regions.get(rid))
+    .filter((r): r is NonNullable<typeof r> => r !== undefined)
+    .map((r) => r.bbox);
+}
+
+function insideAny(state: GameState, id: number, bboxes: [number, number, number, number][]): boolean {
+  const u = state.units.get(id);
+  if (!u) return false;
+  return bboxes.some(([x1, y1, x2, y2]) =>
+    u.position.x >= x1 && u.position.x <= x2 && u.position.y >= y1 && u.position.y <= y2);
+}
+
+async function runReal(): Promise<void> {
+  const cmdUrl = process.env.COMMAND_URL ?? "http://localhost:3004/api/command";
+  console.log(`== dispatch-scope real-model probes (${cmdUrl}) ==`);
+  console.log("   (LLM supplies intents; THIS worktree's resolveIntent counts the units)");
+
+  // The original incident's stage: the el_alamein opening army, untouched.
+  const state = createInitialGameState("el_alamein");
+  const digest = buildDigest(state, [], [], []);
+  let totalDispatchable = 0;
+  state.units.forEach((u) => {
+    if (u.team === "player" && u.state !== "dead" && u.type !== "commander" && !u.manualOverride) totalDispatchable++;
+  });
+  console.log(`   [stage] opening army, ~${totalDispatchable} dispatchable units`);
+
+  const ask = async (message: string): Promise<AdvisorRespLite> => {
+    const res = await fetch(cmdUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ digest, message, styleNote: "risk=0.50 focus=0.50 obj=0.50 cas=0.50", channel: "combat", sessionId: "ab-dispatch" }),
+    });
+    return (await res.json()) as AdvisorRespLite;
+  };
+
+  // Mirrors the ChatPanel high-impact gate for retreat: an unscoped mass
+  // retreat is NOT auto-executed — it must first voice its numbers.
+  const wouldConfirmFirst = (i: Intent): boolean =>
+    !i.fromSquad && (i.quantity === "all" || i.quantity === "most") &&
+    !(typeof i.fromFront === "string" && i.fromFront.trim().length > 0);
+
+  const CASES: Array<[string, string, string]> = [
+    ["R1", "让北线前哨的部队都撤退", "front_coastal"],
+    ["R2", "南线那些人全部后撤", "front_south"],
+  ];
+  for (const [tag, phrase, frontHint] of CASES) {
+    for (let i = 1; i <= 3; i++) {
+      const resp = await ask(phrase);
+      const opt = resp.options?.[0];
+      const intents = opt?.intents?.length ? opt.intents : opt?.intent ? [opt.intent] : [];
+      if (intents.length === 0) {
+        check(`${tag}.${i} "${phrase}" produced an executable intent`, false,
+          `responseType=${resp.responseType} brief=${(resp.brief ?? "").slice(0, 80)}`);
+        continue;
+      }
+      // Fresh state per resolution — resolveIntent mutates nothing we assert
+      // on, but a clean stage keeps every sample independent.
+      const s = createInitialGameState("el_alamein");
+      const assigned = new Set<number>();
+      const reserved = new Set<number>();
+      let gated = false;
+      for (const it of intents) {
+        if (it.type === "retreat" && wouldConfirmFirst(it)) { gated = true; continue; }
+        const r = resolveIntent(it, s, s.style, reserved);
+        for (const id of r.assignedUnitIds) { assigned.add(id); reserved.add(id); }
+      }
+      const bboxes = frontBboxesOf(s, frontHint);
+      const outside = Array.from(assigned).filter((id) => !insideAny(s, id, bboxes));
+      const fullArmy = assigned.size >= Math.floor(totalDispatchable * 0.8);
+      const ok = gated ? assigned.size === 0 : assigned.size > 0 && outside.length === 0 && !fullArmy;
+      check(
+        `${tag}.${i} "${phrase}" → scope holds`,
+        ok,
+        `assigned=${assigned.size}/${totalDispatchable} outside_front=${outside.length} gated=${gated}`,
+      );
+      console.log(
+        `   [${tag}.${i}] intents=${JSON.stringify(intents)} → assigned=${assigned.size}/${totalDispatchable}` +
+        ` outside=${outside.length}${gated ? " (unscoped → confirm-first, 0 auto-moved)" : ""}`,
+      );
+    }
+  }
+
+  console.log(failCount === 0 ? "\nREAL-MODEL GATE PASS" : `\nREAL-MODEL FAILURES: ${failCount}`);
+  process.exit(failCount === 0 ? 0 : 1);
+}
+
 // ── Entry ──
 
 const mode = process.argv[2];
 if (mode === "--synthetic") runSynthetic();
+else if (mode === "--real") void runReal();
 else {
   console.log("usage: tsx scripts/ab-dispatch-scope.ts --synthetic | --real");
   process.exit(2);
