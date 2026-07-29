@@ -196,14 +196,68 @@ function runSynthetic(): void {
       r.assignedUnitIds.length === 0 && r.degraded === true, `assigned=${r.assignedUnitIds.length} log=${r.log}`);
   }
 
-  // ── Disease fingerprint (observations, asserted by the contract section
-  //    once the knife lands): fromFront + quantity=all today IGNORES the front
-  //    — including the EMPTY-front case N6 protects, because the shortcut
-  //    fires before every guard.
+  // ── Contract: quantity never widens scope (the knife itself) ──
+  console.log("\n== dispatch-scope contract (作用域归 fromFront，数量归 quantity) ==");
+
+  // C1-C4) The headline: fromFront + quantity=all for every unit-moving type
+  //        → ALL of that front, ONLY that front. (attack/recon need a target.)
+  {
+    const cases: Array<[string, Intent]> = [
+      ["C1 retreat", { type: "retreat", fromFront: "front_coastal", toFront: "ea_player_hq", quantity: "all" } as Intent],
+      ["C2 attack", { type: "attack", fromFront: "front_coastal", toFront: "front_ridge", quantity: "all" } as Intent],
+      ["C3 defend", { type: "defend", fromFront: "front_coastal", toFront: "front_ridge", quantity: "all" } as Intent],
+      ["C4 recon", { type: "recon", fromFront: "front_coastal", toFront: "front_ridge", quantity: "all" } as Intent],
+    ];
+    for (const [name, intent] of cases) {
+      const a = threeGroupArmy();
+      const r = run(a, intent);
+      const src = sourceSetOk(r.assignedUnitIds, a.coastalIds);
+      check(`${name} fromFront+all → all of the front, only the front`,
+        r.assignedUnitIds.length === a.coastalIds.length && src.ok,
+        `assigned ${r.assignedUnitIds.length}/${a.coastalIds.length}; ${src.detail}`);
+    }
+  }
+
+  // C5) quantity=most narrows WITHIN the front (ceil(4*0.75)=3), never beyond.
   {
     const a = threeGroupArmy();
-    const r = run(a, { type: "retreat", fromFront: "front_coastal", toFront: "ea_player_hq", quantity: "all" } as Intent);
-    console.log(`   [fingerprint] 北线retreat+all assigned=${r.assignedUnitIds.length} (front has ${a.coastalIds.length}, army has ${a.allIds.length})`);
+    const r = run(a, { type: "retreat", fromFront: "front_coastal", quantity: "most" } as Intent);
+    const src = sourceSetOk(r.assignedUnitIds, a.coastalIds);
+    check("C5 fromFront+most → 3/4 of the front, only the front",
+      r.assignedUnitIds.length === 3 && src.ok, `assigned ${r.assignedUnitIds.length}; ${src.detail}`);
+  }
+
+  // C6) Multi-front hint + all → the union of the NAMED fronts, nothing else.
+  {
+    const a = threeGroupArmy();
+    const r = run(a, { type: "retreat", fromFront: "front_coastal,front_ridge", quantity: "all" } as Intent);
+    const allowed = [...a.coastalIds, ...a.ridgeIds];
+    const src = sourceSetOk(r.assignedUnitIds, allowed);
+    check("C6 two named fronts + all → their union only",
+      r.assignedUnitIds.length === allowed.length && src.ok,
+      `assigned ${r.assignedUnitIds.length}/${allowed.length}; ${src.detail}`);
+  }
+
+  // C7) Empty named front + all → the :1447 guard is now REACHABLE: error,
+  //     zero units, never the global pool (N6's dead-code end, revived).
+  {
+    const a = threeGroupArmy();
+    for (const id of a.coastalIds) a.state.units.delete(id);
+    a.state.squads = [];
+    const r = run(a, { type: "retreat", fromFront: "front_coastal", quantity: "all" } as Intent);
+    check("C7 empty front retreat+all → error, not global",
+      r.assignedUnitIds.length === 0 && r.degraded === true, `assigned=${r.assignedUnitIds.length} log=${r.log}`);
+  }
+
+  // C8) Boundary documented, deliberately UNCHANGED this rung (proposal names
+  //     :1405 only): toFront-only + quantity=all still broadens to the global
+  //     pool (:1467 wantsBroadDispatch). Locked so any future change to it is
+  //     a conscious one.
+  {
+    const a = threeGroupArmy();
+    const r = run(a, { type: "retreat", toFront: "ea_player_hq", quantity: "all" } as Intent);
+    check("C8 toFront-only retreat+all keeps its current broad dispatch (out of scope)",
+      r.assignedUnitIds.length === a.allIds.length, `assigned ${r.assignedUnitIds.length}/${a.allIds.length}`);
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);

@@ -1395,14 +1395,14 @@ function resolveSourceUnitsRaw(
 
   // ── fromFront: strict ──
   if (fromHint) {
-    // Common LLM output: "all", "全军", etc. Treat as global pool.
+    // Common LLM output: "all", "全军", etc. Treat as global pool. This is
+    // the ONE full-army entrance (dispatch-scope-v1 ruling 2026-07-28):
+    // scope belongs to fromFront/fromSquad, quantity only says how many OF
+    // that pool — 「北线的部队都撤退」的"都"管北线那些部队，不管全军。The old
+    // quantity=all/most → global shortcut that lived here overrode the named
+    // front and full-army-retreated 74/85 on a one-outpost order; it also made
+    // the two mis-retreat guards below dead code under "all".
     if (isAllFrontHint(fromHint)) {
-      return { units: getAllAvailablePlayerUnits(state) };
-    }
-
-    // Day 10.5 Fix 3: quantity=all/most with fromFront → global pool
-    // fromFront is a hint only; user intent is "all units", not "only those in this bbox"
-    if (intent.quantity === "all" || intent.quantity === "most") {
       return { units: getAllAvailablePlayerUnits(state) };
     }
 
