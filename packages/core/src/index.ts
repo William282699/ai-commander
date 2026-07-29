@@ -5,7 +5,7 @@ export { processRegen } from "./regen";
 export { createFogState, updateFog } from "./fog";
 export { processEconomy, enqueueProduction, canUnitMove, isMechanized } from "./economy";
 export { processEnemyAI, resetEnemyAITimer, resetEnemyProdToggle, resetAttackWaveState } from "./enemyAI";
-export { processAutoBehavior, resetAutoBehaviorTimer } from "./autoBehavior";
+export { processAutoBehavior, resetAutoBehaviorTimer, chaseAnchorHomeOf } from "./autoBehavior";
 export { processMissions, createMission, resetMissionCounter } from "./missions";
 export type { CreateMissionOpts } from "./missions";
 export { createDefaultStyle, updateStyleParam } from "./styleEngine";

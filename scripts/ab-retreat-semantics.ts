@@ -15,7 +15,7 @@
 //   --print-snapshot  print current per-verb order JSON (for snapshot refresh)
 // ============================================================
 
-import { createInitialGameState, resolveIntent, applyOrders, updateFog } from "@ai-commander/core";
+import { createInitialGameState, resolveIntent, applyOrders, updateFog, processAutoBehavior, resetAutoBehaviorTimer, chaseAnchorHomeOf } from "@ai-commander/core";
 import { tick } from "../packages/core/src/sim";
 import type { GameState, Unit, Squad, Intent } from "@ai-commander/shared";
 
@@ -237,12 +237,20 @@ function runSynthetic(): void {
   // can never SEE the intruder — combat targeting is fog-gated — and A2
   // would pass vacuously with a unit that "holds its post" only because it
   // is blind. Refresh once per sim-second.
+  // retreat-semantics fix1: processAutoBehavior is NOT part of tick() — only
+  // GameCanvas calls it (GameCanvas.tsx:1586, right after tick). A pump that
+  // omits it silently tests a world where the 2-second micro-behavior batch
+  // never runs, so chase anchors are never pinned, never consumed and never
+  // leash-checked. That omission is why THREE harnesses (mine, the audit's and
+  // the implementer's) all passed while the live game marched the force back
+  // to its old post. Loop order mirrors production.
   const pump = (s: GameState, seconds: number): void => {
     const dt = 0.1;
     let sinceFog = 1;
     for (let t = 0; t < seconds; t += dt) {
       if (sinceFog >= 1) { updateFog(s); sinceFog = 0; }
       tick(s, dt);
+      processAutoBehavior(s, dt);
       sinceFog += dt;
     }
   };
@@ -321,6 +329,113 @@ function runSynthetic(): void {
     check("A4b player attack_move arrival unchanged (idle, orders cleared)",
       s.units.get(p.id)!.state === "idle" && s.units.get(p.id)!.orders.length === 0,
       `state=${s.units.get(p.id)!.state}`);
+  }
+
+  // ── fix1 contract: a retreat drops its chase anchor (the 70-tile U-turn) ──
+  //
+  // The disease: a pre-retreat 4a/4b/4c reaction pins an anchor ("home") at the
+  // unit's post. A player-ordered retreat CARRIES an order, so P3 returned
+  // before the anchor-cleanup block could see it. On arrival the unit turned
+  // defending, the leash measured ~70 tiles to that expired home, and the whole
+  // force marched back to the front it had just left — in formation.
+  //
+  // ★ These assertions read the ANCHOR, not the position. Position is a lagging
+  //   signal that arrives seconds later and can be masked or mimicked; every
+  //   earlier harness asserted on position and passed vacuously.
+  console.log("\n== chase-anchor lifecycle (撤退即废锚；掉头的真凶) ==");
+
+  /** Pin a real anchor the way the game does: an in-action enemy inside
+   *  ENGAGE_RANGE makes 4a move the garrison out, and pinEpisode records the
+   *  pre-move position as "home". Returns the provoking enemy. */
+  const provoke = (s: GameState, ids: number[]): Unit => {
+    resetAutoBehaviorTimer();
+    const u0 = s.units.get(ids[0])!;
+    const foe = addUnit(s, u0.position.x + 5, u0.position.y, { team: "enemy" } as Partial<Unit>);
+    foe.state = "attacking";        // isThreatInAction ⇒ true
+    foe.attackTarget = ids[0];
+    updateFog(s);
+    processAutoBehavior(s, 2.5);    // one 2-second batch
+    return foe;
+  };
+
+  // N0) The fixture must actually create the disease. Every previous harness
+  //     built its units and issued the retreat with no prior fight, so no
+  //     anchor ever existed — the bug was structurally untestable there.
+  //     If N0 fails, N1-N2 prove nothing.
+  {
+    const { state, ids } = coastalArmy();
+    provoke(state, ids);
+    const anchored = ids.filter((id) => chaseAnchorHomeOf(id) !== null);
+    check("N0 pre-retreat combat pins chase anchors (fixture reproduces the disease)",
+      anchored.length === ids.length,
+      `anchored ${anchored.length}/${ids.length}`);
+  }
+
+  // N1) ★ The fix itself: once the unit is retreating, the anchor is gone —
+  //     asserted on the anchor, one batch after the order.
+  {
+    const { state, ids } = coastalArmy();
+    const foe = provoke(state, ids);
+    state.units.delete(foe.id); // isolate: the retreat, not the enemy, clears it
+    const r = resolveIntent({ type: "retreat", fromFront: "front_coastal", toFront: "front_south", quantity: "all" } as Intent, state, state.style);
+    applyOrders(state, r.orders);
+    processAutoBehavior(state, 2.5);
+    const still = ids.filter((id) => chaseAnchorHomeOf(id) !== null);
+    check("N1 ★ a player-ordered retreat drops the anchor (was unreachable behind P3)",
+      still.length === 0, `${still.length} anchors survived`);
+  }
+
+  // N2) The symptom the player actually saw: with the anchor gone and NO enemy
+  //     anywhere, nothing may drag the force back toward its old post. No
+  //     enemies means the ONLY thing that could move them is the leash, so the
+  //     positional read here is decisive rather than lagging.
+  {
+    const { state, ids } = coastalArmy();
+    const home = { ...state.units.get(ids[0])!.position };
+    const foe = provoke(state, ids);
+    state.units.delete(foe.id);
+    const r = resolveIntent({ type: "retreat", fromFront: "front_coastal", toFront: "front_south", quantity: "all" } as Intent, state, state.style);
+    applyOrders(state, r.orders);
+    const landing = new Map(r.orders.map((o) => [o.unitIds[0], { ...o.target! }]));
+    pump(state, 300);
+    const drifted = ids.filter((id) => {
+      const u = state.units.get(id)!;
+      const dLand = Math.hypot(u.position.x - landing.get(id)!.x, u.position.y - landing.get(id)!.y);
+      const dHome = Math.hypot(u.position.x - home.x, u.position.y - home.y);
+      return dHome < dLand; // closer to the OLD post than to the landing = marched back
+    });
+    check("N2 no march back to the pre-retreat post (300s, no enemies present)",
+      drifted.length === 0,
+      `${drifted.length}/${ids.length} ended nearer the old post`);
+  }
+
+  // N3) Anti-kiting protection must SURVIVE the fix: re-engaging at the new
+  //     landing pins a fresh anchor there. Deleting anchors too eagerly would
+  //     silently remove the leash that stops units being walked off their post.
+  {
+    const { state, ids } = coastalArmy();
+    const foe = provoke(state, ids);
+    state.units.delete(foe.id);
+    const r = resolveIntent({ type: "retreat", fromFront: "front_coastal", toFront: "front_south", quantity: "all" } as Intent, state, state.style);
+    applyOrders(state, r.orders);
+    pump(state, 300);
+    const post = { ...state.units.get(ids[0])!.position };
+    provoke(state, ids); // fresh fight at the NEW post
+    const homes = ids.map((id) => chaseAnchorHomeOf(id)).filter((h): h is NonNullable<typeof h> => h !== null);
+    const atNewPost = homes.filter((h) => Math.hypot(h.x - post.x, h.y - post.y) <= 12);
+    check("N3 re-engaging at the landing pins a FRESH anchor there (leash intact)",
+      homes.length > 0 && atNewPost.length === homes.length,
+      `${atNewPost.length}/${homes.length} anchored near the new post`);
+  }
+
+  // N4) No over-deletion: a unit that is NOT retreating keeps its anchor.
+  {
+    const { state, ids } = coastalArmy();
+    provoke(state, ids);
+    processAutoBehavior(state, 2.5); // another batch, still no retreat
+    const kept = ids.filter((id) => chaseAnchorHomeOf(id) !== null);
+    check("N4 non-retreating units keep their anchor (fix deletes only on retreat)",
+      kept.length === ids.length, `kept ${kept.length}/${ids.length}`);
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);

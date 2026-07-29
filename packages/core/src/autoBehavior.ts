@@ -41,6 +41,22 @@ export function resetAutoBehaviorTimer(): void {
   chaseAnchors.clear();
 }
 
+/**
+ * Read-only introspection of a unit's chase anchor ("home"), null when none.
+ * Test-facing (retreat-semantics fix1) and deliberately NOT a mutator.
+ *
+ * Why it exists: the anchor is the state that actually decides whether a unit
+ * marches back to an old post, but it is invisible from the outside — the only
+ * observable is a position change that arrives many seconds later and can be
+ * masked or mimicked by other systems. Asserting on position alone let this
+ * whole bug class through three separate test harnesses. Benches assert on the
+ * anchor itself; position stays a corroborating signal, never the verdict.
+ */
+export function chaseAnchorHomeOf(unitId: number): Position | null {
+  const ep = chaseAnchors.get(unitId);
+  return ep ? { ...ep.home } : null;
+}
+
 const LOW_HP_THRESHOLD = 0.25;   // 25% maxHP
 const ENGAGE_RANGE = 8;          // tiles
 // PATROL_RANGE removed (Day 9.5 Batch A: idle auto-patrol disabled)
@@ -150,6 +166,25 @@ function runAutoBehavior(state: GameState): void {
       return; // Short-circuit
     }
 
+    // ── Priority 2.5 (retreat-semantics fix1): a RETREATING unit drops its
+    // chase anchor HERE, before P3 can short-circuit.
+    //
+    // The rule itself is not new — the BUG-2 round-2 block below already says
+    // "the episode is dropped when the unit low-HP-retreats (never fight the
+    // retreat)". But it sits AFTER the active-order early return, so it was
+    // only ever reachable for P2's order-less retreats. A player-ordered
+    // retreat CARRIES an order, so P3 returned first and the stale anchor —
+    // pinned at the unit's pre-retreat post by an earlier 4a/4b/4c reaction —
+    // survived the entire retreat. On arrival the unit turned defending, the
+    // leash check below measured ~70 tiles to that OLD home, and :208 marched
+    // the whole force back to the front it had just left, in formation.
+    // The player ordering a move IS the authoritative ruling on where "home"
+    // is; re-engaging at the new landing point pins a fresh anchor there, so
+    // the anti-kiting protection is unchanged — only the expired home dies.
+    if (unit.state === "retreating") {
+      chaseAnchors.delete(unit.id);
+    }
+
     // ── Priority 3: active orders skip (C1 PRIMARY check) ──
     // unit.orders.length > 0 is the primary check.
     // State checks are advisory only, never override C1/C5.
@@ -181,10 +216,12 @@ function runAutoBehavior(state: GameState): void {
     // BUG-2 round 2 — chase-episode anchor management. The episode is dropped
     // when the unit low-HP-retreats (never fight the retreat — an anchor
     // surviving into P2 would ping-pong the wounded unit between HQ and its
-    // old post), when an EXTERNAL command redirects it (its movement target is
-    // neither our chase target nor home — player intent wins; our own chase
-    // movement must NOT be mistaken for that, hence the chaseTgt bookkeeping),
-    // or once it makes it back home (episode over).
+    // old post; retreat-semantics fix1 now also drops it at Priority 2.5 so
+    // ORDER-CARRYING retreats reach the same rule — the check stays here too,
+    // harmless and defensive), when an EXTERNAL command redirects it (its
+    // movement target is neither our chase target nor home — player intent
+    // wins; our own chase movement must NOT be mistaken for that, hence the
+    // chaseTgt bookkeeping), or once it makes it back home (episode over).
     let episode = chaseAnchors.get(unit.id) ?? null;
     if (episode) {
       const near = (p: Position | null, q: Position | null): boolean =>
