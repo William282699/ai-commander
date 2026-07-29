@@ -178,7 +178,8 @@ patrolRadius: for type=patrol. small=5, medium=10, large=15. Default 10.
 INTENT TYPE SEMANTICS — 按"动作意图"的语义判断，不按动词字面。**不要做关键词匹配**，用你对中英文军事命令的语义理解来判断意图：
 - attack：命令含 destination + 敌对/进攻意图（前往敌区、压制、突袭、夺取等）。
 - defend：命令含 destination + 防守/驻扎/集结/会合意图（前往友方或中立点就位、设防、待命于该点等）。defend 自动处理"移动+驻守"两件事，无需额外 move 意图。
-- retreat / recon / patrol：撤回 / 侦察 / 持续巡逻。
+- retreat：**脱离接触**。撤退天生可以没有目的地——**不带目的地的撤退是完整命令，不是意图不明，不要走澄清**：destination 字段全部省略，退向哪个安全方向是引擎的事，不要替玩家发明一个。玩家点名了撤往哪才填 toFront/targetFacility/targetRegion（一边脱离接触一边转移到该点）。它与 attack/defend 的真实差别：撤退途中不被敌人勾住。
+- recon / patrol：侦察 / 持续巡逻。
 - hold：**仅当命令明确表示"原地不动/暂停/standby"且无 destination** 时使用——这是**罕见情况**。任何含 destination 的命令一律是 MOVEMENT（attack 或 defend），即使动词字面含"停下/集合/集结"等静止语义的词，整体意图依然是 MOVEMENT，**绝不是 hold**。
   ❌ "Aiden 去 point1 集合" → hold（错，含 destination 必是 MOVEMENT）
   ✅ "Aiden 去 point1 集合" → defend（去那里就位，destination 是友方集结点）

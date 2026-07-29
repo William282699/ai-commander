@@ -327,6 +327,109 @@ function runSynthetic(): void {
   process.exit(failCount === 0 ? 0 : 1);
 }
 
+// ── --real: LLM intents in, LOCAL resolve + COORDINATE verdicts out ──
+
+interface AdvisorOptionLite { label?: string; intent?: Intent; intents?: Intent[] }
+interface AdvisorRespLite { brief?: string; responseType?: string; options?: AdvisorOptionLite[] }
+
+const hasDestinationFields = (i: Intent): boolean =>
+  !!(i.toFront || i.targetFacility || i.targetRegion);
+
+/** Production-derived center for an intent's destination fields: a single-unit
+ *  defend probe on a CLEAN stage (same scenario ⇒ same fronts/facilities). */
+function probeCenter(src: Intent): { x: number; y: number } | null {
+  nextId = 9000;
+  const s = emptyBattlefield();
+  const u = addUnit(s, COASTAL.x, COASTAL.y);
+  addSquad(s, [u.id], { id: "I1", leaderName: "Aiden" });
+  const probe = {
+    type: "defend",
+    fromSquad: "I1",
+    toFront: src.toFront,
+    targetFacility: src.targetFacility,
+    targetRegion: src.targetRegion,
+    quantity: "all",
+  } as Intent;
+  const r = resolveIntent(probe, s, s.style);
+  return r.orders[0]?.target ?? null;
+}
+
+async function runReal(): Promise<void> {
+  const cmdUrl = process.env.COMMAND_URL ?? "http://localhost:3004/api/command";
+  console.log(`== retreat-semantics real-model probes (${cmdUrl}) ==`);
+  console.log("   (LLM supplies intents; local engine resolves; COORDINATES are the verdict)");
+
+  const stage = createInitialGameState("el_alamein");
+  const digest = buildDigestLocal(stage, [], [], []);
+
+  const ask = async (message: string): Promise<AdvisorRespLite> => {
+    const res = await fetch(cmdUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ digest, message, styleNote: "risk=0.50 focus=0.50 obj=0.50 cas=0.50", channel: "combat", sessionId: "ab-retreat" }),
+    });
+    return (await res.json()) as AdvisorRespLite;
+  };
+
+  // Baseline fact (probed against the pre-rung server, 3/3): a bare scope-less
+  // 「快撤」 has NEVER auto-executed — the staff asks 哪支部队/撤往哪 (NOOP).
+  // 手感一字不改 therefore means: NOOP-with-a-question stays legal, and IF a
+  // retreat sheet is produced it must not carry an invented destination
+  // (the v1 prompt line briefly made the model add toFront:hq → 74 units
+  // marched to the HQ door — caught by this probe, fixed in the prompt).
+  const CASES: Array<[string, string, "destination" | "default" | "bare"]> = [
+    ["R1", "中央前哨的部队，全部撤回到南线前哨", "destination"],
+    ["R2", "快撤", "bare"],
+    ["R2b", "北线的部队先撤下来", "default"],
+    ["R3", "北线的都撤回总部", "destination"],
+  ];
+  for (const [tag, phrase, kind] of CASES) {
+    for (let i = 1; i <= 3; i++) {
+      const resp = await ask(phrase);
+      const opt = resp.options?.[0];
+      const intents = opt?.intents?.length ? opt.intents : opt?.intent ? [opt.intent] : [];
+      const retreats = intents.filter((it) => it.type === "retreat");
+      if (kind === "bare" && retreats.length === 0) {
+        // Scope-less bare retreat: asking back is the baseline behavior.
+        check(`${tag}.${i} "${phrase}" → asks for scope (baseline) or clean retreat`, true);
+        console.log(`   [${tag}.${i}] NOOP (asks back) brief=${(resp.brief ?? "").slice(0, 60)}`);
+        continue;
+      }
+      if (retreats.length === 0) {
+        check(`${tag}.${i} "${phrase}" produced a retreat intent`, false,
+          `responseType=${resp.responseType} intents=${JSON.stringify(intents)}`);
+        continue;
+      }
+      const s = createInitialGameState("el_alamein");
+      const it = retreats[0];
+      const r = resolveIntent(it, s, s.style);
+      const landings = r.orders.map((o) => o.target).filter((t): t is { x: number; y: number } => t !== null);
+      if (kind === "destination") {
+        const center = hasDestinationFields(it) ? probeCenter(it) : null;
+        const ok = center !== null && r.assignedUnitIds.length > 0 &&
+          landings.every((t) => Math.hypot(t.x - center.x, t.y - center.y) <= 6);
+        check(`${tag}.${i} "${phrase}" → units land at the NAMED place`, ok,
+          `intent=${JSON.stringify(it)} center=${JSON.stringify(center)} landings=${JSON.stringify(landings.slice(0, 3))}…`);
+        console.log(`   [${tag}.${i}] n=${r.assignedUnitIds.length} center=${JSON.stringify(center)} first=${JSON.stringify(landings[0])}`);
+      } else {
+        // default/bare with a sheet: the DEFAULT branch must run — no invented
+        // destination fields; per-unit toward-HQ steps.
+        const ok = !hasDestinationFields(it) && r.assignedUnitIds.length > 0 && landings.length > 0;
+        check(`${tag}.${i} "${phrase}" → default branch (no invented destination)`, ok,
+          `intent=${JSON.stringify(it)}`);
+        console.log(`   [${tag}.${i}] n=${r.assignedUnitIds.length} first=${JSON.stringify(landings[0])}`);
+      }
+    }
+  }
+
+  console.log(failCount === 0 ? "\nREAL-MODEL GATE PASS" : `\nREAL-MODEL FAILURES: ${failCount}`);
+  process.exit(failCount === 0 ? 0 : 1);
+}
+
+// buildDigest lives in core; imported lazily here to keep the synthetic path
+// free of front-power mutation.
+import { buildDigest as buildDigestLocal } from "@ai-commander/core";
+
 // keep unused imports referenced until later commits wire them in
 void applyOrders;
 void tick;
@@ -336,7 +439,8 @@ void tick;
 const mode = process.argv[2];
 if (mode === "--synthetic") runSynthetic();
 else if (mode === "--print-snapshot") printSnapshot();
+else if (mode === "--real") void runReal();
 else {
-  console.log("usage: tsx scripts/ab-retreat-semantics.ts --synthetic | --print-snapshot");
+  console.log("usage: tsx scripts/ab-retreat-semantics.ts --synthetic | --print-snapshot | --real");
   process.exit(2);
 }
