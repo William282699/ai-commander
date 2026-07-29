@@ -51,6 +51,14 @@ Step C 收口四笔新账（2026-07-28 用户手测挖出，审核已核代码�
 三笔待办（审核判定 07-28）：**① toFront-only + quantity=all 仍广派**（审核实测 74 个；提案只点名 :1405，C8 已把现状钉死——另立一刀）。**② 说明书纠偏（审核实测为准）：「全军后撤」的确认闸 13 次只响 2 次**——LLM 通常把它拆成三条前线级单子（coastal/center/south），每条 frontScoped=true 闸放行；结果仍正确（32 单位分三线撤），非危险，是"宣传与实际不符"；按家法「清楚就办」全军后撤本该直接办——**改说明书，不改闸**。**③ 两个待用户拍板先记着别动**：「您没点名部队，我按战况替您安排」罐头台词在玩家明说"全军"时照发；attack/sabotage 确认闸未放宽造成不对称（「北线的部队全部撤退」一句话就办、「北线的部队全部进攻」还要确认）——是否接受待裁。
 bench 家法新条目（写在 ab-dispatch-scope.ts 注释）：会动兵的断言必须 resolveIntent 数 assignedUnitIds+核来源集合；bench 自造 fuzzy front 匹配当场烧手（"southern"配不上 id"front_south"，空 bbox 把全对判全错）——成员判定必须用生产 findFront，hint 配不上就 throw。
 
+### ✅ 撤退语义 V1（retreat-semantics-v1，与派兵作用域同分支）【收口 2026-07-29，tag `retreat-semantics-v1-done` @87ea941，用户手测 PASS；随本分支合 main】
+一句话：撤退是 15 个动词里唯一不读目的地的，且撤到位就被拽回原战线。提案 `RETREAT_SEMANTICS_V1_PROPOSAL.md`，修法三条（用户拍板）：①planRetreat 走共用 resolveTarget 读目的地——**仅在真有 destination 字段时调**（resolveTarget:1286 的 fromFront 兜底会把撤退送回出发战线）；无目的地默认分支与其余四动词落点**改前快照逐字钉死**（「快撤」手感一字不改）②sim.ts 到达分支一处（授权的执行链触碰）：retreating+player+retreat 单三重闸 → 转 defending+锚定落点的持久 defend 单；敌军撤退与 autoBehavior 无单撤退保留落 idle 防溅射③目的地==出发战线→忽略走默认。四 commit `fdbfe12`（改前快照先行）/`0b903a2`（读目的地+三护栏）/`503f01c`（到位守住+掉头泵真 sim）/`673a9e0`（prompt 语义行三稿+真模型 11/12：目的地句落点全中；光杆「快撤」基线本就是 NOOP 反问；记账=R2b「撤下来」1/3 被模型先验填 toFront:hq、「南线前哨」被填成 front 非前哨设施的粒度账）。
+**fix1 `87ea941`（实机掉头破案，Opus 5 实施+Fable 审核+用户手测 PASS）**：真凶=autoBehavior 的 **chaseAnchors 模块级 Map**——撤退前接战让 4a/4b/4c 钉下"家"，而"retreating→删锚"规则原在 **P3 带单早退之后**（注释 :182 "never fight the retreat" 自证意图，实现位置让带单撤退永远够不到=死代码），到达后 :201 leash 量出离家 70 格 → :208 整队"送回家"——各回各的战前站位＝队形复原＝实机看到的"整齐"掉头；修前 idle 落地同病（老"开走很远才掉头"同源）。修法＝把该判定**提到 P2.5**（一处插入零删除；4a/4b/4c 规则与阈值逐字未动；防风筝使命完整——新落点再接战会钉新家）。披露：`chaseAnchorHomeOf` 只读探针（返回拷贝，先例 resetAutoBehaviorTimer）——锚是决定掉头的隐藏状态，bench 断言锚本身，位置只作旁证。负对照实证：关修复 N1 FAIL(4 锚存活)+N2 FAIL(4/4 走回旧岗)，N0/N3/N4 仍过。
+**★结构原因（三方台架为何全瞎）**：`tick()` 不含 `processAutoBehavior`——只有 GameCanvas.tsx:1586 调。凡建立在裸 tick() 上的泵帧都跑在"2 秒微行为批次从不运行"的世界里，锚从未被钉、被消费、被 leash 检查。ab-retreat-semantics 泵帧已改为镜像生产循环序（tick+processAutoBehavior+updateFog）。
+**新账（审核推演+帧级实证，main 同病，另立一刀本级不动）**：攻击单变体 stale-anchor walk-home 仍活——externallyRedirected 对带单单位同样不可达，「北线的部队全部进攻中央」打完**整队自己走回北线**（实测 t=60s 到达/t=90s 回程/t=120s 归位）。候选修法＝externallyRedirected 一并提到 P3 前，或把 P2.5 泛化成"带单且单目标≠家→废锚"（"player intent wins" 注释的本意）。证据档 `~/MyProjects/_archive/retreat-uturn-20260729/`。
+
+**家法（第五次同形栽跟头后立）：判据要测效果，不测措辞。** 六条：①会动兵的断言数 assignedUnitIds+核实际落点坐标，不看回执台词②有隐藏状态的病，断言状态本身，位置只作旁证（滞后指标）③**第一机制陷阱**：复现出一个能产生同方向症状的机制≠破案——必须对齐**幅度**（净位移 vs 机制上界）与**终点**（复现终态 vs 实机截图逐点比对）④**N0 式台架自证**：复现台架先证明它结构上表达得出这个病⑤回归测试必做**负对照**：关掉修复重跑，新断言要真的 FAIL⑥谁报的数字，另一方必须重算才作数。（前四次同形：Step B 正则两向饱和/验收单一问法/R12 关键词表/只读台词漏"字面对执行错"。）
+
 ### ⏭ 第 7 级 — Capture 停滞反馈
 实证 bug：占领圈 80% 静默卡死（半径 1.5 格+无对抗判定，战后单位散圈外，零反馈）。修法=停滞时 Chen 报一句+战后归位。Capture 雷区：必须一页纸提案先行（2026-07 大修撤回教训，归档 `~/MyProjects/_archive/capture-overhaul-20260717`）。
 
