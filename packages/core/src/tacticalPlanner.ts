@@ -614,7 +614,7 @@ type RetreatPlan =
   | { ok: false; fail: "no_source"; error: string; unitTypeBypassed: boolean }
   | { ok: false; fail: "no_units"; unitTypeBypassed: boolean }
   | { ok: false; fail: "impassable"; unitTypeBypassed: boolean }
-  | { ok: true; orders: Order[]; requestedCount: number; skippedCount: number; unitTypeBypassed: boolean };
+  | { ok: true; orders: Order[]; requestedCount: number; skippedCount: number; unitTypeBypassed: boolean; destinationNamed: boolean };
 
 function planRetreat(
   intent: Intent,
@@ -644,6 +644,51 @@ function planRetreat(
 
   if (units.length === 0) {
     return { ok: false, fail: "no_units", unitTypeBypassed };
+  }
+
+  // ── retreat-semantics-v1 修法1: a NAMED destination routes through the ONE
+  // resolver every other verb uses (resolveTarget). Gated on destination
+  // fields actually being present — resolveTarget's fromFront fallback would
+  // otherwise send the force back INTO the front it is leaving, and a bare
+  // 「快撤」 must keep the legacy toward-HQ step byte-for-byte
+  // (snapshot-pinned in ab-retreat-semantics).
+  let destination: Position | null =
+    intent._targetPos || intent.targetFacility || intent.targetRegion || intent.toFront
+      ? resolveTarget(intent, state)
+      : null;
+
+  // 修法3: destination inside the departure front = a mis-filled order that
+  // would pin the force where it already stands — ignore it, use the default.
+  if (destination !== null && intent.fromFront) {
+    const departFront = findFront(state, intent.fromFront);
+    if (departFront) {
+      const d = destination;
+      const inDepart = departFront.regionIds
+        .map((rid) => state.regions.get(rid))
+        .filter((r): r is NonNullable<typeof r> => r !== undefined)
+        .some((r) => d.x >= r.bbox[0] && d.x <= r.bbox[2] && d.y >= r.bbox[1] && d.y <= r.bbox[3]);
+      if (inDepart) destination = null;
+    }
+  }
+
+  if (destination !== null) {
+    // Same spread/passability pipeline as defend (radius 1.0 — a retreat
+    // regroups tight); action stays "retreat" so the no-chase transit
+    // semantics (sim.ts / combat.ts retreating exemptions) hold en route.
+    const spread = createOrdersWithSpread(
+      units, destination, state, "retreat", mapUrgency(intent.urgency), 1.0,
+    );
+    if (spread.orders.length === 0) {
+      return { ok: false, fail: "impassable", unitTypeBypassed };
+    }
+    return {
+      ok: true,
+      orders: spread.orders,
+      requestedCount: units.length,
+      skippedCount: spread.skippedCount,
+      unitTypeBypassed,
+      destinationNamed: true,
+    };
   }
 
   // Retreat target: move towards player HQ (dynamic lookup)
@@ -684,6 +729,7 @@ function planRetreat(
     requestedCount: units.length,
     skippedCount: units.length - orders.length,
     unitTypeBypassed,
+    destinationNamed: false,
   };
 }
 
@@ -713,9 +759,13 @@ function resolveRetreat(
   }
 
   const skipNote = plan.skippedCount > 0 ? `（${plan.skippedCount} 个单位因地形限制未下达）` : "";
+  // Named destination → the receipt names what actually executes (the 74/85
+  // family's other face was a receipt reciting the order sheet); default stays
+  // byte-identical 安全区域.
+  const dest = plan.destinationNamed ? describeTargetForLog(intent, state) : "安全区域";
   return {
     orders: plan.orders,
-    log: `命令 ${plan.orders.length} 个单位撤退至安全区域${skipNote}`,
+    log: `命令 ${plan.orders.length} 个单位撤退至${dest}${skipNote}`,
     degraded: false,
   };
 }

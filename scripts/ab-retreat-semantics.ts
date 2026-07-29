@@ -155,6 +155,81 @@ function runSynthetic(): void {
       `actual=${actual.slice(0, 120)}…`);
   }
 
+  // ── 修法1+3 contract: destination read, coordinates verified ──
+  console.log("\n== retreat destination contract (读目的地；目的地==出发地→默认) ==");
+
+  // Expected destination center derived from PRODUCTION code, not re-math:
+  // a single-unit defend at the same toFront lands on resolveTarget's center
+  // (spread of 1 unit = the center itself, modulo passability).
+  const expectedCenter = (toFront: string): { x: number; y: number } => {
+    nextId = 9000;
+    const s = emptyBattlefield();
+    const u = addUnit(s, COASTAL.x, COASTAL.y);
+    addSquad(s, [u.id], { id: "I1", leaderName: "Aiden" });
+    const r = resolveIntent({ type: "defend", fromFront: "front_coastal", toFront, quantity: "all" } as Intent, s, s.style);
+    if (r.orders.length !== 1 || !r.orders[0].target) throw new Error(`no center probe for ${toFront}`);
+    return r.orders[0].target;
+  };
+  const near = (p: { x: number; y: number }, c: { x: number; y: number }, tol: number): boolean =>
+    Math.hypot(p.x - c.x, p.y - c.y) <= tol;
+
+  // D1) retreat + toFront=front_south → every landing within spread+degrade
+  //     tolerance of the ONE resolver's center, counts+source intact.
+  {
+    const { state, ids } = coastalArmy();
+    const center = expectedCenter("front_south");
+    const r = resolveIntent({ type: "retreat", fromFront: "front_coastal", toFront: "front_south", quantity: "all" } as Intent, state, state.style);
+    const landings = r.orders.map((o) => o.target).filter((t): t is { x: number; y: number } => t !== null);
+    check("D1 retreat reads toFront: 4 units land at the named front",
+      r.assignedUnitIds.length === ids.length &&
+      landings.length === ids.length &&
+      landings.every((t) => near(t, center, 4)),
+      `center=(${center.x},${center.y}) landings=${JSON.stringify(landings)}`);
+    check("D1b transit action stays retreat (no-chase semantics)",
+      r.orders.every((o) => o.action === "retreat"));
+    check("D1c receipt names the destination, not 安全区域",
+      r.log.includes("撤退至") && !r.log.includes("安全区域"), r.log);
+  }
+
+  // D2) targetFacility destination (normalizeIntentLocations moves a facility
+  //     put in toFront) — landings at the facility.
+  {
+    const { state, ids } = coastalArmy();
+    const r = resolveIntent({ type: "retreat", fromFront: "front_coastal", toFront: "ea_player_hq", quantity: "all" } as Intent, state, state.style);
+    const hq = state.facilities.get("ea_player_hq");
+    if (!hq) throw new Error("no ea_player_hq facility");
+    const landings = r.orders.map((o) => o.target).filter((t): t is { x: number; y: number } => t !== null);
+    check("D2 facility destination: landings at the HQ",
+      r.assignedUnitIds.length === ids.length && landings.every((t) => near(t, hq.position, 4)),
+      `hq=(${hq.position.x},${hq.position.y}) landings=${JSON.stringify(landings)}`);
+  }
+
+  // D3) 修法3: destination == departure front → ignored, byte-identical to the
+  //     default snapshot (the toFront field changes NOTHING).
+  {
+    nextId = 9000;
+    const s = emptyBattlefield();
+    s.time = 120;
+    const ids: number[] = [];
+    for (let i = 0; i < 4; i++) ids.push(addUnit(s, COASTAL.x + i * 2, COASTAL.y).id);
+    addSquad(s, ids, { id: "I1", leaderName: "Aiden" });
+    const r = resolveIntent({ type: "retreat", fromFront: "front_coastal", toFront: "front_coastal", quantity: "all" } as Intent, s, s.style);
+    check("D3 destination==departure → default landings, byte-identical",
+      ordersKey(r.orders) === EXPECTED["retreat-default"], ordersKey(r.orders).slice(0, 120));
+  }
+
+  // D4) Scope contract survives the new branch: only the named front's units
+  //     move, even with a destination named (dispatch-scope holds through).
+  {
+    const { state, ids } = coastalArmy();
+    for (let i = 0; i < 5; i++) addUnit(state, 300 + i * 2, 150); // southern bystanders
+    const r = resolveIntent({ type: "retreat", fromFront: "front_coastal", toFront: "front_south", quantity: "all" } as Intent, state, state.style);
+    const allowed = new Set(ids);
+    check("D4 destination retreat still front-scoped",
+      r.assignedUnitIds.length === ids.length && r.assignedUnitIds.every((id) => allowed.has(id)),
+      `assigned=${r.assignedUnitIds.length}`);
+  }
+
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);
   process.exit(failCount === 0 ? 0 : 1);
 }
