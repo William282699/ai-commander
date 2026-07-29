@@ -1350,9 +1350,12 @@ function resolveSourceUnitsRaw(
   if (intent.fromSquad && typeof intent.fromSquad === "string") {
     // 1. Exact squad id
     let squad = state.squads.find((s) => s.id === intent.fromSquad);
-    // 2. Squad leader name
+    // 2. Squad leader name — case-insensitive, matching the ChatPanel gate's
+    //    predicate exactly (dispatch-scope-v1 2a: a reference the gate accepts
+    //    must also resolve here, or the two layers loud-fail inconsistently).
     if (!squad) {
-      squad = state.squads.find((s) => s.leaderName === intent.fromSquad);
+      const refLower = intent.fromSquad.toLowerCase();
+      squad = state.squads.find((s) => s.leaderName?.toLowerCase() === refLower);
     }
     if (squad) {
       // Use collectUnitsUnder for hierarchy-aware unit collection

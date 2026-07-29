@@ -1749,14 +1749,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     const intents = opt.intents ?? [opt.intent];
 
     for (const intent of intents) {
-      // Soft-fix: if fromSquad is invalid, clear it so the engine auto-selects units
+      // dispatch-scope-v1 (2a): fromSquad is a SCOPE. The old soft-fix deleted
+      // an unresolvable fromSquad and let the engine "auto-select" — which for
+      // retreat/attack + quantity=all meant the order silently went broad (the
+      // same family as the 74/85 mis-retreat). Ruling: 解析失败必须明确报错，
+      // 不许静默通过 — a missed reference costs the player one sentence; a
+      // silently widened one costs the battle.
       if (intent.fromSquad) {
         const fs = intent.fromSquad.toLowerCase();
         const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
         const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
         if (!isSquad && !isCommander) {
-          addMessage("warning", `分队 ${intent.fromSquad} 不存在，将自动分配单位`, state.time, ch, undefined, "command_ack");
-          intent.fromSquad = undefined;
+          addMessage("warning", `找不到叫「${intent.fromSquad}」的分队，命令未执行——请用编制里的编号或队长名字重新下令`, state.time, ch, undefined, "command_ack");
+          setClarification(`分队「${intent.fromSquad}」无法识别，请重述`);
+          return;
         }
       }
 

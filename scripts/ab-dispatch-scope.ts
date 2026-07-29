@@ -169,6 +169,15 @@ function runSynthetic(): void {
     check("N4 fromSquad=Aiden (leader name) retreat → exactly the squad",
       rName.assignedUnitIds.length === b.coastalIds.length && s2.ok,
       `assigned ${rName.assignedUnitIds.length}/${b.coastalIds.length}; ${s2.detail}`);
+    // N4b) Case drift ("aiden") resolves too — the engine's leaderName match
+    //      must equal the ChatPanel gate's case-insensitive predicate, or a
+    //      reference the gate accepts dies downstream as a confusing error.
+    const c = threeGroupArmy();
+    const rLower = resolveIntent({ type: "retreat", fromSquad: "aiden" } as Intent, c.state, c.state.style);
+    const s3 = sourceSetOk(rLower.assignedUnitIds, c.coastalIds);
+    check("N4b fromSquad=aiden (case drift) retreat → exactly the squad",
+      rLower.assignedUnitIds.length === c.coastalIds.length && s3.ok,
+      `assigned ${rLower.assignedUnitIds.length}/${c.coastalIds.length}; ${s3.detail}`);
   }
 
   // N5) Engine-level loud failure on unresolvable fromSquad: degraded + error
