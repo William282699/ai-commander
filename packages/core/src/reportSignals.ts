@@ -5,6 +5,7 @@
 // ============================================================
 
 import type { GameState, ReportEvent, ReportEventType, Front } from "@ai-commander/shared";
+import { countCaptureContenders } from "./economy";
 
 // --- Module-level snapshot state (reset on new game) ---
 
@@ -15,6 +16,10 @@ let prevPlayerHQHp: number | null = null;
 let cooldowns = new Map<string, number>();
 let reportedHeavyLoss = new Set<string>();
 let missionProgressSnapshot = new Map<string, { progress: number; time: number }>();
+/** capture-stall-feedback-v1: per-FACILITY watch on a player capture attempt.
+ *  Keyed by facility, never by mission — the right-click capture path creates no
+ *  mission at all, so a mission-keyed detector is blind to it by construction. */
+let captureWatch = new Map<string, { peak: number; fired: number }>();
 let initialized = false;
 
 // --- Reset (must be called on restart / StrictMode remount) ---
@@ -27,6 +32,7 @@ export function resetReportSignals(): void {
   cooldowns = new Map();
   reportedHeavyLoss = new Set();
   missionProgressSnapshot = new Map();
+  captureWatch = new Map();
   initialized = false;
 }
 
@@ -109,6 +115,9 @@ export function processReportSignals(state: GameState, _dt: number): void {
 
   // 3.5. FACILITY_CONTESTED (capture-in-progress on a player facility)
   detectFacilityContested(state);
+
+  // 3.6. CAPTURE_STALLED (our own capture stopped advancing — the mirror image of 3.5)
+  detectCaptureStalled(state);
 
   // 4. MISSION_DONE / MISSION_FAILED (each mission reports once)
   detectMissionStatus(state);
@@ -267,6 +276,88 @@ function detectFacilityContested(state: GameState): void {
       );
     }
   });
+}
+
+// --- Detection: CAPTURE_STALLED (capture-stall-feedback-v1 刀A) ---
+//
+// 占领的"没进展"不是"数字没变"，是"圈子空了 / 有对手 / 对方反占了"。
+// detectMissionStalled 量的是"进度 180 秒没变"，而失守后进度是【每帧都在半速衰减】——
+// 计时器每帧被重置，最早也要"掉光归零 + 180 秒"才吭一声，报的还是过期的百分比
+// （实测：停滞后 188 秒才出一句"卡在 0%"，而玩家眼睛看到的是环快满了）。
+//
+// 三个设计点，每个都有实测依据：
+//  ①【按设施键控，不按任务】——右键占领路径根本不建 mission，任务级检测对它天生全瞎。
+//  ②【峰值更新与回落判定分开跑】——敌方反占时 capturingTeam 一帧内翻成 "enemy"、
+//    captureProgress 归零后转为敌方进度；判定若也挂在 capturingTeam==="player" 下，
+//    "对方反占"这条原因就是死代码（本仓吃过两次死代码的亏：:1447 的全军误撤保护、
+//    P3 之后的撤退删锚规则）。所以我方有效进度 = capturingTeam 是我方时的读数，否则按 0。
+//  ③【完成态必须显式排除】——占领【成功】的那一帧 captureProgress 也是 0.98 → 0
+//    （economy.ts 满格清零），纯"从峰值回落"判据会在玩家占下来的瞬间喊"停滞"。
+//    实测 6/6 会踩，T7 专项断言。
+//
+// 门槛全部先量后定（bench --print-snapshot 的环值轨迹）：
+//   PEAK_FLOOR 0.25  路过设施蹭出个位数进度不值得报
+//   DROP_FLOOR 0.05  半速衰减单帧恒 0.0100 → 0.05 = 5 帧，滤掉单位挪半格出圈的抖动，
+//                    同时比现有的 180 秒早三个数量级
+//   预算 2 次/episode + 60 秒冷却  capture mission 只有"完成/全员阵亡"两个终点、无墙钟
+//                    超时（missions.ts:79-97），纯冷却会变成永久复读机
+const CAPTURE_PEAK_FLOOR = 0.25;
+const CAPTURE_DROP_FLOOR = 0.05;
+const CAPTURE_STALL_BUDGET = 2;
+
+function detectCaptureStalled(state: GameState): void {
+  state.facilities.forEach((f) => {
+    // 已经是我方的 → 这次占领成功了（或本来就是我方），episode 结束。
+    // 这一条同时就是③的完成态护栏：成功翻转当帧 f.team 已经是 player。
+    if (f.team === "player") {
+      captureWatch.delete(f.id);
+      return;
+    }
+    if (f.hp <= 0) { captureWatch.delete(f.id); return; }
+
+    const ours = f.capturingTeam === "player" ? f.captureProgress : 0;
+    let rec = captureWatch.get(f.id);
+
+    if (!rec) {
+      if (ours > 0) captureWatch.set(f.id, { peak: ours, fired: 0 });
+      return;
+    }
+    if (ours > rec.peak) {
+      // 创新高。故意【不】重置预算：锯齿悬停时进度会反复越过旧峰值，
+      // 重置预算等于把"一次持续的停滞"拆成无限次新 episode → 复读机。
+      rec.peak = ours;
+      return;
+    }
+
+    if (rec.peak < CAPTURE_PEAK_FLOOR) return;              // 只是路过
+    if (rec.peak - ours < CAPTURE_DROP_FLOOR) return;       // 抖动，不是回落
+    if (rec.fired >= CAPTURE_STALL_BUDGET) return;          // 预算用完，闭嘴
+    if (!canFire(state, `CAPTURE_STALLED:${f.id}`, 60)) return;
+
+    // 引擎只推事实（圈内双方人头 + 进度），不下结论、不给建议。
+    // 计数与占领判定同源（economy.countCaptureContenders），不另立镜像。
+    const { player, enemy } = countCaptureContenders(state, f);
+    const pct = Math.round(ours * 100);
+    const peakPct = Math.round(rec.peak * 100);
+    let msg: string;
+    if (f.capturingTeam === "enemy") {
+      msg = `${f.name} 的占领进度归零：对方已开始反向占领（我方推进到 ${peakPct}%）。`;
+    } else if (player === 0 && enemy > 0) {
+      msg = `${f.name} 的占领进度在回落（${pct}%）：圈内没有我方单位，敌军还有 ${enemy} 个。`;
+    } else if (player === 0) {
+      msg = `${f.name} 的占领进度在回落（${pct}%）：圈内已经没有我方单位。`;
+    } else {
+      msg = `${f.name} 的占领进度在回落（${pct}%）：圈内我方 ${player} 个、敌军 ${enemy} 个，无法推进。`;
+    }
+
+    emit(state, "CAPTURE_STALLED", msg, "warning", f.id, true);
+    rec.fired++;
+  });
+
+  // 设施消失（不该发生，防御性）
+  for (const [id] of captureWatch) {
+    if (!state.facilities.has(id)) captureWatch.delete(id);
+  }
 }
 
 // --- Detection: MISSION_DONE / MISSION_FAILED ---

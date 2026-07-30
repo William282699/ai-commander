@@ -106,6 +106,9 @@ const EVENT_CHANNEL_MAP: Record<ReportEventType, Channel> = {
   FACILITY_CAPTURED: "ops",
   FACILITY_LOST: "ops",
   FACILITY_CONTESTED: "ops", // 7c.1-stab A3: stolen/contested objectives are Marcus's domain, not Chen's
+  CAPTURE_STALLED: "ops",    // user ruling 2026-07-29: its four nearest relatives (CAPTURED / LOST /
+                             // CONTESTED / MISSION_STALLED) all live in ops, and combat is the busiest
+                             // channel at exactly the moment a capture stalls — it would get starved there.
   MISSION_DONE: "ops",
   MISSION_FAILED: "ops",
   HQ_DAMAGED: "combat",
@@ -1148,6 +1151,11 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     // spoken one holds it. Safe: facility damage requires action === "sabotage"
     // (combat.ts:349), so an attack_move carrying this field never shoots the
     // objective it was sent to take.
+    // Player-visible side effect (Fable, commit② review): en route, this column is
+    // now "a threat in action" to the enemy — autoBehavior.ts:377 reads exactly this
+    // field — so a right-clicked capture can draw reactions it used to slip past.
+    // That IS what "same contract as the spoken path" means (planCapture has always
+    // signed its orders this way); flagged for hand-test rather than hidden.
     const order: Order = {
       unitIds: [...input.selectedUnitIds],
       action: "attack_move",

@@ -441,6 +441,10 @@ interface ScriptArmResult {
   survivors: number;
   firstRelatedAfterStallSec: number;
   firstRelatedType: string;
+  /** 刀A 的产物：停滞后发出的 CAPTURE_STALLED（时间相对停滞起点） */
+  stalls: Array<{ atSec: number; entityId?: string; message: string }>;
+  /** 发第一条时环还剩多少（>0 就是"没等掉光就说话了"） */
+  progressAtFirstStall: number;
   trajectory: Array<[number, number]>;
 }
 
@@ -479,18 +483,30 @@ function runScriptArm(mode: "S1" | "S2", seed: number): ScriptArmResult {
   }
 
   let zeroAt = -1;
+  let progressAtFirstStall = -1;
+  const noteFirstStall = (st: GameState): void => {
+    if (progressAtFirstStall >= 0) return;
+    if (st.reportEvents.some((e) => e.type === "CAPTURE_STALLED" && e.entityId === facId)) {
+      progressAtFirstStall = fac.captureProgress;
+    }
+  };
   pump(s, 20, (st) => {
     if (fac.captureProgress > peak) peak = fac.captureProgress;
     traj.push([st.time - t0, fac.captureProgress]);
     if (zeroAt < 0 && fac.captureProgress === 0) zeroAt = st.time - tStall;
+    noteFirstStall(st);
   });
   const frozen = s.missions[0]?.progress ?? -1;
 
-  pump(s, 200);
+  pump(s, 200, noteFirstStall);
 
   const rel = relatedEvents(s, facId, missionId).filter((e) => e.time >= tStall);
   const alive = liveUnits(s, assigned);
   return {
+    stalls: s.reportEvents
+      .filter((e) => e.type === "CAPTURE_STALLED" && e.entityId === facId)
+      .map((e) => ({ atSec: e.time - tStall, entityId: e.entityId, message: e.message })),
+    progressAtFirstStall,
     peak,
     zeroAfterSec: zeroAt,
     missionFrozenAt: frozen,
@@ -510,10 +526,10 @@ function runScriptArm(mode: "S1" | "S2", seed: number): ScriptArmResult {
 //   本身是个真事实：队伍打光了引擎【会】告诉你）。硬造僵持只能靠捏不会开火的单位＝伪造不可能的值。
 //   → "敌在圈内"这个 reason 分支改在 commit ③ 用【短窗口检测器测试】覆盖（摆好状态跑几帧、断言 emit
 //     出的原因），不需要 200 秒存活场景。commit ① 的 RED 基线用 S2（完全可控：无敌军、无战斗、无死亡）。
-function T1_script(seed: number): void {
+function T5_script(seed: number): void {
   for (const mode of ["S2"] as const) {
     const label = "圈子空了";
-    console.log(`\n── T1-SCRIPT ${mode}（脚本化，理由见文件头）：${label} ──`);
+    console.log(`\n── T5-SCRIPT ${mode}（脚本化，理由见文件头）：${label} ──`);
     const r = runScriptArm(mode, seed);
 
     info(`峰值 ${r.peak.toFixed(2)} → 掉光耗时 ${r.zeroAfterSec.toFixed(2)}s；` +
@@ -533,12 +549,30 @@ function T1_script(seed: number): void {
       check("S2 存活单位全在圈外（核坐标）", r.survivorsOutside === r.survivors,
         `圈外 ${r.survivorsOutside}/${r.survivors}`);
     }
-    check(`${mode} ★静默：停滞后 170 秒内没有任何与该设施/任务相关的事件`,
-      r.firstRelatedAfterStallSec < 0 || r.firstRelatedAfterStallSec >= 170,
-      `第一条 ${r.firstRelatedType}@+${r.firstRelatedAfterStallSec.toFixed(0)}s`);
-    check(`${mode} 唯一那句话来自 MISSION_STALLED 且 ≥180 秒`,
-      r.firstRelatedType === "MISSION_STALLED" && r.firstRelatedAfterStallSec >= 178,
-      `${r.firstRelatedType}@+${r.firstRelatedAfterStallSec.toFixed(0)}s`);
+    // ── T5 刀A 效果：改前这里是 170 秒静默、188 秒才一句过期的"卡在 0%"。 ──
+    info(`CAPTURE_STALLED ×${r.stalls.length}：` +
+      (r.stalls.map((x) => `+${x.atSec.toFixed(1)}s`).join(" ") || "(无)") +
+      `；首条发出时环还剩 ${(r.progressAtFirstStall * 100).toFixed(0)}%`);
+    if (r.stalls[0]) info(`首条原文：${r.stalls[0].message}`);
+
+    check("T5 ★停滞当场就说话（≤3 秒，改前是 188 秒）",
+      r.stalls.length > 0 && r.stalls[0].atSec <= 3,
+      r.stalls[0] ? `+${r.stalls[0].atSec.toFixed(2)}s` : "一条都没发");
+    check("T5 ★没等掉光就说话（首条发出时环仍 >0，改前只能等归零后再等 180 秒）",
+      r.progressAtFirstStall > 0, `首条时环 ${(r.progressAtFirstStall * 100).toFixed(0)}%`);
+    check("T5 entityId 是设施 id（不是任务 id——按设施键控）",
+      r.stalls.length > 0 && r.stalls[0].entityId === "ea_alamein_town",
+      `entityId=${r.stalls[0]?.entityId}`);
+    check("T5 ★复读机护栏：整个 episode 最多 2 条（220 秒窗口）",
+      r.stalls.length > 0 && r.stalls.length <= 2, `实际 ${r.stalls.length} 条`);
+    // 事实字段由测试【独立重算】：不信 emit 方给的数（家法⑥）。
+    // S2 的构造是"我方全被挪到 4 格外、圈内无人"，所以那句话必须说"圈内已经没有我方单位"。
+    check("T5 事实与测试自算的几何一致（圈内我方 0 → 文案必须说圈里没我方单位）",
+      r.stalls.length > 0 && r.stalls[0].message.includes("没有我方单位"),
+      r.stalls[0]?.message ?? "-");
+    check("T5 旧的 MISSION_STALLED 仍在（重叠可接受，本刀不动 detectMissionStalled）",
+      r.firstRelatedType === "CAPTURE_STALLED",
+      `第一条现在是 ${r.firstRelatedType}@+${r.firstRelatedAfterStallSec.toFixed(0)}s`);
   }
 }
 
@@ -622,7 +656,109 @@ function T5b_mousePathConversion(): void {
     `state=${cur.state} action=${cur.orders[0]?.action}`);
   check("T5b 锚点在圈内", !!cur.orders[0]?.target && dist(cur.orders[0].target!, fac.position) <= CAPTURE_RADIUS,
     `锚点 ${cur.orders[0]?.target ? `(${cur.orders[0].target!.x.toFixed(1)},${cur.orders[0].target!.y.toFixed(1)})` : "无"}`);
+
+  // ── T5b(A半)：同一条无 mission 的路径上，刀A 也必须发得出声 ──
+  //   这是"按设施键控而不按任务"的唯一硬证据：这里 state.missions 恒为空。
+  //   另起一局：上面那局单位站够 5 秒已经把点占下来了（fac.team=player），没有停滞可报——
+  //   所以本段把窗口卡在【占领完成之前】把人拽走。
+  const s2 = clearedScenario(1);
+  const fac2 = facOf(s2, "ea_kidney_ridge");
+  const u2 = addUnit(s2, "infantry", "player", fac2.position.x, fac2.position.y);
+  applyPlayerCommands(s2, [{
+    unitIds: [u2.id], action: "attack_move",
+    target: { x: fac2.position.x, y: fac2.position.y },
+    targetFacilityId: fac2.id, priority: "high",
+  } as Order]);
+  pump(s2, 2.5);                                  // 峰值 ~0.5，还没满
+  const peak = fac2.captureProgress;
+  const cur2 = s2.units.get(u2.id)!;
+  cur2.position = { x: fac2.position.x + 5, y: fac2.position.y };  // 被拖走：圈子空了
+  cur2.orders = []; cur2.target = null; cur2.waypoints = []; cur2.state = "idle";
+  pump(s2, 3);
+  const st = stallsOf(s2, fac2.id);
+  info(`无 mission 路径：峰值 ${peak.toFixed(2)}，missions=${s2.missions.length}，` +
+    `CAPTURE_STALLED ×${st.length}` + (st[0] ? `　首条：${st[0].message}` : ""));
+  check("T5b(A半) ★无 mission 的鼠标路径照样报得出停滞（设施键控的硬证据）",
+    s2.missions.length === 0 && st.length > 0 && peak >= CAPTURE_PEAK_FLOOR_MIRROR,
+    `missions=${s2.missions.length} 停滞事件 ${st.length} 条 峰值 ${peak.toFixed(2)}`);
 }
+
+// ════════════════════════════════════════════════════════════
+// T7 · 刀A 不误报（四种"看起来像回落、其实不是"的情形）
+// ════════════════════════════════════════════════════════════
+
+const stallsOf = (s: GameState, facId: string): ReportEvent[] =>
+  s.reportEvents.filter((e) => e.type === "CAPTURE_STALLED" && e.entityId === facId);
+
+function T7_noFalsePositives(): void {
+  console.log("\n── T7 刀A 不误报 ──");
+
+  // ① 健康占领：成功那一帧环值也是 0.98 → 0（满格清零）。纯"从峰值回落"判据必踩。
+  {
+    const s = clearedScenario(1);
+    const fac = facOf(s, "ea_alamein_town");
+    for (let i = 0; i < 3; i++) addUnit(s, "infantry", "player", fac.position.x + 0.3 * i, fac.position.y);
+    pump(s, 20);
+    check("T7① 健康占领全程零 CAPTURE_STALLED（★完成态护栏：成功当帧也是 0.98→0）",
+      fac.team === "player" && stallsOf(s, fac.id).length === 0,
+      `facTeam=${fac.team} 报了 ${stallsOf(s, fac.id).length} 条`);
+  }
+
+  // ② 行军途中：进度从未启动
+  {
+    const s = clearedScenario(1);
+    const fac = facOf(s, "ea_alamein_town");
+    const u = addUnit(s, "infantry", "player", fac.position.x + 40, fac.position.y);
+    applyPlayerCommands(s, [{
+      unitIds: [u.id], action: "attack_move", targetFacilityId: fac.id,
+      target: { x: fac.position.x, y: fac.position.y }, priority: "high",
+    } as Order]);
+    pump(s, 20);
+    const cur = s.units.get(u.id)!;
+    const stillMarching = dist(cur.position, fac.position) > CAPTURE_RADIUS;
+    // 前提也要断言：首版摆 20 格、泵 15 秒，人早就走到并开始占了（进度 0.60），
+    // 这条测的就不再是"途中"。零误报是真的，前提是假的——前提假的绿灯不算数。
+    check("T7② 行军途中（尚未进圈、进度未启动）零 CAPTURE_STALLED",
+      stillMarching && fac.captureProgress === 0 && stallsOf(s, fac.id).length === 0,
+      `离圈 ${dist(cur.position, fac.position).toFixed(1)} prog=${fac.captureProgress.toFixed(2)} 报了 ${stallsOf(s, fac.id).length} 条`);
+  }
+
+  // ③ 路过：蹭出一点进度就走（峰值 < 0.25 门槛）
+  {
+    const s = clearedScenario(1);
+    const fac = facOf(s, "ea_alamein_town");
+    const u = addUnit(s, "infantry", "player", fac.position.x, fac.position.y);
+    pump(s, 0.8);                       // ~0.16
+    const peak = fac.captureProgress;
+    u.position = { x: fac.position.x + 10, y: fac.position.y };
+    pump(s, 30);
+    check("T7③ 路过设施（峰值 <0.25）零 CAPTURE_STALLED",
+      peak > 0 && peak < CAPTURE_PEAK_FLOOR_MIRROR && stallsOf(s, fac.id).length === 0,
+      `峰值 ${peak.toFixed(2)} 报了 ${stallsOf(s, fac.id).length} 条`);
+  }
+
+  // ④ 抖动：推到 0.5 后有人挪出圈 3 帧再回来（落差 0.03 < 0.05 门槛）
+  {
+    const s = clearedScenario(1);
+    const fac = facOf(s, "ea_alamein_town");
+    const us = [0, 1, 2].map((i) => addUnit(s, "infantry", "player", fac.position.x + 0.3 * i, fac.position.y));
+    pump(s, 2.5);                       // ~0.5
+    const peak = fac.captureProgress;
+    const home = us.map((u) => ({ ...u.position }));
+    us.forEach((u) => { u.position = { x: fac.position.x + 5, y: fac.position.y }; });
+    pump(s, 0.3);                       // 3 帧 → 掉 0.03
+    const dip = peak - fac.captureProgress;
+    us.forEach((u, i) => { u.position = home[i]; });
+    pump(s, 3);
+    check("T7④ 单位挪出圈 3 帧的抖动（落差 <0.05）零 CAPTURE_STALLED",
+      dip > 0 && dip < CAPTURE_DROP_FLOOR_MIRROR && stallsOf(s, fac.id).length === 0,
+      `落差 ${dip.toFixed(3)} 报了 ${stallsOf(s, fac.id).length} 条`);
+  }
+}
+
+/** 门槛在引擎里（reportSignals.ts），此处故意重打一遍供断言用——数值漂了就该有人发现。 */
+const CAPTURE_PEAK_FLOOR_MIRROR = 0.25;
+const CAPTURE_DROP_FLOOR_MIRROR = 0.05;
 
 // ════════════════════════════════════════════════════════════
 // 刀A 的误报陷阱：占领【成功】那一帧 progress 是 0.98 → 0（economy.ts:152 满格清零）
@@ -777,7 +913,8 @@ if (args.includes("--print-snapshot")) {
   T5b_mousePathConversion();
   T2_main(SEED);
   if (args.includes("--sweep")) T2_main_sweep();
-  T1_script(SEED);
+  T5_script(SEED);
+  T7_noFalsePositives();
   T4_beforeSnapshot(false);
   printTrajectory();
 

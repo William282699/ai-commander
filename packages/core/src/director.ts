@@ -592,6 +592,8 @@ export function selectDirectorBeat(
 const ESCALATION_TYPE_PRIORITY: Partial<Record<ReportEventType, number>> = {
   POSITION_CRITICAL: 5,   // front losing the local exchange — aligns with collapse beats
   FACILITY_CONTESTED: 3,  // an objective actively being taken
+  CAPTURE_STALLED: 2,     // our own capture stopped — more acute than a generic stall,
+                          // less than something being taken FROM us right now
   MISSION_STALLED: 1,     // progress stalled — least time-critical
 };
 
@@ -607,6 +609,7 @@ function eventFrontId(state: GameState, evt: ReportEvent): string | null {
     case "POSITION_CRITICAL":
       return evt.entityId ?? null; // entityId is already a front id
     case "FACILITY_CONTESTED":
+    case "CAPTURE_STALLED":   // entityId is a facility id, same as its two neighbours
     case "FACILITY_LOST": {
       const f = evt.entityId ? state.facilities.get(evt.entityId) : undefined;
       return f ? frontIdForRegion(state, f.regionId) : null;

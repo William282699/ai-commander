@@ -106,6 +106,45 @@ function tickIncome(state: GameState): void {
 
 // ── 2. Facility capture (P3 fix: blacklist instead of whitelist) ──
 
+/**
+ * Who is standing in a facility's capture circle right now, by team.
+ *
+ * capture-stall-feedback-v1: lifted verbatim out of tickFacilityCapture (its only
+ * caller until now) so the stall detector can state the SAME numbers the capture
+ * rule itself acts on. Single source of truth — tacticalPlanner already keeps a
+ * second, looser mirror of this geometry and autoBehavior a third (CAPTURE_THREAT_
+ * RADIUS); a fourth copy would be the next drift bug. Behaviour is byte-equivalent:
+ * same radius, same El Alamein / infantry-only eligibility split, same dead filter.
+ *
+ * NOT a rule change — the 1.5 radius, the eligibility test and the unopposed
+ * requirement all stay exactly where they were (§3 禁改清单).
+ */
+export function countCaptureContenders(
+  state: GameState,
+  fac: Facility,
+): { player: number; enemy: number } {
+  // El Alamein: all ground units can capture; default: infantry only
+  const isElAlamein = state.scenarioId === "el_alamein";
+  let playerInf = 0;
+  let enemyInf = 0;
+
+  state.units.forEach((unit) => {
+    if (unit.hp <= 0 || unit.state === "dead") return;
+    const canCapture = isElAlamein
+      ? getUnitCategory(unit.type) === "ground"
+      : unit.type === "infantry";
+    if (!canCapture) return;
+    const dx = unit.position.x - fac.position.x;
+    const dy = unit.position.y - fac.position.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 1.5) return;
+    if (unit.team === "player") playerInf++;
+    else if (unit.team === "enemy") enemyInf++;
+  });
+
+  return { player: playerInf, enemy: enemyInf };
+}
+
 function tickFacilityCapture(state: GameState, dt: number): void {
   state.facilities.forEach((fac) => {
     // Skip non-capturable types (HQ, barracks, shipyard, airfield, defense_tower)
@@ -114,24 +153,7 @@ function tickFacilityCapture(state: GameState, dt: number): void {
     if (fac.hp <= 0) return;
 
     // Find capture-capable units near this facility (within 1.5 tiles)
-    // El Alamein: all ground units can capture; default: infantry only
-    const isElAlamein = state.scenarioId === "el_alamein";
-    let playerInf = 0;
-    let enemyInf = 0;
-
-    state.units.forEach((unit) => {
-      if (unit.hp <= 0 || unit.state === "dead") return;
-      const canCapture = isElAlamein
-        ? getUnitCategory(unit.type) === "ground"
-        : unit.type === "infantry";
-      if (!canCapture) return;
-      const dx = unit.position.x - fac.position.x;
-      const dy = unit.position.y - fac.position.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist > 1.5) return;
-      if (unit.team === "player") playerInf++;
-      else if (unit.team === "enemy") enemyInf++;
-    });
+    const { player: playerInf, enemy: enemyInf } = countCaptureContenders(state, fac);
 
     // Determine capturing team (must be unopposed infantry)
     let capTeam: Team | null = null;
