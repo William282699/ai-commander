@@ -62,7 +62,7 @@ import {
   resetReportSignals, resetAutoBehaviorTimer, resetEnemyAITimer, resetEnemyProdToggle,
   resetAttackWaveState, resetDefensiveAITimer, resetPressureDirector, resetMissionCounter,
   resetEngagementCache, resetWarPhaseTimers, updateFog, resolveIntent, applyOrders,
-  applyPlayerCommands,
+  applyPlayerCommands, selectEscalationEvent,
 } from "@ai-commander/core";
 import type { GameState, Unit, Facility, Intent, Order, ReportEvent } from "@ai-commander/shared";
 
@@ -519,6 +519,13 @@ function runScriptArm(mode: "S1" | "S2", seed: number): ScriptArmResult {
   };
 }
 
+/** commit ① 在【未修引擎】上测得、Fable 已复算的 S2 病态基线。刀A 落地后这些数必须垮掉。 */
+const PRE_FIX_SCRIPT = {
+  silentSec: 170,          // 停滞后 170 秒内与该设施/任务相关的事件：零条
+  firstWordAtSec: 188,     // 唯一那句话 MISSION_STALLED，字面"卡在 0%"
+  missionFrozenAt: 0.010,  // 任务条冻在末值、status 仍 active
+} as const;
+
 // S1（敌人赖在圈里）为什么不在 commit ① 里：
 //   要让"敌兵占着圈"这个状态【持续】200 秒以观察静默，就得让双方都活着僵持——而引擎两边都不肯僵持：
 //   敌方 autoBehavior 4a 会冲出来打我方（isThreatInAction 命中"orders[0].targetFacilityId != null"，
@@ -555,7 +562,9 @@ function T5_script(seed: number): void {
       `；首条发出时环还剩 ${(r.progressAtFirstStall * 100).toFixed(0)}%`);
     if (r.stalls[0]) info(`首条原文：${r.stalls[0].message}`);
 
-    check("T5 ★停滞当场就说话（≤3 秒，改前是 188 秒）",
+    info(`改前基线（commit ① 实测，Fable 已复算）：静默 ≥${PRE_FIX_SCRIPT.silentSec}s、` +
+      `第一句 MISSION_STALLED@+${PRE_FIX_SCRIPT.firstWordAtSec}s「卡在 0%」、任务条冻 ${PRE_FIX_SCRIPT.missionFrozenAt}`);
+    check(`T5 ★停滞当场就说话（≤3 秒，改前是 ${PRE_FIX_SCRIPT.firstWordAtSec} 秒）`,
       r.stalls.length > 0 && r.stalls[0].atSec <= 3,
       r.stalls[0] ? `+${r.stalls[0].atSec.toFixed(2)}s` : "一条都没发");
     check("T5 ★没等掉光就说话（首条发出时环仍 >0，改前只能等归零后再等 180 秒）",
@@ -681,6 +690,111 @@ function T5b_mousePathConversion(): void {
   check("T5b(A半) ★无 mission 的鼠标路径照样报得出停滞（设施键控的硬证据）",
     s2.missions.length === 0 && st.length > 0 && peak >= CAPTURE_PEAK_FLOOR_MIRROR,
     `missions=${s2.missions.length} 停滞事件 ${st.length} 条 峰值 ${peak.toFixed(2)}`);
+}
+
+// ════════════════════════════════════════════════════════════
+// T8 · 三条原因分支 + director 两张表接线
+//   原因分支用【短窗口检测器测试】覆盖（摆好状态跑几帧、断言 emit 出的原因），
+//   不造 200 秒僵持——引擎两边都不肯僵持，硬造只能捏不会开火的单位（commit ① 已论证）。
+// ════════════════════════════════════════════════════════════
+
+/** 把一个设施推到指定进度，返回 state/fac/我方单位（供三条原因分支复用）。 */
+function primedCapture(seed = 1): { s: GameState; fac: Facility; us: Unit[] } {
+  const s = clearedScenario(seed);
+  const fac = facOf(s, "ea_alamein_town");
+  const us = [0, 1, 2].map((i) => addUnit(s, "infantry", "player", fac.position.x + 0.3 * i, fac.position.y));
+  pump(s, 3.0);   // ~0.6，安全越过 0.25 峰值门槛且未满
+  return { s, fac, us };
+}
+
+function T8_reasonBranches(): void {
+  console.log("\n── T8 三条原因分支（短窗口，不造 200 秒僵持） ──");
+
+  // ① 圈里没人了
+  {
+    const { s, fac, us } = primedCapture();
+    us.forEach((u) => { u.position = { x: fac.position.x + 6, y: fac.position.y }; u.orders = []; u.state = "idle"; });
+    pump(s, 1.0);
+    const st = stallsOf(s, fac.id);
+    info(`①圈内无人：${st[0]?.message ?? "(无)"}`);
+    check("T8① 圈内无我方 → 原因说「圈内已经没有我方单位」",
+      st.length === 1 && st[0].message.includes("没有我方单位") && !st[0].message.includes("敌军还有"),
+      st[0]?.message ?? "-");
+  }
+
+  // ② 敌人还在圈里（我方也在，双方僵持 → capTeam 变 null → 回落）
+  {
+    const { s, fac } = primedCapture();
+    addUnit(s, "main_tank", "enemy", fac.position.x, fac.position.y);
+    pump(s, 1.0);
+    const st = stallsOf(s, fac.id);
+    const mine = countInCircle(s, fac, "player");
+    const theirs = countInCircle(s, fac, "enemy");
+    info(`②敌在圈内（我方${mine}/敌${theirs}）：${st[0]?.message ?? "(无)"}`);
+    // 事实字段由测试独立重算（家法⑥）：文案里的两个数必须等于本文件自己数出来的
+    check("T8② 敌军入圈 → 原因报圈内双方人头，且与测试自算的几何逐个相等",
+      st.length === 1 && st[0].message.includes(`我方 ${mine} 个、敌军 ${theirs} 个`),
+      `自算 我方${mine}/敌${theirs}；文案「${st[0]?.message ?? "-"}」`);
+  }
+
+  // ③ 对方反占（中立设施才可能：capTeam 要求 fac.team !== "enemy"）
+  {
+    const s = clearedScenario(1);
+    const fac = facOf(s, "ea_fuel_depot");     // 开局 neutral
+    const us = [0, 1, 2].map((i) => addUnit(s, "infantry", "player", fac.position.x + 0.3 * i, fac.position.y));
+    pump(s, 3.0);
+    const peak = fac.captureProgress;
+    us.forEach((u) => { u.position = { x: fac.position.x + 8, y: fac.position.y }; u.orders = []; u.state = "idle"; });
+    addUnit(s, "main_tank", "enemy", fac.position.x, fac.position.y);
+    pump(s, 1.0);
+    const st = stallsOf(s, fac.id);
+    info(`③对方反占（峰值 ${peak.toFixed(2)}，capTeam=${fac.capturingTeam}）：${st[0]?.message ?? "(无)"}`);
+    check("T8③ 敌方接管圈子 → 原因说「对方已开始反向占领」（★这条分支若挂在 capturingTeam==='player' 下就是死代码）",
+      fac.capturingTeam === "enemy" && st.length === 1 && st[0].message.includes("反向占领"),
+      `capTeam=${fac.capturingTeam}；${st[0]?.message ?? "-"}`);
+  }
+
+  // ③b episode 重置（用户/Fable 裁定的预算规则）：玩家二次派兵把进度推过历史峰值 →
+  //     预算重置，下一次弃守【必须】再说得出话。实施时我一度改成"不重置"，实测证伪后改回。
+  {
+    const { s, fac, us } = primedCapture();           // 第一次推到 ~0.6
+    const home = us.map((u) => ({ ...u.position }));
+    const away = { x: fac.position.x + 8, y: fac.position.y };
+    us.forEach((u) => { u.position = { ...away }; u.orders = []; u.state = "idle"; });
+    pump(s, 150);                                     // 掉光 + 长静默（跨过 60 秒冷却）
+    const firstRound = stallsOf(s, fac.id).length;
+    us.forEach((u, i) => { u.position = { ...home[i] }; });
+    pump(s, 4.0);                                     // 二次推进，越过历史峰值
+    const peak2 = fac.captureProgress;
+    us.forEach((u) => { u.position = { ...away }; });
+    pump(s, 3);                                       // 又弃守
+    const total = stallsOf(s, fac.id).length;
+    info(`③b 二次占领：第一轮 ${firstRound} 条 → 二次推到 ${peak2.toFixed(2)} 再弃守 → 累计 ${total} 条`);
+    check("T8③b 越过历史峰值 → episode 重置 → 二次弃守仍报得出（预算不是一局一次）",
+      peak2 > 0.6 && total > firstRound, `${firstRound} → ${total}`);
+  }
+
+  // ④ director 两张表：Partial Record 不强制，漏了不会 typecheck 报错，只会永远输
+  {
+    const s = clearedScenario(1);
+    const fac = facOf(s, "ea_alamein_town");
+    const capture: ReportEvent = {
+      type: "CAPTURE_STALLED", time: 10, message: "x", severity: "warning",
+      entityId: fac.id, actionRequired: true,
+    };
+    const mission: ReportEvent = {
+      type: "MISSION_STALLED", time: 10, message: "y", severity: "warning",
+      entityId: "m1", actionRequired: true,
+    };
+    const picked = selectEscalationEvent(s, [mission, capture]);
+    check("T8④ ESCALATION_TYPE_PRIORITY 条目生效：同 severity 下 CAPTURE_STALLED(2) 压过 MISSION_STALLED(1)",
+      picked?.type === "CAPTURE_STALLED", `选中 ${picked?.type}`);
+    // eventFrontId 的设施 case：设施 → regionId → front。这里独立重算一遍映射存在性，
+    // 否则该 case 返回 null，事件永远拿不到"导演本拍前线"的 +1000。
+    const front = s.fronts.find((f) => f.regionIds.includes(fac.regionId));
+    check("T8④ eventFrontId 的设施 case 有得可解（设施 regionId 能映射到前线）",
+      !!front, `regionId=${fac.regionId} → ${front?.id ?? "null"}`);
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -914,6 +1028,7 @@ if (args.includes("--print-snapshot")) {
   T2_main(SEED);
   if (args.includes("--sweep")) T2_main_sweep();
   T5_script(SEED);
+  T8_reasonBranches();
   T7_noFalsePositives();
   T4_beforeSnapshot(false);
   printTrajectory();

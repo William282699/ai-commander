@@ -323,9 +323,12 @@ function detectCaptureStalled(state: GameState): void {
       return;
     }
     if (ours > rec.peak) {
-      // 创新高。故意【不】重置预算：锯齿悬停时进度会反复越过旧峰值，
-      // 重置预算等于把"一次持续的停滞"拆成无限次新 episode → 复读机。
+      // 越过【历史】峰值线 → 玩家把这次占领重新推进了 → episode 重置（用户/Fable 裁定）。
+      // 实施时我一度改成"不重置"，怕锯齿悬停变复读机；实测证伪：重置要求超过 all-time 峰值，
+      // 悬停的锯齿几乎创不出新高——300 秒锯齿场景两种规则是 2 条 vs 3 条。
+      // 而"不重置"有真代价：玩家二次派兵重新推到 0.8 再弃守，一句话都没有。
       rec.peak = ours;
+      rec.fired = 0;
       return;
     }
 
