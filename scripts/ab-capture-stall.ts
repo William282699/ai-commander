@@ -1,0 +1,652 @@
+// ============================================================
+// AI Commander — capture-stall bench (capture-stall-feedback-v1)
+//
+// 本级契约（提案 v2 §0，用户裁定 2026-07-29）：
+//   ①占领圈开始往回掉的那一刻，作战处（ops/马克斯）报一句为什么——不等 180 秒；
+//   ②受命占领的部队（说话下令的和鼠标右键点的都算）到圈即驻防：打完仗走回圈里，占完就地驻守；
+//   ③占领判定语义（半径 1.5 / 无对抗 / 5 秒 / 半速衰减）一个字节不动。
+//
+// ★ 判据铁律（家法六条，逐条落在本文件）：
+//   ①会动兵的断言数 assignedUnitIds + 核【实际落点坐标】，不看回执台词；
+//   ②有隐藏状态的病断言状态本身（unit.state / orders[0].action / capturingTeam），位置只作旁证；
+//   ③第一机制陷阱：复现出同方向症状 ≠ 破案——幅度与终点都要对齐（本文件把环值轨迹打出来）；
+//   ④N0 式台架自证：先证明台架结构上表达得出"占领"，再证明它表达得出"这个病"；
+//   ⑤回归测试必做负对照（T3/T6，摘掉修复必须真 FAIL）；
+//   ⑥谁报的数字对方重算才作数——所以：圈内计数用本文件自己的几何算，不信引擎；
+//     且 Math.random 播种使复跑逐位一致（见下）。
+//
+// ★ 泵帧必须镜像生产序（retreat-semantics fix1 的血教训）：
+//   tick() 只做 移动/combat/regen/堑壕/清尸体。processEconomy / processReportSignals /
+//   processMissions / processEnemyAI / processDefensiveAI / processPressureDirector /
+//   processAutoBehavior 全都【不在】tick() 里，只有 GameCanvas.tsx:1507-1586 依次调用。
+//   建立在裸 tick() 上的泵帧跑在"占领从不推进、微行为从不运行、剧本反击从不发生"的世界里。
+//
+// ★ 确定性：Math.random 是全引擎唯一的不确定源（core/shared 无 Date.now / performance.now /
+//   crypto；17 处 Math.random 全在 autoBehavior / enemyAI / defensiveAI / pressureDirector）。
+//   本文件用 mulberry32 顶掉 Math.random 并逐个 reset 模块级状态（含 resetAttackWaveState——
+//   enemyAI.ts:53 在模块加载时抽过一次 nextWaveTime，静态 import 抢在播种之前，reset 重抽即密封）。
+//   → 同 --seed 复跑逐位一致；断言仍只写稳健性质，换种子也该过。
+//
+// ★ 两臂制（用户+Fable 设计级点头 2026-07-29，理由必须留档）：
+//   实施前用真剧本试了 7 次，【真剧本打不出"进度涨到峰值再停住"】——因为地图上到处是自己人：
+//   全局池派兵会抓 27-30 个（圈里永远有人，5 秒必占下）；换小队后又发现前哨自带守军
+//   （就算把设施设成敌方所有、只派 3 人，圈里仍站着 7-8 个原有我方单位）；把守军也清掉之后
+//   小队直接被守军打残（2 死 1 个低血量撤退 69 格回家），变成"任务永远 0%"另一种形态。
+//   "涨到峰值再停"需要一个很窄的窗口（圈里刚好只有派去的那几个人、刚好推到大半、刚好被拉走或被堵），
+//   真实一局会自然撞到（用户 2026-07-18 就撞到了），但要【确定性】造出来绕不开脚本化。
+//   所以分两臂，各自诚实标注：
+//     主臂 MAIN（真剧本 + 真 AI，零脚本化）＝占完全员漂走：占下来 → 全队离圈 7-9 格站住 →
+//       200 秒不回 → 空城被敌军晃回来夺走。刀B 的直接靶子，可比对坐标。
+//     副臂 SCRIPT（脚本化，标注为脚本化及理由）＝进度掉光冻结：推到 ≥0.7 → 圈被占/被空 →
+//       8 秒掉光 → 任务条冻在末值 → 180 秒静默。刀A 的直接靶子，也最贴用户记忆的终态。
+//   记账（不在本刀治，勿扩范围）：小队被打光/低血量跑光 → 进度从未涨过 → 刀A 的"从峰值回落"
+//   天生不触发 → 仍是 180 秒后一句"卡在 0%"。要治得靠"指派单位全没了"另一条判据。
+//
+// ★ 一手现场（提案 v2 §1，记忆档 project_capture_stall_provenance）：
+//   ROADMAP 里那个"占领圈 80% 静默卡死"的 80% 是转述产物。用户 2026-07-18 22:44 原话是
+//   「让 carter 夺回中央前哨…把敌军打跑了…蓝色圈圈到最后剩大概 20% 的时候突然不转了」，
+//   设施＝ea_player_central_post（他自己的前哨，当时已被敌占，故"夺回"），且他看的是
+//   【蓝色圆环】(rendererCanvas.ts:406) 不是任务条。环从不"冻结"（要么锯齿悬停要么 8 秒掉光后
+//   整个不画）；"冻结"只存在于任务条（missions.ts:194 带守卫的单向镜像）。两个口径分开断言。
+//
+// Modes:
+//   --synthetic       确定性断言（默认）
+//   --seed=N          换种子复跑（默认 1；主臂稳定性用 --sweep）
+//   --sweep           主臂跨 3 个种子跑一遍，报稳定性
+//   --print-snapshot  打印改前到达行为快照 + 环值轨迹（刀B/刀A 落地前的基线）
+// ============================================================
+
+import {
+  createInitialGameState, tick, processEconomy, processReportSignals, processMissions,
+  processEnemyAI, processDefensiveAI, processPressureDirector, processAutoBehavior,
+  resetReportSignals, resetAutoBehaviorTimer, resetEnemyAITimer, resetEnemyProdToggle,
+  resetAttackWaveState, resetDefensiveAITimer, resetPressureDirector, resetMissionCounter,
+  resetEngagementCache, resetWarPhaseTimers, updateFog, resolveIntent, applyOrders,
+  applyPlayerCommands,
+} from "@ai-commander/core";
+import type { GameState, Unit, Facility, Intent, Order, ReportEvent } from "@ai-commander/shared";
+
+// ── 0. Harness ──
+
+let failCount = 0;
+function check(name: string, ok: boolean, detail = ""): void {
+  console.log(`${ok ? "PASS" : "FAIL"} ${name}${ok || !detail ? "" : ` — ${detail}`}`);
+  if (!ok) failCount++;
+}
+function info(line: string): void {
+  console.log(`     · ${line}`);
+}
+
+/** mulberry32 — 顶掉 Math.random 让整条 AI 链可复现。 */
+function seedRandom(seed: number): void {
+  let a = seed >>> 0;
+  Math.random = () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 每个场景前把全部模块级状态清干净（顺序无关，但必须一个不漏）。 */
+function resetAll(seed: number): void {
+  seedRandom(seed);
+  resetReportSignals();
+  resetAutoBehaviorTimer();
+  resetEnemyAITimer();
+  resetEnemyProdToggle();
+  resetAttackWaveState();   // 重抽 enemyAI.ts:53 那次模块加载期的 Math.random
+  resetDefensiveAITimer();
+  resetPressureDirector();
+  resetMissionCounter();
+  resetEngagementCache();
+  resetWarPhaseTimers();
+}
+
+/** 一帧＝生产循环序（GameCanvas.tsx:1507→1586）。 */
+function step(s: GameState, dt: number): void {
+  tick(s, dt);
+  processEconomy(s, dt);
+  processReportSignals(s, dt);
+  processMissions(s, dt);
+  processEnemyAI(s, dt);
+  processDefensiveAI(s, dt);
+  processPressureDirector(s, dt);
+  processAutoBehavior(s, dt);
+}
+
+/** 泵 seconds 秒，每 sim-秒刷一次雾（生产每帧刷；不刷雾则玩家单位全盲，接战判定失真）。 */
+function pump(s: GameState, seconds: number, onFrame?: (s: GameState) => void): void {
+  const dt = 0.1;
+  let sinceFog = 1;
+  for (let t = 0; t < seconds - 1e-9; t += dt) {
+    if (sinceFog >= 1) { updateFog(s); sinceFog = 0; }
+    step(s, dt);
+    sinceFog += dt;
+    onFrame?.(s);
+  }
+}
+
+// ── 几何：本文件自己算，不用引擎的任何计数（家法⑥） ──
+
+const CAPTURE_RADIUS = 1.5;   // economy.ts:131 的常数，故意在此重打一遍
+const dist = (a: { x: number; y: number }, b: { x: number; y: number }): number =>
+  Math.hypot(a.x - b.x, a.y - b.y);
+
+function countInCircle(s: GameState, fac: Facility, team: "player" | "enemy"): number {
+  let n = 0;
+  s.units.forEach((u) => {
+    if (u.hp <= 0 || u.state === "dead") return;
+    if (u.team !== team) return;
+    if (dist(u.position, fac.position) <= CAPTURE_RADIUS) n++;
+  });
+  return n;
+}
+const liveUnits = (s: GameState, ids: readonly number[]): Unit[] =>
+  ids.map((id) => s.units.get(id)).filter((u): u is Unit => !!u && u.state !== "dead" && u.hp > 0);
+
+/** 与某设施/某任务相关的事件（经济类噪声排除——它们自带 120 秒定时器，任何 ≥60 秒窗口必有）。 */
+function relatedEvents(s: GameState, facId: string, missionId?: string): ReportEvent[] {
+  return s.reportEvents.filter(
+    (e) => !e.type.startsWith("ECONOMY") && (e.entityId === facId || (missionId != null && e.entityId === missionId)),
+  );
+}
+
+// ── 单位模板（克隆开局真单位，避免手捏出不可能的属性） ──
+
+let tplCache: Record<string, Unit> = {};
+function template(type: string, team: "player" | "enemy"): Unit {
+  const key = `${type}:${team}`;
+  if (!tplCache[key]) {
+    const s = createInitialGameState("el_alamein");
+    let found: Unit | null = null;
+    s.units.forEach((u) => { if (!found && u.team === team && u.type === type) found = u; });
+    if (!found) throw new Error(`el_alamein 开局没有 ${team} 的 ${type}`);
+    tplCache[key] = found;
+  }
+  return tplCache[key];
+}
+let nextId = 90000;
+function addUnit(s: GameState, type: string, team: "player" | "enemy", x: number, y: number): Unit {
+  const u: Unit = {
+    ...structuredClone(template(type, team)),
+    id: nextId++, team, position: { x, y }, state: "idle",
+    orders: [], waypoints: [], target: null, attackTarget: null,
+    manualOverride: false, isPlayerControlled: false,
+  } as Unit;
+  u.hp = u.maxHp;
+  s.units.set(u.id, u);
+  return u;
+}
+
+// ── 场景构造 ──
+
+/** 真剧本：整局开局状态一字不改（85 我方 / 78 敌方 / 真 defensiveAI）。 */
+function realScenario(seed: number): GameState {
+  resetAll(seed);
+  return createInitialGameState("el_alamein");
+}
+
+/** 脚本化：清空战场，只留真设施 + 手摆的少量单位。标注为脚本化，理由见文件头。 */
+function clearedScenario(seed: number): GameState {
+  resetAll(seed);
+  const s = createInitialGameState("el_alamein");
+  s.units.clear();
+  s.squads = [];
+  s.missions = [];
+  return s;
+}
+
+const facOf = (s: GameState, id: string): Facility => {
+  const f = s.facilities.get(id);
+  if (!f) throw new Error(`没有设施 ${id}`);
+  return f;
+};
+
+// ════════════════════════════════════════════════════════════
+// N0 · 台架自证（先于一切：它结构上表达得出"占领"和"这个病"吗）
+// ════════════════════════════════════════════════════════════
+
+function N0a_healthyCaptureIsExpressible(): void {
+  console.log("\n── N0a 台架表达得出「占领」：无对抗满圈 5 秒、设施易主 ──");
+  const s = clearedScenario(1);
+  const fac = facOf(s, "ea_alamein_town");
+  const ids = [0, 1, 2].map((i) => addUnit(s, "infantry", "player", fac.position.x + 0.3 * i, fac.position.y).id);
+
+  const before = fac.team;
+  let flippedAt = -1;
+  const t0 = s.time;
+  pump(s, 12, (st) => { if (flippedAt < 0 && fac.team === "player") flippedAt = st.time - t0; });
+
+  check("N0a 圈内 3 人无对抗 → 设施翻给我方", fac.team === "player",
+    `before=${before} after=${fac.team}`);
+  check("N0a 满圈耗时 ≈ CAPTURE_TIME_SEC(5)", flippedAt >= 4.8 && flippedAt <= 5.4,
+    `实测 ${flippedAt.toFixed(2)}s`);
+  check("N0a 我方 3 人全在圈内（本文件自算几何）", countInCircle(s, fac, "player") === ids.length,
+    `圈内 ${countInCircle(s, fac, "player")}/${ids.length}`);
+}
+
+function N0b_stallIsExpressible(): void {
+  console.log("\n── N0b 台架表达得出「这个病」：敌兵入圈 → 进度回落 ──");
+  const s = clearedScenario(1);
+  const fac = facOf(s, "ea_alamein_town");
+  for (let i = 0; i < 3; i++) addUnit(s, "infantry", "player", fac.position.x + 0.3 * i, fac.position.y);
+  // 推到 0.8 就停手（不让它占下来）
+  let peak = 0;
+  pump(s, 4.0, () => { if (fac.captureProgress > peak) peak = fac.captureProgress; });
+  const atInject = fac.captureProgress;
+  check("N0b 注入前进度已过半（台架推得动进度）", atInject >= 0.7, `prog=${atInject.toFixed(2)}`);
+
+  // 一辆满血主战坦克进圈：无对抗条件破了 → 必须回落
+  addUnit(s, "main_tank", "enemy", fac.position.x, fac.position.y);
+  pump(s, 2.0);
+  check("N0b 敌兵入圈后进度回落（台架表达得出这个病）", fac.captureProgress < atInject,
+    `${atInject.toFixed(2)} → ${fac.captureProgress.toFixed(2)}`);
+  check("N0b 回落期间 capturingTeam 仍是 player（静默成因的前提）", fac.capturingTeam === "player",
+    `capTeam=${fac.capturingTeam}`);
+}
+
+// ════════════════════════════════════════════════════════════
+// T1-MAIN · 真剧本 RED 基线：占完没人回岗，空城无人告知
+//
+// ★ 这是【病的断言】，不是【药的断言】：commit ① 的 T1 必须在 main 上 PASS。
+//   刀B 落地后（commit ②）它理应翻转——届时这些断言改写成 T2 的反面（空城 ≈ 0 秒、
+//   部队回圈驻防），本节的数字冻成基线常量（同 EXPECTED_ARRIVAL 的做法），
+//   并由 T3 负对照（注释掉刀B）证明它能重新 FAIL。不留永久失败的测试。
+// ════════════════════════════════════════════════════════════
+
+interface MainArmResult {
+  seed: number;
+  capturedAt: number;
+  minDistEnd: number;
+  maxDistEnd: number;
+  inCircleEnd: number;
+  survivors: number;
+  assigned: number;
+  everReenteredAfter60s: boolean;
+  lostBack: boolean;
+  silentWindowSec: number;
+  /** 占领成功后，"圈内我方 = 0"连续持续的最长秒数——刀B 要消掉的就是这个空窗。
+   *  比"终态离圈几格"稳健得多：终态是单帧快照，会被最后一次抖动整个改写。 */
+  longestEmptySec: number;
+  emptyFractionPct: number;
+}
+
+function runMainArm(seed: number, verbose: boolean): MainArmResult {
+  const s = realScenario(seed);
+  const facId = "ea_alamein_town";
+  const fac = facOf(s, facId);
+
+  // 真实节奏：先让雾/AI 跑 2 秒，玩家看到情况才下令
+  pump(s, 2);
+  const r = resolveIntent({ type: "capture", targetFacility: facId, quantity: "some" } as Intent, s, s.style);
+  const assigned = (r as { assignedUnitIds?: number[] }).assignedUnitIds ?? [];
+  applyOrders(s, r.orders);
+  const missionId = s.missions[0]?.id;
+
+  const t0 = s.time;
+  let capturedAt = -1;
+  pump(s, 120, (st) => { if (capturedAt < 0 && fac.team === "player") capturedAt = st.time - t0; });
+
+  // 占下来之后再跑 120 秒，看部队回不回岗；同时量"空城"时长（每 sim-秒采样一次）
+  let reentered = false;
+  const tAfter = s.time;
+  let emptyRun = 0, longestEmpty = 0, emptySamples = 0, samples = 0, lastSample = -1;
+  pump(s, 120, (st) => {
+    if (st.time - tAfter > 60 && countInCircle(st, fac, "player") > 0) reentered = true;
+    const sec = Math.floor(st.time - tAfter);
+    if (sec !== lastSample) {
+      lastSample = sec;
+      samples++;
+      if (countInCircle(st, fac, "player") === 0) {
+        emptySamples++; emptyRun++;
+        if (emptyRun > longestEmpty) longestEmpty = emptyRun;
+      } else emptyRun = 0;
+    }
+  });
+
+  const alive = liveUnits(s, assigned);
+  const dists = alive.map((u) => dist(u.position, fac.position));
+  const rel = relatedEvents(s, facId, missionId);
+  const afterCapture = rel.filter((e) => e.time > t0 + Math.max(capturedAt, 0) + 1);
+  const firstAfter = afterCapture[0];
+
+  const res: MainArmResult = {
+    seed,
+    capturedAt,
+    minDistEnd: dists.length ? Math.min(...dists) : -1,
+    maxDistEnd: dists.length ? Math.max(...dists) : -1,
+    inCircleEnd: countInCircle(s, fac, "player"),
+    survivors: alive.length,
+    assigned: assigned.length,
+    everReenteredAfter60s: reentered,
+    lostBack: fac.team !== "player",
+    silentWindowSec: firstAfter ? firstAfter.time - (t0 + Math.max(capturedAt, 0)) : s.time - (t0 + Math.max(capturedAt, 0)),
+    longestEmptySec: longestEmpty,
+    emptyFractionPct: samples ? Math.round((emptySamples / samples) * 100) : -1,
+  };
+
+  if (verbose) {
+    info(`seed=${seed} 派出 ${assigned.length} 个单位，占下来用 ${capturedAt.toFixed(1)}s`);
+    info(`240s 后：存活 ${alive.length}/${assigned.length}，离圈 ${res.minDistEnd.toFixed(1)}~${res.maxDistEnd.toFixed(1)} 格，圈内我方 ${res.inCircleEnd}`);
+    info(`★空城：占领后 120 秒里圈内无我方占 ${res.emptyFractionPct}%，最长连续 ${res.longestEmptySec}s`);
+    info(`占领后是否有单位再进过圈（>60s 窗口）：${reentered ? "有" : "没有"}；设施终态 ${fac.team}`);
+    info(`占领成功后与该设施相关的下一条事件：${firstAfter ? `${firstAfter.type}@+${res.silentWindowSec.toFixed(0)}s "${firstAfter.message}"` : "(无)"}`);
+    info(`全部相关事件：${rel.map((e) => `${e.type}@${e.time.toFixed(0)}s`).join(" | ") || "(零条)"}`);
+  }
+  return res;
+}
+
+function T1_main(seed: number): void {
+  console.log("\n── T1-MAIN 真剧本 RED 基线（零脚本化）：占完没人回岗 ──");
+  const r = runMainArm(seed, true);
+
+  check("T1-MAIN 占领确实成功了（这一臂测的是「占完之后」，不是占不下来）", r.capturedAt > 0,
+    `capturedAt=${r.capturedAt.toFixed(1)}s`);
+  check("T1-MAIN 存活单位仍有（不是死光了才没人在圈里）", r.survivors > 0,
+    `存活 ${r.survivors}/${r.assigned}`);
+  // ★ 判据用"空城时长"而不是"终态离圈几格"：
+  //   终态是单帧快照，会被最后一次抖动整个改写（首版就写成了终态断言，seed=1 下终态恰好圈内还有 3 个人
+  //   → 4 条断言全 FAIL，而"占完之后长时间没人守"这个病却是真的。数字要量现象本身，不量它的残影。）
+  // 门槛来自三种子实测下界，不是拍的（首版按 seed=1 拍成 ≥30s/≥50%，seed=1337 的 27s/29% 就打脸了）：
+  //   空城最长 seed1=35s seed7=36s seed1337=27s → 门槛 20s
+  //   空城占比 seed1=29% seed7=57% seed1337=66% → 门槛 25%
+  //   静默     seed1=118s seed7=71s seed1337=76s → 门槛 60s
+  check("T1-MAIN 占领后有长时间空城（连续 ≥20 秒圈内零我方；实测 27-36s）", r.longestEmptySec >= 20,
+    `最长连续空城 ${r.longestEmptySec}s（占窗口 ${r.emptyFractionPct}%）`);
+  check("T1-MAIN 空城是常态不是插曲（占领后 120 秒里 ≥25% 时间圈内无人；实测 29-66%）", r.emptyFractionPct >= 25,
+    `${r.emptyFractionPct}%`);
+  check("T1-MAIN ★弃守无人告知：占领成功后 ≥60 秒内没有任何与该设施相关的事件", r.silentWindowSec >= 60,
+    `静默 ${r.silentWindowSec.toFixed(0)}s`);
+  info(`（终态离圈 ${r.minDistEnd.toFixed(1)}~${r.maxDistEnd.toFixed(1)} 格、圈内 ${r.inCircleEnd} 人——记录用，不作断言：单帧量不住抖动）`);
+}
+
+function T1_main_sweep(): void {
+  console.log("\n── T1-MAIN 稳定性：跨种子复跑（换种子应仍成立） ──");
+  const seeds = [1, 7, 1337];
+  const rows = seeds.map((sd) => runMainArm(sd, false));
+  for (const r of rows) {
+    info(`seed=${r.seed} 占领@${r.capturedAt.toFixed(1)}s 存活${r.survivors}/${r.assigned} ` +
+      `空城最长${r.longestEmptySec}s(${r.emptyFractionPct}%) 终态离圈${r.minDistEnd.toFixed(1)}~${r.maxDistEnd.toFixed(1)} ` +
+      `圈内${r.inCircleEnd} 终态${r.lostBack ? "被夺回" : "仍我方"} 静默${r.silentWindowSec.toFixed(0)}s`);
+  }
+  check("T1-MAIN 三个种子都：占领成功 + 长时间空城 + 弃守无人告知",
+    rows.every((r) => r.capturedAt > 0 && r.longestEmptySec >= 20 && r.silentWindowSec >= 60),
+    rows.map((r) => `s${r.seed}:cap${r.capturedAt.toFixed(0)}/空${r.longestEmptySec}/静${r.silentWindowSec.toFixed(0)}`).join(" "));
+}
+
+// ════════════════════════════════════════════════════════════
+// T1-SCRIPT · 脚本化 RED 基线：掉光、冻结、180 秒静默
+//   S1 = 敌人赖在圈里（原始诊断的第 2 种可能："打跑≠打死"）
+//   S2 = 圈子空了（原始诊断的第 1 种可能：人打完架没回旗下）
+// ════════════════════════════════════════════════════════════
+
+interface ScriptArmResult {
+  peak: number;
+  zeroAfterSec: number;
+  missionFrozenAt: number;
+  missionStatus: string;
+  survivorsOutside: number;
+  survivors: number;
+  firstRelatedAfterStallSec: number;
+  firstRelatedType: string;
+  trajectory: Array<[number, number]>;
+}
+
+function runScriptArm(mode: "S1" | "S2", seed: number): ScriptArmResult {
+  const s = clearedScenario(seed);
+  const facId = "ea_alamein_town";
+  const fac = facOf(s, facId);
+  for (let i = 0; i < 3; i++) addUnit(s, "infantry", "player", fac.position.x + 0.35 * i, fac.position.y);
+
+  // 走真解析器下令：order 必须带 targetFacilityId（刀B 的闸门要它），并建真 mission
+  const r = resolveIntent({ type: "capture", targetFacility: facId, quantity: "all" } as Intent, s, s.style);
+  const assigned = (r as { assignedUnitIds?: number[] }).assignedUnitIds ?? [];
+  applyOrders(s, r.orders);
+  const missionId = s.missions[0]?.id;
+
+  // 推到 ≥0.7
+  let peak = 0;
+  const traj: Array<[number, number]> = [];
+  const t0 = s.time;
+  pump(s, 4.0, (st) => {
+    if (fac.captureProgress > peak) peak = fac.captureProgress;
+    traj.push([st.time - t0, fac.captureProgress]);
+  });
+
+  const tStall = s.time;
+  if (mode === "S1") {
+    // 敌残兵晃回圈里：满血主战坦克（不会一挨打就低血量自撤），我方仍站在圈里
+    addUnit(s, "main_tank", "enemy", fac.position.x, fac.position.y);
+  } else {
+    // 圈子空了：我方被拉到 4 格外（真机制是 autoBehavior 4a/4b/4c 拖走，见文件头；
+    // 这里直接把终态摆出来，因为本臂测的是"圈空之后引擎说不说话"，不是"怎么被拖走的"）
+    for (const u of liveUnits(s, assigned)) {
+      u.position = { x: fac.position.x + 4, y: fac.position.y + 1 };
+      u.orders = []; u.target = null; u.waypoints = []; u.state = "idle";
+    }
+  }
+
+  let zeroAt = -1;
+  pump(s, 20, (st) => {
+    if (fac.captureProgress > peak) peak = fac.captureProgress;
+    traj.push([st.time - t0, fac.captureProgress]);
+    if (zeroAt < 0 && fac.captureProgress === 0) zeroAt = st.time - tStall;
+  });
+  const frozen = s.missions[0]?.progress ?? -1;
+
+  pump(s, 200);
+
+  const rel = relatedEvents(s, facId, missionId).filter((e) => e.time >= tStall);
+  const alive = liveUnits(s, assigned);
+  return {
+    peak,
+    zeroAfterSec: zeroAt,
+    missionFrozenAt: frozen,
+    missionStatus: s.missions[0]?.status ?? "-",
+    survivors: alive.length,
+    survivorsOutside: alive.filter((u) => dist(u.position, fac.position) > CAPTURE_RADIUS).length,
+    firstRelatedAfterStallSec: rel.length ? rel[0].time - tStall : -1,
+    firstRelatedType: rel.length ? rel[0].type : "(无)",
+    trajectory: traj,
+  };
+}
+
+// S1（敌人赖在圈里）为什么不在 commit ① 里：
+//   要让"敌兵占着圈"这个状态【持续】200 秒以观察静默，就得让双方都活着僵持——而引擎两边都不肯僵持：
+//   敌方 autoBehavior 4a 会冲出来打我方（isThreatInAction 命中"orders[0].targetFacilityId != null"，
+//   我方占领单正好带这个字段），主战坦克 25 秒打光 3 个步兵 → 触发 MISSION_FAILED（这一句反而不静默了，
+//   本身是个真事实：队伍打光了引擎【会】告诉你）。硬造僵持只能靠捏不会开火的单位＝伪造不可能的值。
+//   → "敌在圈内"这个 reason 分支改在 commit ③ 用【短窗口检测器测试】覆盖（摆好状态跑几帧、断言 emit
+//     出的原因），不需要 200 秒存活场景。commit ① 的 RED 基线用 S2（完全可控：无敌军、无战斗、无死亡）。
+function T1_script(seed: number): void {
+  for (const mode of ["S2"] as const) {
+    const label = "圈子空了";
+    console.log(`\n── T1-SCRIPT ${mode}（脚本化，理由见文件头）：${label} ──`);
+    const r = runScriptArm(mode, seed);
+
+    info(`峰值 ${r.peak.toFixed(2)} → 掉光耗时 ${r.zeroAfterSec.toFixed(2)}s；` +
+      `任务条冻在 ${r.missionFrozenAt.toFixed(3)}（status=${r.missionStatus}）`);
+    info(`停滞后第一条相关事件：${r.firstRelatedType}@+${r.firstRelatedAfterStallSec.toFixed(0)}s`);
+
+    check(`${mode} 进度先推到 ≥0.7（有峰值才谈得上回落）`, r.peak >= 0.7, `peak=${r.peak.toFixed(2)}`);
+    check(`${mode} 半速衰减：峰值→0 的耗时 ≈ peak×10 秒`,
+      Math.abs(r.zeroAfterSec - r.peak * 10) <= 0.6,
+      `实测 ${r.zeroAfterSec.toFixed(2)}s，按公式应 ${(r.peak * 10).toFixed(2)}s`);
+    check(`${mode} 环最终归零（环不"冻结"——冻结只在任务条）`, r.zeroAfterSec > 0);
+    check(`${mode} 任务条冻在末值且任务仍 active（单向镜像 missions.ts:194）`,
+      r.missionFrozenAt > 0 && r.missionFrozenAt < 0.1 && r.missionStatus === "active",
+      `frozen=${r.missionFrozenAt.toFixed(3)} status=${r.missionStatus}`);
+    check(`${mode} 指派单位存活（不是死光了）`, r.survivors > 0, `存活 ${r.survivors}`);
+    if (mode === "S2") {
+      check("S2 存活单位全在圈外（核坐标）", r.survivorsOutside === r.survivors,
+        `圈外 ${r.survivorsOutside}/${r.survivors}`);
+    }
+    check(`${mode} ★静默：停滞后 170 秒内没有任何与该设施/任务相关的事件`,
+      r.firstRelatedAfterStallSec < 0 || r.firstRelatedAfterStallSec >= 170,
+      `第一条 ${r.firstRelatedType}@+${r.firstRelatedAfterStallSec.toFixed(0)}s`);
+    check(`${mode} 唯一那句话来自 MISSION_STALLED 且 ≥180 秒`,
+      r.firstRelatedType === "MISSION_STALLED" && r.firstRelatedAfterStallSec >= 178,
+      `${r.firstRelatedType}@+${r.firstRelatedAfterStallSec.toFixed(0)}s`);
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// 刀A 的误报陷阱：占领【成功】那一帧 progress 是 0.98 → 0（economy.ts:152 满格清零）
+// 纯"从峰值回落"判据会在玩家占下来的瞬间喊"停滞"。此处把这一帧钉成基线事实。
+// ════════════════════════════════════════════════════════════
+
+function T0_successLooksLikeADrop(): void {
+  console.log("\n── 陷阱基线：占领成功的那一帧，环值也是「从峰值掉到 0」 ──");
+  const s = clearedScenario(1);
+  const fac = facOf(s, "ea_alamein_town");
+  for (let i = 0; i < 3; i++) addUnit(s, "infantry", "player", fac.position.x + 0.3 * i, fac.position.y);
+
+  let prev = 0, peakBeforeFlip = 0, dropAtFlip = -1;
+  pump(s, 8, () => {
+    if (fac.team !== "player") { prev = fac.captureProgress; if (prev > peakBeforeFlip) peakBeforeFlip = prev; }
+    else if (dropAtFlip < 0) dropAtFlip = peakBeforeFlip - fac.captureProgress;
+  });
+  info(`翻转前峰值 ${peakBeforeFlip.toFixed(2)} → 翻转帧 ${fac.captureProgress.toFixed(2)}，一帧内落差 ${dropAtFlip.toFixed(2)}`);
+  check("陷阱确实存在：成功翻转时环值一帧内从峰值掉到 0",
+    fac.team === "player" && dropAtFlip > 0.9,
+    `落差 ${dropAtFlip.toFixed(2)}`);
+  info("→ 刀A 必须显式排除完成态（设施易主给我方 / 满格清零），T7 专门断言这条");
+}
+
+// ════════════════════════════════════════════════════════════
+// T4 改前快照 · 三条到达路径的当前行为（刀B 落地后逐字比对，证明零误伤）
+// ════════════════════════════════════════════════════════════
+
+interface ArrivalSnapshot {
+  bareAttackMove: { state: string; orders: number; action: string };
+  sabotage: { state: string; orders: number; action: string };
+  enemyAttackMove: { state: string; orders: number; action: string };
+}
+
+function arrivalSnapshot(): ArrivalSnapshot {
+  // 快照必须取【到达那一帧】，不是"跑 30 秒之后"：
+  //   ①刀B 改的就是到达分支，到达帧才是同一个受测对象；
+  //   ②"清空的战场"并不真空——defensiveAI 会下生产单、processEconomy 把敌军新兵造出来
+  //     （实测 30 秒内总单位 1→3），跑得越久越是在测别的东西，还会把单位打死（首版就崩在这）。
+  const snap = (build: (s: GameState) => Unit): { state: string; orders: number; action: string } => {
+    const s = clearedScenario(1);
+    const u = build(s);
+    const goal = { ...u.target! };
+    let hit: { state: string; orders: number; action: string } | null = null;
+    for (let f = 0; f < 1200 && !hit; f++) {
+      if (f % 10 === 0) updateFog(s);
+      step(s, 0.1);
+      const cur = s.units.get(u.id);
+      if (!cur) break;                       // 被打死了 → 场景不干净，让断言去报
+      if (cur.target === null && dist(cur.position, goal) < 0.5) {
+        hit = { state: cur.state, orders: cur.orders.length, action: cur.orders[0]?.action ?? "(none)" };
+      }
+    }
+    return hit ?? { state: "(never-arrived)", orders: -1, action: "(never-arrived)" };
+  };
+
+  return {
+    // ① 光杆 attack_move（无 targetFacilityId）——刀B 必须放过
+    bareAttackMove: snap((s) => {
+      const fac = facOf(s, "ea_alamein_town");
+      const u = addUnit(s, "infantry", "player", fac.position.x + 6, fac.position.y);
+      applyPlayerCommands(s, [{
+        unitIds: [u.id], action: "attack_move",
+        target: { x: fac.position.x + 3, y: fac.position.y }, priority: "high",
+      } as Order]);
+      return u;
+    }),
+    // ② sabotage（带 targetFacilityId 但动作不是 attack_move）——刀B 必须放过
+    sabotage: snap((s) => {
+      const fac = facOf(s, "ea_axis_barracks");
+      const u = addUnit(s, "infantry", "player", fac.position.x + 5, fac.position.y);
+      applyPlayerCommands(s, [{
+        unitIds: [u.id], action: "sabotage", targetFacilityId: fac.id,
+        target: { x: fac.position.x, y: fac.position.y }, priority: "high",
+      } as Order]);
+      return u;
+    }),
+    // ③ 敌军 attack_move 到达——刀B 的 team 闸必须放过
+    enemyAttackMove: snap((s) => {
+      const fac = facOf(s, "ea_alamein_town");
+      const u = addUnit(s, "infantry", "enemy", fac.position.x + 6, fac.position.y);
+      u.state = "moving";
+      u.target = { x: fac.position.x + 3, y: fac.position.y };
+      u.waypoints = [{ x: fac.position.x + 3, y: fac.position.y }];
+      u.orders = [{
+        unitIds: [u.id], action: "attack_move", targetFacilityId: fac.id,
+        target: { x: fac.position.x + 3, y: fac.position.y }, priority: "high",
+      } as Order];
+      return u;
+    }),
+  };
+}
+
+// 改前快照（2026-07-29 于未改动的 b73d973 上抓取，刀B 落地后必须逐字不变）
+const EXPECTED_ARRIVAL: ArrivalSnapshot = {
+  bareAttackMove: { state: "idle", orders: 0, action: "(none)" },
+  sabotage: { state: "idle", orders: 1, action: "sabotage" },
+  enemyAttackMove: { state: "idle", orders: 0, action: "(none)" },
+};
+
+function T4_beforeSnapshot(printOnly: boolean): void {
+  console.log("\n── T4 改前到达行为快照（刀B 之后必须逐字不变） ──");
+  const got = arrivalSnapshot();
+  const fmt = (x: { state: string; orders: number; action: string }) => `state=${x.state} orders=${x.orders} action=${x.action}`;
+  info(`① 光杆 attack_move：${fmt(got.bareAttackMove)}`);
+  info(`② sabotage：${fmt(got.sabotage)}`);
+  info(`③ 敌军 attack_move：${fmt(got.enemyAttackMove)}`);
+  if (printOnly) {
+    console.log(JSON.stringify(got, null, 2));
+    return;
+  }
+  for (const k of ["bareAttackMove", "sabotage", "enemyAttackMove"] as const) {
+    check(`T4 ${k} 与改前快照逐字一致`,
+      JSON.stringify(got[k]) === JSON.stringify(EXPECTED_ARRIVAL[k]),
+      `got ${fmt(got[k])} / expected ${fmt(EXPECTED_ARRIVAL[k])}`);
+  }
+}
+
+// ── 环值轨迹（挑刀A 的回落幅度门槛用；不是断言，是证据） ──
+
+function printTrajectory(): void {
+  console.log("\n── 环值轨迹（S1 峰值前后，供刀A 选回落幅度门槛） ──");
+  const r = runScriptArm("S1", 1);
+  const iPeak = r.trajectory.findIndex(([, p]) => p >= r.peak - 1e-9);
+  const w = r.trajectory.slice(Math.max(0, iPeak - 4), iPeak + 30);
+  console.log("   " + w.map(([t, p]) => `${t.toFixed(1)}:${p.toFixed(3)}`).join(" "));
+  const drops: number[] = [];
+  for (let i = 1; i < r.trajectory.length; i++) {
+    const d = r.trajectory[i - 1][1] - r.trajectory[i][1];
+    if (d > 0) drops.push(d);
+  }
+  info(`单帧回落幅度：最小 ${Math.min(...drops).toFixed(4)} 最大 ${Math.max(...drops).toFixed(4)}（dt=0.1 时半速衰减理论值 0.01）`);
+}
+
+// ── main ──
+
+const args = process.argv.slice(2);
+const seedArg = args.find((a) => a.startsWith("--seed="));
+const SEED = seedArg ? Number(seedArg.split("=")[1]) : 1;
+
+console.log("=== ab-capture-stall (capture-stall-feedback-v1) ===");
+console.log(`基线 b73d973 · seed=${SEED} · 泵帧镜像生产序 · Math.random 已播种`);
+
+if (args.includes("--print-snapshot")) {
+  T4_beforeSnapshot(true);
+  printTrajectory();
+} else {
+  N0a_healthyCaptureIsExpressible();
+  N0b_stallIsExpressible();
+  T0_successLooksLikeADrop();
+  T1_main(SEED);
+  if (args.includes("--sweep")) T1_main_sweep();
+  T1_script(SEED);
+  T4_beforeSnapshot(false);
+  printTrajectory();
+
+  console.log(`\n=== ${failCount === 0 ? "ALL PASS" : `${failCount} FAIL`} ===`);
+  if (failCount > 0) process.exit(1);
+}
