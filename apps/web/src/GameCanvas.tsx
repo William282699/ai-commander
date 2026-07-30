@@ -1139,11 +1139,20 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     const menu = facilityMenu;
     if (!state || !menu || input.selectedUnitIds.length === 0) return;
 
-    // Move selected units to the facility position (proximity capture is automatic)
+    // Move selected units to the facility position (proximity capture is automatic).
+    // capture-stall-feedback-v1: the mouse path must sign its order the same way
+    // planCapture does. Without targetFacilityId this dispatch is invisible to the
+    // whole feedback layer — 刀B's arrival gate, the stall detector, and even the
+    // existing mission-level checks (this path creates no mission at all) — so a
+    // right-clicked capture would keep wandering off the circle in silence while a
+    // spoken one holds it. Safe: facility damage requires action === "sabotage"
+    // (combat.ts:349), so an attack_move carrying this field never shoots the
+    // objective it was sent to take.
     const order: Order = {
       unitIds: [...input.selectedUnitIds],
       action: "attack_move",
       target: { x: menu.facility.position.x, y: menu.facility.position.y },
+      targetFacilityId: menu.facility.id,
       priority: "high",
     };
     applyPlayerCommands(state, [order]);

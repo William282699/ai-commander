@@ -104,7 +104,16 @@ function resetAll(seed: number): void {
   resetWarPhaseTimers();
 }
 
-/** 一帧＝生产循环序（GameCanvas.tsx:1507→1586）。 */
+/** 一帧＝生产循环序（GameCanvas.tsx:1507→1586）。
+ *
+ *  ★ 省了什么、为什么（Fable commit① 审核账①——撤退语义的教训正是"省略不可见"）：
+ *    不含 updateBattleMarkers / updateGamePhase / checkGameOver / updateTasks /
+ *    processAdvisorTriggers+checkDoctrines / applyEndgamePressure。
+ *    理由：它们都不喂本 bench 的任何断言——relatedEvents 只认 facId/missionId；
+ *    gameOver 恒 false（不调 checkGameOver）反而让各 processor 的 `if (gameOver) return`
+ *    早退闸永不触发，即"跑得比生产更满"而非更少；advisor/doctrine 层只产对话消息不动兵。
+ *    一旦某条断言开始依赖战况阶段、任务栏或 ENDGAME 消耗，必须先把对应处理器加回来。
+ */
 function step(s: GameState, dt: number): void {
   tick(s, dt);
   processEconomy(s, dt);
@@ -146,7 +155,13 @@ function countInCircle(s: GameState, fac: Facility, team: "player" | "enemy"): n
 const liveUnits = (s: GameState, ids: readonly number[]): Unit[] =>
   ids.map((id) => s.units.get(id)).filter((u): u is Unit => !!u && u.state !== "dead" && u.hp > 0);
 
-/** 与某设施/某任务相关的事件（经济类噪声排除——它们自带 120 秒定时器，任何 ≥60 秒窗口必有）。 */
+/** 与某设施/某任务相关的事件（经济类噪声排除——它们自带 120 秒定时器，任何 ≥60 秒窗口必有）。
+ *
+ *  ★ 本 bench 从不排水 reportEvents，生产每帧 drainReportEvents(state, 5)（GameCanvas:1696）。
+ *    （Fable commit① 审核账②）无行为分叉——泵内没有任何处理器读这个数组，它只是只写缓冲；
+ *    不排水反而让整窗事件都留在原地可供断言。但【别拿它当生产等价】：真实频道分发、
+ *    升级问句单槽竞争、staff-ask 冷却全在排水之后，本 bench 一概不覆盖。
+ */
 function relatedEvents(s: GameState, facId: string, missionId?: string): ReportEvent[] {
   return s.reportEvents.filter(
     (e) => !e.type.startsWith("ECONOMY") && (e.entityId === facId || (missionId != null && e.entityId === missionId)),
@@ -271,6 +286,11 @@ interface MainArmResult {
    *  比"终态离圈几格"稳健得多：终态是单帧快照，会被最后一次抖动整个改写。 */
   longestEmptySec: number;
   emptyFractionPct: number;
+  /** 存活的指派单位里，处于「defending + 持久 defend 单 + 锚点在圈内」的比例——刀B 的机制本身
+   *  （家法②：有隐藏状态的病断言状态本身；空城时长只是它的下游代理，还混着合法的出击往返）。 */
+  defendingAtPostPct: number;
+  /** 占领成功之后该设施还被 CONTESTED / LOST 过几次（改前 seed1 是 +118s 被抢、198s 丢掉）。 */
+  contestedOrLostAfterCapture: number;
 }
 
 function runMainArm(seed: number, verbose: boolean): MainArmResult {
@@ -325,6 +345,20 @@ function runMainArm(seed: number, verbose: boolean): MainArmResult {
     silentWindowSec: firstAfter ? firstAfter.time - (t0 + Math.max(capturedAt, 0)) : s.time - (t0 + Math.max(capturedAt, 0)),
     longestEmptySec: longestEmpty,
     emptyFractionPct: samples ? Math.round((emptySamples / samples) * 100) : -1,
+    // ★ 只看【持久 defend 单 + 锚点在圈内】，不看 unit.state：
+    //   开火时 state 是 "attacking"，脱战后 combat.ts:209-217 才翻回 "defending"。
+    //   首版把 state==="defending" 也写进判据 → seed=1 量出"驻岗 0%"，而同一帧圈内站着 10 个人、
+    //   离圈 1.0~1.5 格。瞬时 state 是抖动量，那张单子才是决定它会不会回来的耐久状态。
+    defendingAtPostPct: alive.length
+      ? Math.round((alive.filter((u) =>
+          u.orders[0]?.action === "defend" &&
+          !!u.orders[0]?.target && dist(u.orders[0].target!, fac.position) <= CAPTURE_RADIUS,
+        ).length / alive.length) * 100)
+      : -1,
+    contestedOrLostAfterCapture: rel.filter(
+      (e) => e.time > t0 + Math.max(capturedAt, 0) + 1 &&
+        (e.type === "FACILITY_CONTESTED" || e.type === "FACILITY_LOST"),
+    ).length,
   };
 
   if (verbose) {
@@ -338,42 +372,58 @@ function runMainArm(seed: number, verbose: boolean): MainArmResult {
   return res;
 }
 
-function T1_main(seed: number): void {
-  console.log("\n── T1-MAIN 真剧本 RED 基线（零脚本化）：占完没人回岗 ──");
-  const r = runMainArm(seed, true);
+/** commit ① 在【未修引擎】(b73d973 + bench) 上测得并经 Fable 逐位复算的病态基线。
+ *  刀B 落地后这些数必须垮掉——T2 断言的就是"垮掉"，T3 负对照断言"把刀B 注释掉就回到这里"。 */
+const PRE_FIX_MAIN = {
+  capturedAtSec: 72.0,                       // 三种子完全一致（行军时间主导）
+  longestEmptySec: { s1: 35, s7: 36, s1337: 27 },
+  emptyFractionPct: { s1: 29, s7: 57, s1337: 66 },
+  silentWindowSec: { s1: 118, s7: 71, s1337: 76 },
+} as const;
 
-  check("T1-MAIN 占领确实成功了（这一臂测的是「占完之后」，不是占不下来）", r.capturedAt > 0,
-    `capturedAt=${r.capturedAt.toFixed(1)}s`);
-  check("T1-MAIN 存活单位仍有（不是死光了才没人在圈里）", r.survivors > 0,
-    `存活 ${r.survivors}/${r.assigned}`);
-  // ★ 判据用"空城时长"而不是"终态离圈几格"：
-  //   终态是单帧快照，会被最后一次抖动整个改写（首版就写成了终态断言，seed=1 下终态恰好圈内还有 3 个人
-  //   → 4 条断言全 FAIL，而"占完之后长时间没人守"这个病却是真的。数字要量现象本身，不量它的残影。）
-  // 门槛来自三种子实测下界，不是拍的（首版按 seed=1 拍成 ≥30s/≥50%，seed=1337 的 27s/29% 就打脸了）：
-  //   空城最长 seed1=35s seed7=36s seed1337=27s → 门槛 20s
-  //   空城占比 seed1=29% seed7=57% seed1337=66% → 门槛 25%
-  //   静默     seed1=118s seed7=71s seed1337=76s → 门槛 60s
-  check("T1-MAIN 占领后有长时间空城（连续 ≥20 秒圈内零我方；实测 27-36s）", r.longestEmptySec >= 20,
-    `最长连续空城 ${r.longestEmptySec}s（占窗口 ${r.emptyFractionPct}%）`);
-  check("T1-MAIN 空城是常态不是插曲（占领后 120 秒里 ≥25% 时间圈内无人；实测 29-66%）", r.emptyFractionPct >= 25,
-    `${r.emptyFractionPct}%`);
-  check("T1-MAIN ★弃守无人告知：占领成功后 ≥60 秒内没有任何与该设施相关的事件", r.silentWindowSec >= 60,
-    `静默 ${r.silentWindowSec.toFixed(0)}s`);
-  info(`（终态离圈 ${r.minDistEnd.toFixed(1)}~${r.maxDistEnd.toFixed(1)} 格、圈内 ${r.inCircleEnd} 人——记录用，不作断言：单帧量不住抖动）`);
+function T2_main(seed: number): void {
+  console.log("\n── T2-MAIN 刀B 效果（真剧本，零脚本化）：占完有人守 ──");
+  const r = runMainArm(seed, true);
+  info(`改前基线（commit ① 实测，Fable 已复算）：空城最长 ${PRE_FIX_MAIN.longestEmptySec.s1}/` +
+    `${PRE_FIX_MAIN.longestEmptySec.s7}/${PRE_FIX_MAIN.longestEmptySec.s1337}s、` +
+    `占比 ${PRE_FIX_MAIN.emptyFractionPct.s1}/${PRE_FIX_MAIN.emptyFractionPct.s7}/${PRE_FIX_MAIN.emptyFractionPct.s1337}%`);
+
+  const preLongest = PRE_FIX_MAIN.longestEmptySec[`s${seed}` as keyof typeof PRE_FIX_MAIN.longestEmptySec];
+
+  check("T2-MAIN 占领仍然成功（刀B 不该拖慢占领本身）", r.capturedAt > 0,
+    `capturedAt=${r.capturedAt.toFixed(1)}s（改前 ${PRE_FIX_MAIN.capturedAtSec}s）`);
+  check("T2-MAIN 存活单位仍有", r.survivors > 0, `存活 ${r.survivors}/${r.assigned}`);
+  // ★ 机制断言排第一（家法②）：耐久状态＝那张锚在圈内的 defend 单。
+  check("T2-MAIN ★存活的指派单位全都持有锚在圈内的持久 defend 单（岗位本身）",
+    r.defendingAtPostPct === 100, `${r.defendingAtPostPct}%`);
+  check("T2-MAIN ★占领之后该设施再没被 CONTESTED / LOST 过（改前 seed=1 是 +118s 被抢、198s 丢掉）",
+    r.contestedOrLostAfterCapture === 0, `${r.contestedOrLostAfterCapture} 次`);
+  // 空城时长：门槛先量后定（改前 35/36/27s → 改后 11/13/18s，三种子逐个严格下降）。
+  check("T2-MAIN 长段弃守消失：最长连续空城 ≤20 秒（改前 27-36s，改后实测 11-18s）",
+    r.longestEmptySec <= 20, `最长 ${r.longestEmptySec}s`);
+  check(`T2-MAIN 最长空城严格小于改前同种子（${preLongest}s）`,
+    preLongest === undefined || r.longestEmptySec < preLongest,
+    `改后 ${r.longestEmptySec}s vs 改前 ${preLongest}s`);
+  info(`空城【占比】29/57/66% → 26/37/33%：只小幅下降，且【不作断言】——剩下的空窗是驻防单位` +
+    `合法出击往返（defend 允许迎击射程内威胁，脱战再回岗），不是弃守。本刀治的是"回不回来"，` +
+    `不是"一步不离"（接战方式属手感，用户 07-29 裁定押后）。`);
+  info(`（终态离圈 ${r.minDistEnd.toFixed(1)}~${r.maxDistEnd.toFixed(1)} 格、圈内 ${r.inCircleEnd} 人；` +
+    `静默 ${r.silentWindowSec.toFixed(0)}s——静默归刀A 治，本 commit 不动）`);
 }
 
-function T1_main_sweep(): void {
-  console.log("\n── T1-MAIN 稳定性：跨种子复跑（换种子应仍成立） ──");
+function T2_main_sweep(): void {
+  console.log("\n── T2-MAIN 稳定性：跨种子复跑（换种子应仍成立） ──");
   const seeds = [1, 7, 1337];
   const rows = seeds.map((sd) => runMainArm(sd, false));
   for (const r of rows) {
-    info(`seed=${r.seed} 占领@${r.capturedAt.toFixed(1)}s 存活${r.survivors}/${r.assigned} ` +
+    info(`seed=${r.seed} 占领@${r.capturedAt.toFixed(1)}s 存活${r.survivors}/${r.assigned} 驻岗${r.defendingAtPostPct}% 抢/丢${r.contestedOrLostAfterCapture}次 ` +
       `空城最长${r.longestEmptySec}s(${r.emptyFractionPct}%) 终态离圈${r.minDistEnd.toFixed(1)}~${r.maxDistEnd.toFixed(1)} ` +
       `圈内${r.inCircleEnd} 终态${r.lostBack ? "被夺回" : "仍我方"} 静默${r.silentWindowSec.toFixed(0)}s`);
   }
-  check("T1-MAIN 三个种子都：占领成功 + 长时间空城 + 弃守无人告知",
-    rows.every((r) => r.capturedAt > 0 && r.longestEmptySec >= 20 && r.silentWindowSec >= 60),
-    rows.map((r) => `s${r.seed}:cap${r.capturedAt.toFixed(0)}/空${r.longestEmptySec}/静${r.silentWindowSec.toFixed(0)}`).join(" "));
+  check("T2-MAIN 三个种子都：占领成功 + 全员持有圈内 defend 单 + 设施再没被抢/丢 + 最长空城 ≤20s",
+    rows.every((r) => r.capturedAt > 0 && r.defendingAtPostPct === 100 &&
+      r.contestedOrLostAfterCapture === 0 && r.longestEmptySec <= 20),
+    rows.map((r) => `s${r.seed}:驻岗${r.defendingAtPostPct}%/抢丢${r.contestedOrLostAfterCapture}/空${r.longestEmptySec}s`).join(" "));
 }
 
 // ════════════════════════════════════════════════════════════
@@ -490,6 +540,88 @@ function T1_script(seed: number): void {
       r.firstRelatedType === "MISSION_STALLED" && r.firstRelatedAfterStallSec >= 178,
       `${r.firstRelatedType}@+${r.firstRelatedAfterStallSec.toFixed(0)}s`);
   }
+}
+
+// ════════════════════════════════════════════════════════════
+// T2-SCRIPT · 刀B 机制（可控场景）：到达即驻防 → 被拖出去打 → 打完回岗
+//   断言【状态本身】（unit.state / orders[0].action / 锚点坐标），位置只作旁证（家法②）。
+// ════════════════════════════════════════════════════════════
+
+function T2_script_defendConversion(): void {
+  console.log("\n── T2-SCRIPT 刀B：到达即驻防，打完回岗 ──");
+  const s = clearedScenario(1);
+  const fac = facOf(s, "ea_alamein_town");
+  // 摆在 8 格外 —— 必须真的走过去、真的触发到达分支（摆在圈里就测不到"到达"）
+  const start = { x: fac.position.x + 8, y: fac.position.y };
+  for (let i = 0; i < 3; i++) addUnit(s, "infantry", "player", start.x + 0.4 * i, start.y);
+
+  const r = resolveIntent({ type: "capture", targetFacility: fac.id, quantity: "all" } as Intent, s, s.style);
+  const assigned = (r as { assignedUnitIds?: number[] }).assignedUnitIds ?? [];
+  check("T2-SCRIPT 前置：占领令带 targetFacilityId 且派出 3 个单位（数 assignedUnitIds）",
+    assigned.length === 3 && r.orders[0]?.targetFacilityId === fac.id,
+    `assigned=${assigned.length} tfid=${r.orders[0]?.targetFacilityId}`);
+  applyOrders(s, r.orders);
+
+  pump(s, 40);
+  const arrived = liveUnits(s, assigned);
+  const converted = arrived.filter((u) => u.state === "defending" && u.orders[0]?.action === "defend");
+  const anchoredIn = converted.filter((u) => u.orders[0]?.target && dist(u.orders[0].target!, fac.position) <= CAPTURE_RADIUS);
+  const carriesFid = converted.filter((u) => u.orders[0]?.targetFacilityId != null);
+
+  info(`到达后：${arrived.map((u) => `${u.state}/${u.orders[0]?.action ?? "-"}`).join(" ")}`);
+  check("T2-SCRIPT 到达即转 defending + 持久 defend 单（状态本身）",
+    arrived.length > 0 && converted.length === arrived.length,
+    `${converted.length}/${arrived.length}`);
+  // ↓ 这两条必须显式要求 converted.length > 0：T3 负对照跑出来时 converted 是空集，
+  //   "0 === 0" 和 "带字段的有 0 个" 都会【空转通过】——关掉修复却还 PASS 的断言等于没有断言。
+  check("T2-SCRIPT defend 单锚点落在圈内（≤1.5 格）",
+    converted.length > 0 && anchoredIn.length === converted.length,
+    `${anchoredIn.length}/${converted.length}`);
+  check("T2-SCRIPT ★新 defend 单不带 targetFacilityId（否则敌方 4a isThreatInAction 会读到，行为分叉）",
+    converted.length > 0 && carriesFid.length === 0,
+    `转换 ${converted.length} 个，其中带字段的 ${carriesFid.length} 个`);
+  check("T2-SCRIPT 站住了就把点占下来", fac.team === "player", `facTeam=${fac.team}`);
+
+  // 打一架：4 格外来一个"正在行动"的敌人 → autoBehavior 4a 会把驻防单位拉出去
+  const bait = addUnit(s, "infantry", "enemy", fac.position.x + 4, fac.position.y + 2);
+  bait.attackTarget = assigned[0];
+  let everLeft = false;
+  pump(s, 45, (st) => {
+    if (!everLeft && liveUnits(st, assigned).some((u) => dist(u.position, fac.position) > CAPTURE_RADIUS)) everLeft = true;
+  });
+
+  const back = liveUnits(s, assigned);
+  const inCircle = back.filter((u) => dist(u.position, fac.position) <= CAPTURE_RADIUS);
+  const stillDefending = back.filter((u) => u.state === "defending" && u.orders[0]?.action === "defend");
+  info(`交战后：曾离岗=${everLeft ? "是" : "否"}，回圈 ${inCircle.length}/${back.length}，` +
+    `离圈距离 ${back.map((u) => dist(u.position, fac.position).toFixed(1)).join("/")}`);
+  check("T2-SCRIPT ★打完回岗：存活单位全部回到圈内（核实际落点坐标）",
+    back.length > 0 && inCircle.length === back.length, `回圈 ${inCircle.length}/${back.length}`);
+  check("T2-SCRIPT 回岗后仍持有 defend 单（岗位没丢）", stillDefending.length === back.length,
+    `${stillDefending.length}/${back.length}`);
+}
+
+function T5b_mousePathConversion(): void {
+  console.log("\n── T5b(B半) 鼠标右键占领：不经 resolveIntent、无 mission，刀B 照样认 ──");
+  const s = clearedScenario(1);
+  const fac = facOf(s, "ea_alamein_town");
+  const u = addUnit(s, "infantry", "player", fac.position.x + 8, fac.position.y);
+  // 逐字镜像 GameCanvas.handleFacilityCapture 修后的 order
+  applyPlayerCommands(s, [{
+    unitIds: [u.id], action: "attack_move",
+    target: { x: fac.position.x, y: fac.position.y },
+    targetFacilityId: fac.id, priority: "high",
+  } as Order]);
+  check("T5b 该路径确实不建 mission（所以刀A 必须按设施键控，不能按任务）", s.missions.length === 0,
+    `missions=${s.missions.length}`);
+
+  pump(s, 40);
+  const cur = s.units.get(u.id)!;
+  check("T5b 鼠标下的占领令到达后同样转 defending + defend 单",
+    cur.state === "defending" && cur.orders[0]?.action === "defend",
+    `state=${cur.state} action=${cur.orders[0]?.action}`);
+  check("T5b 锚点在圈内", !!cur.orders[0]?.target && dist(cur.orders[0].target!, fac.position) <= CAPTURE_RADIUS,
+    `锚点 ${cur.orders[0]?.target ? `(${cur.orders[0].target!.x.toFixed(1)},${cur.orders[0].target!.y.toFixed(1)})` : "无"}`);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -641,8 +773,10 @@ if (args.includes("--print-snapshot")) {
   N0a_healthyCaptureIsExpressible();
   N0b_stallIsExpressible();
   T0_successLooksLikeADrop();
-  T1_main(SEED);
-  if (args.includes("--sweep")) T1_main_sweep();
+  T2_script_defendConversion();
+  T5b_mousePathConversion();
+  T2_main(SEED);
+  if (args.includes("--sweep")) T2_main_sweep();
   T1_script(SEED);
   T4_beforeSnapshot(false);
   printTrajectory();

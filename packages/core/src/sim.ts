@@ -269,6 +269,46 @@ function moveUnit(unit: Unit, dt: number, state: GameState): void {
           target: { ...unit.position },
           priority: unit.orders[0].priority,
         }];
+      } else if (
+        unit.team === "player" &&
+        unit.orders[0]?.action === "attack_move" &&
+        unit.orders[0]?.targetFacilityId != null
+      ) {
+        // capture-stall-feedback-v1 刀B: a unit sent to TAKE a facility treats
+        // that circle as its post. Without this it lands `idle` with its orders
+        // cleared (attack_move ∈ ONE_SHOT_ACTIONS) — and an order-less idle unit
+        // is exactly what autoBehavior 4a/4b/4c is allowed to drag away (P3 only
+        // shields units still carrying an order). It then stops wherever the
+        // firefight ended: the capture radius is 1.5 tiles and the chase leash
+        // only pulls back beyond 12, so the gap is never closed. Measured on the
+        // unfixed engine: after a successful capture the post sits empty for
+        // 27-36s at a stretch (29-66% of the window) and nothing ever says so.
+        //
+        // Same已证 machinery as retreat-semantics-v1 修法2 above: the one-shot
+        // capture order becomes a PERSISTENT defend order anchored at the landing
+        // point, so combat.ts:209-217 walks the unit back to the circle every
+        // time an engagement ends. Whole-array replacement, never an in-place
+        // field edit: applyOrders.ts:439 stores ONE shared Order object across the
+        // group, so mutating orders[0] would splash onto every unit in it.
+        //
+        // The new defend order deliberately does NOT carry targetFacilityId:
+        // autoBehavior.ts:377 (isThreatInAction) reads that field on the OTHER
+        // side's units, and today the post-arrival unit has no orders at all —
+        // keeping the field absent leaves the enemy reaction path reading a
+        // falsy value in both worlds, i.e. zero behavioural fork.
+        //
+        // Gate is action+field, not unit.state: `attack_move + targetFacilityId`
+        // is written only by the capture flow (planCapture tacticalPlanner:1262
+        // and the facility context menu); the two sabotage writers use
+        // action "sabotage", and enemyAI writes the field nowhere. The team
+        // check backstops both.
+        unit.state = "defending";
+        unit.orders = [{
+          unitIds: [unit.id],
+          action: "defend",
+          target: { ...unit.position },
+          priority: unit.orders[0].priority,
+        }];
       } else if (unit.state !== "patrolling") {
         unit.state = "idle";
         clearOneShotOrders(unit);
