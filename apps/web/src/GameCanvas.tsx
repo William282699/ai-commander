@@ -58,6 +58,7 @@ import {
   frontEscalationFacts,
   buildFrontEscalationPayload,
   facilityEscalationFacts,
+  buildFacilityEscalationPayload,
   facilityContestWorthAsking,
   assessDecisionReview,
   describeDecisionReview,
@@ -72,7 +73,7 @@ import {
   processPressureDirector,
   resetPressureDirector,
 } from "@ai-commander/core";
-import type { AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot, StrategicSituation, ViewportGeometry } from "@ai-commander/core";
+import type { FacilitySituationType, AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot, StrategicSituation, ViewportGeometry } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
 import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
@@ -395,11 +396,19 @@ function makeActionId(): string {
  * Returns true if the escalation was accepted (a question will post), false if
  * skipped (cooldown, or a voice already in flight on this channel).
  */
+/** Map the SOURCE report event onto the SITUATION frame the voice is written under.
+ *  Default keeps every pre-existing caller (doctrine breach / director dilemma /
+ *  debug) byte-identical — only capture stalls get the new frame. */
+function situationTypeForEvent(type: ReportEventType): FacilitySituationType {
+  return type === "CAPTURE_STALLED" ? "capture_stalled" : "facility_contested";
+}
+
 function escalateCrisisToConversation(
   state: GameState,
   crisis: CrisisEvent,
   channel: Channel,
   topicKey: string,
+  situationType: FacilitySituationType = "facility_contested",
 ): boolean {
   const now = state.time;
   const last = escalationState.topicCooldown.get(topicKey) ?? -Infinity;
@@ -450,22 +459,13 @@ function escalateCrisisToConversation(
 
   // Structured mini-facts for ONE situation — NOT the full battlefield digest, NO
   // option menu, NO question text. The LLM writes the question from these.
-  const miniFacts = (facFacts
-    ? [
-        "SITUATION (voice ONE in-character line for THIS single point only):",
-        "type: facility_contested",
-        `facility: ${facFacts.facilityName}`,
-        `owner: ${facFacts.owner}`,
-        `capturing: ${facFacts.capturingTeam ?? "none"}`,
-        `capture_progress_pct: ${Math.round(facFacts.captureProgress * 100)}`,
-        `is_keypoint: ${facFacts.isKeypoint}`,
-        `is_objective: ${facFacts.isObjective}`,
-        `nearby_forces_ours_vs_enemy_visible: ${facFacts.nearbyPlayerUnits} vs ${facFacts.nearbyEnemyVisibleUnits}`,
-        `idle_reinforcement_available: ${facFacts.idleReinforcementAvailable}`,
-        `raw_signal: ${crisis.message}`,
-      ]
+  // capture-stall-feedback-v1 fix1: both branches now come from ONE core builder, so
+  // the bench can assert the frame label. The array used to be inline here and no node
+  // harness loads GameCanvas — that blind spot is how a reversed frame shipped.
+  const miniFacts = facFacts
+    ? buildFacilityEscalationPayload(facFacts, situationType, crisis.message)
     : // V1b: front payload from the ONE core builder (shared with the A/B bench)
-      buildFrontEscalationPayload(state, crisis).split("\n")).join("\n");
+      buildFrontEscalationPayload(state, crisis);
 
   // Neutral fallback — one open question, no defensive assumption, no option menu.
   const fallback =
@@ -1561,7 +1561,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
             time: state.time,
           };
           const topicKey = `${trig.event.type}:${trig.event.entityId ?? "global"}`;
-          escalateCrisisToConversation(state, syntheticCrisis, trig.channel, `ADVISOR_CRISIS:${topicKey}`);
+          escalateCrisisToConversation(state, syntheticCrisis, trig.channel, `ADVISOR_CRISIS:${topicKey}`, situationTypeForEvent(trig.event.type));
           // Mark so the staff-ask path doesn't also escalate this topic.
           crisisCardTopics.add(topicKey);
         } else if (trig.type === "llm_advice") {
@@ -1783,7 +1783,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
             message: evt.message,
             time: state.time,
           };
-          escalateCrisisToConversation(state, synthCrisis, channel, topicKey);
+          escalateCrisisToConversation(state, synthCrisis, channel, topicKey, situationTypeForEvent(evt.type));
         } else {
           // Regular report-only message
           addMessage(level, evt.message, state.time, channel, undefined, "event_report");

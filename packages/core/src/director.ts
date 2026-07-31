@@ -741,6 +741,47 @@ export interface FacilityEscalationFacts {
   idleReinforcementAvailable: boolean;
 }
 
+/** Which SITUATION frame a facility escalation is voiced under.
+ *
+ *  capture-stall-feedback-v1 fix1: the frame used to be hardcoded to
+ *  "facility_contested" in the web layer's inline array — correct for "the enemy is
+ *  taking something of ours", exactly backwards for CAPTURE_STALLED ("OUR capture
+ *  stopped advancing"). Real-model probe on the mislabelled frame: Marcus reasoned
+ *  from the label and produced "敌军可能反夺 / 敌军随时可能反抢" — the frame, not the
+ *  facts, drove the sentence. The facts themselves were all correct. */
+export type FacilitySituationType = "facility_contested" | "capture_stalled";
+
+/**
+ * The ONE builder for a facility escalation's fact pack.
+ *
+ * Mirrors the V1b precedent (buildFrontEscalationPayload): the payload lives in core
+ * so the bench can assert it. It previously sat inline in GameCanvas.tsx, which no
+ * node harness ever loads — the same structural blind spot as the drain pipeline, and
+ * the reason a reversed frame label could ship unnoticed. Field lines are moved
+ * verbatim; only the `type:` line is now a parameter.
+ *
+ * Engine states facts only — no conclusion, no option menu, no question text.
+ */
+export function buildFacilityEscalationPayload(
+  facts: FacilityEscalationFacts,
+  situationType: FacilitySituationType,
+  rawSignal: string,
+): string {
+  return [
+    "SITUATION (voice ONE in-character line for THIS single point only):",
+    `type: ${situationType}`,
+    `facility: ${facts.facilityName}`,
+    `owner: ${facts.owner}`,
+    `capturing: ${facts.capturingTeam ?? "none"}`,
+    `capture_progress_pct: ${Math.round(facts.captureProgress * 100)}`,
+    `is_keypoint: ${facts.isKeypoint}`,
+    `is_objective: ${facts.isObjective}`,
+    `nearby_forces_ours_vs_enemy_visible: ${facts.nearbyPlayerUnits} vs ${facts.nearbyEnemyVisibleUnits}`,
+    `idle_reinforcement_available: ${facts.idleReinforcementAvailable}`,
+    `raw_signal: ${rawSignal}`,
+  ].join("\n");
+}
+
 export function facilityEscalationFacts(state: GameState, facilityId: string): FacilityEscalationFacts | null {
   const f = state.facilities.get(facilityId);
   if (!f) return null;

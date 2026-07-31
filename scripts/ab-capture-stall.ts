@@ -62,7 +62,7 @@ import {
   resetReportSignals, resetAutoBehaviorTimer, resetEnemyAITimer, resetEnemyProdToggle,
   resetAttackWaveState, resetDefensiveAITimer, resetPressureDirector, resetMissionCounter,
   resetEngagementCache, resetWarPhaseTimers, updateFog, resolveIntent, applyOrders,
-  applyPlayerCommands, selectEscalationEvent,
+  applyPlayerCommands, selectEscalationEvent, facilityEscalationFacts, buildFacilityEscalationPayload,
 } from "@ai-commander/core";
 import type { GameState, Unit, Facility, Intent, Order, ReportEvent } from "@ai-commander/shared";
 
@@ -798,6 +798,48 @@ function T8_reasonBranches(): void {
 }
 
 // ════════════════════════════════════════════════════════════
+// T9 · 升级事实包的 SITUATION 帧标签（fix1）
+//   病灶：帧标签原先写死在 GameCanvas 的内联数组里（"type: facility_contested"），
+//   而 CAPTURE_STALLED 的语义是"我方占领卡住"，正好相反。真模型探针实证：马克斯是
+//   【按标签推理】的——拿到"被争夺"帧就说「敌军可能反夺/随时可能反抢」，而事实字段全对。
+//   同时这也是个结构盲区：GameCanvas 不进任何 node 台架（与排水管线同一个洞），
+//   所以标签反了没人测得到。修法＝搬进 core 做唯一 builder，帧标签由调用方按源事件类型映射。
+//   ★ 只断言 builder 输出的结构字段，不断言马克斯的措辞（措辞归手测）。
+// ════════════════════════════════════════════════════════════
+
+function T9_escalationFrame(): void {
+  console.log("\n── T9 升级事实包的 SITUATION 帧标签 ──");
+  const s = clearedScenario(1);
+  const fac = facOf(s, "ea_alamein_town");
+  for (let i = 0; i < 3; i++) addUnit(s, "infantry", "player", fac.position.x + 0.3 * i, fac.position.y);
+  pump(s, 3.0);
+  const facts = facilityEscalationFacts(s, fac.id);
+  check("T9 前置：facilityEscalationFacts 拿得到该设施的事实", !!facts, `${facts ? "ok" : "null"}`);
+  if (!facts) return;
+
+  const stalled = buildFacilityEscalationPayload(facts, "capture_stalled", "占领进度在回落：圈内已经没有我方单位。");
+  const contested = buildFacilityEscalationPayload(facts, "facility_contested", "正在被夺取！");
+  info(`capture_stalled 帧首两行：${stalled.split("\n").slice(0, 2).join(" / ")}`);
+
+  check("T9① CAPTURE_STALLED 的升级 payload 帧标签＝capture_stalled",
+    stalled.includes("type: capture_stalled") && !stalled.includes("type: facility_contested"),
+    stalled.split("\n")[1]);
+  check("T9② FACILITY_CONTESTED 仍是 facility_contested（不回归）",
+    contested.includes("type: facility_contested"),
+    contested.split("\n")[1]);
+  // 除 type 行外必须逐字相同——搬移是"只动标签"，其余字段不许漂
+  const stripType = (p: string) => p.split("\n").filter((l) => !l.startsWith("type: ")).join("\n");
+  check("T9③ 两帧除 type 行外逐字相同（搬移未改任何事实字段）",
+    stripType(stalled).replace("占领进度在回落：圈内已经没有我方单位。", "X") ===
+    stripType(contested).replace("正在被夺取！", "X"),
+    "字段集有差异");
+  check("T9④ 事实字段仍是引擎真值（进度与本文件自算的一致）",
+    stalled.includes(`capture_progress_pct: ${Math.round(fac.captureProgress * 100)}`) &&
+    stalled.includes(`facility: ${fac.name}`),
+    `环 ${(fac.captureProgress * 100).toFixed(0)}%`);
+}
+
+// ════════════════════════════════════════════════════════════
 // T7 · 刀A 不误报（四种"看起来像回落、其实不是"的情形）
 // ════════════════════════════════════════════════════════════
 
@@ -1029,6 +1071,7 @@ if (args.includes("--print-snapshot")) {
   if (args.includes("--sweep")) T2_main_sweep();
   T5_script(SEED);
   T8_reasonBranches();
+  T9_escalationFrame();
   T7_noFalsePositives();
   T4_beforeSnapshot(false);
   printTrajectory();

@@ -42,7 +42,8 @@ export { buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFall
 export type { PreflightConcernFacts, PreflightFrontDelta, PreflightFrontStatus } from "./commandPreflight";
 export type { EscalationFacts } from "./director";
 // Step 7c.1 stabilization — facility-contest grounding facts + worthiness gate (pure)
-export { facilityEscalationFacts, facilityContestWorthAsking } from "./director";
+export { facilityEscalationFacts, facilityContestWorthAsking, buildFacilityEscalationPayload } from "./director";
+export type { FacilitySituationType } from "./director";
 export type { FacilityEscalationFacts } from "./director";
 export type { DirectorBeat, DirectorBeatKind, DirectorStake, DirectorTrend, DirectorMetricSnapshot, DirectorSnapshot } from "./director";
 // Step 7c.2b — Marcus strategic aggregation (pure; report-driven situations)
