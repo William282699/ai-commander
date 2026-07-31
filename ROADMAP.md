@@ -59,8 +59,13 @@ bench 家法新条目（写在 ab-dispatch-scope.ts 注释）：会动兵的断�
 
 **家法（第五次同形栽跟头后立）：判据要测效果，不测措辞。** 六条：①会动兵的断言数 assignedUnitIds+核实际落点坐标，不看回执台词②有隐藏状态的病，断言状态本身，位置只作旁证（滞后指标）③**第一机制陷阱**：复现出一个能产生同方向症状的机制≠破案——必须对齐**幅度**（净位移 vs 机制上界）与**终点**（复现终态 vs 实机截图逐点比对）④**N0 式台架自证**：复现台架先证明它结构上表达得出这个病⑤回归测试必做**负对照**：关掉修复重跑，新断言要真的 FAIL⑥谁报的数字，另一方必须重算才作数。（前四次同形：Step B 正则两向饱和/验收单一问法/R12 关键词表/只读台词漏"字面对执行错"。）
 
-### ⏭ 第 7 级 — Capture 停滞反馈
-实证 bug：占领圈 80% 静默卡死（半径 1.5 格+无对抗判定，战后单位散圈外，零反馈）。修法=停滞时 Chen 报一句+战后归位。Capture 雷区：必须一页纸提案先行（2026-07 大修撤回教训，归档 `~/MyProjects/_archive/capture-overhaul-20260717`）。
+### ✅ 第 7 级 — Capture 停滞反馈（capture-stall-feedback-v1）【收口 2026-07-30，tag `capture-stall-feedback-v1-done` @2a4afa8，用户手测 PASS，已合 main】
+一手现场溯源先行（记忆档 project_capture_stall_provenance）：**"80% 卡死"是转述产物**——用户 07-18 原话「蓝圈剩大概 20% 不转」被助手换算后抄了 11 天；环从不冻结（锯齿悬停或 8 秒掉光），冻结只在任务条（missions.ts:194 带守卫单向镜像）。静默结构成因＝衰减期 capturingTeam 仍 "player" → mission.progress 每帧镜像衰减值 → detectMissionStalled "180 秒没变"计时器每帧被重置，端到端实测 188 秒后才一句"卡在 0%"。
+**两刀+一补+fix1（占领判定语义零字节动），五 commit**：①`420cc3b` bench 台架+RED 基线（两臂制：真剧本七连败产不出"涨到峰值再停"→主臂测模式①占完漂走[更贵的病]、副臂显式脚本化测模式③掉光冻结；mulberry32 播种+十 reset 逐位可复现）②`4aa6d08` **刀B 到岗即驻防**——sim.ts 到达分支一个 else-if（闸=player+attack_move+targetFacilityId 唯占领流独有；整数组替换防 applyOrders 共享引用溅射；defend 单不带 targetFacilityId 防敌 4a isThreatInAction 行为分叉）+鼠标右键路径补签 targetFacilityId③`3899bcc` **刀A 停滞当场报**——reportSignals 按**设施**键控（右键无 mission 也看得见），峰值 0.25/回落 0.05（=5 帧,单帧衰减恒 0.0100）/预算 2 条+60s 冷却/完成态护栏（成功帧 0.98→0 与停滞同形,6/6 必踩）④`2da5c33` episode 重置照裁定（Opus 偏离后自测证伪改回:锯齿创不出新高,不重置的代价=二次派兵白跑无声）+T8 三原因分支+director 两表断言⑤`2a4afa8` **fix1 帧标签**——升级事实包 type 原写死 facility_contested,马克斯按标签推理说「敌军反夺」;修=事实包搬 core 唯一 builder（镜像 V1b 先例）+situationTypeForEvent 映射,真模型×4 方向全正、战损编造 1/3→0/4。
+**效果**：空城最长 35/36/27s→11/13/18s、占后被抢 2/1/2→**0**、停滞发声 188s→**0.5s**（环剩 75% 就说话）、占领耗时 72.0s 未拖慢。bench 55 断言+T3/T6/T9 负对照（12/11/1 条真 FAIL 精准不误伤,审核亲手摘刀）。手测活体验收：撤令致圈空→停滞行 0.5s 内出、马克斯问句方向正（"补人拉回还是留着防别处"）、事实零编造、3 秒后刀B 走回圈占领完成。
+**八笔记账（本级不治）**：①模式②小队打光→任务永远 0%（"指派单位全灭/全撤"判据挂 missions.ts 另立刀,常见值得早排）②中立设施任务条冻 0.80+neutral→enemy 零事件③60s 冷却挡 33s 内二次弃守第二句（旋钮是冷却非预算）④capture mission 无墙钟超时⑤右键占领行军会被敌 4a 认作威胁（对齐说话路径,手感留意）⑥马克斯残留编造 1/4（「两个排」量级/「被清出圈」——两层修法:先给 capture_stalled 帧补活性事实行不碰 prompt,仍在则一行语义原则「位置≠战损、数字须指回字段」,与 Step B 账③合刀）⑦**结构盲区同族两洞**:bench 从不排水 reportEvents + GameCanvas 接线无台架可测（帧标签反了活到真模型探针才被抓=此洞实证）⑧worthiness 闸防守调的也管停滞升级,FACILITY_GATE 自带调参授权等真反馈。
+**手测新账（对话层,与本级四刀无关已结构证死:四文件 diff 空+双端 6/6）**：①判断执照边界——顶一句在设计内,**玩家重复下令仍不办=权力错位**（修法方向:引擎检测同 intent 短窗重复→信封注入 REPEATED_ORDER+一行原则「顶撞只许一次,坚持即执行」）②悬挂升级问句劫持新命令（与 Step C 账④同地基合并记账;方向=焦点时效+「带动词与目标的新句优先当命令」）③prompt [A] 首字 acknowledgment 漏网,反例与规则例句逐字相同（修法=照 §4b 先例:一行语义原则不挂例句）④SQUADS 半忙半闲表达不出+"只调闲的那半"无 intent 字段（归 Preflight V2 族）。
+方法资产：判据三教训又添一批——终态是单帧残影要量现象时长、瞬时 state 非耐久状态要断言那张单、空转断言 0/0 白过要 length>0 前置、**负对照必须打在 bench 测得到的层上**（GameCanvas 接线打不到,打 builder 本体）。
 
 ### 🔭 第 8 级 — Preflight V2：provenance
 Intent 字段分 playerCommand / unspecified / advisorProposal，根治 74 单位洞（该 bug 目前**有意放回**，手测撞到不是新 bug）。
