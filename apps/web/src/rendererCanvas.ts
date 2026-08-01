@@ -309,12 +309,30 @@ export function renderFacilities(
     // Skip if off-screen (with margin)
     if (screenX < -50 || screenY < -50) continue;
 
-    const iconSize = Math.max(12, tileScreenSize * 1.2);
+    // 刀3 fix4: 无 sprite 的产出据点（油库/弹药库/铁路枢纽走圆点兜底）1.2→1.7 放大。
+    const incomeRow = FACILITY_GLYPH_ROW[fac.type];
+    const iconSize = Math.max(12, tileScreenSize * (incomeRow ? 1.7 : 1.2));
     const cx = screenX + tileScreenSize / 2;
     const cy = screenY + tileScreenSize / 2;
 
-    // Try building sprite first; fall back to colored-circle icon
     const spriteEntry = FACILITY_SPRITE_MAP[fac.type];
+
+    // 刀3 fix4: 可占产出据点 → 队色地环（RTS 控制点语言，画在建筑脚下）。
+    // 判据=有资源行（FACILITY_GLYPH_ROW，同一真相源）：环与资源字永远成对出现。
+    // 三层视觉语言：旗=胜负点、环+资源字=可占的产出据点、素图=不可占设施。
+    // 颜色恒等 fac.team 即时换色；比 renderFacilitySprite 的 0.25 底光亮一档。
+    if (incomeRow) {
+      const ringR = tileScreenSize * ((spriteEntry?.drawScale ?? 1.6) * 0.55);
+      ctx.strokeStyle =
+        fac.team === "player" ? "rgba(46,123,255,0.9)" :
+        fac.team === "enemy" ? "rgba(255,64,64,0.9)" : "rgba(205,205,205,0.75)";
+      ctx.lineWidth = Math.max(2, tileScreenSize * 0.14);
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + tileScreenSize * 0.25, ringR, ringR * 0.45, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Try building sprite first; fall back to colored-circle icon
     const drewSprite =
       spriteEntry != null &&
       renderFacilitySprite(ctx, fac, spriteEntry, cx, cy, tileScreenSize);

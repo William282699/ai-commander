@@ -137,14 +137,16 @@ export const FACILITY_SPRITE_MAP: Partial<Record<FacilityType, FacilitySpriteEnt
     drawScale: 3.0,
     showTeamBorder: true,
   },
+  // 刀3 fix4: 可占产出据点（comm_tower/radar/repair_station）放大 2.0→2.6，
+  // 与不可占的 defense_tower(2.0) 拉开一档——据点要一眼比杂物楼大。
   comm_tower: {
     spriteKey: "watchtower",
-    drawScale: 2.0,
+    drawScale: 2.6,
     showTeamBorder: true,
   },
   radar: {
     spriteKey: "watchtower",
-    drawScale: 2.0,
+    drawScale: 2.6,
     showTeamBorder: true,
   },
   defense_tower: {
@@ -154,7 +156,7 @@ export const FACILITY_SPRITE_MAP: Partial<Record<FacilityType, FacilitySpriteEnt
   },
   repair_station: {
     spriteKey: "house_small",
-    drawScale: 2.0,
+    drawScale: 2.6,
     showTeamBorder: true,
   },
 };
