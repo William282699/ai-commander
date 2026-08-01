@@ -141,8 +141,8 @@ export function createElAlameinState(): GameState {
     scenarioId: "el_alamein",
     namedRoutes: EL_ALAMEIN_ROUTES.map(r => ({ ...r, waypoints: r.waypoints.map(w => ({ ...w })) })),
     captureObjectives: [...EL_ALAMEIN_OBJECTIVES],
-    // Step 5B win/loss tuning: capture ANY 2 of 4 Axis objectives to win,
-    // lose 2 of 3 forward keypoints OR run out of time to lose. HQ destroyed
+    // Step 5B win/loss tuning (5C-lite values): capture 3 of 4 Axis objectives to win,
+    // lose all 3 forward keypoints OR run out of time to lose. HQ destroyed
     // and all-commanders-dead are handled by scenario-agnostic checks in warPhase.
     scenarioWinConfig: {
       timeLimitSec: 1800,                  // 30 minutes
@@ -153,8 +153,11 @@ export function createElAlameinState(): GameState {
         "ea_player_south_post",
       ],
       maxFriendlyKeypointsLost: 3,         // 5C-lite: all 3 lost → defeat (rating handles partial)
+      // pretest-polish-v1 刀1: score = 2×captured − lost（见 warPhase.endGameWithRating）。
+      // 倍率通胀顶端抬两档（majorVictory 4 / victory 3），否则占2丢1=3 直接大胜。
+      // 大胜只留给满分卷（占2丢0=4）；下行三格（captured=0）与旧公式完全一致。
       ratingThresholds: {
-        majorVictory: 3, victory: 2, minorVictory: 1,
+        majorVictory: 4, victory: 3, minorVictory: 1,
         draw: 0, minorDefeat: -1, defeat: -2,
       },
     },

@@ -608,7 +608,7 @@ export const EL_ALAMEIN_CAMERA_TARGETS: Record<string, { x: number; y: number }>
 // ──────────────────────────────────────────────
 // Capture objectives — pool of Axis strongpoints that count toward victory.
 // Step 5B: victory requires capturing ANY K of these (K = scenarioWinConfig.
-// requiredCapturedObjectives, currently 2). Rommel's HQ remains a separate
+// requiredCapturedObjectives, currently 3). Rommel's HQ remains a separate
 // "destroy HQ" win path handled by warPhase, not listed here.
 // ──────────────────────────────────────────────
 

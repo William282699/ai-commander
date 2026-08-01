@@ -245,10 +245,11 @@ function endGame(state: GameState, winner: Team, reason: string): void {
 }
 
 // 5C-lite: 30-min timeout → rating evaluation.
-// Score = capturedObjectives - lostKeypoints. Mapped to 6 tiers via winCfg.ratingThresholds
-// (with sensible defaults). Sets gameOverRating + gameOverBreakdown on state; winner is
-// "player" for draw/victory tiers, "enemy" for defeat tiers — UI MUST read rating to render
-// title correctly, otherwise draw will mis-render as VICTORY.
+// Score = 2×capturedObjectives - lostKeypoints (pretest-polish-v1 刀1: 进攻的一分买得起
+// 防守的一分还有剩，占1丢1=+1 小胜而非平局，龟缩保平不再是理性解). Mapped to 6 tiers via
+// winCfg.ratingThresholds (with sensible defaults). Sets gameOverRating + gameOverBreakdown
+// on state; winner is "player" for draw/victory tiers, "enemy" for defeat tiers — UI MUST
+// read rating to render title correctly, otherwise draw will mis-render as VICTORY.
 function endGameWithRating(state: GameState, winCfg: NonNullable<GameState["scenarioWinConfig"]>): void {
   const captured = (state.captureObjectives ?? []).filter(id =>
     state.facilities.get(id)?.team === "player",
@@ -257,10 +258,10 @@ function endGameWithRating(state: GameState, winCfg: NonNullable<GameState["scen
     const f = state.facilities.get(id);
     return !f || f.hp <= 0 || f.team !== "player";
   }).length;
-  const score = captured - lost;
+  const score = 2 * captured - lost;
 
   const t = winCfg.ratingThresholds ?? {
-    majorVictory: 3, victory: 2, minorVictory: 1, draw: 0, minorDefeat: -1, defeat: -2,
+    majorVictory: 4, victory: 3, minorVictory: 1, draw: 0, minorDefeat: -1, defeat: -2,
   };
 
   let rating: NonNullable<GameState["gameOverRating"]>;
