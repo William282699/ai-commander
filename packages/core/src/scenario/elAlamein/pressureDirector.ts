@@ -482,6 +482,20 @@ function pickFormation(kind: PressureKind, phase: PressurePhase): FormationStyle
 //     applyHistory=false — the op locks its target for a whole assembly, so
 //     P4's rotation memory must not skew its strategic pick.
 
+// pretest-polish-v1 刀2: 三山脊性格 — (A) recapture 分支的每目标权重。
+// 北部山脊死保 / 阿拉曼镇要冲 / 中央山脊基准 / 南部高地软肋，
+// "打哪个"从此取决于目标价值，不再只看哪个近哪个空。
+// 乘在基础分（100/70）之后、historyPenalty 之前：惩罚是"最近打过这儿"的轮换
+// 记忆，量纲是绝对分，跟着目标价值一起缩放会污染轮换语义（提案 v2 P1①；今天
+// recapture 的 historyPenalty 恒 0，钉死位置是防将来给 recapture 加惩罚时踩坑）。
+// B/C 分支（keypoint 的 finish_post/raid）不吃权重。
+export const OBJECTIVE_PRESSURE_WEIGHT: Record<string, number> = {
+  ea_kidney_ridge: 1.4,    // 北部山脊 — 死保
+  ea_alamein_town: 1.2,    // 阿拉曼镇 — 要冲
+  ea_miteirya_ridge: 1.0,  // 中央山脊 — 基准
+  ea_himeimat: 0.6,        // 南部高地 — 软肋
+};
+
 function buildPressureTargets(
   state: GameState,
   applyHistory: boolean,
@@ -500,6 +514,7 @@ function buildPressureTargets(
     if (f.team === "player") s += 100;
     else if (f.team === "enemy" && f.capturingTeam === "player") s += 70;
     else continue;
+    s *= OBJECTIVE_PRESSURE_WEIGHT[objId] ?? 1.0;  // 刀2: 性格权重乘在基础分后、惩罚前
     if (applyHistory) s += historyPenalty(state, objId, "recapture");  // exempt → 0
     out.push({ targetId: objId, frontId: frontOf(objId), position: { ...f.position }, kind: "recapture", score: s });
   }
@@ -537,6 +552,18 @@ function buildPressureTargets(
   }
 
   return out;
+}
+
+/** pretest-polish-v1 刀2 只读探针（bench 专用；照 autoBehavior.chaseAnchorHomeOf 形状：
+ *  返回拷贝，不把内部 builder 直接漏出去）。生产消费者只走 processPressureDirector /
+ *  buildOperationTargets，谁也不该拿这个改状态。 */
+export function probePressureTargets(
+  state: GameState,
+  applyHistory: boolean,
+  banFinishPost: boolean,
+): PressureCandidate[] {
+  return buildPressureTargets(state, applyHistory, banFinishPost)
+    .map(c => ({ ...c, position: { ...c.position } }));
 }
 
 /**

@@ -21,7 +21,9 @@
 // 用法：npx tsx scripts/ab-pretest-polish.ts [--negctl]
 // ============================================================
 
-import { createInitialGameState, checkGameOver } from "@ai-commander/core";
+import {
+  createInitialGameState, checkGameOver, probePressureTargets, OBJECTIVE_PRESSURE_WEIGHT,
+} from "@ai-commander/core";
 import type { GameState } from "@ai-commander/shared";
 
 // ── 0. Harness ──
@@ -162,12 +164,116 @@ function T1_negctl(): void {
   }
 }
 
+// ── 4. T2 刀2 三山脊性格（pressureDirector (A) recapture 权重表）──
+//
+// 探针 probePressureTargets 只读返回拷贝（照 chaseAnchorHomeOf 形状）。
+// 权重真值直接读 OBJECTIVE_PRESSURE_WEIGHT（不在 bench 里抄第二份数字表，
+// 抄了就是第二真相源）；本段只把"排序严格按权重"和"数值=基础分×权重"钉死。
+// 确定性：probe 纯读 state，无 Math.random（historyPenalty 对 recapture 恒 0，
+// 模块级 p4TargetHistory 在本进程从未被写入）。
+
+const RIDGE_ORDER = ["ea_kidney_ridge", "ea_alamein_town", "ea_miteirya_ridge", "ea_himeimat"];
+const RIDGE_NAMES: Record<string, string> = {
+  ea_kidney_ridge: "北部山脊", ea_alamein_town: "阿拉曼镇",
+  ea_miteirya_ridge: "中央山脊", ea_himeimat: "南部高地",
+};
+
+/** 四目标同时进入 (A) 分支的两种姿势：held=玩家已占（基础分 100）；
+ *  capturing=敌持有但玩家占领中（基础分 70）。 */
+function makeRecaptureState(mode: "held" | "capturing"): GameState {
+  const s = createInitialGameState("el_alamein");
+  for (const objId of s.captureObjectives ?? []) {
+    const f = s.facilities.get(objId)!;
+    if (mode === "held") f.team = "player";
+    else f.capturingTeam = "player"; // team 保持 enemy
+  }
+  return s;
+}
+
+function runT2Grid(mode: "held" | "capturing", base: number, tag: string): void {
+  const s = makeRecaptureState(mode);
+  const recap = probePressureTargets(s, true, false).filter(c => c.kind === "recapture");
+  check(`${tag} 四个 objective 全部产出 recapture 候选`,
+    recap.length === 4, `实际 ${recap.length}`);
+  for (const c of recap) {
+    const expected = base * (OBJECTIVE_PRESSURE_WEIGHT[c.targetId] ?? 1.0);
+    check(`${tag} ${RIDGE_NAMES[c.targetId]} score=${base}×${OBJECTIVE_PRESSURE_WEIGHT[c.targetId]}`,
+      Math.abs(c.score - expected) < 1e-9, `实际 ${c.score}，期望 ${expected}`);
+  }
+  const sorted = [...recap].sort((a, b) => b.score - a.score);
+  const strictlyDesc = sorted.every((c, i) => i === 0 || sorted[i - 1].score > c.score);
+  check(`${tag} 候选分严格按权重表排序：北>镇>中央>南（无并列）`,
+    strictlyDesc && sorted.map(c => c.targetId).join(",") === RIDGE_ORDER.join(","),
+    `实际 ${sorted.map(c => `${RIDGE_NAMES[c.targetId]}:${c.score}`).join(" ")}`);
+}
+
+function T2_ridge_weights(): void {
+  console.log("\n== T2 刀2 三山脊性格：候选分严格按权重表排序（探针只读）==");
+  runT2Grid("held", 100, "T2a[已占100]");
+  runT2Grid("capturing", 70, "T2b[占领中70]");
+  info("消费方耦合：P4 在 pressureDirector.ts:399 按 score 降序取 candidates[0]，operation 层 :576 同样");
+  info("best-first —— 上面钉住的排序就是派兵决策线本身。真剧本反扑派兵差异属记录性观测（提案 (c)");
+  info("不设硬门槛），等用户手测时看敌军是否死保北线、软放南线。");
+
+  // T2c B/C 分支不吃权重：同一状态下，真权重 vs 全 1.0，非 recapture 候选逐字节相同。
+  const s = createInitialGameState("el_alamein");
+  const objectives = s.captureObjectives ?? [];
+  s.facilities.get(objectives[0])!.team = "player"; // 造一个 recapture，B 照常、C 被压制
+  const weighted = probePressureTargets(s, true, false).filter(c => c.kind !== "recapture");
+  const saved = { ...OBJECTIVE_PRESSURE_WEIGHT };
+  try {
+    for (const k of Object.keys(OBJECTIVE_PRESSURE_WEIGHT)) OBJECTIVE_PRESSURE_WEIGHT[k] = 1.0;
+    const flat = probePressureTargets(s, true, false).filter(c => c.kind !== "recapture");
+    check("T2c B/C 分支不吃权重（真权重 vs 全1.0，非 recapture 候选逐字节相同）",
+      JSON.stringify(weighted) === JSON.stringify(flat),
+      `weighted=${JSON.stringify(weighted)} flat=${JSON.stringify(flat)}`);
+  } finally {
+    Object.assign(OBJECTIVE_PRESSURE_WEIGHT, saved);
+  }
+}
+
+function T2_negctl(): void {
+  console.log("\n== NEGCTL 刀2 负对照：权重全 1.0 → 四分并列，排序/数值断言必须真 FAIL ==");
+  const saved = { ...OBJECTIVE_PRESSURE_WEIGHT };
+  const before = failCount;
+  try {
+    for (const k of Object.keys(OBJECTIVE_PRESSURE_WEIGHT)) OBJECTIVE_PRESSURE_WEIGHT[k] = 1.0;
+    // 数值断言读的是表本身（全 1.0 时期望=实际），所以换用【原始权重表】的期望值打平权引擎，
+    // 与 T1 负对照同构：新期望打旧行为。
+    for (const [mode, base, tag] of [["held", 100, "NEGCTL-T2a"], ["capturing", 70, "NEGCTL-T2b"]] as const) {
+      const s = makeRecaptureState(mode);
+      const recap = probePressureTargets(s, true, false).filter(c => c.kind === "recapture");
+      check(`${tag} 四候选仍在（平权不该丢候选）`, recap.length === 4);
+      for (const c of recap) {
+        const expected = base * (saved[c.targetId] ?? 1.0);
+        check(`${tag} ${RIDGE_NAMES[c.targetId]} 原权重期望 ${expected}`,
+          Math.abs(c.score - expected) < 1e-9, `实际 ${c.score}`);
+      }
+      const sorted = [...recap].sort((a, b) => b.score - a.score);
+      check(`${tag} 严格排序（平权下必并列）`,
+        sorted.every((c, i) => i === 0 || sorted[i - 1].score > c.score));
+    }
+  } finally {
+    Object.assign(OBJECTIVE_PRESSURE_WEIGHT, saved);
+  }
+  const fails = failCount - before;
+  // 期望恰 8：每臂 3 条数值 FAIL（中央山脊 ×1.0 平权同值不挂——精准不误伤）+ 1 条严格排序 FAIL。
+  console.log(`\nNEGCTL-刀2 结果：${fails} 条 FAIL（期望恰 8）`);
+  if (fails === 8) {
+    failCount = before;
+    console.log("NEGCTL-刀2 PASS —— 排序与数值断言在平权世界里真的会挂，中央山脊(×1.0)零误伤");
+  } else {
+    console.log("NEGCTL-刀2 FAIL —— 负对照失真，检查权重表或断言");
+  }
+}
+
 // ── main ──
 
 const args = process.argv.slice(2);
 T0_harness_proves_domain();
 T1_nine_grid();
-if (args.includes("--negctl")) T1_negctl();
+T2_ridge_weights();
+if (args.includes("--negctl")) { T1_negctl(); T2_negctl(); }
 
 console.log(`\n${failCount === 0 ? "ALL PASS" : `${failCount} FAILED`}`);
 process.exit(failCount === 0 ? 0 : 1);

@@ -21,7 +21,7 @@ export type { BattleBoard, BoardSquadRow, BoardGroupRow } from "./battleBoard";
 export { processReportSignals, drainReportEvents, resetReportSignals } from "./reportSignals";
 export { createInitialGameState } from "./scenario";
 export { processDefensiveAI, resetDefensiveAITimer } from "./scenario/elAlamein";
-export { processPressureDirector, resetPressureDirector } from "./scenario/elAlamein/pressureDirector";
+export { processPressureDirector, resetPressureDirector, probePressureTargets, OBJECTIVE_PRESSURE_WEIGHT } from "./scenario/elAlamein/pressureDirector";
 export { checkDoctrines, cancelDoctrine } from "./doctrine";
 export { findBestReinforcements, generateCrisisCard, assessCrisisEscalation } from "./crisisResponse";
 export type { ReinforceCandidate, CrisisEscalation, CrisisEscalationKind } from "./crisisResponse";
