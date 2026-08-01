@@ -13,7 +13,7 @@ import type {
   Tag,
   BattleMarker,
 } from "@ai-commander/shared";
-import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
+import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, FACILITY_BONUSES } from "@ai-commander/shared";
 import { renderUnit, hasSpriteEntry } from "./rendering/unitRenderer";
 import { SPRITE_MANIFEST } from "./rendering/spriteManifest";
 import {
@@ -244,16 +244,61 @@ function objectiveFlagColor(team: Facility["team"]): string {
   return "#b8b8b8";
 }
 
+// 刀3 fix1: 旗面阵营 symbol。红旗=德军 Balkenkreuz（国防军装甲标志十字，战争游戏
+// 通行做法；不画纳粹符号），蓝旗=盟军白星，中立灰旗无符号。
+function drawBalkenkreuz(ctx: CanvasRenderingContext2D, x: number, y: number, r: number): void {
+  const t = r * 0.44;
+  ctx.fillStyle = "#f5f5f5";
+  ctx.fillRect(x - r, y - t / 2, 2 * r, t);
+  ctx.fillRect(x - t / 2, y - r, t, 2 * r);
+  const t2 = t * 0.5, r2 = r * 0.8;
+  ctx.fillStyle = "#141414";
+  ctx.fillRect(x - r2, y - t2 / 2, 2 * r2, t2);
+  ctx.fillRect(x - t2 / 2, y - r2, t2, 2 * r2);
+}
+
+function drawAlliedStar(ctx: CanvasRenderingContext2D, x: number, y: number, r: number): void {
+  ctx.beginPath();
+  for (let i = 0; i < 5; i++) {
+    const outer = -Math.PI / 2 + (i * 2 * Math.PI) / 5;
+    const inner = outer + Math.PI / 5;
+    const px = x + r * Math.cos(outer), py = y + r * Math.sin(outer);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+    ctx.lineTo(x + r * 0.42 * Math.cos(inner), y + r * 0.42 * Math.sin(inner));
+  }
+  ctx.closePath();
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+}
+
+// 刀3 fix1: 设施收益图标 — 从 FACILITY_BONUSES 推导（唯一真相源，改收益表图标自动跟），
+// 静态地图知识与设施名同策略恒显。"夺下这里能得什么"一眼可见。
+const RESOURCE_GLYPHS: Array<{ key: "money" | "fuel" | "ammo" | "intel"; ch: string; color: string }> = [
+  { key: "money", ch: "$", color: "#ffd75e" },
+  { key: "fuel",  ch: "油", color: "#ffa94d" },
+  { key: "ammo",  ch: "弹", color: "#ff7b72" },
+  { key: "intel", ch: "情", color: "#6fd8d3" },
+];
+const FACILITY_GLYPH_ROW: Record<string, Array<{ ch: string; color: string }>> = {};
+for (const [ftype, bonus] of Object.entries(FACILITY_BONUSES)) {
+  const row = RESOURCE_GLYPHS.filter(g => (bonus as Record<string, number | undefined>)[g.key])
+    .map(g => ({ ch: g.ch, color: g.color }));
+  if (row.length > 0) FACILITY_GLYPH_ROW[ftype] = row;
+}
+
 export function renderFacilities(
   ctx: CanvasRenderingContext2D,
   facilities: Facility[],
   camera: Camera,
   captureObjectives?: string[],
+  friendlyKeypoints?: string[],
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
-  const objectiveSet = captureObjectives && captureObjectives.length > 0
-    ? new Set(captureObjectives)
-    : null;
+  // 刀3 fix1: 胜负相关点全插旗 — 4 个夺取目标（占3胜）+ 3 个我方前哨（丢3败）。
+  // 开局即见蓝旗（我方必守）与红旗（敌方必夺），旗色恒等 fac.team 易主即换。
+  const flagged = [...(captureObjectives ?? []), ...(friendlyKeypoints ?? [])];
+  const objectiveSet = flagged.length > 0 ? new Set(flagged) : null;
 
   for (const fac of facilities) {
     const screenX = (fac.position.x * TILE_SIZE - camera.x) * camera.zoom;
@@ -307,34 +352,35 @@ export function renderFacilities(
       ctx.fillText(symbol, cx, cy);
     }
 
-    // pretest-polish-v1 刀3: 胜利目标插旗（旗杆+三角旗，画在图标右上方）。
-    // 恒显含雾区：旗是静态地图知识（"哪 4 个点算赢"），与设施名字同策略——本函数
+    // pretest-polish-v1 刀3(+fix1): 胜负点插旗（旗杆+矩形旗+阵营符号，画在图标右上方）。
+    // 恒显含雾区：旗是静态地图知识（"哪些点决定胜负"），与设施名字同策略——本函数
     // 画在雾层之前（GameCanvas 步骤 2→3），雾只把旗压暗不遮没，不泄任何实时敌情。
-    // 旗色恒等 fac.team（见 objectiveFlagColor），无独立状态无动画。
-    // 非 objective 设施走不进这个 if，零绘制改动。
+    // 旗色恒等 fac.team（见 objectiveFlagColor），符号跟旗色走：红旗黑十字（德军）、
+    // 蓝旗白星（盟军）、中立灰旗素面。无独立状态无动画。
+    // 非胜负点设施走不进这个 if，零绘制改动。
     if (objectiveSet?.has(fac.id)) {
       const poleX = cx + iconSize * 0.38;
       const poleBase = cy - iconSize * 0.05;
-      const poleH = Math.max(18, tileScreenSize * 1.9);
+      const poleH = Math.max(22, tileScreenSize * 2.1);
       const poleTop = poleBase - poleH;
-      const flagW = Math.max(12, poleH * 0.55);
-      const flagH = Math.max(8, poleH * 0.36);
+      const flagW = Math.max(16, poleH * 0.6);
+      const flagH = Math.max(11, poleH * 0.4);
       ctx.strokeStyle = "#1a1a1a";
       ctx.lineWidth = Math.max(2, tileScreenSize * 0.1);
       ctx.beginPath();
       ctx.moveTo(poleX, poleBase);
       ctx.lineTo(poleX, poleTop);
       ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(poleX, poleTop);
-      ctx.lineTo(poleX + flagW, poleTop + flagH / 2);
-      ctx.lineTo(poleX, poleTop + flagH);
-      ctx.closePath();
       ctx.fillStyle = objectiveFlagColor(fac.team);
-      ctx.fill();
+      ctx.fillRect(poleX, poleTop, flagW, flagH);
       ctx.strokeStyle = "#000";
       ctx.lineWidth = 1;
-      ctx.stroke();
+      ctx.strokeRect(poleX, poleTop, flagW, flagH);
+      const symX = poleX + flagW / 2;
+      const symY = poleTop + flagH / 2;
+      const symR = flagH * 0.36;
+      if (fac.team === "enemy") drawBalkenkreuz(ctx, symX, symY, symR);
+      else if (fac.team === "player") drawAlliedStar(ctx, symX, symY, symR * 1.25);
     }
 
     // Label (shared by both sprite and icon paths)
@@ -367,6 +413,29 @@ export function renderFacilities(
     ctx.lineWidth = isStrategic ? 3 : 2;
     ctx.strokeText(fac.name, cx, cy + iconSize / 2 + 8);
     ctx.fillText(fac.name, cx, cy + iconSize / 2 + 8);
+
+    // 刀3 fix1: 名字下一行画收益图标（$/油/弹/情，颜色分资源），来源=FACILITY_BONUSES
+    // 推导表。谁产什么一眼可见——"夺下加钱的"从此不用问。
+    const glyphRow = FACILITY_GLYPH_ROW[fac.type];
+    if (glyphRow) {
+      const gFont = Math.max(9, 11 * camera.zoom);
+      ctx.font = `bold ${gFont}px sans-serif`;
+      const gap = Math.max(2, gFont * 0.25);
+      const widths = glyphRow.map(g => ctx.measureText(g.ch).width);
+      const total = widths.reduce((a, b) => a + b, 0) + gap * (glyphRow.length - 1);
+      let gx = cx - total / 2;
+      const gy = cy + iconSize / 2 + 8 + fontSize * 0.95;
+      ctx.textAlign = "left";
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#000";
+      for (let gi = 0; gi < glyphRow.length; gi++) {
+        ctx.strokeText(glyphRow[gi].ch, gx, gy);
+        ctx.fillStyle = glyphRow[gi].color;
+        ctx.fillText(glyphRow[gi].ch, gx, gy);
+        gx += widths[gi] + gap;
+      }
+      ctx.textAlign = "center";
+    }
 
     // MVP2: HQ health bar (always visible)
     if (fac.type === "headquarters") {
