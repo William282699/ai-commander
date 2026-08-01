@@ -67,6 +67,9 @@ bench 家法新条目（写在 ab-dispatch-scope.ts 注释）：会动兵的断�
 **手测新账（对话层,与本级四刀无关已结构证死:四文件 diff 空+双端 6/6）**：①判断执照边界——顶一句在设计内,**玩家重复下令仍不办=权力错位**（修法方向:引擎检测同 intent 短窗重复→信封注入 REPEATED_ORDER+一行原则「顶撞只许一次,坚持即执行」）②悬挂升级问句劫持新命令（与 Step C 账④同地基合并记账;方向=焦点时效+「带动词与目标的新句优先当命令」）③prompt [A] 首字 acknowledgment 漏网,反例与规则例句逐字相同（修法=照 §4b 先例:一行语义原则不挂例句）④SQUADS 半忙半闲表达不出+"只调闲的那半"无 intent 字段（归 Preflight V2 族）。
 方法资产：判据三教训又添一批——终态是单帧残影要量现象时长、瞬时 state 非耐久状态要断言那张单、空转断言 0/0 白过要 length>0 前置、**负对照必须打在 bench 测得到的层上**（GameCanvas 接线打不到,打 builder 本体）。
 
+### ▶ 插队 · 外测前三小刀（pretest-polish-v1）【提案已双审，2026-07-31 用户拍板开工】
+MVP 外测前唯一要做的事。提案 `PRETEST_POLISH_V1_PROPOSAL.md`（v2：Opus 抓出刀1 算术错[占3即时胜把取值夹死在 [0,2]²，9 格表为准]+刀3 落点错[占领环循环平时 continue，改 renderFacilities:240]，均已修订）。三刀独立可单砍：①超时计分 `2×captured−lost` + 阈值抬 4/3（治龟缩保平）②三山脊 pressureDirector 权重表 北1.4/镇1.2/中1.0/南0.6，乘在 historyPenalty 之前、只动 (A) 分支（治目标复制粘贴；**实施第一步先跑 ab-capture-stall --sweep 对照漂移**）③胜利目标插旗 renderFacilities 恒显（雾里可见，旗色恒等 fac.team）。三裁定按联合建议采纳（数字可实施后再调）。worktree `../AI Commander-pretest` 分支 `pretest-polish-v1` @493ce85 已建。**大改地图/摆位置/敌方全知（combat.ts:134 敌索敌不吃雾＝"偷袭"结构上不存在）全部外测后再议。**
+
 ### 🔭 第 8 级 — Preflight V2：provenance
 Intent 字段分 playerCommand / unspecified / advisorProposal，根治 74 单位洞（该 bug 目前**有意放回**，手测撞到不是新 bug）。
 
