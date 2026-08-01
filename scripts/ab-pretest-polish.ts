@@ -4,7 +4,8 @@
 // 提案 PRETEST_POLISH_V1_PROPOSAL.md v2。三刀独立，可单砍：
 //   刀1 超时计分 score = 2×captured − lost + 阈值抬两档（majorVictory 4 / victory 3）
 //       —— 本文件 T1（9 格全表逐格断言）+ --negctl（旧公式期望表打新引擎，必须真 FAIL）。
-//   刀2 三山脊性格权重表 —— 本文件 T2（只读探针断言候选分严格按权重排序 + 权重全 1.0 负对照）。
+//   刀2 三山脊性格权重表 —— 本文件 T2（只读探针断言候选分严格按权重排序 + 权重全 1.0 负对照）
+//       + T2d 跨 kind 排序两边钉死（北 140 顶住 120 前哨 / 南 60 让位 90 前哨；用户裁定保留）。
 //   刀3 插旗 —— 渲染层，bench 测不到（验收=改前/改后截图+用户过目，见提案 §1 刀3）。
 //
 // ★ 判据家法（六条中落在本文件的）：
@@ -232,6 +233,135 @@ function T2_ridge_weights(): void {
   }
 }
 
+// ── 4b. T2d 跨 kind 排序钉死（用户裁定 2026-07-31：权重的跨类效应=有意保留）──
+//
+// 权重不止排"三山脊之间"，还翻转 recapture vs finish_post 的跨类排序（三类候选
+// 同一张表，P4 :399 与 op 层 :578 都取全局最大）。两边都钉（Opus 审核指出只钉南边
+// 的话，1.4 调回 1.0 断言不会响）：
+//   北：占住北岭 140 > 残血前哨 120 —— 改前 100~140 的 finish_post 能把敌人拉走，
+//       改后拉不走（1.4 的真实代价="只会一件事"，手测判据在此）；
+//   南：占住南高地 60 < 残血前哨 90 —— 敌人宁可补刀也不抢软肋。
+// 构造全确定性（家法④ 自证=两个构造分数逐分断言）：
+//   残血 +60 / 被占领中 +60 / 攻击者 +0（观察哨 state 恒 idle，:628 只认
+//   attacking|moving）/ 防守分靠"对敌可见的圈内我方地面 hp"分桶精确控制
+//   （观察哨给视野；N 塞 ≥250hp 满编→+0；S 清场后放一个 40hp→+30）。
+//   applyHistory=false（op 层语义；P4 的轮换惩罚是另一维度，与跨类排序无关）。
+
+function farCornerFrom(s: GameState, pos: { x: number; y: number }): { x: number; y: number } {
+  const corners = [
+    { x: 2, y: 2 }, { x: s.mapWidth - 3, y: 2 },
+    { x: 2, y: s.mapHeight - 3 }, { x: s.mapWidth - 3, y: s.mapHeight - 3 },
+  ];
+  return corners.reduce((best, c) => {
+    const d = (a: { x: number; y: number }) => (a.x - pos.x) ** 2 + (a.y - pos.y) ** 2;
+    return d(c) > d(best) ? c : best;
+  });
+}
+
+/** 拿一个敌军单位当观察哨钉在 pos：给敌方视野（防守分才数得到人），idle 不触发 +25。 */
+function plantObserver(s: GameState, pos: { x: number; y: number }): void {
+  for (const u of s.units.values()) {
+    if (u.team === "enemy" && u.state !== "dead") {
+      u.position = { ...pos };
+      u.state = "idle";
+      return;
+    }
+  }
+  throw new Error("no enemy unit to plant as observer");
+}
+
+function playerGroundUnits(s: GameState): Array<{ position: { x: number; y: number }; hp: number; maxHp: number }> {
+  const out: Array<{ position: { x: number; y: number }; hp: number; maxHp: number }> = [];
+  for (const u of s.units.values()) {
+    if (u.team === "player" && u.state !== "dead" && (u.type === "infantry" || u.type === "tank")) out.push(u);
+  }
+  return out;
+}
+
+function T2d_cross_kind(): void {
+  console.log("\n== T2d 跨 kind 排序（用户裁定：保留；北南两边+负对照都要真牙）==");
+
+  // 北：kidney 140 顶住 120 分残血前哨（旧世界 100 会被拉走）
+  const n = createInitialGameState("el_alamein");
+  n.facilities.get("ea_kidney_ridge")!.team = "player";
+  const postN = n.facilities.get("ea_player_coastal_post")!;
+  postN.hp = Math.floor(postN.maxHp * 0.4);   // +60
+  postN.capturingTeam = "enemy";              // +60
+  plantObserver(n, postN.position);
+  const defenders = playerGroundUnits(n).slice(0, 8);
+  defenders.forEach((u, i) => {
+    u.position = { x: postN.position.x + (i % 3) - 1, y: postN.position.y + Math.floor(i / 3) - 1 };
+    u.hp = u.maxHp;
+  });
+  const sumHp = defenders.reduce((a, u) => a + u.hp, 0);
+  check("T2d-N 前置：圈内可见我方地面 hp ≥250（防守分归零的自证）", sumHp >= 250, `实际 ${sumHp}`);
+  const candN = probePressureTargets(n, false, false);
+  const fpN = candN.find(c => c.targetId === "ea_player_coastal_post");
+  check("T2d-N 残血前哨构造分=120（60 残血+60 被占中+0 攻击者+0 防守）",
+    fpN?.kind === "finish_post" && fpN.score === 120, `实际 ${fpN?.kind}:${fpN?.score}`);
+  check("T2d-N 120 落在翻转窗（>旧北分 100，<新北分 140）", 120 > 100 && 120 < 140);
+  const kidN = candN.find(c => c.targetId === "ea_kidney_ridge");
+  check("T2d-N 北岭分=100×权重表值（两个世界都该过——读表不抄数）",
+    Math.abs((kidN?.score ?? NaN) - 100 * OBJECTIVE_PRESSURE_WEIGHT.ea_kidney_ridge) < 1e-9,
+    `实际 ${kidN?.score}`);
+  const topN = [...candN].sort((a, b) => (b.score - a.score) || a.targetId.localeCompare(b.targetId))[0];
+  check("T2d-N ★全表第一名仍是北岭（残血前哨拉不走敌人——1.4 的代价与承诺同源）",
+    topN.targetId === "ea_kidney_ridge",
+    `实际 top=${topN.targetId}:${topN.score}`);
+
+  // 南：himeimat 60 输给 90 分残血前哨（旧世界 100 必赢）
+  const s = createInitialGameState("el_alamein");
+  s.facilities.get("ea_himeimat")!.team = "player";
+  const postS = s.facilities.get("ea_player_south_post")!;
+  postS.hp = Math.floor(postS.maxHp * 0.4);   // +60，不设占领中
+  const far = farCornerFrom(s, postS.position);
+  for (const u of s.units.values()) {
+    if (u.team !== "player" || u.state === "dead") continue;     // 清场搬全兵种：
+    const dx = u.position.x - postS.position.x, dy = u.position.y - postS.position.y;  // 只搬步坦会把
+    if (dx * dx + dy * dy <= 18 * 18) u.position = { ...far };   // 炮兵等地面单位留在圈里爆 250 档
+  }
+  plantObserver(s, postS.position);
+  const lone = playerGroundUnits(s)[0];
+  lone.position = { x: postS.position.x + 1, y: postS.position.y };
+  lone.hp = 40;                               // 可见 hp 40 → 防守分档 +30
+  const candS = probePressureTargets(s, false, false);
+  const fpS = candS.find(c => c.targetId === "ea_player_south_post");
+  check("T2d-S 残血前哨构造分=90（60 残血+30 防守薄）",
+    fpS?.kind === "finish_post" && fpS.score === 90, `实际 ${fpS?.kind}:${fpS?.score}`);
+  check("T2d-S 90 落在翻转窗（>新南分 60，<旧南分 100）", 90 > 60 && 90 < 100);
+  const himS = candS.find(c => c.targetId === "ea_himeimat");
+  check("T2d-S 南高地分=100×权重表值（两个世界都该过）",
+    Math.abs((himS?.score ?? NaN) - 100 * OBJECTIVE_PRESSURE_WEIGHT.ea_himeimat) < 1e-9,
+    `实际 ${himS?.score}`);
+  const sortedS = [...candS].sort((a, b) => (b.score - a.score) || a.targetId.localeCompare(b.targetId));
+  check("T2d-S ★残血前哨排在南高地之前（敌人宁可补刀也不抢软肋）",
+    sortedS.findIndex(c => c.targetId === "ea_player_south_post")
+      < sortedS.findIndex(c => c.targetId === "ea_himeimat"),
+    `实际序 ${sortedS.map(c => `${c.targetId}:${c.score}`).join(" ")}`);
+}
+
+function T2d_negctl(): void {
+  console.log("\n== NEGCTL 刀2-T2d 负对照：权重全 1.0 → 两条跨 kind 断言必须真 FAIL ==");
+  const saved = { ...OBJECTIVE_PRESSURE_WEIGHT };
+  const before = failCount;
+  try {
+    for (const k of Object.keys(OBJECTIVE_PRESSURE_WEIGHT)) OBJECTIVE_PRESSURE_WEIGHT[k] = 1.0;
+    T2d_cross_kind();
+  } finally {
+    Object.assign(OBJECTIVE_PRESSURE_WEIGHT, saved);
+  }
+  const fails = failCount - before;
+  // 期望恰 2：北=第一名被 120 分前哨抢走、南=100 分南高地重新压过 90 分前哨。
+  // 构造分/翻转窗/读表断言两个世界通过（负对照零误伤的自证）。
+  console.log(`\nNEGCTL-T2d 结果：${fails} 条 FAIL（期望恰 2）`);
+  if (fails === 2) {
+    failCount = before;
+    console.log("NEGCTL-T2d PASS —— 跨 kind 两边的牙都是真的，平权世界里两条都翻");
+  } else {
+    console.log("NEGCTL-T2d FAIL —— 负对照失真，检查构造或断言");
+  }
+}
+
 function T2_negctl(): void {
   console.log("\n== NEGCTL 刀2 负对照：权重全 1.0 → 四分并列，排序/数值断言必须真 FAIL ==");
   const saved = { ...OBJECTIVE_PRESSURE_WEIGHT };
@@ -273,7 +403,8 @@ const args = process.argv.slice(2);
 T0_harness_proves_domain();
 T1_nine_grid();
 T2_ridge_weights();
-if (args.includes("--negctl")) { T1_negctl(); T2_negctl(); }
+T2d_cross_kind();
+if (args.includes("--negctl")) { T1_negctl(); T2_negctl(); T2d_negctl(); }
 
 console.log(`\n${failCount === 0 ? "ALL PASS" : `${failCount} FAILED`}`);
 process.exit(failCount === 0 ? 0 : 1);
