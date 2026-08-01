@@ -278,7 +278,8 @@ const RESOURCE_GLYPHS: Array<{ key: "money" | "fuel" | "ammo" | "intel"; ch: str
   { key: "money", ch: "$", color: "#ffd75e" },
   { key: "fuel",  ch: "油", color: "#ffa94d" },
   { key: "ammo",  ch: "弹", color: "#ff7b72" },
-  { key: "intel", ch: "情", color: "#6fd8d3" },
+  // intel 用全词：单字"情"排在 $ 后面成"$情"，用户手测当场读成不可描述（2026-07-31）
+  { key: "intel", ch: "情报", color: "#6fd8d3" },
 ];
 const FACILITY_GLYPH_ROW: Record<string, Array<{ ch: string; color: string }>> = {};
 for (const [ftype, bonus] of Object.entries(FACILITY_BONUSES)) {
