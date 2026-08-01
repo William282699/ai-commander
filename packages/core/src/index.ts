@@ -3,7 +3,7 @@ export { tick, canUnitEnterTile } from "./sim";
 export { calculateDamage, processCombat } from "./combat";
 export { processRegen } from "./regen";
 export { createFogState, updateFog } from "./fog";
-export { processEconomy, enqueueProduction, canUnitMove, isMechanized, countCaptureContenders } from "./economy";
+export { processEconomy, enqueueProduction, canUnitMove, isMechanized, countCaptureContenders, isCapturableFacilityType } from "./economy";
 export { processEnemyAI, resetEnemyAITimer, resetEnemyProdToggle, resetAttackWaveState } from "./enemyAI";
 export { processAutoBehavior, resetAutoBehaviorTimer, chaseAnchorHomeOf } from "./autoBehavior";
 export { processMissions, createMission, resetMissionCounter } from "./missions";

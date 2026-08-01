@@ -39,6 +39,12 @@ const NON_CAPTURABLE: readonly FacilityType[] = [
   "defense_tower",
 ];
 
+/** pretest-polish 刀3 fix5: 渲染层画"可占"标记的判据必须与引擎同一张黑名单——
+ *  只读导出，不给第二真相源留活口。 */
+export function isCapturableFacilityType(type: FacilityType): boolean {
+  return !NON_CAPTURABLE.includes(type);
+}
+
 // ── Helper: is a unit "mechanized" (consumes fuel to move)? ──
 
 /**

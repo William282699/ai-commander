@@ -14,6 +14,7 @@ import type {
   BattleMarker,
 } from "@ai-commander/shared";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, FACILITY_BONUSES } from "@ai-commander/shared";
+import { isCapturableFacilityType } from "@ai-commander/core";
 import { renderUnit, hasSpriteEntry } from "./rendering/unitRenderer";
 import { SPRITE_MANIFEST } from "./rendering/spriteManifest";
 import {
@@ -401,6 +402,24 @@ export function renderFacilities(
       const symR = flagH * 0.36;
       if (fac.team === "enemy") drawBalkenkreuz(ctx, symX, symY, symR);
       else if (fac.team === "player") drawAlliedStar(ctx, symX, symY, symR * 1.25);
+    } else if (isCapturableFacilityType(fac.type)) {
+      // 刀3 fix5: 可占但非胜负点 → 队色菱形悬标（用户点名"要旗子级醒目但不能是旗，
+      // 旗=胜负点混了会误导"）。同一视线高度、无旗杆、剪影迥异：菱形=能占的，
+      // 旗=必须占/守的。判据=引擎可占黑名单唯一真相源（isCapturableFacilityType），
+      // 颜色恒等 fac.team 即时换色。
+      const dR = Math.max(9, tileScreenSize * 0.85);
+      const dY = cy - iconSize * 0.05 - Math.max(22, tileScreenSize * 2.1);
+      ctx.beginPath();
+      ctx.moveTo(cx, dY - dR);
+      ctx.lineTo(cx + dR * 0.68, dY);
+      ctx.lineTo(cx, dY + dR);
+      ctx.lineTo(cx - dR * 0.68, dY);
+      ctx.closePath();
+      ctx.fillStyle = objectiveFlagColor(fac.team);
+      ctx.fill();
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
     }
 
     // Label (shared by both sprite and icon paths)
@@ -438,7 +457,8 @@ export function renderFacilities(
     // 推导表。谁产什么一眼可见——"夺下加钱的"从此不用问。
     const glyphRow = FACILITY_GLYPH_ROW[fac.type];
     if (glyphRow) {
-      const gFont = Math.max(9, 11 * camera.zoom);
+      // fix5: 资源字与设施名同级放大（原 9/11 一档，用户手测嫌小）。
+      const gFont = Math.max(12, 14 * camera.zoom);
       ctx.font = `bold ${gFont}px sans-serif`;
       const gap = Math.max(2, gFont * 0.25);
       const widths = glyphRow.map(g => ctx.measureText(g.ch).width);
