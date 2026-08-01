@@ -67,8 +67,11 @@ bench 家法新条目（写在 ab-dispatch-scope.ts 注释）：会动兵的断�
 **手测新账（对话层,与本级四刀无关已结构证死:四文件 diff 空+双端 6/6）**：①判断执照边界——顶一句在设计内,**玩家重复下令仍不办=权力错位**（修法方向:引擎检测同 intent 短窗重复→信封注入 REPEATED_ORDER+一行原则「顶撞只许一次,坚持即执行」）②悬挂升级问句劫持新命令（与 Step C 账④同地基合并记账;方向=焦点时效+「带动词与目标的新句优先当命令」）③prompt [A] 首字 acknowledgment 漏网,反例与规则例句逐字相同（修法=照 §4b 先例:一行语义原则不挂例句）④SQUADS 半忙半闲表达不出+"只调闲的那半"无 intent 字段（归 Preflight V2 族）。
 方法资产：判据三教训又添一批——终态是单帧残影要量现象时长、瞬时 state 非耐久状态要断言那张单、空转断言 0/0 白过要 length>0 前置、**负对照必须打在 bench 测得到的层上**（GameCanvas 接线打不到,打 builder 本体）。
 
-### ▶ 插队 · 外测前三小刀（pretest-polish-v1）【提案已双审，2026-07-31 用户拍板开工】
-MVP 外测前唯一要做的事。提案 `PRETEST_POLISH_V1_PROPOSAL.md`（v2：Opus 抓出刀1 算术错[占3即时胜把取值夹死在 [0,2]²，9 格表为准]+刀3 落点错[占领环循环平时 continue，改 renderFacilities:240]，均已修订）。三刀独立可单砍：①超时计分 `2×captured−lost` + 阈值抬 4/3（治龟缩保平）②三山脊 pressureDirector 权重表 北1.4/镇1.2/中1.0/南0.6，乘在 historyPenalty 之前、只动 (A) 分支（治目标复制粘贴；**实施第一步先跑 ab-capture-stall --sweep 对照漂移**）③胜利目标插旗 renderFacilities 恒显（雾里可见，旗色恒等 fac.team）。三裁定按联合建议采纳（数字可实施后再调）。worktree `../AI Commander-pretest` 分支 `pretest-polish-v1` @493ce85 已建。**大改地图/摆位置/敌方全知（combat.ts:134 敌索敌不吃雾＝"偷袭"结构上不存在）全部外测后再议。**
+### ✅ 插队 · 外测前三小刀（pretest-polish-v1）【收口 2026-08-01，tag `pretest-polish-v1-done` @9499b1b，合 main（ff），Fable 实施/Opus 审】
+提案 `PRETEST_POLISH_V1_PROPOSAL.md` v2。**十 commit**：三刀（`7d87b43` 计分 2×c−l+阈值4/3+九格断言 / `d5070d9` 山脊权重 北1.4镇1.2中1.0南0.6+只读探针 / `a56d5fb` 插旗恒显）+ Opus 审后两笔（`9a76bdb` 陈注释、`7eb96dc` T2d 跨 kind 两颗真牙）+ 刀3 五连修全部来自用户手测反馈（`bf9f13a` 前哨蓝旗+阵营符号[红旗黑十字 Balkenkreuz/蓝旗白星，不画纳粹符号]+收益图标、`244c314` "$情"连排读感事故→全词、`d885540` 资源词改英文 $/Fuel/Ammo/Intel、`762d4b7` 图标放大+队色地环、`9499b1b` 资源字放大+可占非胜负点菱形悬标[isCapturableFacilityType 从引擎黑名单导出，不抄第二份]）。
+**关键裁定与实证**：①跨 kind 翻转=有意保留（用户裁定："锁进山脊内部"需引入 kind 两级排序反而是更大语义改动）；北/镇反向翻转（非只南边）——北 1.4 的代价=残血前哨拉不走敌人，撞"只会一件事"时调 1.4 不撤刀；T2d 把两边钉死（北 140>120 前哨/南 60<90 前哨）②sweep 前后零漂移（三种子 72.0s/空城 11/13/18s 逐字节同）——但零漂移=「走不到」非「走到了不变」：台架剧本占自家前哨走 B/C，**sweep 对刀2 零回归保护，保护只来自探针断言**③negctl 恰 12+8+2 条真 FAIL 全部与手算逐格同址，Opus 独立复算零 P0④刀1 实测两臂对照：占南部高地一个结算周期 money +15/intel +10 分毫不差。
+**视觉语言四层定稿**：旗（十字/白星）=胜负点7个 · 菱形悬标=可占据点 · 地环+资源字=有产出 · 素图=不可占。挂账：刀1 结算画面（只夺2点拖满30分）与刀2 山脊手感专项判据未走完，外测中观察；Opus 记账=权重表可写全局、T1 分不出剧本/fallback 阈值（两份现同值）、GameCanvas:2545 结算 /3 硬编码（旧账）。
+**手测新账（不属本级，main 旧病实证）**：升级提案说"可以"不执行（批准合同三判退未合 main，"可以"绑不到 20 秒前的提案）+ "东北未编组群"是叙事对象不可点名（单子退化成无来源 defend→默认 few→1 个兵，台词说调群执行 1 兵）→ Opus 诊断档 `ESCALATION_ACK_V4_DIAGNOSIS_20260801.md`，归批准合同 v4 + Preflight V2 族。dev 环境：pretest-web@3008+pretest-api@3011（.claude/ 脚本+launch.json，worktree 需拷 .env）。
 
 ### 🔭 第 8 级 — Preflight V2：provenance
 Intent 字段分 playerCommand / unspecified / advisorProposal，根治 74 单位洞（该 bug 目前**有意放回**，手测撞到不是新 bug）。
