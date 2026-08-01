@@ -274,12 +274,13 @@ function drawAlliedStar(ctx: CanvasRenderingContext2D, x: number, y: number, r: 
 
 // 刀3 fix1: 设施收益图标 — 从 FACILITY_BONUSES 推导（唯一真相源，改收益表图标自动跟），
 // 静态地图知识与设施名同策略恒显。"夺下这里能得什么"一眼可见。
+// 资源词用英文与 HUD 顶栏（MONEY/FUEL/AMMO/INTEL）同语系；曾用中文单字，
+// "$情"连排读感事故（2026-07-31 用户手测），勿改回。
 const RESOURCE_GLYPHS: Array<{ key: "money" | "fuel" | "ammo" | "intel"; ch: string; color: string }> = [
   { key: "money", ch: "$", color: "#ffd75e" },
-  { key: "fuel",  ch: "油", color: "#ffa94d" },
-  { key: "ammo",  ch: "弹", color: "#ff7b72" },
-  // intel 用全词：单字"情"排在 $ 后面成"$情"，用户手测当场读成不可描述（2026-07-31）
-  { key: "intel", ch: "情报", color: "#6fd8d3" },
+  { key: "fuel",  ch: "Fuel", color: "#ffa94d" },
+  { key: "ammo",  ch: "Ammo", color: "#ff7b72" },
+  { key: "intel", ch: "Intel", color: "#6fd8d3" },
 ];
 const FACILITY_GLYPH_ROW: Record<string, Array<{ ch: string; color: string }>> = {};
 for (const [ftype, bonus] of Object.entries(FACILITY_BONUSES)) {
