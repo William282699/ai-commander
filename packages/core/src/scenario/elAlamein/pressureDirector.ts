@@ -568,8 +568,9 @@ export function probePressureTargets(
 
 /**
  * Operation-layer targets (owner: defensiveAI). Same live scoring as P4 —
- * recapture(100) > finish_post(60+) > raid(20+defense mods) — minus P4's
- * rotation history, plus the corridor each front marches. Sorted best-first.
+ * recapture(100/70 × 山脊权重，南部高地压到 60/42 后可能输给高分 finish_post，
+ * 属刀2 的跨 kind 连带) > finish_post(60+) > raid(20+defense mods) — minus
+ * P4's rotation history, plus the corridor each front marches. Sorted best-first.
  */
 export function buildOperationTargets(state: GameState): OperationTargetCandidate[] {
   if (!state.scenarioWinConfig) return [];
