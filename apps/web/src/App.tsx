@@ -90,6 +90,7 @@ export default function App() {
   const [winProgress, setWinProgress] = useState<{
     captured: number;
     required: number;
+    pool: number;      // 刀3: 地图上插旗的目标总数（4），HUD tooltip 讲清"4 取 3"
     lost: number;
     maxLost: number;
     timeLeftSec: number;
@@ -125,6 +126,7 @@ export default function App() {
         setWinProgress({
           captured,
           required: cfg.requiredCapturedObjectives,
+          pool: (state.captureObjectives ?? []).length,
           lost,
           maxLost: cfg.maxFriendlyKeypointsLost,
           timeLeftSec: Math.max(0, cfg.timeLimitSec - state.time),
@@ -224,7 +226,10 @@ export default function App() {
             scenarioWinConfig fall back to the legacy clock. */}
         {winProgress ? (
           <div className="hud-topbar__resources" style={{ marginLeft: "auto" }}>
-            <div className="hud-resource-chip hud-resource-chip--info">
+            <div
+              className="hud-resource-chip hud-resource-chip--info"
+              title={`夺下地图上 ${winProgress.pool} 面旗中的任意 ${winProgress.required} 面即胜`}
+            >
               <span className="hud-resource-chip__label">OBJECTIVES</span>
               <span className="hud-resource-chip__value">
                 {winProgress.captured}/{winProgress.required}

@@ -2192,7 +2192,8 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       // 2. Facilities on map (drawn after context labels so facility names
       // are always readable on top of any overlapping front/route/region label)
       const facArray = Array.from(state.facilities.values());
-      renderFacilities(ctx, facArray, camera);
+      // 刀3: 胜利目标 id 列表传进去插旗（恒显，雾层在后只压暗）。
+      renderFacilities(ctx, facArray, camera, state.captureObjectives);
 
       // 3. Fog of war overlay (darkens unseen areas)
       if (!noFog) {

@@ -237,12 +237,23 @@ export function renderTerrain(
 // Render: Facilities (icons on the map)
 // ──────────────────────────────────────────────
 
+// pretest-polish-v1 刀3: 胜利目标旗色 — 直接读 fac.team，不缓存不建第二真相源，易主即换色。
+function objectiveFlagColor(team: Facility["team"]): string {
+  if (team === "player") return "#2e7bff";
+  if (team === "enemy") return "#ff4040";
+  return "#b8b8b8";
+}
+
 export function renderFacilities(
   ctx: CanvasRenderingContext2D,
   facilities: Facility[],
   camera: Camera,
+  captureObjectives?: string[],
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
+  const objectiveSet = captureObjectives && captureObjectives.length > 0
+    ? new Set(captureObjectives)
+    : null;
 
   for (const fac of facilities) {
     const screenX = (fac.position.x * TILE_SIZE - camera.x) * camera.zoom;
@@ -294,6 +305,36 @@ export function renderFacilities(
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(symbol, cx, cy);
+    }
+
+    // pretest-polish-v1 刀3: 胜利目标插旗（旗杆+三角旗，画在图标右上方）。
+    // 恒显含雾区：旗是静态地图知识（"哪 4 个点算赢"），与设施名字同策略——本函数
+    // 画在雾层之前（GameCanvas 步骤 2→3），雾只把旗压暗不遮没，不泄任何实时敌情。
+    // 旗色恒等 fac.team（见 objectiveFlagColor），无独立状态无动画。
+    // 非 objective 设施走不进这个 if，零绘制改动。
+    if (objectiveSet?.has(fac.id)) {
+      const poleX = cx + iconSize * 0.38;
+      const poleBase = cy - iconSize * 0.05;
+      const poleH = Math.max(18, tileScreenSize * 1.9);
+      const poleTop = poleBase - poleH;
+      const flagW = Math.max(12, poleH * 0.55);
+      const flagH = Math.max(8, poleH * 0.36);
+      ctx.strokeStyle = "#1a1a1a";
+      ctx.lineWidth = Math.max(2, tileScreenSize * 0.1);
+      ctx.beginPath();
+      ctx.moveTo(poleX, poleBase);
+      ctx.lineTo(poleX, poleTop);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(poleX, poleTop);
+      ctx.lineTo(poleX + flagW, poleTop + flagH / 2);
+      ctx.lineTo(poleX, poleTop + flagH);
+      ctx.closePath();
+      ctx.fillStyle = objectiveFlagColor(fac.team);
+      ctx.fill();
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 1;
+      ctx.stroke();
     }
 
     // Label (shared by both sprite and icon paths)
