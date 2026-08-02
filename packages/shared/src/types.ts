@@ -426,6 +426,22 @@ export interface SquadLeader {
 }
 
 export type CommanderKey = "chen" | "marcus" | "emily";
+
+/** All commanders, in display order. */
+export const COMMANDER_KEYS: readonly CommanderKey[] = ["chen", "marcus", "emily"];
+
+/**
+ * Which channel (=role) each commander holds. GAME DATA, not UI decoration —
+ * 手测账③ needs it in the engine to answer "who owns the unassigned units",
+ * and the answer must be a ROLE lookup, never the hardcoded string "chen"
+ * (re-assign the combat role and the rule follows it).
+ */
+export const COMMANDER_CHANNEL: Record<CommanderKey, Channel> = {
+  chen: "combat",
+  marcus: "ops",
+  emily: "logistics",
+};
+
 export type SquadRole = "leader" | "commander";
 
 export interface Squad {

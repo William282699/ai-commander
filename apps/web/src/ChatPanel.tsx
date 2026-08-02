@@ -18,7 +18,7 @@ declare global {
 }
 import { OrgTree } from "./OrgTree";
 import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines, isAllFrontHint } from "@ai-commander/core";
-import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, NO_PROPOSAL_GUIDANCE, isKnownForceRef } from "@ai-commander/core";
+import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, NO_PROPOSAL_GUIDANCE, isKnownForceRef, checkDispatchAuthority } from "@ai-commander/core";
 import type { CommanderRef } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
@@ -1829,7 +1829,27 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     const ticketReceipts: string[] = [];
     const ticketsToBurn: string[] = [];
 
+    // 手测账③: who is being spoken to decides what they may move. This is the
+    // ENGINE BACKSTOP — the primary fix is the prompt principle (a persona with
+    // no forces should never emit a dispatch intent in the first place). By the
+    // time we are here the model has already spoken, so this tier is the
+    // degraded one: state the structural fact, execute nothing.
+    const speakingPersona = COMMANDERS.find((c) => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
+
     for (const intent of intents) {
+      const auth = checkDispatchAuthority(state, speakingPersona, intent);
+      if (auth.kind === "denied") {
+        const who = COMMANDER_META[speakingPersona].label;
+        addMessage(
+          "warning",
+          auth.reason === "commands_no_forces"
+            ? `${who}名下没有部队，这道命令未执行——调兵请对带兵的指挥官说。`
+            : `那支部队不在${who}麾下，这道命令未执行——请对${COMMANDER_META[auth.ownerOfNamed!].label}下令。`,
+          state.time, ch, undefined, "command_ack",
+        );
+        return;
+      }
+
       // v4 刀2b: a G-number is the ONE legal handle for "那批兵". Resolved
       // before the squad check below, which would otherwise reject it as an
       // unknown squad name. Every non-dispatch outcome is a loud refusal with

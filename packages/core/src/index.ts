@@ -60,5 +60,8 @@ export {
   TICKET_TTL_SEC, NO_PROPOSAL_GUIDANCE,
 } from "./escalationTicket";
 export type { EscalationTicket, TicketResolution, EscalationWithTickets, CommanderRef } from "./escalationTicket";
+// 手测账③ — command authority (dispatch is per-persona, not per-naming)
+export { checkDispatchAuthority, commanderDispatchPool, isDispatchIntent, combatRoleHolder } from "./commandAuthority";
+export type { AuthorityVerdict } from "./commandAuthority";
 export type { CommanderMood, CommanderMoodLevel, ViewportGeometry, TileBox } from "./commanderPresence";
 export type { DecisionCaptureArgs, DecisionReviewFacts, FrontOutcome, FacilityOutcome, CasualtyLevel, CrossFrontFact } from "./decisionReview";
