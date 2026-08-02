@@ -1542,14 +1542,22 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           const staleRefs = detectStaleSquadRefs(data.options as AdvisorOption[] | undefined, state);
 
           // Bucket A — clear command, player named no squad of their own → the advisor
-          // picked. Auto-execute the recommended option + a one-line "I chose for you"
-          // note (handleApprove's confirm echoes the option label, which names the pick).
+          // picked. Auto-execute the recommended option; the persona's own reply and
+          // the execution receipt already name who was picked and where they went.
+          //
+          // 手测账② (用户判退 2026-08-02)：the fixed "您没点名部队，我按战况替您
+          // 安排" note is gone. It was a machine explaining itself in a channel that
+          // is supposed to contain only people talking — 台词禁死模板 (07-22) +
+          // 对话是唯一界面 (07-22), both standing law. Nothing is lost: the very next
+          // lines are 「执行: 调度 9 个单位进攻2. 山脊战线」 and the persona's own
+          // 「是，长官。Aiden继续推进」, which carry who/where between them.
+          // If "I picked for you" ever needs saying again, it is the LLM's line to
+          // write in its own voice — never a template that three personas recite.
           const bucketA = staleRefs.length === 0 && opt0 != null &&
             (reason === "no_anchor" || (reason === "anchor_mismatch" && !gate.playerNamedSquad));
 
           if (bucketA) {
             setClarification(null);
-            addMessage("info", "您没点名部队，我按战况替您安排，要改随时说。", state.time, ch, undefined, "command_ack");
             setTimeout(() => handleApprove(opt0, 0, "auto", execCtx, data as DisplayResponse), 0);
           } else {
             // Bucket B (clarify) / C (confirm high_impact). Voice the concern/question.
