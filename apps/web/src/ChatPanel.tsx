@@ -18,7 +18,8 @@ declare global {
 }
 import { OrgTree } from "./OrgTree";
 import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines, isAllFrontHint } from "@ai-commander/core";
-import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, NO_PROPOSAL_GUIDANCE } from "@ai-commander/core";
+import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, NO_PROPOSAL_GUIDANCE, isKnownForceRef } from "@ai-commander/core";
+import type { CommanderRef } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
@@ -63,6 +64,14 @@ const COMMANDER_META: Record<Commander, { label: string; role: string; avatar: s
   marcus: { label: "马克斯上尉", role: "作战", avatar: "🎖️" },
   emily: { label: "艾米莉中尉", role: "后勤", avatar: "📦" },
 };
+
+/** v4 §6c-3c: the slice of COMMANDER_META the core reference predicate needs.
+ *  Passed in rather than moved to shared — avatar/role are UI data and have no
+ *  business in the engine (minimal-change ruling). */
+const COMMANDER_REFS: readonly CommanderRef[] = COMMANDERS.map((c) => ({
+  key: c,
+  label: COMMANDER_META[c].label,
+}));
 
 /** Map LLM "from" field back to Commander key */
 const FROM_TO_COMMANDER: Record<string, Commander> = {
@@ -134,12 +143,11 @@ function isValidTarget(intent: Intent, state: GameState): boolean {
   }
   if (intent.toFront && !isKnownLocation(intent.toFront, state)) return false;
   if (intent.fromFront && !isKnownLocation(intent.fromFront, state)) return false;
-  if (intent.fromSquad) {
-    const fs = intent.fromSquad.toLowerCase();
-    const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
-    const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
-    if (!isSquad && !isCommander) return false;
-  }
+  // v4 §6c-3c: ONE predicate owns "is this a known force reference" (core).
+  // The private copy that used to live here had never heard of tickets, so a
+  // correct fromSquad="G1" died as an unknown squad. Ticket VALIDITY is not
+  // judged here — see isKnownForceRef's contract.
+  if (intent.fromSquad && !isKnownForceRef(state, intent.fromSquad, COMMANDER_REFS)) return false;
   return true;
 }
 
@@ -223,9 +231,13 @@ function detectStaleSquadRefs(
     if (!intent?.fromSquad) continue;
     const fs = intent.fromSquad.toLowerCase();
 
-    // Commander key → always treat as alive (aggregates many squads;
-    // we don't flag it stale unless the player specifically named a dead one)
-    if (COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!))) {
+    // v4 §6c-3c: commander keys AND ticket numbers are alive-by-definition here.
+    // Commander keys aggregate many squads (never flagged stale unless the
+    // player named a dead one); ticket numbers are judged — unknown / expired /
+    // burned — by resolveTicketReference alone. A liveness check here would be
+    // a SECOND owner of ticket validity, which is the bug this fix removes.
+    if (isKnownForceRef(state, intent.fromSquad, COMMANDER_REFS) &&
+        !state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs)) {
       continue;
     }
 

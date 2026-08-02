@@ -56,9 +56,9 @@ export { buildFrontJudgmentLines, commanderMood, buildCommanderMoodLine, viewpor
 // approval-contract-v4 刀2 — escalation tickets (the machine handle for "那批兵")
 export {
   buildFrontEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
-  burnEscalationTicket, isTicketRef, resetEscalationTickets,
+  burnEscalationTicket, isTicketRef, isKnownForceRef, resetEscalationTickets,
   TICKET_TTL_SEC, NO_PROPOSAL_GUIDANCE,
 } from "./escalationTicket";
-export type { EscalationTicket, TicketResolution, EscalationWithTickets } from "./escalationTicket";
+export type { EscalationTicket, TicketResolution, EscalationWithTickets, CommanderRef } from "./escalationTicket";
 export type { CommanderMood, CommanderMoodLevel, ViewportGeometry, TileBox } from "./commanderPresence";
 export type { DecisionCaptureArgs, DecisionReviewFacts, FrontOutcome, FacilityOutcome, CasualtyLevel, CrossFrontFact } from "./decisionReview";

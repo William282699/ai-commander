@@ -184,6 +184,46 @@ export function isTicketRef(raw: string): boolean {
   return /^G\d+$/i.test(raw.trim());
 }
 
+/** A commander as the reference predicate needs to see one: the key the model
+ *  may write ("chen") and the display label a player may say ("陈军士").
+ *  Passed IN so core never carries UI data (avatar/role stay in the web layer). */
+export interface CommanderRef {
+  key: string;
+  label: string;
+}
+
+/**
+ * THE one answer to "is this string a force reference the system knows about".
+ *
+ * v4 §6c-3c (P0 fix): `detectStaleSquadRefs` and `isValidTarget` each carried a
+ * private copy of this judgement, and neither had heard of tickets — so a
+ * correctly-written `fromSquad="G1"` was rejected as a dead squad before the
+ * translation layer ever ran. Two private definitions of "legal reference" IS
+ * the bug class; this collapses them to one.
+ *
+ * ★ Ticket refs pass on SHAPE ALONE. Whether G1 is unknown / expired / burned
+ * is decided by resolveTicketReference and NOWHERE ELSE — a gate that also
+ * consulted the registry would recreate the second source of truth this fix
+ * exists to remove. A hallucinated G99 therefore passes the gate and is refused
+ * loudly one layer down: same zero-execution outcome, one owner.
+ */
+export function isKnownForceRef(
+  state: GameState,
+  raw: string | undefined | null,
+  commanders: readonly CommanderRef[],
+): boolean {
+  if (!raw) return false;
+  const s = raw.trim();
+  if (s.length === 0) return false;
+  if (isTicketRef(s)) return true;
+
+  const lower = s.toLowerCase();
+  if (state.squads?.some((sq) => sq.id === s || sq.leaderName?.toLowerCase() === lower)) return true;
+  // Semantics preserved verbatim from the two former copies: key matches
+  // case-insensitively and exactly; label matches by CONTAINING the reference.
+  return commanders.some((c) => c.key.toLowerCase() === lower || c.label.includes(s));
+}
+
 /** One-shot: a consumed ticket can never dispatch twice. */
 export function burnEscalationTicket(gNumber: string): void {
   const t = tickets.get(gNumber.trim().toUpperCase());

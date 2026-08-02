@@ -33,7 +33,7 @@ import { captureDecisionReview } from "../packages/core/src/decisionReview";
 import { filterLateCandidates } from "../packages/core/src/frontEscalationPayload";
 import {
   mintEscalationTickets, lookupEscalationTicket, burnEscalationTicket, liveMembersOf,
-  isTicketRef, ticketPromptLine, resetEscalationTickets, TICKET_TTL_SEC,
+  isTicketRef, isKnownForceRef, ticketPromptLine, resetEscalationTickets, TICKET_TTL_SEC,
   buildFrontEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
   NO_PROPOSAL_GUIDANCE,
 } from "../packages/core/src/escalationTicket";
@@ -673,6 +673,82 @@ function runKnife3(): void {
 }
 
 // ============================================================
+// 刀2c — the gate layer (v4 §6c-3c P0). The live smoke test found a correct
+// fromSquad="G1" killed by detectStaleSquadRefs BEFORE the translation layer
+// ever ran: two gates each carried a private definition of "legal reference"
+// and neither knew about tickets. These assertions are the blind spot turned
+// into territory — the predicate now lives in core, so the bench can reach it.
+//
+// Gate contract under test: ticket-shaped refs pass on SHAPE ALONE. Validity
+// (unknown/expired/burned) is resolveTicketReference's alone.
+// ============================================================
+
+const BENCH_COMMANDERS = [
+  { key: "chen", label: "陈军士" },
+  { key: "marcus", label: "马克斯上尉" },
+  { key: "emily", label: "艾米莉中尉" },
+];
+
+function runKnife2c(): void {
+  console.log("\n== 刀2c 闸层：番号是合法引用（形状归闸，生死归翻译）==");
+  resetEscalationTickets();
+
+  const { state, front } = scenarioStraddle();
+  const built = buildFrontEscalationWithTickets(state, makeCrisis(front));
+  const g = built.tickets.find((t) => t.label.includes("未编组"))?.gNumber;
+  check("T5a 前置 铸出番号", !!g, built.tickets.map((t) => t.gNumber).join(","));
+  if (!g) return;
+
+  // ── ① 活跃番号：闸放行 + 翻译派出快照 ──
+  checkKnife(
+    "T5b ★端到端★ 活跃番号过闸（这正是活体冒烟被拦下的那一步）",
+    isKnownForceRef(state, g, BENCH_COMMANDERS),
+    false,
+    `isKnownForceRef(${g})=${isKnownForceRef(state, g, BENCH_COMMANDERS)}`,
+  );
+  const okRes = resolveTicketReference(state, g, state.time);
+  check(
+    "T5c 过闸后翻译派出快照（assignedUnitIds ⊆ 冻结名单）",
+    okRes.kind === "dispatch" && okRes.unitIds.every((id) => okRes.ticket.unitIds.includes(id)),
+    okRes.kind === "dispatch" ? `${okRes.unitIds.length}/${okRes.ticket.unitIds.length}` : okRes.kind,
+  );
+
+  // ── ② 已烧号：闸仍放行，翻译响亮拒绝，零派兵 ──
+  burnEscalationTicket(g);
+  checkKnife(
+    "T5d ★ 烧过的号闸层照样放行（闸不查生死，否则就是第二真相源）",
+    isKnownForceRef(state, g, BENCH_COMMANDERS),
+    false,
+    `${g} burned`,
+  );
+  const burnedRes = resolveTicketReference(state, g, state.time);
+  check(
+    "T5e 烧号的裁决权独占于翻译层：refuse+人话+零派兵",
+    burnedRes.kind === "refuse" && burnedRes.reason === "burned" && burnedRes.line.length > 0,
+    burnedRes.kind === "refuse" ? `${burnedRes.reason}: ${burnedRes.line}` : burnedRes.kind,
+  );
+
+  // ── ③ 幻觉号 G99：从未铸过，闸放行 → 翻译拒绝 ──
+  checkKnife(
+    "T5f ★ 幻觉号 G99 闸层放行（形状合法即可）",
+    isKnownForceRef(state, "G99", BENCH_COMMANDERS),
+    false,
+  );
+  const ghost = resolveTicketReference(state, "G99", state.time);
+  check(
+    "T5g 幻觉号被翻译层响亮拒绝，安全性质不变（零执行）",
+    ghost.kind === "refuse" && ghost.reason === "unknown",
+    ghost.kind === "refuse" ? ghost.reason : ghost.kind,
+  );
+
+  // ── 谓词其余三类不得回归 ──
+  check("T5h 谓词仍认 commander key", isKnownForceRef(state, "chen", BENCH_COMMANDERS));
+  check("T5i 谓词仍认 commander 显示名（label 包含引用）", isKnownForceRef(state, "陈军士", BENCH_COMMANDERS));
+  check("T5j 谓词拒绝真正的胡话", !isKnownForceRef(state, "第七装甲军", BENCH_COMMANDERS));
+  check("T5k 谓词拒绝空引用", !isKnownForceRef(state, "  ", BENCH_COMMANDERS));
+}
+
+// ============================================================
 
 function main(): void {
   if (NEGCTL) {
@@ -681,6 +757,7 @@ function main(): void {
   runKnife1();
   runKnife2a();
   runKnife2b();
+  runKnife2c();
   runKnife3();
 
   console.log(`\nPASS=${passCount} FAIL=${failCount}`);
