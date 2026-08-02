@@ -494,6 +494,31 @@ function serializeOptions(result: ReinforceOptionsResult): string[] {
  * byte-identical to the pre-V1b GameCanvas branch; only the old
  * `idle_reinforcement_available` line is replaced by the options block.
  */
+/**
+ * 诚实闸 (v4 刀3, §8-3): drop candidates that cannot arrive before the line
+ * breaks. `clock` is the EXCHANGE clock (facts.estimatedCollapseSeconds), so
+ * "too late" is judged against a real mutual-fire estimate, not against the
+ * one-sided countdown that used to make everything look too late.
+ *
+ * Offering a 68s march to a fight with 7s left is not a choice, it is noise
+ * dressed as a choice — and if the commander approves it, the units leave
+ * their posts for nothing.
+ *
+ * clock === null (stable, or we win the exchange) ⇒ no basis to call anything
+ * late, so nothing is filtered. Unknown eta is never filtered either: an
+ * absent number may not be read as a verdict.
+ */
+export function filterLateCandidates(
+  result: ReinforceOptionsResult,
+  clock: number | null,
+): ReinforceOptionsResult {
+  if (clock === null) return result;
+  const options = result.options.filter((o) => o.etaSec === null || o.etaSec <= clock);
+  if (options.length === result.options.length) return result;
+  const shown = options.slice(0, DISPLAY_BUDGET);
+  return { ...result, options, shown, omitted: options.length - shown.length };
+}
+
 export function buildFrontEscalationPayload(
   state: GameState,
   crisis: CrisisEvent,
@@ -509,7 +534,12 @@ export function buildFrontEscalationPayload(
   const place = facts?.frontName ?? crisis.locationTag;
   const stake = facts?.stake ?? "unknown";
 
-  const optionsBlock = serializeOptions(precomputed ?? buildReinforceOptions(state, front));
+  const optionsBlock = serializeOptions(
+    filterLateCandidates(
+      precomputed ?? buildReinforceOptions(state, front),
+      facts?.estimatedCollapseSeconds ?? null,
+    ),
+  );
 
   return [
     "SITUATION (voice ONE in-character line for THIS single point only):",

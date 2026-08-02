@@ -157,8 +157,11 @@ function frontCollapseSeconds(state: GameState, front: Front): number | null {
     time: state.time,
   };
   const a = assessCrisisEscalation(state, crisis);
-  if (!a || a.tCollapse === Infinity) return null;
-  return Math.round(a.tCollapse);
+  // v4 刀3 SPEAKING FACE: every caller of this wrapper renders a sentence for
+  // the commander, so it reads the exchange clock. null now means BOTH "stable"
+  // and "we win this exchange" — the second was structurally unsayable before.
+  if (!a || a.exchange.spokenSeconds === null) return null;
+  return Math.round(a.exchange.spokenSeconds);
 }
 
 /** Living player units among the given ids ("resolved assigned units"). */

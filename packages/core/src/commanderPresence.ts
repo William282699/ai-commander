@@ -156,7 +156,12 @@ function frontCollapseSeconds(state: GameState, front: Front): number | null {
     time: state.time,
   };
   const a = assessCrisisEscalation(state, crisis);
-  return a ? a.tCollapse : null;
+  // v4 刀3 SPEAKING FACE: the board row (survival≈Ns) and the mood line are
+  // both read by the commander, so this wrapper carries the exchange clock.
+  // null now covers "stable" AND "we win this exchange" — the caller already
+  // renders null as survival=stable, so a won fight stops being reported as a
+  // countdown. 对内触发用悲观钟，对人说话用互射钟。
+  return a ? a.exchange.spokenSeconds : null;
 }
 
 // ============================================================

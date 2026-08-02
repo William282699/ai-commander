@@ -220,7 +220,10 @@ function crisisEngaged(): GameState {
 /** Single-front boundary state: pooled defender HP vs ONE visible enemy
  *  infantry (DPS = 6/1.5 = 4) places collapse exactly at / just past the
  *  critical threshold: [40,40,40] → 120/4 = 30s; [40,40,48] → 128/4 = 32s. */
-function boundaryMood(defenderHp: number[]): GameState {
+/** v4 刀3: enemyCount is now a parameter because the spoken clock reads BOTH
+ *  sides. One enemy against three defenders is a fight we win, so it can no
+ *  longer be used to exercise the "critical + seconds" band (see M9/M10). */
+function boundaryMood(defenderHp: number[], enemyCount = 1): GameState {
   const s = emptyBattlefield();
   s.time = 300;
   const ids: number[] = [];
@@ -229,8 +232,10 @@ function boundaryMood(defenderHp: number[]): GameState {
     ids.push(u.id);
   });
   addSquad(s, ids, { id: "I1", leaderName: "Aiden" });
-  const e = addUnit(s, COASTAL.x + 8, COASTAL.y, { team: "enemy" } as Partial<Unit>);
-  reveal(s, e.position.x, e.position.y);
+  for (let k = 0; k < enemyCount; k++) {
+    const e = addUnit(s, COASTAL.x + 8 + k, COASTAL.y, { team: "enemy" } as Partial<Unit>);
+    reveal(s, e.position.x, e.position.y);
+  }
   return s;
 }
 
@@ -430,11 +435,27 @@ function runSynthetic(): void {
   }
   {
     // Visible-branch banding at the named threshold (CRITICAL_COLLAPSE_SEC=30,
-    // inclusive): 120HP/4DPS = 30s → critical with seconds; 128HP = 32s →
-    // tense, seconds withheld, the fog-gated ratio speaks instead.
-    const mCrit = commanderMood(boundaryMood([40, 40, 40]));
-    check("M9 t=30s boundary → critical", mCrit.level === "critical", `${mCrit.level}（${mCrit.reason}）`);
+    // inclusive). v4 刀3 (§6c-3 行为变化预期 + §6c-3b 用户裁定 A): the spoken
+    // clock is now the EXCHANGE clock, so the boundary must be exercised by a
+    // fight we are LOSING. The old fixture (3 defenders vs 1 enemy) said "还能
+    // 撑30秒" while the enemy died in 5 — it asserted the very lie 刀3 removes.
+    //
+    // Losing boundary, 1v3, arithmetic checkable by hand:
+    //   defender 1×360HP, DPS 4   → tWeDie     = 360 / 12 = 30s  (on the band edge)
+    //   enemy    3×60HP,  DPS 12  → tEnemyDies = 180 /  4 = 45s
+    //   45 > 30 ⇒ holds=false ⇒ spokenSeconds = 30
+    const mCrit = commanderMood(boundaryMood([360], 3));
+    check("M9 t=30s boundary (输面 1v3) → critical", mCrit.level === "critical", `${mCrit.level}（${mCrit.reason}）`);
     check("M10 critical reason: front + ~seconds", mCrit.reason.includes("北部战线") && /约30秒内/.test(mCrit.reason), mCrit.reason);
+    // 负对照 (§6c-3b 条件 b): the SAME 30s pessimistic clock, but we win the
+    // exchange (3 defenders vs 1 enemy: they die in 5s). A countdown here is
+    // the pre-刀3 lie — it must not come back.
+    const mWin = commanderMood(boundaryMood([40, 40, 40]));
+    check(
+      "M9b ★负对照★ 赢面 3打1：同样 30s 悲观钟，绝不出倒计时",
+      mWin.level !== "critical" && !/秒内/.test(mWin.reason),
+      `${mWin.level}（${mWin.reason}）`,
+    );
     const mTense = commanderMood(boundaryMood([40, 40, 48]));
     check(
       "M11 t=32s → tense w/ ratio, no seconds",

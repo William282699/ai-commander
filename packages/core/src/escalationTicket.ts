@@ -29,7 +29,7 @@
 
 import type { GameState, Front, Position, CrisisEvent } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
-import { buildReinforceOptions, buildFrontEscalationPayload } from "./frontEscalationPayload";
+import { buildReinforceOptions, buildFrontEscalationPayload, filterLateCandidates } from "./frontEscalationPayload";
 import type { ReinforceOptionsResult } from "./frontEscalationPayload";
 import { battleAnchorFor } from "./crisisResponse";
 import { frontEscalationFacts } from "./director";
@@ -153,7 +153,13 @@ export function buildFrontEscalationWithTickets(
 ): EscalationWithTickets {
   const facts = frontEscalationFacts(state, crisis);
   const front = facts ? state.fronts.find((f) => f.id === facts.frontId) ?? null : null;
-  const result = buildReinforceOptions(state, front);
+  // 诚实闸 (刀3) is applied ONCE, here, and the SAME filtered set feeds both the
+  // payload and the mint — a ticket must never exist for a candidate Chen was
+  // not allowed to mention.
+  const result = filterLateCandidates(
+    buildReinforceOptions(state, front),
+    facts?.estimatedCollapseSeconds ?? null,
+  );
   const payload = buildFrontEscalationPayload(state, crisis, result);
   const minted = front ? mintEscalationTickets(state, front, result) : [];
   return { payload, tickets: minted, promptLine: ticketPromptLine(minted) };

@@ -250,6 +250,50 @@ export function estimateSquadTravelTime(
   return worstTime;
 }
 
+// ── v4 刀3: two clocks, two jobs ──
+//
+// 口径原则（用户 2026-08-02 拍板）：**对内触发用悲观钟，对人说话用互射钟。**
+//
+// The pessimistic clock (tCollapse = defenderHP / enemyDPS) assumes we never
+// fire back. As an ALARM THRESHOLD that is the right bias — better to wake up
+// early. As a SENTENCE SAID TO THE COMMANDER it is indefensible: "还能撑7秒"
+// rests on a premise ("我们一枪不放") that is simply false, and 07-20 家法
+// requires every spoken number to point back at a defensible field.
+//
+// The exchange clock reads the SAME four quantities under a true premise —
+// both sides are shooting — and answers the question the commander actually
+// asked: do we hold this, and if not, how long.
+//
+// Honestly NOT modelled (§6c-2 disclosure): terrain defence bonus, unit
+// counters, range/engagement geometry, reinforcements in transit, the player
+// retreating. These are "not counted", not "counted backwards" — which is why
+// the spoken line keeps its 约.
+
+export interface ExchangeClock {
+  /** Seconds until OUR force is spent at the enemy's current rate. */
+  tWeDie: number;
+  /** Seconds until THEIR force is spent at our current rate. */
+  tEnemyDies: number;
+  /** True when we win the exchange — the case the old formula could never express. */
+  holds: boolean;
+  /** What to say out loud: seconds until we break, or null when we hold. */
+  spokenSeconds: number | null;
+}
+
+function exchangeClock(
+  defenderHP: number, defenderDPS: number, enemyHP: number, enemyDPS: number,
+): ExchangeClock {
+  const tWeDie = enemyDPS > 0 ? defenderHP / enemyDPS : Infinity;
+  const tEnemyDies = defenderDPS > 0 ? enemyHP / defenderDPS : Infinity;
+  const holds = tEnemyDies < tWeDie;
+  return {
+    tWeDie,
+    tEnemyDies,
+    holds,
+    spokenSeconds: holds || tWeDie === Infinity ? null : tWeDie,
+  };
+}
+
 /**
  * Estimate how long the front can hold (seconds) based on current force balance.
  *
@@ -259,14 +303,21 @@ export function estimateSquadTravelTime(
  * so the estimate errs on the pessimistic side (shorter collapse time).
  * This is intentional — better to slightly over-estimate urgency than
  * to recommend reinforcement that arrives after the line breaks.
+ *
+ * v4 刀3: this value stays BYTE-IDENTICAL and keeps feeding the alarm gate
+ * (director.ts:379) and urgency (:381). The exchange clock returned alongside
+ * is what every SPOKEN surface reads instead.
  */
 function estimateCollapseTime(state: GameState, front: Front): {
   tCollapse: number;
   defenderDPS: number;
   enemyDPS: number;
+  /** v4 刀3: the mutual-fire read of the same four quantities. */
+  exchange: ExchangeClock;
 } {
   let defenderHP = 0;
   let defenderDPS = 0;
+  let enemyHP = 0;
   let enemyDPS = 0;
 
   state.units.forEach(u => {
@@ -279,6 +330,7 @@ function estimateCollapseTime(state: GameState, front: Front): {
         defenderDPS += u.attackDamage / u.attackInterval;
       }
     } else {
+      enemyHP += u.hp; // v4 刀3: the missing half of the exchange
       // FOG-TODO: when fog-of-war has an info layer, only count enemies
       // visible to the player (state.visibleTiles check). Unseen enemies
       // should be excluded, making T_collapse optimistic — which is the
@@ -290,7 +342,12 @@ function estimateCollapseTime(state: GameState, front: Front): {
   });
 
   const tCollapse = enemyDPS > 0 ? defenderHP / enemyDPS : Infinity;
-  return { tCollapse, defenderDPS, enemyDPS };
+  return {
+    tCollapse,
+    defenderDPS,
+    enemyDPS,
+    exchange: exchangeClock(defenderHP, defenderDPS, enemyHP, enemyDPS),
+  };
 }
 
 /**
@@ -748,6 +805,9 @@ export interface CrisisEscalation {
   frontId: string;
   frontName: string;
   tCollapse: number;                       // seconds before collapse; Infinity if stable
+  /** v4 刀3: the mutual-fire read. EVERY spoken surface uses this; tCollapse
+   *  stays the internal alarm threshold. 对内触发用悲观钟，对人说话用互射钟。 */
+  exchange: ExchangeClock;
   /** Best ORGANIZED idle/low-priority reinforcement (excludes __reserve__). */
   bestCandidate: ReinforceCandidate | null;
 }
@@ -774,11 +834,12 @@ export function assessCrisisEscalation(
       frontId: crisis.locationTag,
       frontName: crisis.locationTag,
       tCollapse: Infinity,
+      exchange: { tWeDie: Infinity, tEnemyDies: Infinity, holds: false, spokenSeconds: null },
       bestCandidate: null,
     };
   }
 
-  const { tCollapse } = estimateCollapseTime(state, front);
+  const { tCollapse, exchange } = estimateCollapseTime(state, front);
 
   // findBestReinforcements ignores the doctrine arg (it scans the battlefield
   // directly), so a minimal stand-in is sufficient here.
@@ -802,6 +863,7 @@ export function assessCrisisEscalation(
     frontId: front.id,
     frontName: front.name,
     tCollapse,
+    exchange,
     bestCandidate,
   };
 }

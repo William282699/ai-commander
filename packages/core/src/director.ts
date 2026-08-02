@@ -376,10 +376,21 @@ function collectCollapseBeats(
     const a = assessCrisisEscalation(state, crisis);
     if (!a) continue;
     // Only a finite, near-term break is a beat. A holding exchange stays silent.
+    // INTERNAL FACE (v4 刀3 — must stay on the pessimistic clock): the alarm
+    // threshold and the urgency ramp. Waking up early is the right bias here.
     if (a.tCollapse === Infinity || a.tCollapse > TUNING.COLLAPSE_DANGER_SEC) continue;
-
     const urgency = clamp01(1 - a.tCollapse / TUNING.COLLAPSE_DANGER_SEC);
-    const tSec = Math.round(a.tCollapse);
+
+    // 诚实闸 (v4 刀3, §8-3): the pessimistic clock rang, but both sides are
+    // actually shooting and we win this exchange. Proposing reinforcements for
+    // a fight we are already winning is the "狼来了" the spoken number used to
+    // manufacture. Say nothing. EXPECTED behaviour change, not a regression
+    // (§6c-3): escalation frequency drops.
+    if (a.exchange.holds) continue;
+
+    // SPEAKING FACE: everything below is said to the commander, so it reads the
+    // exchange clock. Non-null by construction — holds already `continue`d.
+    const tSec = Math.round(a.exchange.spokenSeconds ?? a.tCollapse);
     const stake = classifyStake(state, front);
     const metric: DirectorMetricSnapshot = {
       engagementIntensity: front.engagementIntensity,
@@ -705,7 +716,11 @@ export function frontEscalationFacts(state: GameState, crisis: CrisisEvent): Esc
     frontId: a.frontId,
     frontName: a.frontName,
     stake: front ? classifyStake(state, front) : "unknown",
-    estimatedCollapseSeconds: a.tCollapse === Infinity ? null : Math.round(a.tCollapse),
+    // SPEAKING FACE (v4 刀3): this fact pack is what Chen voices the escalation
+    // from, so it carries the exchange clock. null when we hold the exchange —
+    // and a null here is the honest answer, not a missing number.
+    estimatedCollapseSeconds:
+      a.exchange.spokenSeconds === null ? null : Math.round(a.exchange.spokenSeconds),
     powerRatio: front ? freshFrontPowerRatio(state, front) : null,
     freeReinforcement: a.bestCandidate
       ? { leaderName: a.bestCandidate.leaderName, aliveCount: a.bestCandidate.aliveCount }

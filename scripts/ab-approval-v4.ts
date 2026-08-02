@@ -26,7 +26,11 @@ import {
   estimateSquadTravelTime,
 } from "../packages/core/src/crisisResponse";
 import { buildReinforceOptions } from "../packages/core/src/frontEscalationPayload";
-import { buildFrontJudgmentLines } from "../packages/core/src/commanderPresence";
+import { buildFrontJudgmentLines, commanderMood } from "../packages/core/src/commanderPresence";
+import { assessCrisisEscalation } from "../packages/core/src/crisisResponse";
+import { collectDirectorBeats, frontEscalationFacts } from "../packages/core/src/director";
+import { captureDecisionReview } from "../packages/core/src/decisionReview";
+import { filterLateCandidates } from "../packages/core/src/frontEscalationPayload";
 import {
   mintEscalationTickets, lookupEscalationTicket, burnEscalationTicket, liveMembersOf,
   isTicketRef, ticketPromptLine, resetEscalationTickets, TICKET_TTL_SEC,
@@ -509,6 +513,166 @@ function runKnife2b(): void {
 }
 
 // ============================================================
+// 刀3 — 互射钟。口径原则：对内触发用悲观钟，对人说话用互射钟。
+// 覆盖矩阵照 §6c-5：六说话面各一断言 + 两内部面不变负对照 + 行为正负对照
+// + filterLateCandidates 同喂两处。
+// ============================================================
+
+/** front_coastal fixture with dialled HP/DPS so both clocks are hand-checkable.
+ *  infantry = 60maxHP, 6dmg/1.5s = 4 DPS. */
+function exchangeFixture(opts: {
+  defenders: number[];     // player HP each (DPS 4 apiece)
+  enemies: number[];       // enemy HP each (DPS 4 apiece)
+}): { state: GameState; front: Front } {
+  const state = emptyBattlefield();
+  state.time = 300;
+  const front = frontById(state, "front_coastal");
+  const [x, y] = [250, 38]; // inside northern_coastal[200,22,490,55]
+  opts.defenders.forEach((hp, i) =>
+    addUnit(state, x + i, y, { hp, lastAttackTime: state.time - 1, lastDamagedAt: state.time - 1 }));
+  opts.enemies.forEach((hp, i) =>
+    addUnit(state, x + 8 + i, y, { hp, team: "enemy", lastAttackTime: state.time - 1 }));
+  for (const row of state.fog) for (let i = 0; i < row.length; i++) row[i] = "visible";
+  // director's collapse scan skips quiet fronts (TUNING.ENGAGED_MIN = 0.25);
+  // this fixture exists to exercise the scan, so mark it hot.
+  front.engagementIntensity = 5;
+  return { state, front };
+}
+
+function runKnife3(): void {
+  console.log("\n== 刀3 互射钟：对内悲观、对人互射 ==");
+
+  // 输面：我方 1×360HP/DPS4；敌方 3×60HP/DPS12
+  //   tWeDie = 360/12 = 30s   tEnemyDies = 180/4 = 45s → holds=false, spoken=30
+  const lose = exchangeFixture({ defenders: [360], enemies: [60, 60, 60] });
+  const aLose = assessCrisisEscalation(lose.state, makeCrisis(lose.front));
+  check("T4a 前置 输面构造：悲观钟 30s", !!aLose && Math.round(aLose.tCollapse) === 30,
+    aLose ? `${aLose.tCollapse.toFixed(1)}` : "null");
+  check("T4b 前置 输面互射钟：tEnemyDies 45s > tWeDie 30s ⇒ 守不住",
+    !!aLose && Math.round(aLose.exchange.tEnemyDies) === 45 && aLose.exchange.holds === false,
+    aLose ? `tEnemyDies=${aLose.exchange.tEnemyDies.toFixed(1)} holds=${aLose.exchange.holds}` : "null");
+  check("T4c 输面说话数 == 30（输时互射钟与悲观钟同值，见 §6c-2 披露）",
+    !!aLose && aLose.exchange.spokenSeconds !== null && Math.round(aLose.exchange.spokenSeconds) === 30,
+    aLose ? `${aLose.exchange.spokenSeconds}` : "null");
+
+  // 赢面：我方 3×40HP/DPS12；敌方 1×60HP/DPS4
+  //   tWeDie = 120/4 = 30s    tEnemyDies = 60/12 = 5s → holds=true, spoken=null
+  const win = exchangeFixture({ defenders: [40, 40, 40], enemies: [60] });
+  const aWin = assessCrisisEscalation(win.state, makeCrisis(win.front));
+  check("T4d 前置 赢面构造：悲观钟同样是 30s（两局悲观钟不可区分）",
+    !!aWin && Math.round(aWin.tCollapse) === 30, aWin ? `${aWin.tCollapse.toFixed(1)}` : "null");
+  checkKnife(
+    "T4e ★ 赢面：互射钟判守得住，说话数为 null（旧公式结构上说不出这句）",
+    !!aWin && aWin.exchange.holds === true && aWin.exchange.spokenSeconds === null,
+    !!aWin && Math.round(aWin.tCollapse) === 30,
+    aWin ? `holds=${aWin.exchange.holds} spoken=${aWin.exchange.spokenSeconds}` : "null",
+  );
+
+  // ── 两内部面必须仍读悲观钟（负对照：改错面要被抓）──
+  check(
+    "T4f ★内部面★ 报警闸读悲观钟：赢面悲观钟 30s < DANGER 阈值，仍进扫描",
+    !!aWin && aWin.tCollapse <= 30 && aWin.tCollapse !== Infinity,
+    aWin ? `${aWin.tCollapse}` : "null",
+  );
+  check(
+    "T4g ★内部面★ tCollapse 字节未变：两局同值 30s，只有说话面分叉",
+    !!aWin && !!aLose && Math.round(aWin.tCollapse) === Math.round(aLose.tCollapse),
+    `win=${aWin?.tCollapse.toFixed(1)} lose=${aLose?.tCollapse.toFixed(1)}`,
+  );
+
+  // ── 说话面 1-2: director beat（tSec）与事实包（estimatedCollapseSeconds）──
+  const beatsWin = collectDirectorBeats(win.state, null).filter((b) => b.frontId === "front_coastal");
+  const beatsLose = collectDirectorBeats(lose.state, null).filter((b) => b.frontId === "front_coastal");
+  checkKnife(
+    "T4h ★行为★ 赢面零升级提案（诚实闸：守得住就不开口）",
+    beatsWin.length === 0,
+    beatsWin.length > 0,
+    `beats=${beatsWin.length}`,
+  );
+  check(
+    "T4i ★行为正对照★ 输面照常升级，且 beat 念的是新数 30s",
+    beatsLose.length > 0 && beatsLose.every((b) => b.estimatedCollapseSeconds === 30),
+    `beats=${beatsLose.length} secs=${beatsLose.map((b) => b.estimatedCollapseSeconds).join(",")}`,
+  );
+  const factsLose = frontEscalationFacts(lose.state, makeCrisis(lose.front));
+  const factsWin = frontEscalationFacts(win.state, makeCrisis(win.front));
+  check("T4j 说话面 事实包 输面 = 30", factsLose?.estimatedCollapseSeconds === 30,
+    `${factsLose?.estimatedCollapseSeconds}`);
+  checkKnife(
+    "T4k ★ 说话面 事实包 赢面 = null（不是缺数，是诚实答案）",
+    factsWin?.estimatedCollapseSeconds === null,
+    factsWin?.estimatedCollapseSeconds === 30,
+    `${factsWin?.estimatedCollapseSeconds}`,
+  );
+
+  // ── 说话面 3-4: presence wrapper（survival≈ 与 mood 行）──
+  const rowsLose = buildFrontJudgmentLines(lose.state).find((l) => l.includes("1. 北部战线"));
+  const rowsWin = buildFrontJudgmentLines(win.state).find((l) => l.includes("1. 北部战线"));
+  check("T4l 说话面 态势板 输面带 survival≈30s", !!rowsLose && /survival≈30s/.test(rowsLose), rowsLose ?? "");
+  checkKnife(
+    "T4m ★ 说话面 态势板 赢面 survival=stable（不再谎报倒计时）",
+    !!rowsWin && rowsWin.includes("survival=stable"),
+    !!rowsWin && /survival≈30s/.test(rowsWin),
+    rowsWin ?? "",
+  );
+  const moodWin = commanderMood(win.state);
+  check("T4n 说话面 mood 赢面不出秒数", !/秒内/.test(moodWin.reason), `${moodWin.level}（${moodWin.reason}）`);
+
+  // ── 说话面 5-6: decisionReview wrapper（复盘基线/跨线行）──
+  // §6c-4: "压着打"现在 = null，翻盘才非 null —— 旧谓词把这类战线永远滤掉。
+  const revSnap = (st: GameState, fr: Front): number | null => {
+    const ids = Array.from(st.units.values()).filter((u) => u.team === "player").map((u) => u.id);
+    // escalateId lowers MIN_UNITS from 3 to 1 — the losing fixture is 1v3 on
+    // purpose, and the wrapper under test is per-front, not per-squad-size.
+    const rec = captureDecisionReview(st, {
+      kind: "defend", assignedUnitIds: ids, frontId: fr.id, escalateId: "bench",
+    } as never);
+    return rec?.baseline.fronts.find((f) => f.frontId === fr.id)?.collapseSeconds ?? null;
+  };
+  const revWin = revSnap(win.state, win.front);
+  const revLose = revSnap(lose.state, lose.front);
+  checkKnife(
+    "T4o ★ 说话面 复盘基线 赢面 = null（§6c-4 盲区修复：压着打不再有钟）",
+    revWin === null, revWin === 30, `${revWin}`,
+  );
+  check("T4p 说话面 复盘基线 输面 = 30", revLose === 30, `${revLose}`);
+
+  // ── 诚实闸第二半：晚到候选从 payload 与铸号同时消失 ──
+  resetEscalationTickets();
+  // Relief group 300 tiles away → eta far beyond the 30s exchange clock.
+  const far = exchangeFixture({ defenders: [360], enemies: [60, 60, 60] });
+  for (let i = 0; i < 6; i++) addUnit(far.state, 60 + i, 260, {}); // deep south-west
+  const unfiltered = buildReinforceOptions(far.state, far.front);
+  const built = buildFrontEscalationWithTickets(far.state, makeCrisis(far.front));
+  const farOpt = unfiltered.options.find((o) => o.etaSec !== null && o.etaSec > 30);
+  check("T4q 前置 存在一个 eta > 互射钟(30s) 的候选", !!farOpt,
+    unfiltered.options.map((o) => `${o.label}:${o.etaSec}s`).join(" | "));
+  if (farOpt) {
+    checkKnife(
+      "T4r ★ 晚到候选不进 payload（提一个来不及的案＝噪声冒充选择）",
+      !built.payload.includes(farOpt.label),
+      built.payload.includes(farOpt.label),
+      built.payload.split("\n").filter((l) => l.includes("units")).join(" / "),
+    );
+    checkKnife(
+      "T4s ★ 同一次过滤也挡住铸号（陈不能提的案，绝不存在号）",
+      !built.tickets.some((t) => t.label === farOpt.label),
+      built.tickets.some((t) => t.label === farOpt.label),
+      built.tickets.map((t) => `${t.gNumber}=${t.label}`).join(" | "),
+    );
+  }
+  check(
+    "T4t 未知 eta 永不被过滤（缺数不得当作判决）",
+    filterLateCandidates({ ...unfiltered, options: [{ ...unfiltered.options[0], etaSec: null }],
+      shown: [{ ...unfiltered.options[0], etaSec: null }], omitted: 0 }, 1).options.length === 1,
+  );
+  check(
+    "T4u 互射钟为 null（稳/赢）时零过滤（无依据不删候选）",
+    filterLateCandidates(unfiltered, null).options.length === unfiltered.options.length,
+  );
+}
+
+// ============================================================
 
 function main(): void {
   if (NEGCTL) {
@@ -517,6 +681,7 @@ function main(): void {
   runKnife1();
   runKnife2a();
   runKnife2b();
+  runKnife3();
 
   console.log(`\nPASS=${passCount} FAIL=${failCount}`);
   if (NEGCTL) {

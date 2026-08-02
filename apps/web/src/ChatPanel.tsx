@@ -638,6 +638,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // player has seen the warning); "awaiting_reply" = the only phase where the
   // literal fast path or the LLM pendingDecision may consume. Unique id +
   // channel + session are re-verified at consumption (judgePendingConsumption).
+  /** v4 刀2b P1: set at send time when a BARE confirm answers a live proposal;
+   *  consumed at applyOrders. The instrument behind 刀A's revival ruling. */
+  const bareConfirmExecRef = useRef<{ escalateId: string } | null>(null);
   const pendingContractRef = useRef<{
     id: string;
     phase: "voicing" | "awaiting_reply";
@@ -1245,6 +1248,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       }
       // voicing phase / off-channel: no consumption of any kind here.
     }
+
+    // ── v4 刀2b P1: instrument the ONE branch that decides whether 刀A (the
+    // shelved approval contract) has to come back. A bare confirm answering a
+    // live proposal is exactly the case where the LLM — not a structural gate —
+    // decides which batch the player just approved. If the external playtest
+    // shows it mis-binds, 刀A revives; if it doesn't, the contract stays
+    // shelved. Either way the ruling is made on counted evidence, not vibes.
+    // Stamped here (send time), consumed at applyOrders so only executions that
+    // really moved troops are counted.
+    bareConfirmExecRef.current =
+      isConfirmReply(userMsg) && getActiveEscalation(ch, state.time)
+        ? { escalateId: getActiveEscalation(ch, state.time)!.actionId }
+        : null;
 
     // ── v4 刀2b 绊索: a BARE confirm with nothing on the table never reaches
     // the LLM. Today such a word falls through to the normal command chain,
@@ -1900,6 +1916,26 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       for (const g of ticketsToBurn) burnEscalationTicket(g);
       for (const r of ticketReceipts) {
         addMessage("info", r, state.time, ch, undefined, "command_ack");
+      }
+
+      // v4 刀2b P1: one exportable row per bare-confirm execution that actually
+      // moved troops. viaTicket=false is the interesting population — that is
+      // the LLM binding a nod with no structural handle, i.e. the risk 刀A was
+      // built to remove. Exported by counting these against mis-dispatch
+      // reports from the external playtest.
+      const bce = bareConfirmExecRef.current;
+      if (bce) {
+        bareConfirmExecRef.current = null;
+        const targets = intents
+          .map((i) => i.toFront ?? i.targetFacility ?? i.targetRegion ?? i.fromFront ?? "unspecified")
+          .join("+");
+        state.diagnostics.push({
+          time: state.time,
+          code: "V4_BARE_CONFIRM_EXEC",
+          message: `escalateId=${bce.escalateId} viaTicket=${ticketsToBurn.length > 0}` +
+            `${ticketsToBurn.length > 0 ? ` tickets=${ticketsToBurn.join(",")}` : ""}` +
+            ` dispatched=${allAssignedUnitIds.length} target=${targets}`,
+        });
       }
 
       // Surface economy failures (produce/trade) the engine recorded as
