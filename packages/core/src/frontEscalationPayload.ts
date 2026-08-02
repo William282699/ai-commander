@@ -30,7 +30,7 @@ import type {
 } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
 import { frontEscalationFacts } from "./director";
-import { frontCenterPos, estimateSquadTravelTime } from "./crisisResponse";
+import { frontCenterPos, battleAnchorFor, estimateSquadTravelTime } from "./crisisResponse";
 
 // ── Tunables (explicit, no defaults hidden in call sites) ──
 
@@ -95,7 +95,9 @@ export interface ReinforceOptionsResult {
 }
 
 // ── Geometry helpers (front bboxes; local on purpose — the only crisisResponse
-//    symbols we are allowed to import are frontCenterPos + the ETA helper) ──
+//    symbols we are allowed to import are frontCenterPos, battleAnchorFor
+//    [v4 刀1: the anchor truth source lives next to frontCenterPos] and the
+//    ETA helper) ──
 
 function frontBboxes(state: GameState, front: Front): [number, number, number, number][] {
   const out: [number, number, number, number][] = [];
@@ -343,7 +345,11 @@ export function buildReinforceOptions(
   front: Front | null,
 ): ReinforceOptionsResult {
   const bboxes = front ? frontBboxes(state, front) : [];
-  const anchor = front ? frontCenterPos(state, front) : null;
+  // v4 刀1: the ETA promise is measured to where the FIGHT is, not to the
+  // front's geometric center. Every downstream consumer of etaSec (the
+  // escalation question and commanderPresence's best_help row) inherits the
+  // fix from this one line — they all read this builder's output.
+  const anchor = front ? battleAnchorFor(state, front) : null;
   const outsideFront = (p: Position): boolean => bboxes.length === 0 || !insideBboxes(bboxes, p);
 
   // Dispatchable pool (friendly-only; commanders and manual-only excluded).

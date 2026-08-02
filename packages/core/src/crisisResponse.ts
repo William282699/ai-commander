@@ -63,6 +63,48 @@ export function frontCenterPos(state: GameState, front: Front): Position | null 
   return { x: Math.round(totalX / count), y: Math.round(totalY / count) };
 }
 
+// ── Battle anchor (v4 刀1; ported from shelved `5a1f195`) ──
+//
+// Where reinforcements should actually rally: the FIGHT, not the front's
+// geometric center. frontCenterPos averages region bboxes, so on a
+// multi-region front it can sit ~100 tiles from where anyone is shooting
+// (7-22 acceptance caught center (263,96) vs the real fight at (360,105)).
+// The old crisis-card path deliberately used the defender centroid; the V1b
+// payload's switch to the geometric center was the regression this restores.
+//
+// Three-tier fallback: recently-engaged defenders → any in-front defender →
+// frontCenterPos. Friendly-only reads, so fog-safe by construction. The
+// `> 0` guards keep an initial-0 timestamp from reading as "just fought".
+const ANCHOR_ENGAGED_WINDOW_SEC = 10;
+
+function unitFoughtRecently(u: Unit, now: number): boolean {
+  if (u.lastAttackTime > 0 && now - u.lastAttackTime < ANCHOR_ENGAGED_WINDOW_SEC) return true;
+  if (u.lastDamagedAt !== undefined && u.lastDamagedAt > 0 &&
+      now - u.lastDamagedAt < ANCHOR_ENGAGED_WINDOW_SEC) {
+    return true;
+  }
+  return false;
+}
+
+/** The point a reinforcement promise (and its ETA) should be measured against. */
+export function battleAnchorFor(state: GameState, front: Front): Position | null {
+  const now = state.time;
+  const defenders: Unit[] = [];
+  const engaged: Unit[] = [];
+  state.units.forEach((u) => {
+    if (u.team !== "player" || u.hp <= 0 || u.state === "dead") return;
+    if (!isInsideFront(state, front, u.position)) return;
+    defenders.push(u);
+    if (unitFoughtRecently(u, now)) engaged.push(u);
+  });
+
+  const group = engaged.length > 0 ? engaged : defenders;
+  if (group.length === 0) return frontCenterPos(state, front);
+  const x = group.reduce((s, u) => s + u.position.x, 0) / group.length;
+  const y = group.reduce((s, u) => s + u.position.y, 0) / group.length;
+  return { x, y };
+}
+
 /** Check if a position is inside a front's region bounding boxes. */
 function isInsideFront(state: GameState, front: Front, pos: Position): boolean {
   for (const rid of front.regionIds) {
