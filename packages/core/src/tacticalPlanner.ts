@@ -584,6 +584,7 @@ function resolveDefend(
   if (target) {
     const spread = createOrdersWithSpread(
       units, target, state, "defend", mapUrgency(intent.urgency), 1.0,
+      undefined, intent.routeId, intent.routeIds,
     );
     if (spread.orders.length === 0) {
       return { orders: [], log: "目标地形不可达，无可用单位执行防御", degraded: true };
@@ -677,6 +678,7 @@ function planRetreat(
     // semantics (sim.ts / combat.ts retreating exemptions) hold en route.
     const spread = createOrdersWithSpread(
       units, destination, state, "retreat", mapUrgency(intent.urgency), 1.0,
+      undefined, intent.routeId, intent.routeIds,
     );
     if (spread.orders.length === 0) {
       return { ok: false, fail: "impassable", unitTypeBypassed };
@@ -838,6 +840,7 @@ function resolveRecon(
   // ④ passability degradation (no spread for recon — units scout independently)
   const spread = createOrdersWithSpread(
     selected, target, state, "recon", mapUrgency(intent.urgency), 0,
+    undefined, intent.routeId, intent.routeIds,
   );
 
   if (spread.orders.length === 0) {
@@ -1124,6 +1127,7 @@ function planSabotage(
   // Issue sabotage orders to the facility (action: "sabotage" — NOT attack_move)
   const spread = createOrdersWithSpread(
     units, target, state, "sabotage", mapUrgency(intent.urgency), 1.5,
+    undefined, intent.routeId, intent.routeIds,
   );
   if (spread.orders.length === 0) return { ok: false, fail: "impassable" };
   return { ok: true, target, fac, spread, requestedCount: units.length };
@@ -1249,6 +1253,7 @@ function resolveCapture(
   // Move units to facility and set up capture (uses attack_move to handle hostiles en route)
   const spread = createOrdersWithSpread(
     units, target, state, "attack_move", mapUrgency(intent.urgency), 1.0,
+    undefined, intent.routeId, intent.routeIds,
   );
 
   if (spread.orders.length === 0) {
