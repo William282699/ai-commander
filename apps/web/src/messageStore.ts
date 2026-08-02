@@ -330,8 +330,15 @@ export interface ActiveEscalation {
   actionId: string;
   question: string;
   createdAt: number; // game time
+  /** v4 刀2b: engine-authored permission line naming this proposal's ticket
+   *  numbers (G1=…, G2=…). Rides ---ACTIVE_ESCALATION--- so the model has a
+   *  legal handle for "那批兵"; absent when nothing was minted. */
+  ticketLine?: string;
 }
 
+/** ⇄ MUST equal escalationTicket.TICKET_TTL_SEC (core). Same clock (state.time),
+ *  same 120s: a ticket must not outlive the question that minted it, and a
+ *  visible question must not hold a dead ticket. Change one → change both. */
 const ESCALATION_WINDOW_SEC = 120;
 const _escalations: Record<Channel, ActiveEscalation | null> = {
   ops: null,

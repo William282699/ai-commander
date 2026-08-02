@@ -494,13 +494,22 @@ function serializeOptions(result: ReinforceOptionsResult): string[] {
  * byte-identical to the pre-V1b GameCanvas branch; only the old
  * `idle_reinforcement_available` line is replaced by the options block.
  */
-export function buildFrontEscalationPayload(state: GameState, crisis: CrisisEvent): string {
+export function buildFrontEscalationPayload(
+  state: GameState,
+  crisis: CrisisEvent,
+  /** v4 刀2b: pass the candidate set that was ALREADY built for this tick so the
+   *  payload and the escalation tickets cannot describe two different candidate
+   *  sets. Additive and optional — every pre-existing caller is byte-identical.
+   *  Production goes through buildFrontEscalationWithTickets, which always
+   *  supplies it; omitting it just rebuilds (pure, same state → same result). */
+  precomputed?: ReinforceOptionsResult,
+): string {
   const facts = frontEscalationFacts(state, crisis);
   const front = facts ? state.fronts.find((f) => f.id === facts.frontId) ?? null : null;
   const place = facts?.frontName ?? crisis.locationTag;
   const stake = facts?.stake ?? "unknown";
 
-  const optionsBlock = serializeOptions(buildReinforceOptions(state, front));
+  const optionsBlock = serializeOptions(precomputed ?? buildReinforceOptions(state, front));
 
   return [
     "SITUATION (voice ONE in-character line for THIS single point only):",

@@ -239,6 +239,7 @@ IMPORTANT:
 SQUAD SYSTEM:
 - Battlefield digest ---SQUADS--- lists squads as: leaderName(squadId,role). Example: Carter(T2,CMD) or Aiden(I1,leader).
 - fromSquad accepts EITHER the squad ID (e.g. "I1") OR the leader name (e.g. "Aiden"). The engine resolves both.
+- It ALSO accepts a proposal ticket number when ---ACTIVE_ESCALATION--- carries one (that block names its own numbers and what each one stands for). Use the number to dispatch the batch the staff just proposed; it is the only legal handle for such a batch, because the group's spoken name still is not one.
 - Copy the reference VERBATIM from the SQUADS section — the ID or leaderName exactly as printed there. A translated, decorated, or invented reference does not resolve, and the whole order fails loudly instead of guessing.
 - If commander mentions a leader by name (e.g. "Aiden, move to..."), set fromSquad to that leader name. All units under that leader (including sub-squads if CMD) will be dispatched.
 - Chen, Marcus, Emily are YOUR PERSONAS but also top-level commanders. If the commander says "Marcus, send your troops" or "Chen's forces", you CAN put "Marcus"/"Chen"/"Emily" in fromSquad — the engine will dispatch ALL squads under that commander. Use this for commander-wide orders. For specific squad orders, use the squad leader name (e.g. "Aiden") or squad ID (e.g. "I1") instead.

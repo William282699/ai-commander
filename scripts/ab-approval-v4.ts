@@ -30,8 +30,10 @@ import { buildFrontJudgmentLines } from "../packages/core/src/commanderPresence"
 import {
   mintEscalationTickets, lookupEscalationTicket, burnEscalationTicket, liveMembersOf,
   isTicketRef, ticketPromptLine, resetEscalationTickets, TICKET_TTL_SEC,
+  buildFrontEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
+  NO_PROPOSAL_GUIDANCE,
 } from "../packages/core/src/escalationTicket";
-import type { GameState, Unit, Front, Position } from "@ai-commander/shared";
+import type { GameState, Unit, Front, Position, CrisisEvent } from "@ai-commander/shared";
 
 // ── Harness ──
 
@@ -101,6 +103,17 @@ function frontById(state: GameState, id: string): Front {
 
 function dist(a: Position, b: Position): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function makeCrisis(front: Front): CrisisEvent {
+  return {
+    type: "DOCTRINE_BREACH",
+    severity: "critical",
+    doctrineId: "bench-v4",
+    locationTag: front.id,
+    message: `${front.name} 态势需要决断`,
+    time: 0,
+  };
 }
 
 /** Production ETA convention (frontEscalationPayload.etaOf): ceil, never a fake 0. */
@@ -378,6 +391,124 @@ function runKnife2a(): void {
 }
 
 // ============================================================
+// 刀2b — the pure half of the wiring: one construction feeds both the spoken
+// payload and the tickets, and the translation verdict is decided in core
+// (GameCanvas/ChatPanel have no node harness — that blind spot shipped a
+// reversed frame label once already).
+// ============================================================
+
+function runKnife2b(): void {
+  console.log("\n== 刀2b 接线的纯函数面 ==");
+  resetEscalationTickets();
+
+  const { state, front } = scenarioStraddle();
+  const crisis = makeCrisis(front);
+  const built = buildFrontEscalationWithTickets(state, crisis);
+
+  // ── 单次构建：payload 与番号必须描述同一批候选 ──
+  const groupTicket = built.tickets.find((t) => t.label.includes("未编组"));
+  check("T3a 合成入口同时产出 payload 与番号", built.payload.length > 0 && built.tickets.length > 0,
+    `tickets=${built.tickets.length}`);
+  check(
+    "T3b payload 里 serialize 的候选人数 == 番号快照人数（同一次构建）",
+    !!groupTicket && built.payload.includes(`${groupTicket.unitCount}`),
+    groupTicket ? `ticket=${groupTicket.unitCount} payload含该数=${built.payload.includes(String(groupTicket.unitCount))}` : "无群号",
+  );
+  check(
+    "T3c payload 文本不含 G 番号（号只走 ACTIVE_ESCALATION，不污染 SITUATION）",
+    !/G\d+/.test(built.payload),
+    built.payload.split("\n").find((l) => /G\d+/.test(l)) ?? "",
+  );
+
+  // ── anchor 回填断言（用户 item 2）：(0,0) 占位不许活过接线 ──
+  const expectAnchor = battleAnchorFor(state, front);
+  check(
+    "T3d anchor 非 (0,0) 占位",
+    !!groupTicket && groupTicket.anchor !== null &&
+      !(groupTicket.anchor.x === 0 && groupTicket.anchor.y === 0),
+    groupTicket?.anchor ? `${groupTicket.anchor.x},${groupTicket.anchor.y}` : "null",
+  );
+  check(
+    "T3e anchor == 刀1 的 battleAnchorFor（两刀同一个点）",
+    !!groupTicket && !!expectAnchor && groupTicket.anchor !== null &&
+      groupTicket.anchor.x === expectAnchor.x && groupTicket.anchor.y === expectAnchor.y,
+    `ticket=${groupTicket?.anchor ? `${groupTicket.anchor.x},${groupTicket.anchor.y}` : "null"} battleAnchor=${expectAnchor ? `${expectAnchor.x},${expectAnchor.y}` : "null"}`,
+  );
+
+  // ── TTL 对齐（用户 item 3）──
+  check("T3f 番号 TTL == messageStore 升级窗口 120s（同一游戏时钟）", TICKET_TTL_SEC === 120, `${TICKET_TTL_SEC}`);
+
+  // ── 翻译判决（ChatPanel 只做路由，判断全在这里）──
+  if (!groupTicket) return;
+  const g = groupTicket.gNumber;
+
+  const notTicket = resolveTicketReference(state, "Aiden", state.time);
+  check("T3g 非番号引用原路放行（不劫持正常命令）", notTicket.kind === "not_a_ticket", notTicket.kind);
+
+  const nullRef = resolveTicketReference(state, undefined, state.time);
+  check("T3h 无 fromSquad 原路放行", nullRef.kind === "not_a_ticket", nullRef.kind);
+
+  const good = resolveTicketReference(state, g, state.time);
+  checkKnife(
+    "T3i ★ 番号翻成冻结名单（5 人，全是线外那批）",
+    good.kind === "dispatch" && good.unitIds.length === 5,
+    good.kind === "dispatch" && good.unitIds.length === 10,
+    good.kind === "dispatch" ? `${good.unitIds.length} 人 [${good.unitIds.join(",")}]` : good.kind,
+  );
+
+  const stale = resolveTicketReference(state, g, state.time + TICKET_TTL_SEC + 1);
+  check(
+    "T3j 过期＝响亮拒绝＋人话，零执行",
+    stale.kind === "refuse" && stale.reason === "expired" && stale.line.length > 0,
+    stale.kind === "refuse" ? `${stale.reason}: ${stale.line}` : stale.kind,
+  );
+
+  const unknown = resolveTicketReference(state, "G9999", state.time);
+  check(
+    "T3k 未知号＝响亮拒绝，绝不静默兜底",
+    unknown.kind === "refuse" && unknown.reason === "unknown",
+    unknown.kind,
+  );
+
+  burnEscalationTicket(g);
+  const twice = resolveTicketReference(state, g, state.time);
+  check(
+    "T3l 烧号后再引用＝拒绝（同一提案不执行两遍）",
+    twice.kind === "refuse" && twice.reason === "burned",
+    twice.kind === "refuse" ? twice.reason : twice.kind,
+  );
+
+  // ── 核空：全员阵亡 → 拒绝而不是派零人 ──
+  resetEscalationTickets();
+  const fresh = buildFrontEscalationWithTickets(state, makeCrisis(front));
+  const t2 = fresh.tickets.find((t) => t.label.includes("未编组"));
+  if (t2) {
+    for (const id of t2.unitIds) { const u = state.units.get(id); if (u) { u.hp = 0; u.state = "dead"; } }
+    const gone = resolveTicketReference(state, t2.gNumber, state.time);
+    check(
+      "T3m 名单核空＝拒绝＋人话（不派零人、不换人顶替）",
+      gone.kind === "refuse" && gone.reason === "all_gone",
+      gone.kind === "refuse" ? `${gone.reason}: ${gone.line}` : gone.kind,
+    );
+  }
+
+  // ── 回执报真实数（承诺与实发对账）──
+  check(
+    "T3n 回执足额时报promised数",
+    ticketDispatchReceipt(groupTicket, groupTicket.unitCount).includes(`${groupTicket.unitCount}个单位`),
+    ticketDispatchReceipt(groupTicket, groupTicket.unitCount),
+  );
+  check(
+    "T3o 回执缺额时同时报实发与原报（不假装足额）",
+    (() => { const r = ticketDispatchReceipt(groupTicket, 3);
+      return r.includes("3") && r.includes(`${groupTicket.unitCount}`); })(),
+    ticketDispatchReceipt(groupTicket, 3),
+  );
+
+  check("T3p 绊索引导句为引擎原文（该分支永不进 LLM）", NO_PROPOSAL_GUIDANCE.length > 0, NO_PROPOSAL_GUIDANCE);
+}
+
+// ============================================================
 
 function main(): void {
   if (NEGCTL) {
@@ -385,6 +516,7 @@ function main(): void {
   }
   runKnife1();
   runKnife2a();
+  runKnife2b();
 
   console.log(`\nPASS=${passCount} FAIL=${failCount}`);
   if (NEGCTL) {

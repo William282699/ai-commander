@@ -56,7 +56,8 @@ import {
   STRATEGIC_WINDOW_SEC,
   snapshotForDirector,
   frontEscalationFacts,
-  buildFrontEscalationPayload,
+  buildFrontEscalationWithTickets,
+  resetEscalationTickets,
   facilityEscalationFacts,
   buildFacilityEscalationPayload,
   facilityContestWorthAsking,
@@ -462,10 +463,14 @@ function escalateCrisisToConversation(
   // capture-stall-feedback-v1 fix1: both branches now come from ONE core builder, so
   // the bench can assert the frame label. The array used to be inline here and no node
   // harness loads GameCanvas — that blind spot is how a reversed frame shipped.
+  // v4 刀2b: ONE core call builds the payload AND mints this proposal's tickets
+  // off the SAME candidate construction — the payload Chen speaks from and the
+  // numbers the model may quote can never describe different groups.
+  const withTickets = facFacts ? null : buildFrontEscalationWithTickets(state, crisis);
   const miniFacts = facFacts
     ? buildFacilityEscalationPayload(facFacts, situationType, crisis.message)
     : // V1b: front payload from the ONE core builder (shared with the A/B bench)
-      buildFrontEscalationPayload(state, crisis);
+      withTickets!.payload;
 
   // Neutral fallback — one open question, no defensive assumption, no option menu.
   const fallback =
@@ -480,7 +485,12 @@ function escalateCrisisToConversation(
     const t = state.time;
     // command_ack source → renders as the channel persona speaking, not a report.
     addMessage("urgent", text, t, channel, undefined, "command_ack");
-    setActiveEscalation(channel, { actionId, question: text, createdAt: t });
+    setActiveEscalation(channel, {
+      actionId,
+      question: text,
+      createdAt: t,
+      ticketLine: withTickets?.promptLine ?? undefined,
+    });
     // Step 1 log: escalate + correlation id (the player's reply carries it back).
     fetch(`${API_URL}/api/log-event`, {
       method: "POST",
@@ -1216,6 +1226,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetHeartbeatState();
     resetStaffAskState();
     resetEscalationState();
+    resetEscalationTickets(); // v4 刀2b: G-numbers must not survive a battle
     resetProactiveBudget();
     resetProactiveDirectorState();
     resetRecentReports();
@@ -1264,6 +1275,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     resetHeartbeatState();
     resetStaffAskState();
     resetEscalationState();
+    resetEscalationTickets(); // v4 刀2b: G-numbers must not survive a battle
     resetProactiveBudget();
     resetProactiveDirectorState();
     resetRecentReports();

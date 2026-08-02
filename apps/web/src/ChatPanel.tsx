@@ -18,6 +18,7 @@ declare global {
 }
 import { OrgTree } from "./OrgTree";
 import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines, isAllFrontHint } from "@ai-commander/core";
+import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, NO_PROPOSAL_GUIDANCE } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
@@ -1245,6 +1246,24 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // voicing phase / off-channel: no consumption of any kind here.
     }
 
+    // ── v4 刀2b 绊索: a BARE confirm with nothing on the table never reaches
+    // the LLM. Today such a word falls through to the normal command chain,
+    // where Bucket A invents a plan out of context — that is the 02:32 "1 个
+    // 单位" shape. There is nothing to approve, so there is nothing to voice:
+    // the engine answers directly and executes zero.
+    //
+    // Narrowest possible form on purpose: it fires ONLY when there is no
+    // pending preflight contract at all AND no active escalation. A confirm
+    // that belongs to either machine was already routed above / is routed
+    // below. 带尾确认 ("可以，派他们去") is deliberately NOT caught here — it
+    // carries an instruction, so it goes down the normal path and is
+    // disambiguated by the ticket number instead (刀2 术语: 裸确认 vs 带尾确认).
+    if (isConfirmReply(userMsg) && !pendingContractRef.current && !getActiveEscalation(ch, state.time)) {
+      addMessage("info", NO_PROPOSAL_GUIDANCE, state.time, ch, undefined, "command_ack");
+      setLoading(false);
+      return;
+    }
+
     // Capture persona once for the entire stream. selectedCommanders[0]
     // could in theory drift if user switches tabs mid-stream; ttsPersona
     // is the locked persona used by every speak()/flush() call below.
@@ -1263,7 +1282,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     const activeEsc = getActiveEscalation(ch, state.time);
     const escalateId = activeEsc?.actionId;
     const escalationContext = activeEsc
-      ? `\n---ACTIVE_ESCALATION---\n参谋刚问:「${activeEsc.question}」\n指挥官下面这句是对它的回应。`
+      ? `\n---ACTIVE_ESCALATION---\n参谋刚问:「${activeEsc.question}」\n指挥官下面这句是对它的回应。` +
+        // v4 刀2b: the engine-minted ticket numbers for THIS proposal. The
+        // digest's standing "group labels are NOT valid fromSquad" rule stays
+        // true — this grants the NUMBER, which is a different handle, and the
+        // line says so in as many words.
+        (activeEsc.ticketLine ? `\n${activeEsc.ticketLine}` : "")
       : "";
     // 7c.1-stab (A2 Tier 1): do NOT clear the escalation on every first reply — a
     // multi-step answer ("调用Drake去" then "可以") must keep the question context so
@@ -1760,7 +1784,35 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     const cleanLabel = opt.label.replace(/^[ABC]:\s*/, '');
     const intents = opt.intents ?? [opt.intent];
 
+    // v4 刀2b: ticket rosters resolved for this option, keyed by the intent
+    // they belong to. A ticket REPLACES scope resolution — the frozen roster
+    // goes in through resolveIntent's selectedUnitIds hard constraint (the
+    // Day 10.5 box-select parameter), so tacticalPlanner is untouched and the
+    // global pool is never consulted.
+    const ticketRosters = new Map<Intent, number[]>();
+    const ticketReceipts: string[] = [];
+    const ticketsToBurn: string[] = [];
+
     for (const intent of intents) {
+      // v4 刀2b: a G-number is the ONE legal handle for "那批兵". Resolved
+      // before the squad check below, which would otherwise reject it as an
+      // unknown squad name. Every non-dispatch outcome is a loud refusal with
+      // a spoken reason — never a silent fallback (the soft-fix family).
+      const tk = resolveTicketReference(state, intent.fromSquad, state.time);
+      if (tk.kind === "refuse") {
+        addMessage("warning", tk.line, state.time, ch, undefined, "command_ack");
+        setClarification("增援案不可用，请重新指明部队");
+        return;
+      }
+      if (tk.kind === "dispatch") {
+        ticketRosters.set(intent, tk.unitIds);
+        ticketsToBurn.push(tk.ticket.gNumber);
+        ticketReceipts.push(ticketDispatchReceipt(tk.ticket, tk.unitIds.length));
+        // The roster IS the scope now; leaving the G-number in fromSquad would
+        // send the squad resolver looking for a squad that does not exist.
+        intent.fromSquad = undefined;
+      }
+
       // dispatch-scope-v1 (2a): fromSquad is a SCOPE. The old soft-fix deleted
       // an unresolvable fromSquad and let the engine "auto-select" — which for
       // retreat/attack + quantity=all meant the order silently went broad (the
@@ -1798,7 +1850,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
     const allAssignedUnitIds: number[] = [];
     for (const intent of intents) {
-      const result = resolveIntent(intent, state, state.style, reserved, selectedIdsSnapshotRef.current);
+      // v4 刀2b: a ticket's frozen roster wins over the box-select snapshot —
+      // the player approved THAT batch, not whatever is currently framed.
+      const result = resolveIntent(
+        intent, state, state.style, reserved,
+        ticketRosters.get(intent) ?? selectedIdsSnapshotRef.current,
+      );
       if (result.degraded) {
         degradedCount++;
         addMessage("warning", result.log, state.time, ch, undefined, "command_ack");
@@ -1834,6 +1891,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       }
       const diagsBefore = new Set(state.diagnostics);
       applyOrders(state, allOrders);
+
+      // v4 刀2b: burn AFTER the orders are actually applied — a ticket that
+      // failed to produce orders must stay usable. One-shot from here on: the
+      // same proposal can never dispatch twice. The receipt reports the number
+      // that REALLY left (casualties/re-tasked members already dropped out in
+      // liveMembersOf), so the promise is reconciled out loud, not assumed.
+      for (const g of ticketsToBurn) burnEscalationTicket(g);
+      for (const r of ticketReceipts) {
+        addMessage("info", r, state.time, ch, undefined, "command_ack");
+      }
 
       // Surface economy failures (produce/trade) the engine recorded as
       // diagnostics during this apply — otherwise insufficient money/fuel/stock

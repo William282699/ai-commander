@@ -27,14 +27,29 @@
 // no background task, no single slot — tickets are naturally multi-instance.
 // ============================================================
 
-import type { GameState, Front, Position } from "@ai-commander/shared";
+import type { GameState, Front, Position, CrisisEvent } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
-import { buildReinforceOptions } from "./frontEscalationPayload";
+import { buildReinforceOptions, buildFrontEscalationPayload } from "./frontEscalationPayload";
+import type { ReinforceOptionsResult } from "./frontEscalationPayload";
+import { battleAnchorFor } from "./crisisResponse";
+import { frontEscalationFacts } from "./director";
 
-/** Ticket validity (seconds of game time). Matches the ACTIVE_ESCALATION
- *  window in messageStore — a ticket must never outlive the question that
- *  minted it, or "可以" could land on a proposal long off the screen. */
+/**
+ * Ticket validity, in seconds of GAME time (state.time) — the same clock and
+ * the same 120s as messageStore's ESCALATION_WINDOW_SEC, which gates
+ * ---ACTIVE_ESCALATION--- via getActiveEscalation(ch, state.time).
+ *
+ * ⇄ The two MUST stay equal: a ticket outliving its question would let "可以"
+ * land on a proposal that is no longer on screen (the P0-1 shape); a ticket
+ * dying first would make a visible proposal silently unexecutable. If you
+ * change one, change the other (messageStore.ts ESCALATION_WINDOW_SEC).
+ */
 export const TICKET_TTL_SEC = 120;
+
+/** What Chen says when a bare "可以" arrives with no proposal on the table.
+ *  Engine-authored: this branch must never reach the LLM (绊索), so there is
+ *  no model turn in which to phrase it. */
+export const NO_PROPOSAL_GUIDANCE = "我这儿没有待批的方案——您说「派谁去哪」我就动。";
 
 export interface EscalationTicket {
   /** "G7" — monotonic within a battle, never reused (a recycled number is the
@@ -47,7 +62,10 @@ export interface EscalationTicket {
   /** unitIds.length at mint — the number Chen promised out loud. */
   unitCount: number;
   targetFrontId: string;
-  anchor: Position;
+  /** Rally point the ETA promise was measured to (刀1 battleAnchorFor).
+   *  null only when the front has no resolvable geometry at all — never a
+   *  (0,0) placeholder waiting for someone to remember to backfill it. */
+  anchor: Position | null;
   mintedAt: number;
   burned: boolean;
 }
@@ -76,11 +94,22 @@ export function resetEscalationTickets(): void {
  * Same-state determinism with the payload: both read the one builder
  * synchronously off the same GameState.
  */
-export function mintEscalationTickets(state: GameState, front: Front): EscalationTicket[] {
-  const result = buildReinforceOptions(state, front);
-  const anchorSource = result.shown;
+export function mintEscalationTickets(
+  state: GameState,
+  front: Front,
+  /** The candidate set already built for this tick. Production ALWAYS passes it
+   *  (via buildFrontEscalationWithTickets) so the payload Chen speaks from and
+   *  the tickets are literally the same objects — not two constructions that
+   *  happen to agree today. */
+  precomputed?: ReinforceOptionsResult,
+): EscalationTicket[] {
+  const result = precomputed ?? buildReinforceOptions(state, front);
+  // The rally point the ETA promise was made against (刀1). Computed HERE, not
+  // backfilled by the caller: a placeholder that depends on a later call is a
+  // placeholder that eventually ships.
+  const anchor = battleAnchorFor(state, front);
   const out: EscalationTicket[] = [];
-  for (const opt of anchorSource) {
+  for (const opt of result.shown) {
     if (opt.memberIds.length === 0) continue;
     seq += 1;
     const t: EscalationTicket = {
@@ -89,7 +118,7 @@ export function mintEscalationTickets(state: GameState, front: Front): Escalatio
       label: opt.label,
       unitCount: opt.memberIds.length,
       targetFrontId: front.id,
-      anchor: { x: 0, y: 0 }, // filled by caller when it has the battle anchor
+      anchor: anchor ? { x: anchor.x, y: anchor.y } : null,
       mintedAt: state.time,
       burned: false,
     };
@@ -99,10 +128,35 @@ export function mintEscalationTickets(state: GameState, front: Front): Escalatio
   return out;
 }
 
-/** Record the rally point the ETA promise was made against (刀1's anchor). */
-export function setTicketAnchor(gNumber: string, anchor: Position): void {
-  const t = tickets.get(gNumber);
-  if (t) t.anchor = { x: anchor.x, y: anchor.y };
+export interface EscalationWithTickets {
+  /** The SITUATION payload the voice is written from (byte-identical to V1b). */
+  payload: string;
+  tickets: EscalationTicket[];
+  /** Permission line for ---ACTIVE_ESCALATION---; null when nothing was minted. */
+  promptLine: string | null;
+}
+
+/**
+ * THE production entry for a front escalation: one candidate construction
+ * feeding both the spoken payload and the tickets.
+ *
+ * Why this exists instead of two calls in GameCanvas (user ruling 2026-08-02
+ * item 1): "same tick, same state, pure function" is true today, but it is an
+ * argument, not a structure. Building once and handing the SAME result to both
+ * consumers makes promise/ticket drift impossible rather than merely unlikely.
+ * It also keeps buildReinforceOptions out of core/index.ts, which stays
+ * builder-only for production (Codex round-4 P1-4).
+ */
+export function buildFrontEscalationWithTickets(
+  state: GameState,
+  crisis: CrisisEvent,
+): EscalationWithTickets {
+  const facts = frontEscalationFacts(state, crisis);
+  const front = facts ? state.fronts.find((f) => f.id === facts.frontId) ?? null : null;
+  const result = buildReinforceOptions(state, front);
+  const payload = buildFrontEscalationPayload(state, crisis, result);
+  const minted = front ? mintEscalationTickets(state, front, result) : [];
+  return { payload, tickets: minted, promptLine: ticketPromptLine(minted) };
 }
 
 /**
@@ -156,6 +210,65 @@ export function ticketPromptLine(minted: EscalationTicket[]): string | null {
   if (minted.length === 0) return null;
   const list = minted.map((t) => `${t.gNumber}=${t.label}(${t.unitCount}units)`).join("｜");
   return `本案候选编号：${list}\nfromSquad="G编号" 即调陈所述那批（编号是合法把手，群名仍然不是）。`;
+}
+
+// ── The translation decision (pure; ChatPanel keeps only thin glue) ──
+//
+// GameCanvas/ChatPanel have no node harness — a reversed frame label once
+// shipped through exactly that blind spot (GameCanvas.tsx:463). So every
+// judgment lives here where the bench can reach it, and the UI layer only
+// routes the verdict: dispatch these ids, or say this line.
+
+export type TicketResolution =
+  /** fromSquad is not a G-number at all → normal command path, untouched. */
+  | { kind: "not_a_ticket" }
+  /** Execute EXACTLY these ids (they are the frozen roster, filtered to alive). */
+  | { kind: "dispatch"; ticket: EscalationTicket; unitIds: number[] }
+  /** Zero execution + this in-character line. Never a silent fallback. */
+  | { kind: "refuse"; reason: "unknown" | "expired" | "burned" | "all_gone"; line: string };
+
+/**
+ * Resolve a model-written `fromSquad` against the ticket registry.
+ *
+ * Fail-closed by construction: every non-dispatch outcome is a REFUSAL with a
+ * spoken reason, never "pick something reasonable". The silently-widening
+ * soft-fix is the 74/85 family and is what dispatch-scope-v1 removed.
+ */
+export function resolveTicketReference(
+  state: GameState,
+  rawFromSquad: string | undefined | null,
+  now: number,
+): TicketResolution {
+  if (!rawFromSquad || !isTicketRef(rawFromSquad)) return { kind: "not_a_ticket" };
+
+  const look = lookupEscalationTicket(rawFromSquad, now);
+  if (!look.ok) {
+    const g = rawFromSquad.trim().toUpperCase();
+    const line =
+      look.reason === "expired"
+        ? `那个增援案已经过时了——现在还要动兵的话，您说一声，我按当下的情况重新点人。`
+        : look.reason === "burned"
+          ? `${look.ticket?.label ?? g} 已经派出去了，不重复下令。`
+          : `我这儿没有编号 ${g} 的方案——您说「派谁去哪」我就动。`;
+    return { kind: "refuse", reason: look.reason, line };
+  }
+
+  const live = liveMembersOf(state, look.ticket);
+  if (live.length === 0) {
+    return {
+      kind: "refuse",
+      reason: "all_gone",
+      line: `${look.ticket.label} 已经没人能动了——要增援得另外点人。`,
+    };
+  }
+  return { kind: "dispatch", ticket: look.ticket, unitIds: live };
+}
+
+/** Receipt after a dispatch: the REAL number that left, never the promised one. */
+export function ticketDispatchReceipt(ticket: EscalationTicket, dispatched: number): string {
+  return dispatched === ticket.unitCount
+    ? `${ticket.label} ${dispatched}个单位出发了。`
+    : `${ticket.label} 实际能走的 ${dispatched} 个已经出发（原报 ${ticket.unitCount} 个，其余已不在编）。`;
 }
 
 /** Bench-only view of the registry. */
