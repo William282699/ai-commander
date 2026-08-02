@@ -70,6 +70,10 @@ export type ReinforceTaskStatus = "交战中" | "守卫" | "巡逻" | "无任务
 export interface ReinforceOption {
   /** Player-addressable label: "Blake(T5)" or "大本营附近未编组群". Never a bare internal id. */
   label: string;
+  /** v4 刀2: STRUCTURED capture only — the escalation ticket freezes these ids
+   *  at mint time. MUST NEVER appear in serializeOptions: the payload text
+   *  stays byte-identical to 163d86e (the V1b bench is the gate). */
+  memberIds: number[];
   unitCount: number;
   /** Composition summary, e.g. "infantry×52" / "infantry×12+armor×4" (top 3 types). */
   composition: string;
@@ -381,6 +385,7 @@ export function buildReinforceOptions(
     if (members.some((u) => !outsideFront(u.position))) continue;
     options.push({
       label: `${sq.leaderName}(${sq.id})`,
+      memberIds: members.map((u) => u.id).sort((a, b) => a - b),
       unitCount: members.length,
       composition: compositionOf(members),
       hpPct: hpPctOf(members),
@@ -427,6 +432,7 @@ export function buildReinforceOptions(
     }
     options.push({
       label,
+      memberIds: group.map((u) => u.id).sort((a, b) => a - b),
       unitCount: group.length,
       composition: compositionOf(group),
       hpPct: hpPctOf(group),

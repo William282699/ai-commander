@@ -53,5 +53,11 @@ export type { StrategicSituation, StrategicSituationKind } from "./director";
 export { captureDecisionReview, enqueueDecisionReview, assessDecisionReview, describeDecisionReview, buildRetrospectMiniFacts, isReviewableIntentType, REVIEW_TUNING } from "./decisionReview";
 // Commander Presence V1 — engine judgment material (pure; LLM only voices)
 export { buildFrontJudgmentLines, commanderMood, buildCommanderMoodLine, viewportToTileBox, unitsInBox, placeNameAt, buildPlayerViewLines } from "./commanderPresence";
+// approval-contract-v4 刀2 — escalation tickets (the machine handle for "那批兵")
+export {
+  mintEscalationTickets, setTicketAnchor, lookupEscalationTicket, burnEscalationTicket,
+  liveMembersOf, isTicketRef, ticketPromptLine, resetEscalationTickets, TICKET_TTL_SEC,
+} from "./escalationTicket";
+export type { EscalationTicket, TicketLookup } from "./escalationTicket";
 export type { CommanderMood, CommanderMoodLevel, ViewportGeometry, TileBox } from "./commanderPresence";
 export type { DecisionCaptureArgs, DecisionReviewFacts, FrontOutcome, FacilityOutcome, CasualtyLevel, CrossFrontFact } from "./decisionReview";
