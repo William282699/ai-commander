@@ -219,7 +219,10 @@ function runSynthetic(): void {
     );
     const expect = buildReinforceOptions(s, null).options
       .filter((o) => !squadLabels.has(o.label))
-      .map((o) => ({ label: o.label, unitCount: o.unitCount, composition: o.composition, hpPct: o.hpPct, task: o.task }));
+      // B 刀 (2026-08-02): memberIds joined the row — the frozen roster a
+      // G-handle is minted from. Still VERBATIM from the V1b option (zero
+      // rebuild), so it belongs in this field-level equality, not outside it.
+      .map((o) => ({ label: o.label, unitCount: o.unitCount, composition: o.composition, hpPct: o.hpPct, task: o.task, memberIds: o.memberIds }));
     check("groups verbatim from V1b options", JSON.stringify(board.groups) === JSON.stringify(expect));
 
     const pool = unassignedPoolUnits(s);

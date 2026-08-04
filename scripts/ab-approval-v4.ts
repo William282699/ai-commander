@@ -19,6 +19,7 @@
 //   npx tsx scripts/ab-approval-v4.ts --negctl
 // ============================================================
 
+import { readFileSync, readdirSync } from "node:fs";
 import { createInitialGameState } from "@ai-commander/core";
 import {
   frontCenterPos,
@@ -26,18 +27,20 @@ import {
   estimateSquadTravelTime,
 } from "../packages/core/src/crisisResponse";
 import { buildReinforceOptions } from "../packages/core/src/frontEscalationPayload";
+import { buildBattleBoard, boardToDigestLines } from "../packages/core/src/battleBoard";
+import { resolveIntent } from "../packages/core/src/tacticalPlanner";
 import { buildFrontJudgmentLines, commanderMood } from "../packages/core/src/commanderPresence";
 import { assessCrisisEscalation } from "../packages/core/src/crisisResponse";
-import { collectDirectorBeats, frontEscalationFacts } from "../packages/core/src/director";
+import { collectDirectorBeats, frontEscalationFacts, facilityEscalationFacts } from "../packages/core/src/director";
 import { captureDecisionReview } from "../packages/core/src/decisionReview";
 import { filterLateCandidates } from "../packages/core/src/frontEscalationPayload";
 import {
   mintEscalationTickets, lookupEscalationTicket, burnEscalationTicket, liveMembersOf,
   isTicketRef, isKnownForceRef, ticketPromptLine, resetEscalationTickets, TICKET_TTL_SEC,
   buildFrontEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
-  NO_PROPOSAL_GUIDANCE,
+  mintSpokenForce, _ticketsForTest, retargetIntentForTicket,
 } from "../packages/core/src/escalationTicket";
-import type { GameState, Unit, Front, Position, CrisisEvent } from "@ai-commander/shared";
+import type { GameState, Unit, Front, Position, CrisisEvent, Intent } from "@ai-commander/shared";
 
 // ── Harness ──
 
@@ -509,7 +512,289 @@ function runKnife2b(): void {
     ticketDispatchReceipt(groupTicket, 3),
   );
 
-  check("T3p 绊索引导句为引擎原文（该分支永不进 LLM）", NO_PROPOSAL_GUIDANCE.length > 0, NO_PROPOSAL_GUIDANCE);
+  // T3p（绊索引导句断言）已随绊索删除 — 见 runKnifeB1 的护栏登记表。
+}
+
+// ============================================================
+// B 刀①「听得见」— 确认词表只准当捷径，绝不准当闸
+//
+// 事故：Codex 在 preflight round-2 立过一条护栏，写在词表正上方——
+//   "NEVER EXPAND — semantic fallback owns natural language.
+//    ANY word-list miss goes to the LLM pendingDecision pass."
+// 即：命中 = 抄近路，未命中 = 照常进 LLM，词表没有语义裁决权。
+// v4 刀2b 把同一个词表反过来用：命中就拦下、不进 LLM、回一句罐头。安全性质翻转
+// （miss→LLM 变成 hit→罐头），词表从加速器变成了法官。护栏就在同一个文件里，
+// 往上九百行，没人看见。
+//
+// ★ 教训：护栏写成注释拦不住后来的人。所以这里把它变成会 FAIL 的断言——
+//   确认词的每一个调用点都必须登记并声明政策；多出一个未登记的，台架当场炸。
+// ============================================================
+
+type ConfirmSitePolicy =
+  | "fast-path"    // 命中抄近路（仅限已有待批合同）；未命中必须落回 LLM
+  | "telemetry"    // 只读打点，不改变路由
+  | "context-only"; // 调整上下文/状态，但不拦截 LLM 调用
+
+interface ConfirmSite {
+  token: "isConfirmReply" | "isCancelReply";
+  nth: number;
+  policy: ConfirmSitePolicy;
+  note: string;
+}
+
+/** ChatPanel 里确认词判定的全部活调用点。**新增一个就必须先登记并声明政策。** */
+const CONFIRM_WORD_SITES: ConfirmSite[] = [
+  { token: "isConfirmReply", nth: 1, policy: "fast-path",
+    note: "待批合同存在时直接执行该合同（避开确认死循环）" },
+  { token: "isCancelReply", nth: 1, policy: "fast-path",
+    note: "待批合同存在时直接放弃该合同" },
+  { token: "isConfirmReply", nth: 2, policy: "telemetry",
+    note: "V4_BARE_CONFIRM_EXEC 打点：裸确认答复在案升级时记一行，不改路由" },
+  { token: "isCancelReply", nth: 2, policy: "context-only",
+    note: "取消/推辞时清掉在案升级，避免串到下一条命令；消息照常进 LLM" },
+];
+
+const CHATPANEL = "apps/web/src/ChatPanel.tsx";
+
+function runKnifeB1(): void {
+  console.log("\n== B 刀① 听得见：确认词表只准当捷径，不准当闸 ==");
+
+  const src = readFileSync(CHATPANEL, "utf8").split("\n");
+  const seen = new Map<string, number>();
+  const found: { token: string; nth: number; line: number }[] = [];
+  src.forEach((raw, i) => {
+    const line = raw.trim();
+    if (line.startsWith("//") || line.startsWith("*") || line.startsWith("/*")) return;
+    if (/^(export )?function is(Confirm|Cancel)Reply\(/.test(line)) return; // 定义本身不算
+    for (const token of ["isConfirmReply", "isCancelReply"]) {
+      if (!new RegExp(`\\b${token}\\(`).test(line)) continue;
+      const nth = (seen.get(token) ?? 0) + 1;
+      seen.set(token, nth);
+      found.push({ token, nth, line: i + 1 });
+    }
+  });
+
+  const declared = new Set(CONFIRM_WORD_SITES.map((s) => `${s.token}#${s.nth}`));
+  const undeclared = found.filter((f) => !declared.has(`${f.token}#${f.nth}`));
+  const missing = CONFIRM_WORD_SITES.filter(
+    (s) => !found.some((f) => f.token === s.token && f.nth === s.nth),
+  );
+
+  check(
+    "TB1 ★护栏★ 确认词没有未登记的调用点（新增一处必须先声明政策）",
+    undeclared.length === 0,
+    undeclared.map((f) => `${f.token}#${f.nth}@:${f.line}`).join(" , "),
+  );
+  check(
+    "TB2 ★护栏★ 登记表里没有已消失的调用点",
+    missing.length === 0,
+    missing.map((s) => `${s.token}#${s.nth}`).join(" , "),
+  );
+  check(
+    "TB3 ★护栏★ 没有任何调用点被声明为闸（policy 不含 blocker 类）",
+    CONFIRM_WORD_SITES.every((s) =>
+      s.policy === "fast-path" || s.policy === "telemetry" || s.policy === "context-only"),
+    CONFIRM_WORD_SITES.map((s) => `${s.token}#${s.nth}=${s.policy}`).join(" "),
+  );
+
+  // 具体回归钉：那句罐头必须从 ChatPanel 彻底消失（绊索的唯一出口）
+  const body = src.join("\n");
+  checkKnife(
+    "TB4 ★ 绊索已拆：ChatPanel 不再引用 NO_PROPOSAL_GUIDANCE（咨询后的「可以」必须能进 LLM）",
+    !body.includes("NO_PROPOSAL_GUIDANCE"),
+    body.includes("NO_PROPOSAL_GUIDANCE"),
+    body.includes("NO_PROPOSAL_GUIDANCE") ? "仍被引用" : "已移除",
+  );
+  check(
+    "TB5 捷径本身保留：待批合同下的确认/取消仍走本地快路（不得回到确认死循环）",
+    found.some((f) => f.token === "isConfirmReply" && f.nth === 1) &&
+      found.some((f) => f.token === "isCancelReply" && f.nth === 1),
+    found.map((f) => `${f.token}#${f.nth}`).join(" "),
+  );
+}
+
+// ============================================================
+// B 刀②「知道指谁」— 被说出口的部队都有临时番号
+//
+// 手测坐实的死链：群标签不是合法 fromSquad → 模型退回"只给目的地"的兜底 →
+// 引擎的就近优先把源池取成【目的地已有的部队】→ 承诺 6 辆坦克，实派 1 个原地
+// 幸存者，回执还念着"6辆主战坦克增援中央战线"。
+//
+// ★ 本刀的核心裁定：**番号是地址，不是背书。** 引擎拒绝「推荐」赶不到的部队
+// （诚实闸）与拒绝「让长官够得着」它们，是两件事，只有前者归引擎管。
+// ============================================================
+
+function runKnifeB2(): void {
+  console.log("\n== B 刀② 知道指谁：说出口的部队都有把手 ==");
+
+  // ── 纯度：不给铸号器 ⇒ 行字节不变、一个号都不铸 ──
+  resetEscalationTickets();
+  const pure = lateCandidateFixture();
+  const pureRow1 = buildFrontJudgmentLines(pure.state).find((l) => l.includes("1. 北部战线"));
+  const pureRow2 = buildFrontJudgmentLines(pure.state).find((l) => l.includes("1. 北部战线"));
+  check(
+    "TB6 纯度 无铸号器时行内无 handle=，且零铸号（台架/心跳/复算不得产生副作用）",
+    !!pureRow1 && !pureRow1.includes("handle=") && pureRow1 === pureRow2 &&
+      _ticketsForTest().length === 0,
+    `tickets=${_ticketsForTest().length} row=${pureRow1 ?? "(无)"}`,
+  );
+
+  // ── ★ 赶不到的那批也必须有号（地址≠背书）──
+  resetEscalationTickets();
+  const late = lateCandidateFixture();
+  const lateRow = buildFrontJudgmentLines(late.state, (f, o) => mintSpokenForce(late.state, f, o))
+    .find((l) => l.includes("1. 北部战线"));
+  const lateG = lateRow?.match(/handle=(G\d+)/)?.[1] ?? null;
+  check(
+    "TB7 前置 该行确实是「披露赶不到」形态（best_help=none + 点名 + 赶不到）",
+    !!lateRow && lateRow.includes("best_help=none(") && lateRow.includes(late.squadLabel) &&
+      lateRow.includes("赶不到"),
+    lateRow ?? "(无)",
+  );
+  checkKnife(
+    "TB8 ★ 被说成「赶不到」的部队照样铸号（番号是地址，不是背书）",
+    lateG !== null,
+    lateG === null,
+    `handle=${lateG ?? "(无)"} row=${lateRow ?? ""}`,
+  );
+  if (lateG) {
+    const look = lookupEscalationTicket(lateG, late.state.time);
+    const expected = late.state.squads.find((s) => s.id === "T9")?.unitIds ?? [];
+    checkKnife(
+      "TB9 ★端到端★ 号解析回的正是行里点名的那批人（承诺==执行，不是就近抓一支）",
+      look.ok && look.ticket.label === late.squadLabel &&
+        look.ticket.unitIds.length === expected.length &&
+        look.ticket.unitIds.every((id) => expected.includes(id)),
+      false,
+      look.ok ? `${look.ticket.label} ${look.ticket.unitIds.length}units` : `lookup=${look.reason}`,
+    );
+    const res = resolveTicketReference(late.state, lateG, late.state.time);
+    check(
+      "TB10 翻译层按冻结名单派兵（6 辆坦克全在，绝不退化成目的地就近）",
+      res.kind === "dispatch" && res.unitIds.length === expected.length,
+      res.kind === "dispatch" ? `${res.unitIds.length}units` : res.kind,
+    );
+    if (look.ok) {
+      const receipt = ticketDispatchReceipt(look.ticket, expected.length);
+      check(
+        "TB11 回执带到达估算（派赶不到的兵，代价要说出口）",
+        /约 \d+ 秒到位/.test(receipt),
+        receipt,
+      );
+    }
+  }
+
+  // ── 推荐面同样有号（两种行都要能被指着说话）──
+  resetEscalationTickets();
+  const near = lateCandidateFixture(false);
+  const nearRow = buildFrontJudgmentLines(near.state, (f, o) => mintSpokenForce(near.state, f, o))
+    .find((l) => l.includes("1. 北部战线"));
+  check(
+    "TB12 前置 近处编队过闸，该行是推荐形态（best_help=<番号>）",
+    !!nearRow && nearRow.includes(`best_help=${near.squadLabel}(`),
+    nearRow ?? "(无)",
+  );
+  checkKnife(
+    "TB13 ★ 推荐出来的部队也带 handle（fromSquad 有合法把手可写）",
+    !!nearRow && /handle=G\d+/.test(nearRow),
+    !!nearRow && !/handle=G\d+/.test(nearRow),
+    nearRow ?? "(无)",
+  );
+  check(
+    "TB14 表头在铸号时才挂番号说明（没铸号的信封不多话）",
+    buildFrontJudgmentLines(near.state, (f, o) => mintSpokenForce(near.state, f, o))[0]
+      .includes("handle=G#") &&
+      !buildFrontJudgmentLines(near.state)[0].includes("handle=G#"),
+  );
+
+  // ── ★ 手测 02:50 的真凶：名单被当过滤器，交集为空 ──
+  // 家法：会动兵的断言必须数 assignedUnitIds，不许读 log 字面。
+  resetEscalationTickets();
+  const disp = lateCandidateFixture();
+  const roster = disp.state.squads.find((s) => s.id === "T9")!.unitIds;
+  const fakeTicket = {
+    gNumber: "G0", unitIds: [...roster], label: disp.squadLabel, unitCount: roster.length,
+    targetFrontId: disp.front.id, anchor: battleAnchorFor(disp.state, disp.front),
+    etaSec: 154, mintedAt: disp.state.time, burned: false,
+  };
+  const countFrom = (intent: Intent): { n: number; fromRoster: number; log: string } => {
+    const r = resolveIntent(intent, disp.state, disp.state.style, undefined, roster);
+    return { n: r.assignedUnitIds.length, fromRoster: r.assignedUnitIds.filter((i) => roster.includes(i)).length, log: r.log };
+  };
+  const raw = countFrom({ type: "defend", toFront: disp.front.id } as Intent);
+  check(
+    "TB15 前置 病灶复现：名单 + toFront 时源池取的是目的地已有部队，交集为空",
+    raw.n === 0 && raw.log.includes("框选的单位不在可调度范围内"),
+    `assigned=${raw.n} log=${raw.log}`,
+  );
+  const fixed = countFrom(retargetIntentForTicket(disp.state, { type: "defend", toFront: disp.front.id } as Intent, fakeTicket));
+  checkKnife(
+    "TB16 ★端到端·数兵★ 降级 front 提示后，冻结名单原样出发（承诺 6 == 实派 6）",
+    fixed.n === roster.length && fixed.fromRoster === roster.length,
+    fixed.n === 0,
+    `assigned=${fixed.n}/${roster.length} 名单内=${fixed.fromRoster} log=${fixed.log}`,
+  );
+  // ★ 手测第四局：兵动了，但开到了空沙漠——"去某条战线"解析成该线的【几何中心】，
+  // 而不是打仗的地方。刀1 当年只修了 ETA 承诺那一面，派兵这一面原样留着。
+  const anchorPt = battleAnchorFor(disp.state, disp.front)!;
+  const centerPt = frontCenterPos(disp.state, disp.front)!;
+  check(
+    // 门槛按本局实测定（44 格），不是拍脑袋的 50——判据要能量到真实分歧，
+    // 又不能松到"两点几乎重合也算过"。
+    "TB17a 前置 该局战斗锚点与几何中心相距 > 30 格（否则本条不可测）",
+    dist(anchorPt, centerPt) > 30,
+    `anchor=(${anchorPt.x},${anchorPt.y}) center=(${centerPt.x},${centerPt.y}) d=${dist(anchorPt, centerPt).toFixed(1)}`,
+  );
+  const sameFront = retargetIntentForTicket(disp.state, { type: "defend", toFront: disp.front.id } as Intent, fakeTicket);
+  checkKnife(
+    "TB17 ★ 目的地就是本票据那条线时，落点用【战斗锚点】而非几何中心（承诺与执行同点）",
+    !!sameFront._targetPos && sameFront._targetPos.x === anchorPt.x && sameFront._targetPos.y === anchorPt.y,
+    sameFront.targetRegion === disp.front.id && !sameFront._targetPos,
+    `_targetPos=${sameFront._targetPos ? `(${sameFront._targetPos.x},${sameFront._targetPos.y})` : "无"} targetRegion=${sameFront.targetRegion ?? "无"}`,
+  );
+  const otherFrontId = disp.state.fronts.find((f) => f.id !== disp.front.id)!.id;
+  const otherFront = retargetIntentForTicket(disp.state, { type: "defend", toFront: otherFrontId } as Intent, fakeTicket);
+  check(
+    "TB17b ★边界★ 目的地是【别的】战线时锚点不得劫持（长官说去哪就去哪）",
+    otherFront.targetRegion === otherFrontId && !otherFront._targetPos && otherFront.toFront === undefined,
+    `targetRegion=${otherFront.targetRegion ?? "无"} _targetPos=${otherFront._targetPos ? "有" : "无"}`,
+  );
+  check(
+    "TB17c 精确目的地（设施/标记点）优先于锚点——长官点了名的点不许被改",
+    (() => { const o = retargetIntentForTicket(disp.state, { type: "defend", targetFacility: "ea_alamein_town", toFront: disp.front.id } as Intent, fakeTicket);
+      return o.targetFacility === "ea_alamein_town" && !o._targetPos && o.toFront === undefined; })(),
+  );
+  check(
+    "TB18 命令没给目的地时，落点回退到号里冻结的集合点（ETA 就是对它承诺的）",
+    (() => { const o = retargetIntentForTicket(disp.state, { type: "defend" } as Intent, fakeTicket);
+      return !!o._targetPos && o._targetPos.x === fakeTicket.anchor!.x; })(),
+  );
+
+  // ── 板子群行也要有号（手测 02:07 陈是从板子上念的那两股） ──
+  resetEscalationTickets();
+  const boardState = lateCandidateFixture().state;
+  const boardLines = boardToDigestLines(
+    buildBattleBoard(boardState),
+    (row) => mintSpokenForce(boardState, null, { label: row.label, memberIds: row.memberIds, etaSec: null }),
+  ).unassignedGroupLines;
+  const boardG = boardLines.join("\n").match(/handle=(G\d+)/)?.[1] ?? null;
+  checkKnife(
+    "TB19 ★ 板子群行也铸号（「附近有空闲部队吗」念出来的那几股必须可寻址）",
+    boardLines.length > 0 && boardG !== null,
+    boardLines.length > 0 && boardG === null,
+    boardLines.join(" | ") || "(无群行)",
+  );
+  check(
+    "TB20 板子号解析回该群的冻结名单（不是标签，标签每帧会变）",
+    (() => { if (!boardG) return false;
+      const look = lookupEscalationTicket(boardG, boardState.time);
+      return look.ok && look.ticket.unitIds.length > 0; })(),
+    boardG ?? "(无号)",
+  );
+  check(
+    "TB21 纯度 板子不给铸号器时字节不变、零 handle",
+    !boardToDigestLines(buildBattleBoard(boardState)).unassignedGroupLines.join("").includes("handle="),
+  );
 }
 
 // ============================================================
@@ -749,6 +1034,270 @@ function runKnife2c(): void {
 }
 
 // ============================================================
+// A 刀 — 候选诚实闸「同一把尺」（对话层全量审计 2026-08-02）
+//
+// 病史：诚实闸只装在升级合成入口一处，于是同一个信封里，升级块说
+// "reinforcement_options: none"，态势板行还在推销 best_help=某群(eta≈153s)。
+// 更深一层：候选不是一台机器而是三台，各有各的成员判据——
+//   机器 A buildReinforceOptions   (isDispatchable + 空间群 + 按 front 内外分)
+//   机器 B findBestReinforcements  (idle/patrolling/holding + 仅编队 + missionPri<2)
+//   机器 C facilityEscalationFacts (全图任一 idle 带枪单位 → 一个布尔)
+// 只 grep 机器 A 的调用点会数出"两处要修"——那正是本次事故的盲区形状。
+//
+// 所以断言写在【出口枚举表】上，不逐面散写（逐面写下次还漏第三个面）：
+//   ① 源码扫描不变量：任何未登记的新出口 → 直接 FAIL；
+//   ② 每个已登记出口按其【声明的政策】断言行为。
+// ============================================================
+
+/** 一个说话面被允许的政策。写死在表里，改行为必须先改政策声明。 */
+type FacePolicy =
+  | "gate"             // 必须过晚到闸
+  | "gate-null-clock"  // 走闸，但钟按构造恒为 null（雾：无可见敌 ⇒ 无可辩护的秒数）
+  | "gated-upstream"   // 生产恒接收已过滤集合
+  | "no-eta"           // 结构上给不出到达承诺（front=null ⇒ 无锚点 ⇒ 无 eta）
+  | "known-gap";       // 已入档的缺口（P1 改话术），断言现状以防悄悄漂移
+
+/** 候选出口的三个源码标记：两台 builder 的调用 + 那个被两台机器共用的字段名。 */
+type FaceToken =
+  | "buildReinforceOptions"
+  | "findBestReinforcements"
+  | "idle_reinforcement_available"          // 机器 C（设施布尔）仍用原名
+  | "reinforcement_able_to_arrive_in_time"; // fix1: 机器 B 的播报字段改名，none 才不说谎
+
+interface CandidateFace {
+  file: string;
+  token: FaceToken;
+  /** 该文件内该标记的第 N 次出现（1 起）。**故意不用行号当键**——行号会因为
+   *  上方任何一次加注释而漂，那是噪声不是信号；序数只在真的增删调用点时才变。 */
+  nth: number;
+  machine: "A" | "B" | "C";
+  policy: FacePolicy;
+  note: string;
+}
+
+/** ★ 全部能把"候选"变成长官读得到的东西的活调用点。 */
+const CANDIDATE_FACES: CandidateFace[] = [
+  { file: "packages/core/src/escalationTicket.ts", token: "buildReinforceOptions", nth: 1,
+    machine: "A", policy: "gated-upstream", note: "mint：生产恒传 precomputed（已被下一处滤过）" },
+  { file: "packages/core/src/escalationTicket.ts", token: "buildReinforceOptions", nth: 2,
+    machine: "A", policy: "gate", note: "升级 payload + 铸号（一次过滤同喂两处）" },
+  { file: "packages/core/src/frontEscalationPayload.ts", token: "buildReinforceOptions", nth: 1,
+    machine: "A", policy: "gate", note: "payload builder 自带 filterLateCandidates" },
+  { file: "packages/core/src/commanderPresence.ts", token: "buildReinforceOptions", nth: 1,
+    machine: "A", policy: "gate-null-clock", note: "态势板『交战中·敌情未明』行 best_help" },
+  { file: "packages/core/src/commanderPresence.ts", token: "buildReinforceOptions", nth: 2,
+    machine: "A", policy: "gate", note: "态势板有钟行 best_help（症状 1a 病灶）" },
+  { file: "packages/core/src/battleBoard.ts", token: "buildReinforceOptions", nth: 1,
+    machine: "A", policy: "no-eta", note: "板子群行 front=null → 无锚点 → 无 eta，推销不了晚到" },
+  { file: "packages/core/src/crisisResponse.ts", token: "findBestReinforcements", nth: 1,
+    machine: "B", policy: "gate", note: "assessCrisisEscalation：bestCandidate / kind / freeReinforcement 三消费者同源" },
+  { file: "packages/core/src/director.ts", token: "idle_reinforcement_available", nth: 1,
+    machine: "C", policy: "known-gap", note: "设施升级布尔：全图任一 idle 即 true（P1 改话术，已入档）" },
+  { file: "apps/web/src/GameCanvas.tsx", token: "reinforcement_able_to_arrive_in_time", nth: 1,
+    machine: "B", policy: "gated-upstream", note: "proactive 播报行：渲染机器 B 的 freeReinforcement（源头已过滤；fix1 字段改名，none 才不说谎）" },
+];
+
+interface ScannedSite { file: string; token: FaceToken; nth: number; line: number }
+
+/** 扫描源码，列出所有"候选出口"的活调用点（跳过注释 / 定义 / import）。 */
+function scanCandidateSites(): ScannedSite[] {
+  const TOKENS: { token: FaceToken; re: RegExp }[] = [
+    { token: "buildReinforceOptions", re: /\bbuildReinforceOptions\(/ },
+    { token: "findBestReinforcements", re: /\bfindBestReinforcements\(/ },
+    { token: "idle_reinforcement_available", re: /idle_reinforcement_available/ },
+    { token: "reinforcement_able_to_arrive_in_time", re: /reinforcement_able_to_arrive_in_time/ },
+  ];
+  const roots = ["packages/core/src", "apps/web/src"];
+  const out: ScannedSite[] = [];
+  const seen = new Map<string, number>(); // file|token → 已见次数
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const p = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) { walk(p); continue; }
+      if (!/\.(ts|tsx)$/.test(entry.name)) continue;
+      readFileSync(p, "utf8").split("\n").forEach((raw, i) => {
+        const line = raw.trim();
+        if (line.startsWith("//") || line.startsWith("*") || line.startsWith("/*")) return; // 注释不算出口
+        if (/^export function /.test(line)) return;                                        // 定义本身不算
+        for (const { token, re } of TOKENS) {
+          if (!re.test(line)) continue;
+          const key = `${p}|${token}`;
+          const nth = (seen.get(key) ?? 0) + 1;
+          seen.set(key, nth);
+          out.push({ file: p, token, nth, line: i + 1 });
+        }
+      });
+    }
+  };
+  for (const r of roots) walk(r);
+  return out;
+}
+
+const faceKey = (f: { file: string; token: FaceToken; nth: number }): string =>
+  `${f.file}|${f.token}#${f.nth}`;
+
+/** front_coastal 输面（互射钟 30s）+ 一支编队。far=true 时远在西南、绝对来不及。 */
+function lateCandidateFixture(far = true): { state: GameState; front: Front; squadLabel: string } {
+  const { state, front } = exchangeFixture({ defenders: [360], enemies: [60, 60, 60] });
+  const ids: number[] = [];
+  const [ox, oy] = far ? [60, 260] : [252, 60]; // 远：eta ≫ 30s；近：赶得上
+  for (let i = 0; i < 6; i++) ids.push(addUnit(state, ox + i, oy).id);
+  state.squads.push({
+    id: "T9", name: "远征分队", unitIds: ids,
+    leader: { name: "Farrell", rank: "squad_leader", personality: "balanced" },
+    currentMission: null, missionTarget: null, morale: 1,
+    formationStyle: "line", ownerCommander: "chen", leaderName: "Farrell", role: "leader",
+  });
+  return { state, front, squadLabel: "Farrell(T9)" };
+}
+
+/** 无钟面：我方按自身时间戳在交战，敌军全在雾里 ⇒ ratio=null ⇒ 走无钟分支。 */
+function noClockFixture(hiddenEnemies: number): { state: GameState; front: Front } {
+  const state = emptyBattlefield();
+  state.time = 300;
+  const front = frontById(state, "front_coastal");
+  const [x, y] = [250, 38];
+  for (let i = 0; i < 3; i++) {
+    addUnit(state, x + i, y, { lastAttackTime: state.time - 1, lastDamagedAt: state.time - 1 });
+  }
+  // 雾中敌军：不设 fog=visible，所以 freshFrontPowerRatio 看不见它们，
+  // 而 estimateCollapseTime 会把它们算进去（FOG-TODO）——这正是钉子①防的那条泄漏。
+  for (let i = 0; i < hiddenEnemies; i++) {
+    addUnit(state, x + 8 + i, y, { team: "enemy", lastAttackTime: state.time - 1 });
+  }
+  for (let i = 0; i < 6; i++) addUnit(state, 60 + i, 260);
+  front.engagementIntensity = 5;
+  return { state, front };
+}
+
+function runKnifeA(): void {
+  console.log("\n== A 刀 候选诚实闸：同一把尺覆盖全部说话面 ==");
+
+  // ── ① 枚举表 vs 源码：任何未登记的新出口都必须炸 ──
+  let scanned: ScannedSite[] = [];
+  let scanOk = true;
+  try {
+    scanned = scanCandidateSites();
+  } catch (e) {
+    scanOk = false;
+    check("TA0 前置 源码扫描可运行（须在 worktree 根目录跑）", false, String(e));
+  }
+  if (scanOk) {
+    const declared = new Set(CANDIDATE_FACES.map(faceKey));
+    const undeclared = scanned.filter((s) => !declared.has(faceKey(s)));
+    const scannedKeys = new Set(scanned.map(faceKey));
+    const missing = CANDIDATE_FACES.filter((f) => !scannedKeys.has(faceKey(f)));
+    check(
+      "TA1 ★不变量★ 源码里没有未登记的候选出口（新增一个面必须先进枚举表）",
+      undeclared.length === 0,
+      undeclared.map((s) => `${s.file}:${s.line}(${s.token}#${s.nth})`).join(" , "),
+    );
+    check(
+      "TA2 ★不变量★ 枚举表里没有已消失的出口（删掉一个面也必须改表）",
+      missing.length === 0,
+      missing.map(faceKey).join(" , "),
+    );
+    check(
+      "TA3 三台候选机器全部在册（A/B/C 各至少一个面）",
+      (["A", "B", "C"] as const).every((m) => CANDIDATE_FACES.some((f) => f.machine === m)),
+      CANDIDATE_FACES.map((f) => `${f.machine}:${f.policy}`).join(" "),
+    );
+  }
+
+  // ── ② 行为：有钟面（机器 A + 机器 B 同局对照）──
+  resetEscalationTickets();
+  const { state, front, squadLabel } = lateCandidateFixture();
+  const a = assessCrisisEscalation(state, makeCrisis(front));
+  check(
+    "TA4 前置 局造得对：互射钟 30s，且唯一候选是那支来不及的编队",
+    !!a && a.exchange.spokenSeconds !== null && Math.round(a.exchange.spokenSeconds) === 30 &&
+      buildReinforceOptions(state, front).options.every((o) => o.label === squadLabel),
+    a ? `spoken=${a.exchange.spokenSeconds} 候选=${buildReinforceOptions(state, front).options.map((o) => `${o.label}:${o.etaSec}s`).join("|")}` : "null",
+  );
+
+  // 面 ①②（机器 A，早已装闸——回归守卫，不是本刀承重）
+  const built = buildFrontEscalationWithTickets(state, makeCrisis(front));
+  check("TA5 面① 升级 payload 不含晚到候选", !built.payload.includes(squadLabel));
+  check("TA6 面② 同一次过滤也挡住铸号", !built.tickets.some((t) => t.label === squadLabel));
+
+  // 面⑤（机器 A，:120）——本刀承重
+  const row = buildFrontJudgmentLines(state).find((l) => l.includes("1. 北部战线"));
+  check("TA7 前置 态势板产出该战线有钟行", !!row && /survival≈30s/.test(row ?? ""), row ?? "(无)");
+  checkKnife(
+    "TA8 ★面⑤★ 态势板有钟行不再推销晚到候选（信封自相矛盾就此闭合）",
+    !!row && !row.includes(`best_help=${squadLabel}(`),
+    !!row && row.includes(`best_help=${squadLabel}(`),
+    row ?? "(无)",
+  );
+  // fix1（手测 2026-08-02）：闸清空 ≠ 沉默。沉默把"有没有可支援部队"答成"只有
+  // Blake"，六辆闲着的坦克被藏掉——F1 教训（无候选≠无友军）此前只写在升级面。
+  check(
+    "TA8b ★fix1★ 空集必须开口：披露存在（股数/人数）+ 最近 eta + 赶不到",
+    !!row && row.includes("best_help=none(") && row.includes(squadLabel) &&
+      /线外\d+股\/\d+units/.test(row) && /eta≈\d+s/.test(row) && row.includes("赶不到"),
+    row ?? "(无)",
+  );
+  check(
+    "TA8c ★fix1·边界★ 披露不得变相推荐（番号只出现在 none(...) 从句里）",
+    !!row && !new RegExp(`best_help=${squadLabel.replace(/[()]/g, "\\$&")}\\(`).test(row),
+    row ?? "(无)",
+  );
+
+  // 面⑦（机器 B）——本刀承重，三个消费者一次全喂
+  checkKnife(
+    "TA9 ★面⑦★ 机器 B：晚到候选不再当 bestCandidate（「艾登一人可增援」的同族出口）",
+    !!a && a.bestCandidate === null,
+    !!a && a.bestCandidate !== null,
+    a ? `best=${a.bestCandidate?.leaderName ?? "null"} tArrive=${a.bestCandidate?.tArrive ?? "-"}s` : "null",
+  );
+  checkKnife(
+    "TA10 ★面⑦·连带★ 废候选不再把 dilemma 降级成 safe_reinforce（被吞掉的问句回来了）",
+    !!a && a.kind === "dilemma",
+    !!a && a.kind === "safe_reinforce",
+    a ? a.kind : "null",
+  );
+  const beats = collectDirectorBeats(state, null).filter((b) => b.frontId === front.id);
+  checkKnife(
+    "TA11 ★面⑦·端到端★ director beat 升为 cross_front_dilemma 且不再点名废援兵",
+    beats.length > 0 && beats.every((b) => b.kind === "cross_front_dilemma" && b.freeReinforcement === null),
+    beats.length > 0 && beats.every((b) => b.kind === "front_collapse" && b.freeReinforcement !== null),
+    beats.map((b) => `${b.kind}/free=${b.freeReinforcement?.leaderName ?? "null"}`).join(" | ") || "(无 beat)",
+  );
+
+  // ── ③ 行为：无钟面（政策 gate-null-clock）+ 雾泄漏守卫 ──
+  const clean = noClockFixture(0);
+  const fogged = noClockFixture(6);
+  const rowClean = buildFrontJudgmentLines(clean.state).find((l) => l.includes("敌军实力未明"));
+  const rowFogged = buildFrontJudgmentLines(fogged.state).find((l) => l.includes("敌军实力未明"));
+  check("TA12 前置 无钟面确实无钟（该行不带 survival≈）",
+    !!rowClean && !/survival≈/.test(rowClean), rowClean ?? "(无)");
+  check(
+    "TA13 面④ 政策 gate-null-clock：无钟 ⇒ 零过滤，候选照列（缺数不得当判决）",
+    !!rowClean && rowClean.includes("best_help"),
+    rowClean ?? "(无)",
+  );
+  check(
+    "TA14 ★钉子①守卫★ 雾中敌军不得经候选名单形状泄露（有/无隐身敌，该行必须逐字相同）",
+    rowClean === rowFogged,
+    `clean=${rowClean ?? "(无)"}\n      fogged=${rowFogged ?? "(无)"}`,
+  );
+
+  // ── ④ 行为：结构性不可推销面 + 已入档缺口 ──
+  check(
+    "TA15 面⑥ 政策 no-eta：front=null 的板子群行结构上给不出 eta",
+    buildReinforceOptions(state, null).options.every((o) => o.etaSec === null),
+    buildReinforceOptions(state, null).options.map((o) => `${o.label}:${o.etaSec}`).join("|"),
+  );
+  const facId = [...state.facilities.keys()][0];
+  const facFacts = facId ? facilityEscalationFacts(state, facId) : null;
+  check(
+    "TA16 面⑧ 政策 known-gap 记账：设施布尔仍被地图另一端的 idle 单位点亮（P1 待改话术）",
+    !!facFacts && facFacts.idleReinforcementAvailable === true,
+    facFacts ? `idle=${facFacts.idleReinforcementAvailable} 附近我方=${facFacts.nearbyPlayerUnits}` : "null",
+  );
+}
+
+// ============================================================
 
 function main(): void {
   if (NEGCTL) {
@@ -759,6 +1308,9 @@ function main(): void {
   runKnife2b();
   runKnife2c();
   runKnife3();
+  runKnifeA();
+  runKnifeB1();
+  runKnifeB2();
 
   console.log(`\nPASS=${passCount} FAIL=${failCount}`);
   if (NEGCTL) {

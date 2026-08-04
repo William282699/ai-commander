@@ -363,7 +363,13 @@ function buildProactiveMiniFacts(beat: DirectorBeat): string {
     `our_committed_force_survival_sec: ${beat.estimatedCollapseSeconds ?? "unknown"}`,
     `local_power_ratio_ours_to_visible_enemy: ${m.powerRatio ?? "unknown"}`,
     `trend: ${m.trend}`,
-    `idle_reinforcement_available: ${
+    // A 刀 fix1 (手测 2026-08-02): the field is now gated on ARRIVAL TIME, so a
+    // bare `idle_reinforcement_available: none` had started to lie — it reads
+    // "we have no idle troops" when what the engine means is "none of them can
+    // get there in time". The name carries the qualifier so `none` stays true;
+    // existence-without-reachability is disclosed on the board row instead
+    // (commanderPresence describeNoHelp), which is where the counts live.
+    `reinforcement_able_to_arrive_in_time: ${
       beat.freeReinforcement
         ? `${beat.freeReinforcement.leaderName}, ${beat.freeReinforcement.aliveCount} men`
         : "none"

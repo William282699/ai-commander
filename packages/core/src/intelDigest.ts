@@ -8,6 +8,7 @@ import type { GameState } from "@ai-commander/shared";
 import { generateDigestV1 } from "@ai-commander/shared";
 import { buildBattleBoard, boardToDigestLines } from "./battleBoard";
 import { buildFrontJudgmentLines, buildCommanderMoodLine } from "./commanderPresence";
+import { mintSpokenForce } from "./escalationTicket";
 
 /**
  * Compute player/enemy power per front from actual unit positions.
@@ -70,12 +71,30 @@ export function buildDigest(
   selectedUnitIds: number[],
   markedTargets: { id: string; position: [number, number] }[],
   recentEvents: string[],
+  /** B 刀 (2026-08-02): mint an addressable handle for every force the judgment
+   *  frame NAMES this turn, so 「让她们去支援」 has something to bind to.
+   *  Minting mutates (monotonic counter + registry), so it is OPT-IN and only
+   *  the real conversation path passes true — benches, heartbeats and any other
+   *  digest rebuild stay pure and byte-identical. */
+  mintForceHandles = false,
 ): string {
   updateFrontPower(state);
-  const board = boardToDigestLines(buildBattleBoard(state));
+  // B 刀: board rows get handles too. The staff reads THESE rows out when the
+  // commander asks 「附近有空闲部队吗」 — without a number the only thing the
+  // model can write into fromSquad is the label, which is not a legal reference
+  // and never can be (live hand-test 2026-08-02: 「东方向第四未编组群」 → 闸拦下).
+  const board = boardToDigestLines(
+    buildBattleBoard(state),
+    mintForceHandles
+      ? (row) => mintSpokenForce(state, null, { label: row.label, memberIds: row.memberIds, etaSec: null })
+      : undefined,
+  );
   // Commander-presence V1: judgment lines computed here (core), appended at the
   // digest tail by the shared renderer — legacy digest stays a byte prefix.
-  const judgment = buildFrontJudgmentLines(state);
+  const judgment = buildFrontJudgmentLines(
+    state,
+    mintForceHandles ? (front, opt) => mintSpokenForce(state, front, opt) : undefined,
+  );
   // Step B: mood line rides the same core→shared path (calm = no line).
   const mood = buildCommanderMoodLine(state);
   return generateDigestV1(state, selectedUnitIds, markedTargets, recentEvents, board, judgment, mood ?? undefined);

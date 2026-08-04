@@ -18,7 +18,7 @@ declare global {
 }
 import { OrgTree } from "./OrgTree";
 import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines, isAllFrontHint } from "@ai-commander/core";
-import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, NO_PROPOSAL_GUIDANCE, isKnownForceRef, checkDispatchAuthority } from "@ai-commander/core";
+import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, isKnownForceRef, checkDispatchAuthority, retargetIntentForTicket } from "@ai-commander/core";
 import type { CommanderRef } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
@@ -1274,23 +1274,31 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         ? { escalateId: getActiveEscalation(ch, state.time)!.actionId }
         : null;
 
-    // ── v4 刀2b 绊索: a BARE confirm with nothing on the table never reaches
-    // the LLM. Today such a word falls through to the normal command chain,
-    // where Bucket A invents a plan out of context — that is the 02:32 "1 个
-    // 单位" shape. There is nothing to approve, so there is nothing to voice:
-    // the engine answers directly and executes zero.
+    // ── 绊索已删除（B 刀 2026-08-02）──────────────────────────────────────
+    // v4 刀2b put a blocker here: a bare confirm with no pending contract and
+    // no active escalation was answered by the engine with a canned line and
+    // NEVER reached the LLM. Two standing laws broken at once:
     //
-    // Narrowest possible form on purpose: it fires ONLY when there is no
-    // pending preflight contract at all AND no active escalation. A confirm
-    // that belongs to either machine was already routed above / is routed
-    // below. 带尾确认 ("可以，派他们去") is deliberately NOT caught here — it
-    // carries an instruction, so it goes down the normal path and is
-    // disambiguated by the ticket number instead (刀2 术语: 裸确认 vs 带尾确认).
-    if (isConfirmReply(userMsg) && !pendingContractRef.current && !getActiveEscalation(ch, state.time)) {
-      addMessage("info", NO_PROPOSAL_GUIDANCE, state.time, ch, undefined, "command_ack");
-      setLoading(false);
-      return;
-    }
+    //   1. 禁关键词枚举 — the same 15-word list that Codex had explicitly fenced
+    //      as a CLOSED FAST PATH ("semantic fallback owns natural language; ANY
+    //      word-list miss goes to the LLM") was reused INVERTED: a hit now
+    //      blocked the semantic fallback instead of skipping ahead of it. The
+    //      list stopped being an accelerator and became a judge.
+    //   2. 台词禁死模板 — the canned refusal was an engine-authored line three
+    //      personas would recite verbatim.
+    //
+    // Blast radius (hand-test 2026-08-02): the staff gives a consultation with
+    // real numbers, the commander says 「可以」, and the engine answers "我这儿
+    // 没有待批的方案" — because a suggestion is neither a pending contract nor a
+    // registered escalation. The most natural way to accept advice was the one
+    // sentence the model could never hear. SHORT FOLLOW-UP RESOLUTION (ai.ts)
+    // was structurally dead for those words.
+    //
+    // What the blocker was actually afraid of — a bare confirm turning into an
+    // invented dispatch — is NOT a routing problem and is not solved by keeping
+    // the words away from the model. It belongs to the auto-execute gate below,
+    // where it is judged on the INTENT (does this dispatch have a real handle),
+    // never on the wording.
 
     // Capture persona once for the entire stream. selectedCommanders[0]
     // could in theory drift if user switches tabs mid-stream; ttsPersona
@@ -1333,7 +1341,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // section renders from it; BattleContextV2 ignores it and gets the ids via
     // PLAYER_VIEW below instead).
     const cmdSelectedIds = getSelectedUnitIds?.() ?? [];
-    const baseDigest = buildDigestForChannel(state, ch, commanderMemoryRef.current[ch], cmdSelectedIds);
+    // B 刀: this is the ONE path where the staff both speaks to the commander
+    // and can execute what he answers, so it is the only path that mints force
+    // handles. Every force the judgment frame names this turn gets a G-number
+    // the model may write into fromSquad — that is what makes 「让她们去支援」
+    // land on the force that was actually named instead of on whoever happens
+    // to be standing at the destination.
+    const baseDigest = buildDigestForChannel(state, ch, commanderMemoryRef.current[ch], cmdSelectedIds, undefined, undefined, true);
     const contextSuffix = formatContext(channelContextRef.current, ch);
     // 地基二: tag the request with the live contract ONLY when it is visible
     // (awaiting_reply), same channel, unexpired. voicing is never tagged — a
@@ -1861,12 +1875,31 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         return;
       }
       if (tk.kind === "dispatch") {
-        ticketRosters.set(intent, tk.unitIds);
+        // 手测账③ × B 刀: a handle must not become an authority bypass. The
+        // check above only asks "does this persona command anything" and "is a
+        // NAMED squad theirs" — a G-number is neither, so without this the
+        // frozen roster would execute unfiltered. Now the roster is intersected
+        // with what this persona may lawfully move; an empty intersection is a
+        // loud refusal, never a silent partial dispatch.
+        const pool = auth.kind === "allowed" ? new Set(auth.pool) : null;
+        const lawful = pool ? tk.unitIds.filter((id) => pool.has(id)) : tk.unitIds;
+        if (lawful.length === 0) {
+          const who = COMMANDER_META[speakingPersona].label;
+          addMessage("warning", `${tk.ticket.label} 不在${who}麾下，这道命令未执行——请对带这支部队的指挥官下令。`, state.time, ch, undefined, "command_ack");
+          return;
+        }
+        ticketRosters.set(intent, lawful);
         ticketsToBurn.push(tk.ticket.gNumber);
-        ticketReceipts.push(ticketDispatchReceipt(tk.ticket, tk.unitIds.length));
+        ticketReceipts.push(ticketDispatchReceipt(tk.ticket, lawful.length));
         // The roster IS the scope now; leaving the G-number in fromSquad would
         // send the squad resolver looking for a squad that does not exist.
         intent.fromSquad = undefined;
+
+        // ★ B 刀 fix (hand-test 2026-08-02): the roster must REPLACE source
+        // resolution, not be intersected with it. The judgment itself lives in
+        // core (retargetIntentForTicket) where the bench can reach it — this
+        // layer only applies the verdict, per the ChatPanel-has-no-harness rule.
+        Object.assign(intent, retargetIntentForTicket(state, intent, tk.ticket));
       }
 
       // dispatch-scope-v1 (2a): fromSquad is a SCOPE. The old soft-fix deleted

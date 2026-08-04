@@ -854,8 +854,34 @@ export function assessCrisisEscalation(
     createdAt: state.time,
     status: "active",
   };
+  // 诚实闸 (A 刀 2026-08-02) — the SECOND candidate machine gets the same ruler.
+  //
+  // Two reasons this is not cosmetic:
+  //  1. findBestReinforcements only PENALISES a late arrival (timeScore -100 —
+  //     a sort weight, not a drop), so when every candidate is late the
+  //     least-bad one still becomes bestCandidate and gets named out loud in
+  //     the proactive line ("idle_reinforcement_available: X, N men").
+  //  2. `kind` below is decided purely by `bestCandidate != null`, so ONE
+  //     unusable candidate silently downgrades a real dilemma (must-ask) into
+  //     safe_reinforce (a statement) — the question the commander needed was
+  //     swallowed by a squad that could never have arrived.
+  //
+  // Clock = the EXCHANGE clock (刀3 口径原则: 对内触发用悲观钟，对人说话用互射钟).
+  // These candidates are SPOKEN — proactive lines and escalation facts — so
+  // they are judged on the mutual-fire estimate, rounded exactly as the
+  // escalation face rounds facts.estimatedCollapseSeconds, so both machines
+  // filter against the identical number rather than two roundings of one.
+  // null (stable, or we win the exchange) ⇒ no basis to call anything late ⇒
+  // nothing filtered, matching filterLateCandidates' contract. A non-finite
+  // tArrive is an ABSENT estimate, not a verdict, so it passes — the same rule
+  // as that gate's `etaSec === null` branch.
+  const spokenClock =
+    exchange.spokenSeconds === null ? null : Math.round(exchange.spokenSeconds);
   const candidates = findBestReinforcements(state, crisis, stubDoctrine)
-    .filter((c) => c.squadId !== "__reserve__");
+    .filter((c) => c.squadId !== "__reserve__")
+    .filter(
+      (c) => spokenClock === null || !Number.isFinite(c.tArrive) || c.tArrive <= spokenClock,
+    );
   const bestCandidate = candidates[0] ?? null;
 
   return {

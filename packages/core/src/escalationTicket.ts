@@ -27,11 +27,12 @@
 // no background task, no single slot — tickets are naturally multi-instance.
 // ============================================================
 
-import type { GameState, Front, Position, CrisisEvent } from "@ai-commander/shared";
+import type { GameState, Front, Position, CrisisEvent, Intent } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
 import { buildReinforceOptions, buildFrontEscalationPayload, filterLateCandidates } from "./frontEscalationPayload";
 import type { ReinforceOptionsResult } from "./frontEscalationPayload";
 import { battleAnchorFor } from "./crisisResponse";
+import { findFront } from "./tacticalPlanner";
 import { frontEscalationFacts } from "./director";
 
 /**
@@ -66,6 +67,11 @@ export interface EscalationTicket {
    *  null only when the front has no resolvable geometry at all — never a
    *  (0,0) placeholder waiting for someone to remember to backfill it. */
   anchor: Position | null;
+  /** Arrival estimate at mint time; null = unknown. Carried so the receipt can
+   *  state the cost of sending a force the engine already called too slow —
+   *  B 刀: a handle is an ADDRESS, not an endorsement, so late forces DO get
+   *  numbered, and the receipt is where their lateness is reconciled out loud. */
+  etaSec: number | null;
   mintedAt: number;
   burned: boolean;
 }
@@ -110,22 +116,75 @@ export function mintEscalationTickets(
   const anchor = battleAnchorFor(state, front);
   const out: EscalationTicket[] = [];
   for (const opt of result.shown) {
-    if (opt.memberIds.length === 0) continue;
-    seq += 1;
-    const t: EscalationTicket = {
-      gNumber: `G${seq}`,
-      unitIds: [...opt.memberIds],
-      label: opt.label,
-      unitCount: opt.memberIds.length,
-      targetFrontId: front.id,
-      anchor: anchor ? { x: anchor.x, y: anchor.y } : null,
-      mintedAt: state.time,
-      burned: false,
-    };
-    tickets.set(t.gNumber, t);
-    out.push(t);
+    const t = mintOne(state, front, opt, anchor);
+    if (t) out.push(t);
   }
   return out;
+}
+
+/** The one place a ticket is actually created. Roster frozen at this instant. */
+function mintOne(
+  state: GameState,
+  front: Front | null,
+  opt: { label: string; memberIds: number[]; etaSec: number | null },
+  anchor: Position | null,
+): EscalationTicket | null {
+  if (opt.memberIds.length === 0) return null;
+  seq += 1;
+  const t: EscalationTicket = {
+    gNumber: `G${seq}`,
+    unitIds: [...opt.memberIds],
+    label: opt.label,
+    unitCount: opt.memberIds.length,
+    targetFrontId: front?.id ?? "",
+    anchor: anchor ? { x: anchor.x, y: anchor.y } : null,
+    etaSec: opt.etaSec,
+    mintedAt: state.time,
+    burned: false,
+  };
+  tickets.set(t.gNumber, t);
+  return t;
+}
+
+/**
+ * B 刀 (2026-08-02): mint a handle for a force the staff is about to NAME OUT
+ * LOUD outside the escalation machine — the board's best_help row, and the
+ * disclosure row that names a force it just said cannot arrive in time.
+ *
+ * Why this exists: a spatial group's spoken name ("东北方向第一未编组群") is not
+ * a legal fromSquad and never can be — the label is recomputed every frame and
+ * the same words can mean a different roster seconds later. Before this, naming
+ * such a force in conversation was a dead end: the commander says 「让她们去
+ * 支援」, the model has nothing to bind to, falls back to a destination-only
+ * intent, and the engine dispatches whoever already stands at the destination
+ * (live hand-test: 6 idle tanks promised, 1 surviving defender actually moved).
+ *
+ * ★ A handle is an ADDRESS, not an endorsement. The engine mints one even for a
+ * force it has just declared too slow — refusing to RECOMMEND it (诚实闸) and
+ * refusing to let the commander REACH it are different things, and only the
+ * first is the engine's call. Overriding "赶不到" is a legitimate command
+ * decision (counter-attack, screen, retake).
+ *
+ * Roster + anchor are frozen here exactly as the escalation path freezes them,
+ * so 承诺 == 执行 holds for this face too.
+ */
+export function mintSpokenForce(
+  state: GameState,
+  front: Front | null,
+  opt: { label: string; memberIds: number[]; etaSec: number | null },
+): string | null {
+  // front === null: the board's force rows are front-agnostic (they are built
+  // with buildReinforceOptions(state, null)), so there is no rally point and no
+  // ETA to freeze — only the ROSTER, which is the part that matters. The order
+  // itself supplies the destination. Handing these rows a handle is what makes
+  // 「东方向第四未编组群」 addressable at all: the staff reads that name off the
+  // board when the commander asks 「附近有空闲部队吗」, and without a number the
+  // model can only write the LABEL into fromSquad — which the gate then refuses
+  // as a squad that was never in the order of battle (live hand-test 02:42).
+  const t = front
+    ? mintOne(state, front, opt, battleAnchorFor(state, front))
+    : mintOne(state, null, opt, null);
+  return t ? t.gNumber : null;
 }
 
 export interface EscalationWithTickets {
@@ -310,11 +369,75 @@ export function resolveTicketReference(
   return { kind: "dispatch", ticket: look.ticket, unitIds: live };
 }
 
-/** Receipt after a dispatch: the REAL number that left, never the promised one. */
+/**
+ * Demote a ticket-bound intent's front hints from SOURCE to DESTINATION.
+ *
+ * The frozen roster reaches the planner through resolveIntent's selectedUnitIds,
+ * which is a hard FILTER over whatever pool resolveSourceUnits built. With
+ * toFront set, that pool is "units already standing at the destination", so
+ * roster ∩ pool = ∅ and the order dies as 「框选的单位不在可调度范围内」 — after
+ * the receipt already promised the batch (live hand-test 2026-08-02; measured
+ * 0 dispatched with toFront, 6 with the hints cleared).
+ *
+ * A ticket HAS no source front: its source is the roster. So fromFront is
+ * dropped, toFront is moved to targetRegion (resolveTarget resolves a front id
+ * there), and an order that named no destination at all falls back to the rally
+ * point frozen with the ticket — the very point its ETA was promised against.
+ *
+ * Pure, and in core on purpose: ChatPanel has no bench harness, and this is
+ * exactly the kind of judgment that shipped reversed once already.
+ */
+export function retargetIntentForTicket(
+  state: GameState,
+  intent: Intent,
+  ticket: EscalationTicket,
+): Intent {
+  const out: Intent = { ...intent };
+  // A ticket has no SOURCE front — its source is the frozen roster.
+  out.fromFront = undefined;
+
+  // Precise, player-meant destinations win outright (a facility, a map tag, an
+  // explicit coordinate): those name a POINT, and the commander chose it.
+  const hasPreciseTarget = !!(out.targetFacility || out.targetRegion || out._targetPos);
+  const destFront = out.toFront ? findFront(state, out.toFront) : undefined;
+
+  // ★ Otherwise the ticket's own battle anchor beats the front hint (hand-test
+  // 2026-08-02 round 4). "去中央战线" resolves through getFrontCenterPos — the
+  // GEOMETRIC CENTRE of the front's region union, which on a multi-region front
+  // sits ~100 tiles from where anyone is shooting; the units marched into empty
+  // desert while the outpost they were sent to save was elsewhere. That is the
+  // exact 7-22 incident 刀1 fixed for the ETA PROMISE and never fixed for the
+  // DISPATCH. The anchor is where the fight is, and it is the very point this
+  // ticket's ETA was measured against — promise and execution agree by
+  // construction. Only used when the order's destination IS this ticket's front
+  // (or names no front at all); a handle pointed at some other line must go
+  // where the commander said, not where its escalation happened to be.
+  const anchorWins =
+    !!ticket.anchor && !hasPreciseTarget &&
+    (!destFront || destFront.id === ticket.targetFrontId);
+
+  if (anchorWins && ticket.anchor) {
+    out._targetPos = { x: ticket.anchor.x, y: ticket.anchor.y };
+  } else if (!hasPreciseTarget && out.toFront) {
+    // Front hint demoted from SOURCE to DESTINATION (targetRegion resolves a
+    // front id) — it must never reach resolveSourceUnits, where it would make
+    // the pool "units already at the destination" and leave the roster with an
+    // empty intersection (measured: 0 dispatched with toFront, 6 without).
+    out.targetRegion = out.toFront;
+  }
+  out.toFront = undefined;
+  return out;
+}
+
+/** Receipt after a dispatch: the REAL number that left, never the promised one.
+ *  B 刀: when the handle carries an arrival estimate, the receipt states it —
+ *  a force the engine called too slow may still be sent, but the commander is
+ *  told what he just bought rather than only that it left. */
 export function ticketDispatchReceipt(ticket: EscalationTicket, dispatched: number): string {
+  const eta = ticket.etaSec !== null ? `，按估算约 ${ticket.etaSec} 秒到位` : "";
   return dispatched === ticket.unitCount
-    ? `${ticket.label} ${dispatched}个单位出发了。`
-    : `${ticket.label} 实际能走的 ${dispatched} 个已经出发（原报 ${ticket.unitCount} 个，其余已不在编）。`;
+    ? `${ticket.label} ${dispatched}个单位出发了${eta}。`
+    : `${ticket.label} 实际能走的 ${dispatched} 个已经出发${eta}（原报 ${ticket.unitCount} 个，其余已不在编）。`;
 }
 
 /** Bench-only view of the registry. */

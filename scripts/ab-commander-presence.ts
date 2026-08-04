@@ -42,7 +42,7 @@ import {
   buildPlayerViewLines,
   type ViewportGeometry,
 } from "../packages/core/src/commanderPresence";
-import { buildReinforceOptions } from "../packages/core/src/frontEscalationPayload";
+import { buildReinforceOptions, filterLateCandidates } from "../packages/core/src/frontEscalationPayload";
 import type { GameState, Unit, Squad } from "@ai-commander/shared";
 
 // ── Harness ──
@@ -283,14 +283,45 @@ function runSynthetic(): void {
 
     // best_help must be the top shown V1b candidate for that front — same
     // builder, same sort; never a re-ranked or invented name.
+    //
+    // A 刀 (2026-08-02) 合同变更：候选集先过晚到闸，钟就是这一行自己印出来的
+    // survival≈Ns。旧断言测的是"未过滤的 top"——那正是本刀砍掉的行为：这局
+    // 只剩 3 秒，谁也赶不到，把 best_help=Carter(eta≈40s) 印上去是拿噪声冒充
+    // 选择。新断言仍然守住原来那条性质（同一 builder、同一排序、绝不改名或
+    // 重排），只是量在过闸后的集合上；集合空 ⇒ 该行必须一个字都不提增援。
     const coastalFront = s.fronts.find((f) => f.id === "front_coastal")!;
-    const top = buildReinforceOptions(s, coastalFront).shown[0];
+    const unfilteredTop = buildReinforceOptions(s, coastalFront).shown[0];
+    const survivalMatch = coastal?.match(/survival≈(\d+)s/);
+    const rowClock = survivalMatch ? Number(survivalMatch[1]) : null;
+    const gatedTop = filterLateCandidates(buildReinforceOptions(s, coastalFront), rowClock).shown[0];
+    // 防空转：这一局必须真的有候选被闸拦下，否则 A7 会以"闸没干活"的方式空绿。
     check(
-      "A7 best_help = V1b top candidate",
-      !!top && !!coastal && coastal.includes(`best_help=${top.label}(`),
-      `top=${top?.label} line=${coastal}`,
+      "A6b 前置 本局确有候选被晚到闸拦下（否则 A7 空转）",
+      !!unfilteredTop && !gatedTop && rowClock !== null,
+      `clock=${rowClock}s unfilteredTop=${unfilteredTop?.label}(eta≈${unfilteredTop?.etaSec}s) gatedTop=${gatedTop?.label ?? "none"}`,
     );
-    check("A8 eta token engine-sourced", !!coastal && (/eta≈\d+s/.test(coastal) || coastal.includes("eta=unknown")), coastal);
+    check(
+      "A7 best_help = 过闸后的 V1b top（空集 ⇒ 转为 none(...) 披露，不是沉默）",
+      gatedTop
+        ? !!coastal && coastal.includes(`best_help=${gatedTop.label}(`)
+        : !!coastal && coastal.includes("best_help=none("),
+      `gatedTop=${gatedTop?.label ?? "none"} line=${coastal}`,
+    );
+    check(
+      "A8 eta token engine-sourced（推荐给 eta；空集给最近一股的 eta 作为「赶不到」的依据）",
+      !!coastal && (/eta≈\d+s/.test(coastal) || coastal.includes("eta=unknown")),
+      coastal,
+    );
+    // fix1：F1 教训上板——"无候选"绝不能读成"无友军"。手测现场：长官问
+    // "有没有可支援部队"，参谋答"只有 Blake"，六辆闲着的坦克被藏掉。
+    check(
+      "A8b fix1 空集必须披露存在（有闲兵就报股数/人数，没有就明说无友军）",
+      gatedTop
+        ? true
+        : !!coastal && (/线外\d+股\/\d+units/.test(coastal) ||
+            /front 外有\d+个友军单位/.test(coastal) || coastal.includes("战场上无其他友军")),
+      coastal,
+    );
 
     // No-force notes (handtest fix): fallen/undeployed fronts appear as pure
     // existence facts — completing the compare frame with ZERO enemy-derived

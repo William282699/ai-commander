@@ -18,7 +18,54 @@ import type { GameState, CrisisEvent, Front, Unit, Position } from "@ai-commande
 import { TILE_SIZE } from "@ai-commander/shared";
 import { assessCrisisEscalation } from "./crisisResponse";
 import { hasPlayerCombatPresence, freshFrontPowerRatio } from "./director";
-import { buildReinforceOptions, groupTaskStatus, hpPctOf, nearestPlaceWithin, NAME_RADIUS_TILES } from "./frontEscalationPayload";
+import { buildReinforceOptions, filterLateCandidates, groupTaskStatus, hpPctOf, nearestPlaceWithin, NAME_RADIUS_TILES } from "./frontEscalationPayload";
+import type { ReinforceOptionsResult } from "./frontEscalationPayload";
+
+/**
+ * What the row says when NO candidate can be recommended (A 刀 fix1, 手测 2026-08-02).
+ *
+ * The F1 lesson — "no candidates" must never read as "no friendlies" — was
+ * encoded on the escalation face (serializeOptions) and NOT here. The honesty
+ * gate then made the empty case common, and the row answered it with silence:
+ * `1. 北部战线: survival≈3s ratio=0.33` and nothing else. Live hand-test: the
+ * commander asked "有没有可支援部队", the staff answered "只有 Blake" while six
+ * idle main tanks sat outside the front. A force that exists was hidden.
+ *
+ * So EXISTENCE and REACHABILITY are stated as two separate facts. A force that
+ * cannot arrive in time is still the commander's to spend — counter-attack,
+ * screen, retake — so this DISCLOSES it; it never re-recommends it (the label
+ * only ever appears inside a none(...) clause, never as `best_help=<label>(`).
+ *
+ * Friendly-only reads (options + outsideFriendlyCount + our own clock), so the
+ * disclosure cannot leak fog the way a hidden-enemy-derived number would.
+ */
+function describeNoHelp(
+  all: ReinforceOptionsResult,
+  clock: number | null,
+): { text: string; named: ReinforceOptionsResult["options"][number] | null } {
+  const timed = all.options.filter((o) => o.etaSec !== null);
+  if (timed.length > 0) {
+    // Gate emptied a non-empty set ⇒ every survivor had a finite eta above the
+    // clock. Report the SOONEST one: "how late are we" is the actual question.
+    const nearest = timed.reduce((a, b) => ((b.etaSec ?? 0) < (a.etaSec ?? 0) ? b : a));
+    const units = all.options.reduce((s, o) => s + o.unitCount, 0);
+    const vs = clock !== null ? ` > survival ${clock}s` : "";
+    return {
+      // `named` rides back out so the caller can mint a handle for it: the
+      // commander who hears "有 6 辆闲着但赶不到" must be able to say "还是让他们
+      // 去" and have it land (B 刀 — address ≠ endorsement).
+      text: `线外${all.options.length}股/${units}units 闲着，最近 ${nearest.label} eta≈${nearest.etaSec}s${vs}，都赶不到`,
+      named: nearest,
+    };
+  }
+  // Same two reachable truths, same wording as the escalation face (F1).
+  return {
+    text: all.outsideFriendlyCount > 0
+      ? `front 外有${all.outsideFriendlyCount}个友军单位, 但当前无可单列的增援候选`
+      : "战场上无其他友军",
+    named: null,
+  };
+}
 
 /**
  * Player COMBAT units inside a front's bboxes. Mirrors the predicate inside
@@ -69,10 +116,33 @@ function playerCombatUnitsInFront(state: GameState, front: Front): Unit[] {
  * exists; a healthy battlefield (no visible enemies, no combat evidence)
  * keeps its byte-identical, section-free digest (Act-0 guard).
  */
-export function buildFrontJudgmentLines(state: GameState): string[] {
+/**
+ * B 刀 (2026-08-02): mints an addressable handle for a force this frame is
+ * about to NAME to the commander, and returns the number to print beside it.
+ *
+ * Passed IN rather than called directly because minting MUTATES (a monotonic
+ * counter + a registry), and this builder is a pure function every bench,
+ * heartbeat and digest rebuild runs. Only the real conversation path supplies a
+ * minter; everyone else gets byte-identical rows and mints nothing.
+ */
+export type ForceHandleMinter = (
+  front: Front,
+  option: { label: string; memberIds: number[]; etaSec: number | null },
+) => string | null;
+
+export function buildFrontJudgmentLines(
+  state: GameState,
+  mintHandle?: ForceHandleMinter,
+): string[] {
   const body: string[] = [];
   const engagedUnknown: string[] = [];
   const noForce: string[] = [];
+  /** ` handle=G13` when a minter is supplied and the force has members. */
+  const handleOf = (front: Front, option: { label: string; memberIds: number[]; etaSec: number | null } | undefined): string => {
+    if (!mintHandle || !option) return "";
+    const g = mintHandle(front, option);
+    return g ? ` handle=${g}` : "";
+  };
 
   for (const front of state.fronts) {
     if (!hasPlayerCombatPresence(state, front)) {
@@ -98,10 +168,27 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
         // survival/ratio either, so stale ask-time numbers would win by
         // being the only ones on offer.
         let line = `${front.name}: 交战中，我方${members.length}units hp=${hpPctOf(members)}%，敌军实力未明（无法给出存活估计；早先提问里引用的该线存活/战力数字已作废）`;
-        const top = buildReinforceOptions(state, front).shown[0];
+        // 同一把尺 (A 刀 2026-08-02): EVERY face that renders a candidate goes
+        // through the SAME honesty gate. Here the clock is null BY CONSTRUCTION,
+        // and that is the point of routing through the gate at all:
+        // ratio===null means we cannot see the enemy, while estimateCollapseTime
+        // DOES count unseen enemies (crisisResponse.ts FOG-TODO). Feeding its
+        // seconds in would let hidden enemy DPS shorten this list — the fog
+        // would leak through the SHAPE of the candidate set, the same sneaky
+        // channel gate ③ of commanderMood exists to close. So: null clock,
+        // zero behaviour change today, and the call site is here so the gate
+        // cannot be silently skipped if this row ever gains a clock.
+        const all = filterLateCandidates(buildReinforceOptions(state, front), null);
+        const top = all.shown[0];
         if (top) {
           const eta = top.etaSec !== null ? `eta≈${top.etaSec}s` : "eta=unknown";
-          line += ` best_help=${top.label}(${top.unitCount}units ${top.task} ${eta})`;
+          line += ` best_help=${top.label}(${top.unitCount}units ${top.task} ${eta})${handleOf(front, top)}`;
+        } else {
+          // F1 on this face too: no candidate ≠ no friendlies. Nothing was
+          // filtered here (null clock), so this can only mean the candidate set
+          // is genuinely empty — say which of the two truths it is.
+          const nh = describeNoHelp(all, null);
+          line += ` best_help=none(${nh.text})${handleOf(front, nh.named ?? undefined)}`;
         }
         engagedUnknown.push(line);
       }
@@ -117,10 +204,30 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
     // Top V1b candidate (无任务 first, then eta asc) — who could actually
     // steady this front and how long the engine says they need. eta=unknown
     // stays unknown; never a fabricated number.
-    const top = buildReinforceOptions(state, front).shown[0];
+    //
+    // 同一把尺 (A 刀 2026-08-02): the row is filtered against the SAME clock it
+    // prints one field earlier. Rounded exactly like the printed survival≈ and
+    // like the escalation face's facts.estimatedCollapseSeconds, so promise and
+    // filter cannot disagree by a fraction of a second. null (stable / we win
+    // the exchange) ⇒ no basis to call anything late ⇒ nothing filtered.
+    // Before this gate the board could recommend a 153s march to a fight with
+    // 7s left while the escalation block in the SAME envelope said
+    // "reinforcement_options: none".
+    const clock = t !== null && Number.isFinite(t) ? Math.round(t) : null;
+    const unfiltered = buildReinforceOptions(state, front);
+    const top = filterLateCandidates(unfiltered, clock).shown[0];
     if (top) {
       const eta = top.etaSec !== null ? `eta≈${top.etaSec}s` : "eta=unknown";
-      line += ` best_help=${top.label}(${top.unitCount}units ${top.task} ${eta})`;
+      line += ` best_help=${top.label}(${top.unitCount}units ${top.task} ${eta})${handleOf(front, top)}`;
+    } else {
+      // fix1 (手测 2026-08-02): the gate's empty set must SPEAK, not vanish.
+      // Silence here answered "有没有可支援部队" with "只有 Blake" while six
+      // idle tanks stood outside the front. Disclose existence + why they are
+      // not being recommended; the commander decides what to do with a force
+      // that arrives late — and B 刀 gives that force a handle so the decision
+      // can actually be executed.
+      const nh = describeNoHelp(unfiltered, clock);
+      line += ` best_help=none(${nh.text})${handleOf(front, nh.named ?? undefined)}`;
     }
 
     body.push(line);
@@ -134,7 +241,14 @@ export function buildFrontJudgmentLines(state: GameState): string[] {
     // numbers (handtest round-3 followup: Chen recited his own earlier
     // escalation question's ask-time numbers over this frame's current ones —
     // the stale source sits in the same envelope, so the correction must too).
-    "---FRONT_JUDGMENT--- (CURRENT values for this reply — numbers quoted in earlier questions/escalations are ask-time snapshots, superseded by these; survival=committed HP vs visible enemy DPS, eta=straight-line terrain estimate; read these numbers — do NOT hand-compute distance/time from coordinates)",
+    "---FRONT_JUDGMENT--- (CURRENT values for this reply — numbers quoted in earlier questions/escalations are ask-time snapshots, superseded by these; survival=committed HP vs visible enemy DPS, eta=straight-line terrain estimate; read these numbers — do NOT hand-compute distance/time from coordinates)" +
+      // B 刀: the handle is an ADDRESS, not an endorsement — it is printed for
+      // forces the row just declared too slow as well, because refusing to
+      // recommend and refusing to let the commander reach them are different
+      // things. Only stated when handles were actually minted this frame.
+      (mintHandle
+        ? " | handle=G# 是这支部队的临时番号，可直接作为 fromSquad 下令；它只是地址，不代表引擎推荐——赶不到的部队同样有号，长官坚持要派就照号派"
+        : ""),
     ...body,
     ...engagedUnknown,
     ...noForce,

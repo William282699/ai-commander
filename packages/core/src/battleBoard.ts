@@ -66,6 +66,10 @@ export interface BoardGroupRow {
   composition: string;
   hpPct: number;
   task: ReinforceTaskStatus;
+  /** B 刀: frozen roster, so a G-handle can be minted for the row the staff
+   *  reads out when the commander asks 「附近有空闲部队吗」. The LABEL is not
+   *  and can never be a legal fromSquad (recomputed every frame); the number is. */
+  memberIds: number[];
 }
 
 export interface BattleBoard {
@@ -109,6 +113,7 @@ export function buildBattleBoard(state: GameState): BattleBoard {
       composition: o.composition,
       hpPct: o.hpPct,
       task: o.task,
+      memberIds: o.memberIds,
     }));
 
   return { squads, groups };
@@ -125,12 +130,20 @@ function squadSuffix(row: BoardSquadRow): string {
   return s;
 }
 
-function groupLine(row: BoardGroupRow): string {
+function groupLine(row: BoardGroupRow, handle: string): string {
   const task = row.task !== "unknown" ? ` ${row.task}` : "";
-  return `- ${row.label}: ${row.unitCount}units(${row.composition}) hp=${row.hpPct}%${task}`;
+  return `- ${row.label}: ${row.unitCount}units(${row.composition}) hp=${row.hpPct}%${task}${handle}`;
 }
 
-export function boardToDigestLines(board: BattleBoard): {
+/** B 刀: mints an addressable handle for a board row. Passed IN because minting
+ *  mutates and this projection runs on every digest build — only the live
+ *  conversation path supplies one. */
+export type BoardHandleMinter = (row: BoardGroupRow) => string | null;
+
+export function boardToDigestLines(
+  board: BattleBoard,
+  mintHandle?: BoardHandleMinter,
+): {
   squadLineSuffixById: Record<string, string>;
   unassignedGroupLines: string[];
 } {
@@ -138,7 +151,10 @@ export function boardToDigestLines(board: BattleBoard): {
   for (const row of board.squads) squadLineSuffixById[row.squadId] = squadSuffix(row);
 
   const shown = board.groups.slice(0, MAX_GROUP_LINES);
-  const unassignedGroupLines = shown.map(groupLine);
+  const unassignedGroupLines = shown.map((row) => {
+    const g = mintHandle ? mintHandle(row) : null;
+    return groupLine(row, g ? ` handle=${g}` : "");
+  });
   const omitted = board.groups.length - shown.length;
   if (omitted > 0) {
     const units = board.groups

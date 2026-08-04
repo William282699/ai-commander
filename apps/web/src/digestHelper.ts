@@ -21,9 +21,14 @@ export function buildDigestForChannel(
   selectedUnitIds?: number[],
   markedTargets?: { id: string; position: [number, number] }[],
   recentEvents?: string[],
+  /** B 刀: mint addressable force handles for this turn. Only the live
+   *  conversation path passes true — minting mutates, so every other digest
+   *  build (bench, heartbeat, staff-ask) must stay pure. Marcus's ops route
+   *  never mints: he is advisor-only and issues no dispatch intents. */
+  mintForceHandles = false,
 ): string {
   if (ENABLE_BATTLE_CONTEXT_V2 && ch === "ops") {
     return buildBattleContextV2(state, ch, memory ?? DEFAULT_MEMORY);
   }
-  return buildDigest(state, selectedUnitIds ?? [], markedTargets ?? [], recentEvents ?? []);
+  return buildDigest(state, selectedUnitIds ?? [], markedTargets ?? [], recentEvents ?? [], mintForceHandles);
 }
