@@ -24,6 +24,7 @@ import type {
 } from "@ai-commander/shared";
 import { getUnitCategory, UNIT_STATS, UNIT_DISPLAY_NAME, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit, isFootUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
+import { frontDestinationFor, type FrontDestinationMode } from "./frontDestination";
 import { createMission } from "./missions";
 import { getFormationOffset, computeHeading, type FormationStyle } from "./formation";
 
@@ -1312,6 +1313,22 @@ export function findFacilityById(
 // Helpers
 // ============================================================
 
+/**
+ * A front hint is the LEAST specific thing a commander can name, and until v4
+ * §8 it was also the least accurate: all three branches below went through the
+ * front's geometric center — an average of region bboxes, 97 tiles from the
+ * outpost the order was about on front_center. `frontDestinationFor` walks the
+ * ladder instead (biggest fighting cluster → any friendlies → our facility →
+ * the center only when the line is bare). Tags, facilities and explicit
+ * coordinates are untouched: those already name a POINT the commander chose.
+ *
+ * Mode is read off the verb: a retreat resolves the SAME front to a different
+ * point, because falling back onto the firefight is not a retreat.
+ */
+function frontDestinationMode(intent: Intent): FrontDestinationMode {
+  return intent.type === "retreat" ? "withdraw" : "approach";
+}
+
 /** Resolve attack/defend/recon target position from intent fields. */
 function resolveTarget(intent: Intent, state: GameState): Position | null {
   // Internal override: crisis card system provides exact coordinates
@@ -1323,6 +1340,7 @@ function resolveTarget(intent: Intent, state: GameState): Position | null {
     const pos = findFacilityPosition(state, intent.targetFacility);
     if (pos) return pos;
   }
+  const mode = frontDestinationMode(intent);
   if (intent.targetRegion) {
     // Day 15: check tags first, then regions, then fronts
     const tag = state.tags?.find(t => t.id === intent.targetRegion);
@@ -1331,16 +1349,16 @@ function resolveTarget(intent: Intent, state: GameState): Position | null {
     if (pos) return pos;
     // Also try front match (LLM might put front id in targetRegion)
     const front = findFront(state, intent.targetRegion);
-    if (front) return getFrontCenterPos(state, front);
+    if (front) return frontDestinationFor(state, front, mode);
   }
   if (intent.toFront) {
     const front = findFront(state, intent.toFront);
-    if (front) return getFrontCenterPos(state, front);
+    if (front) return frontDestinationFor(state, front, mode);
   }
   // For some intents, fromFront can serve as target area
   if (intent.fromFront) {
     const front = findFront(state, intent.fromFront);
-    if (front) return getFrontCenterPos(state, front);
+    if (front) return frontDestinationFor(state, front, mode);
   }
   // Last resort: try all location fields as facility name (fuzzy match).
   // Catches cases where LLM puts a facility name in toFront/targetRegion
@@ -1676,22 +1694,10 @@ function getUnitsOnFront(state: GameState, front: Front): Unit[] {
   return units;
 }
 
-/** Compute center position of a front's regions. */
-function getFrontCenterPos(state: GameState, front: Front): Position | null {
-  let totalX = 0;
-  let totalY = 0;
-  let count = 0;
-  for (const rid of front.regionIds) {
-    const region = state.regions.get(rid);
-    if (region) {
-      totalX += (region.bbox[0] + region.bbox[2]) / 2;
-      totalY += (region.bbox[1] + region.bbox[3]) / 2;
-      count++;
-    }
-  }
-  if (count === 0) return null;
-  return { x: Math.round(totalX / count), y: Math.round(totalY / count) };
-}
+// getFrontCenterPos deleted (v4 §8): it was a byte-for-byte second copy of
+// crisisResponse's frontCenterPos, and every one of its call sites now goes
+// through frontDestinationFor — which still ends on that same center as its
+// last rung. One front-center implementation, in frontDestination.ts.
 
 /** Find a region's center by exact id or fuzzy name match. */
 function getRegionCenter(state: GameState, regionHint: string): Position | null {

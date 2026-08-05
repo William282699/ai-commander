@@ -31,20 +31,16 @@ import type {
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
 import { frontEscalationFacts } from "./director";
 import { frontCenterPos, battleAnchorFor, estimateSquadTravelTime } from "./crisisResponse";
+// v4 §8: the clustering moved DOWN to frontDestination so the destination
+// resolver can use it without importing this module (which would close the
+// crisisResponse ↔ frontEscalationPayload loop). Same function, one copy.
+import { spatialGroups, tileDist as dist } from "./frontDestination";
+export { spatialGroups, CLUSTER_DIAMETER_CAP } from "./frontDestination";
 
 // ── Tunables (explicit, no defaults hidden in call sites) ──
 
-/** Spatial-grouping link distance (tiles): two groups may merge only if their
- *  CLOSEST members are within this range — "moves as one local force", same
- *  order of magnitude as the facility NEAR_RADIUS (12). */
-const CLUSTER_LINK_TILES = 10;
-
-/** Hard cap on a group's DIAMETER (max pairwise member distance). Pure
- *  connected-component expansion lets chains (A–B≤10, B–C≤10, …) snowball
- *  into one "force" with unbounded span — a fake force no commander would
- *  treat as one body (Codex round-3 boundary). Every merge must keep the
- *  merged diameter within this cap, so the bound holds by construction. */
-const CLUSTER_DIAMETER_MAX_TILES = 20;
+// Spatial-grouping tunables (link distance 10, diameter cap 20) live with the
+// clustering itself in frontDestination.ts, re-exported above.
 
 /** Naming radius (tiles): a candidate is "near <place>" (or "en route to
  *  <place>") only within this range of a standing facility or front center.
@@ -116,11 +112,8 @@ function insideBboxes(bboxes: [number, number, number, number][], p: Position): 
   return bboxes.some(([x1, y1, x2, y2]) => p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2);
 }
 
-function dist(a: Position, b: Position): number {
-  const dx = a.x - b.x;
-  const dy = a.y - b.y;
-  return Math.sqrt(dx * dx + dy * dy);
-}
+// `dist` is frontDestination's tileDist, imported above under the old local
+// name — one euclid helper, not two that could drift apart in rounding.
 
 // ── Evidence helpers ──
 
@@ -198,54 +191,8 @@ function etaOf(state: GameState, memberIds: number[], anchor: Position | null): 
   return Number.isFinite(t) && t > 0 ? Math.ceil(t) : null;
 }
 
-// ── Deterministic spatial grouping with a hard diameter cap ──
-//
-// Greedy agglomerative, smallest link first. A merge happens only when BOTH
-// hold: (a) closest members of the two groups are within CLUSTER_LINK_TILES,
-// (b) the merged group's diameter stays ≤ CLUSTER_DIAMETER_MAX_TILES. (b) is
-// the invariant that stops chain snowballing (A–B≤10, B–C≤10, A–C≫10 must
-// NOT become one group once its span exceeds the cap). Deterministic: groups
-// are kept sorted by smallest member id; candidate scan order + strict
-// "better (link, diam)" comparison make tie-breaks order-independent.
-
-/** Exported for the bench: groups whose max pairwise distance must stay ≤ cap. */
-export const CLUSTER_DIAMETER_CAP = CLUSTER_DIAMETER_MAX_TILES;
-
-export function spatialGroups(units: Unit[]): Unit[][] {
-  let groups: Unit[][] = [...units]
-    .sort((a, b) => a.id - b.id)
-    .map((u) => [u]);
-
-  for (;;) {
-    let best: { i: number; j: number; link: number; diam: number } | null = null;
-    for (let i = 0; i < groups.length; i++) {
-      for (let j = i + 1; j < groups.length; j++) {
-        let link = Infinity;
-        let diam = 0;
-        const merged = [...groups[i], ...groups[j]];
-        for (let x = 0; x < merged.length; x++) {
-          for (let y = x + 1; y < merged.length; y++) {
-            const d = dist(merged[x].position, merged[y].position);
-            if (d > diam) diam = d;
-            const cross =
-              (x < groups[i].length) !== (y < groups[i].length); // one from each side
-            if (cross && d < link) link = d;
-          }
-        }
-        if (link > CLUSTER_LINK_TILES || diam > CLUSTER_DIAMETER_MAX_TILES) continue;
-        if (!best || link < best.link || (link === best.link && diam < best.diam)) {
-          best = { i, j, link, diam };
-        }
-      }
-    }
-    if (!best) break;
-    const merged = [...groups[best.i], ...groups[best.j]].sort((a, b) => a.id - b.id);
-    groups = groups.filter((_, k) => k !== best.i && k !== best.j);
-    groups.push(merged);
-    groups.sort((ga, gb) => ga[0].id - gb[0].id);
-  }
-  return groups;
-}
+// The spatial grouping itself now lives in frontDestination.ts (re-exported
+// at the top of this file) — see the import note there for why it had to move.
 
 // ── Location phrase (contract v3 §3; shared by squads and groups) ──
 

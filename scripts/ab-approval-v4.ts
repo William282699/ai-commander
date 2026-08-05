@@ -27,6 +27,7 @@ import {
   estimateSquadTravelTime,
 } from "../packages/core/src/crisisResponse";
 import { buildReinforceOptions } from "../packages/core/src/frontEscalationPayload";
+import { frontDestinationFor } from "../packages/core/src/frontDestination";
 import { buildBattleBoard, boardToDigestLines } from "../packages/core/src/battleBoard";
 import { resolveIntent } from "../packages/core/src/tacticalPlanner";
 import { buildFrontJudgmentLines, commanderMood } from "../packages/core/src/commanderPresence";
@@ -179,6 +180,34 @@ function scenarioKnife1(opts: { engagedTimestamps: boolean; defendersInFront: bo
   return { state, front, reliefIds };
 }
 
+// 两簇同线（v4 §8）：东头 / 西头各一堆，只有一堆带交火时间戳。分档合同的两个
+// 承重点都要靠它——「取最大簇不取平均」与「交火压人多」在单簇局里都测不出来。
+const EAST_CLUSTER: Position = { x: 360, y: 105 }; // central_desert 东端
+const WEST_CLUSTER: Position = { x: 130, y: 90 };  // 同一条线的西端，相距 230 格
+
+function twoClusterFront(opts: {
+  eastN: number;
+  westN: number;
+  engaged: "east" | "west" | "none";
+}): { state: GameState; front: Front; eastIds: number[]; westIds: number[] } {
+  const state = emptyBattlefield();
+  const front = frontById(state, "front_center");
+  state.time = 1000;
+  const stamp = (side: "east" | "west"): Partial<Unit> =>
+    opts.engaged === side
+      ? { lastAttackTime: state.time - 2, lastDamagedAt: state.time - 1 }
+      : { lastAttackTime: 0, lastDamagedAt: undefined };
+  const eastIds: number[] = [];
+  const westIds: number[] = [];
+  for (let i = 0; i < opts.eastN; i++) {
+    eastIds.push(addUnit(state, EAST_CLUSTER.x + i, EAST_CLUSTER.y, stamp("east")).id);
+  }
+  for (let i = 0; i < opts.westN; i++) {
+    westIds.push(addUnit(state, WEST_CLUSTER.x + i, WEST_CLUSTER.y, stamp("west")).id);
+  }
+  return { state, front, eastIds, westIds };
+}
+
 function runKnife1(): void {
   console.log("\n== 刀1 ETA 锚点：承诺量到战斗点，不是几何中心 ==");
 
@@ -246,32 +275,163 @@ function runKnife1(): void {
     }
   }
 
-  // ── 三级兜底 ──
+  // ── 兜底各级（v4 §8：分档合同，2026-08-04 用户裁定 / Fable 5 裁决）──
+  //
+  // ★ 合同变更 1（T1j）：二级从「全体在线守军的【平均】」改为「最大簇质心」。
+  //   变更原因：平均是个统计量，不是一个地方——西头一堆、东头一堆，平均值落在
+  //   两堆中间的空地上，离谁都一百格（§8.2 第三档的实测病因）。
+  //   出处：DIALOGUE_AB_KNIFE_REVIEW_BRIEF_20260803.md §8.2 / §8.4-3。
   const quiet = scenarioKnife1({ engagedTimestamps: false, defendersInFront: true });
   const quietAnchor = battleAnchorFor(quiet.state, quiet.front);
-  // No one fought recently → tier 2 (all in-front defenders): 4 east + 2 west.
-  const expectX = (4 * (BATTLE.x + 1.5) + 2 * 130.5) / 6;
+  // 局里两堆：东头 4 人（x≈361.5）、西头 2 人（x≈130.5）。新合同取东头那簇。
+  const biggestX = BATTLE.x + 1.5;
+  const meanOfAllX = (4 * (BATTLE.x + 1.5) + 2 * 130.5) / 6; // 旧合同的答案 = 284.5
+  checkKnife(
+    "T1j ★合同变更★ 兜底二级 无人交火 → 【最大簇】质心（东头 4 人），不是全体平均",
+    !!quietAnchor && Math.abs(quietAnchor.x - biggestX) < 0.01,
+    !!quietAnchor && Math.abs(quietAnchor.x - meanOfAllX) < 0.01,
+    `实得 ${quietAnchor ? quietAnchor.x.toFixed(2) : "null"} 最大簇 ${biggestX.toFixed(2)} 全体平均 ${meanOfAllX.toFixed(2)}`,
+  );
   check(
-    "T1j 兜底二级 无人近期交火 → 全体在线守军质心（非几何中心）",
-    !!quietAnchor && Math.abs(quietAnchor.x - expectX) < 0.01,
-    `实得 ${quietAnchor ? quietAnchor.x.toFixed(2) : "null"} 期望 ${expectX.toFixed(2)}`,
+    "T1j-neg ★负对照★ 落点绝不是两堆的中点（那是没人站的空地）",
+    !!quietAnchor && Math.abs(quietAnchor.x - meanOfAllX) > 50,
+    `实得 ${quietAnchor ? quietAnchor.x.toFixed(2) : "null"} 中点 ${meanOfAllX.toFixed(2)}`,
   );
 
+  // ★ 合同变更 2（T1k）：线内无兵不再直接退回几何中心，先看这条线上【我方拥有
+  //   什么】。实测：front_center 几何中心 (263,96) 是空沙漠，而我方在这条线上
+  //   真正拥有的是中央前哨 (360,105)（§8.2 第五档，"第五档实测同样必要"）。
+  //   battleAnchorFor 与派兵落点同走一把尺 ⇒ 这一档必然一起进来。
   const empty = scenarioKnife1({ engagedTimestamps: false, defendersInFront: false });
   const emptyAnchor = battleAnchorFor(empty.state, empty.front);
   const emptyCenter = frontCenterPos(empty.state, empty.front);
+  const ownPost = empty.state.facilities.get("ea_player_central_post");
   check(
-    "T1k 兜底三级 线内无我方部队 → 退回 frontCenterPos",
+    "T1k0 前置 该线我方设施与几何中心确实是两个地方（否则本条不可测）",
+    !!ownPost && !!emptyCenter && dist(ownPost.position, emptyCenter) > 50,
+    ownPost && emptyCenter
+      ? `post=(${ownPost.position.x},${ownPost.position.y}) center=(${emptyCenter.x},${emptyCenter.y}) d=${dist(ownPost.position, emptyCenter).toFixed(1)}`
+      : "缺设施/中心",
+  );
+  checkKnife(
+    "T1k ★合同变更★ 线内无兵但有我方设施 → 落到该设施（不是空沙漠中心）",
+    !!emptyAnchor && !!ownPost &&
+      emptyAnchor.x === ownPost.position.x && emptyAnchor.y === ownPost.position.y,
     !!emptyAnchor && !!emptyCenter &&
       emptyAnchor.x === emptyCenter.x && emptyAnchor.y === emptyCenter.y,
     `anchor=${emptyAnchor ? `${emptyAnchor.x},${emptyAnchor.y}` : "null"}`,
   );
 
+  // 真荒线（无兵、无我方设施）才退回几何中心 —— 兜底的最后一级仍在。
+  {
+    const bare = emptyBattlefield();
+    const bareFront = frontById(bare, "front_ridge"); // 线上三座设施全是敌/中立
+    bare.time = 1000;
+    const bareCenter = frontCenterPos(bare, bareFront);
+    const bareDest = battleAnchorFor(bare, bareFront);
+    check(
+      "T1k2 荒线兜底 无兵且线上没有我方任何设施 → 退回 frontCenterPos",
+      !!bareDest && !!bareCenter && bareDest.x === bareCenter.x && bareDest.y === bareCenter.y,
+      `dest=${bareDest ? `${bareDest.x},${bareDest.y}` : "null"} center=${bareCenter ? `${bareCenter.x},${bareCenter.y}` : "null"}`,
+    );
+  }
+
+  // ★ 合同变更 3（T1l）：旧局里交战堆恰好也是最大堆，一级二级同点 ⇒ 测不出谁压谁
+  //   （旧断言是同义反复）。换成「东头 2 人在打、西头 4 人安静」——交火必须压过人多。
+  {
+    const tl = twoClusterFront({ eastN: 2, westN: 4, engaged: "east" });
+    const d = battleAnchorFor(tl.state, tl.front);
+    checkKnife(
+      "T1l ★合同变更★ 交火簇压过人更多的安静簇（一级压二级，不是比人数）",
+      !!d && Math.abs(d.x - (EAST_CLUSTER.x + 0.5)) < 0.01,
+      !!d && Math.abs(d.x - ((2 * (EAST_CLUSTER.x + 0.5) + 4 * (WEST_CLUSTER.x + 1.5)) / 6)) < 0.01,
+      `实得 ${d ? d.x.toFixed(2) : "null"} 交火簇 ${(EAST_CLUSTER.x + 0.5).toFixed(2)} 安静大簇 ${(WEST_CLUSTER.x + 1.5).toFixed(2)}`,
+    );
+    check(
+      "T1l-neg ★负对照★ 人多的那簇没有赢（判据真的在量交火，不是量人数）",
+      !!d && Math.abs(d.x - (WEST_CLUSTER.x + 1.5)) > 50,
+      `实得 ${d ? d.x.toFixed(2) : "null"} 安静大簇 ${(WEST_CLUSTER.x + 1.5).toFixed(2)}`,
+    );
+  }
+}
+
+// ============================================================
+// 刀A 续 — 撤退档（withdraw）：同一条线，撤和援不是同一个点。
+//
+// §7④ 实证：裸 retreat 被改写成"撤向原战斗锚"，6 个单位收到 retreat → (251,38)，
+// 也就是敌人所在。撤退档的第一级是我方设施（退守要塞），第二级是【未交火】簇的
+// 质心——交火簇在撤退档里永远不是答案。
+// ============================================================
+
+function runKnife1Withdraw(): void {
+  console.log("\n== 刀A 撤退档：撤退落点永不落进交火堆 ==");
+
+  // 西头一场恶仗，东头是我方的中央前哨（同一条线）。
+  const tw = twoClusterFront({ eastN: 0, westN: 4, engaged: "west" });
+  const post = tw.state.facilities.get("ea_player_central_post");
+  const approach = frontDestinationFor(tw.state, tw.front, "approach");
+  const withdraw = frontDestinationFor(tw.state, tw.front, "withdraw");
   check(
-    "T1l 交战守军优先于安静守军（一级压二级）",
-    Math.abs(anchor.x - (BATTLE.x + 1.5)) < 0.01 && anchor.x > expectX,
-    `engaged=${anchor.x} allDefenders=${expectX.toFixed(2)}`,
+    "T1w0 前置 该线打在西头、我方设施在东头（两点相距 > 100 格）",
+    !!post && !!approach && dist(approach, post.position) > 100,
+    post && approach
+      ? `fight=(${approach.x.toFixed(1)},${approach.y.toFixed(1)}) post=(${post.position.x},${post.position.y}) d=${dist(approach, post.position).toFixed(1)}`
+      : "缺件",
   );
+  checkKnife(
+    "T1w ★ 同一条线：援兵去打仗那头，撤退去我方据点那头（两档不同点）",
+    !!withdraw && !!post && withdraw.x === post.position.x && withdraw.y === post.position.y,
+    !!withdraw && !!approach && Math.abs(withdraw.x - approach.x) < 0.01,
+    `withdraw=${withdraw ? `${withdraw.x},${withdraw.y}` : "null"} approach=${approach ? `${approach.x.toFixed(1)},${approach.y.toFixed(1)}` : "null"}`,
+  );
+  check(
+    "T1w-neg ★负对照★ 撤退落点离交火簇 > 100 格（绝不撤进正在打的那堆）",
+    !!withdraw && !!approach && dist(withdraw, approach) > 100,
+    withdraw && approach ? `d=${dist(withdraw, approach).toFixed(1)}` : "缺件",
+  );
+
+  // 无我方设施的线：撤退落到【未交火】簇，不是交火簇。
+  {
+    const st = emptyBattlefield();
+    const fr = frontById(st, "front_ridge"); // 线上无我方设施
+    st.time = 1000;
+    const hot = { x: 215, y: 60 };   // kidney_ridge_zone[200,45,260,75]
+    const cold = { x: 250, y: 100 }; // ruweisat_zone[230,85,275,115]
+    for (let i = 0; i < 3; i++) addUnit(st, hot.x + i, hot.y, { lastAttackTime: st.time - 2, lastDamagedAt: st.time - 1 });
+    for (let i = 0; i < 2; i++) addUnit(st, cold.x + i, cold.y, { lastAttackTime: 0, lastDamagedAt: undefined });
+    const w = frontDestinationFor(st, fr, "withdraw");
+    const a = frontDestinationFor(st, fr, "approach");
+    checkKnife(
+      "T1w2 ★ 无设施可退时撤向【未交火】那簇，援兵仍去交火那簇",
+      !!w && Math.abs(w.x - (cold.x + 0.5)) < 0.01 && !!a && Math.abs(a.x - (hot.x + 1)) < 0.01,
+      !!w && !!a && Math.abs(w.x - a.x) < 0.01,
+      `withdraw=${w ? `${w.x.toFixed(1)},${w.y.toFixed(1)}` : "null"} approach=${a ? `${a.x.toFixed(1)},${a.y.toFixed(1)}` : "null"}`,
+    );
+  }
+
+  // ★端到端·数兵+核坐标★ 具名撤退真的落在设施上，且带的是那批兵。
+  {
+    const { state, front } = twoClusterFront({ eastN: 0, westN: 4, engaged: "west" });
+    const post = state.facilities.get("ea_player_central_post")!;
+    const fleeIds: number[] = [];
+    for (let i = 0; i < 4; i++) fleeIds.push(addUnit(state, 250 + i * 2, 38).id); // front_coastal
+    const r = resolveIntent(
+      { type: "retreat", fromFront: "front_coastal", toFront: front.id, quantity: "all" } as Intent,
+      state, state.style,
+    );
+    const landings = r.orders.map((o) => o.target).filter((t): t is Position => !!t);
+    const fightPos = frontDestinationFor(state, front, "approach")!;
+    checkKnife(
+      "T1w3 ★端到端·数兵核坐标★ 「撤到中央战线」= 4 个单位落在我方前哨附近，不在战场上",
+      r.assignedUnitIds.length === fleeIds.length &&
+        r.assignedUnitIds.every((id) => fleeIds.includes(id)) &&
+        landings.length === fleeIds.length &&
+        landings.every((t) => dist(t, post.position) <= 5) &&
+        landings.every((t) => dist(t, fightPos) > 100),
+      landings.length > 0 && landings.every((t) => dist(t, fightPos) <= 5),
+      `assigned=${r.assignedUnitIds.length} landings=${JSON.stringify(landings)} post=(${post.position.x},${post.position.y}) fight=(${fightPos.x.toFixed(1)},${fightPos.y.toFixed(1)})`,
+    );
+  }
 }
 
 // ============================================================
@@ -1151,6 +1311,34 @@ function lateCandidateFixture(far = true): { state: GameState; front: Front; squ
   return { state, front, squadLabel: "Farrell(T9)" };
 }
 
+/**
+ * §7⑥ 的原局：front_center 东端一场必输的仗（互射钟 30s），一支编队在线外
+ * 东南角——到战斗点 25s（赶得上），到几何中心 89s（赶不上）。两台候选机器
+ * 量不同的点就会给出相反的裁决。
+ */
+function twoRulerFixture(): { state: GameState; front: Front; squadIds: number[]; squadLabel: string } {
+  const state = emptyBattlefield();
+  const front = frontById(state, "front_center");
+  state.time = 1000;
+  // 输面：我方 1×360HP/DPS4 vs 敌方 3×60HP/DPS4 ⇒ tWeDie = 360/12 = 30s
+  addUnit(state, BATTLE.x, BATTLE.y, { hp: 360, lastAttackTime: state.time - 1, lastDamagedAt: state.time - 1 });
+  for (let i = 0; i < 3; i++) {
+    addUnit(state, BATTLE.x + 6 + i, BATTLE.y, { hp: 60, team: "enemy", lastAttackTime: state.time - 1 });
+  }
+  for (const row of state.fog) for (let i = 0; i < row.length; i++) row[i] = "visible";
+  front.engagementIntensity = 5;
+  // 线外编队（必须是编队：机器 B 把散兵归到 __reserve__，那一档本就不参与裁决）
+  const squadIds: number[] = [];
+  for (let i = 0; i < 6; i++) squadIds.push(addUnit(state, RELIEF.x + i, RELIEF.y).id);
+  state.squads.push({
+    id: "T7", name: "近援分队", unitIds: squadIds,
+    leader: { name: "Nadia", rank: "squad_leader", personality: "balanced" },
+    currentMission: null, missionTarget: null, morale: 1,
+    formationStyle: "line", ownerCommander: "chen", leaderName: "Nadia", role: "leader",
+  });
+  return { state, front, squadIds, squadLabel: "Nadia(T7)" };
+}
+
 /** 无钟面：我方按自身时间戳在交战，敌军全在雾里 ⇒ ratio=null ⇒ 走无钟分支。 */
 function noClockFixture(hiddenEnemies: number): { state: GameState; front: Front } {
   const state = emptyBattlefield();
@@ -1295,6 +1483,42 @@ function runKnifeA(): void {
     !!facFacts && facFacts.idleReinforcementAvailable === true,
     facFacts ? `idle=${facFacts.idleReinforcementAvailable} 附近我方=${facFacts.nearbyPlayerUnits}` : "null",
   );
+
+  // ── ⑤ 两机同尺（v4 §8 ⑥；审核档 §7⑥ 的原局）──
+  //
+  // 同一支候选：到【战斗点】25s、到【几何中心】89s、这条线撑 30s。装闸之后，
+  // 量哪个点决定它是"来得及的援兵"还是"废候选"——机器 A 量战斗点留下它，
+  // 机器 B 量几何中心淘汰它。诚实闸把这个旧偏差从排序扣分放大成了淘汰依据，
+  // 所以两台机器必须用同一把尺。
+  {
+    const two = twoRulerFixture();
+    const anchorPt = battleAnchorFor(two.state, two.front)!;
+    const centerPt = frontCenterPos(two.state, two.front)!;
+    const etaAnchor = etaTo(two.state, two.squadIds, anchorPt);
+    const etaCenter = etaTo(two.state, two.squadIds, centerPt);
+    const esc = assessCrisisEscalation(two.state, makeCrisis(two.front));
+    const clock = esc && esc.exchange.spokenSeconds !== null ? Math.round(esc.exchange.spokenSeconds) : null;
+    check(
+      "TA17 前置 局造得对：到战斗点赶得上、到几何中心赶不上、钟在两者之间",
+      etaAnchor !== null && etaCenter !== null && clock !== null &&
+        etaAnchor <= clock && etaCenter > clock,
+      `战斗点=${etaAnchor}s 几何中心=${etaCenter}s 钟=${clock}s`,
+    );
+    const optA = filterLateCandidates(buildReinforceOptions(two.state, two.front), clock)
+      .options.find((o) => o.label === two.squadLabel);
+    check(
+      "TA18 前置 机器 A 留下了它（量的是战斗点）",
+      !!optA && optA.etaSec === etaAnchor,
+      optA ? `${optA.label} eta=${optA.etaSec}s` : "(被滤掉)",
+    );
+    checkKnife(
+      "TA19 ★⑥★ 机器 B 装闸后同样留下它（两机同尺，不再一个说 25s 一个说 89s）",
+      !!esc && esc.bestCandidate !== null && esc.bestCandidate.squadId === "T7" &&
+        esc.bestCandidate.tArrive === etaAnchor,
+      !!esc && esc.bestCandidate === null,
+      esc ? `best=${esc.bestCandidate?.leaderName ?? "null"} tArrive=${esc.bestCandidate?.tArrive ?? "-"}s 战斗点=${etaAnchor}s 中心=${etaCenter}s 钟=${clock}s` : "null",
+    );
+  }
 }
 
 // ============================================================
@@ -1304,6 +1528,7 @@ function main(): void {
     console.log("=== NEGCTL 模式：★ 断言持修复前预期，必须出 FAIL ===");
   }
   runKnife1();
+  runKnife1Withdraw();
   runKnife2a();
   runKnife2b();
   runKnife2c();

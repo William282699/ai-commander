@@ -22,6 +22,12 @@ import type { Intent } from "@ai-commander/shared";
 import type { CrisisEvent, StandingOrder } from "@ai-commander/shared";
 import { collectUnitsUnder, getUnitCategory, TERRAIN_MOVE_MULT } from "@ai-commander/shared";
 import { findFront } from "./tacticalPlanner";
+import { frontCenterPos, frontDestinationFor, isInsideFront } from "./frontDestination";
+
+// v4 §8: frontCenterPos moved down to frontDestination (it is the LAST rung of
+// the destination ladder, and the ladder has to sit below tacticalPlanner).
+// Re-exported here so every existing importer keeps its one import site.
+export { frontCenterPos } from "./frontDestination";
 
 // --- Types ---
 
@@ -46,74 +52,28 @@ export interface ReinforceCandidate {
 
 // --- Helpers ---
 
-/** Get the center position of a front by averaging its region bboxes. */
-export function frontCenterPos(state: GameState, front: Front): Position | null {
-  let totalX = 0;
-  let totalY = 0;
-  let count = 0;
-  for (const rid of front.regionIds) {
-    const region = state.regions.get(rid);
-    if (region) {
-      totalX += (region.bbox[0] + region.bbox[2]) / 2;
-      totalY += (region.bbox[1] + region.bbox[3]) / 2;
-      count++;
-    }
-  }
-  if (count === 0) return null;
-  return { x: Math.round(totalX / count), y: Math.round(totalY / count) };
-}
-
 // ── Battle anchor (v4 刀1; ported from shelved `5a1f195`) ──
 //
 // Where reinforcements should actually rally: the FIGHT, not the front's
 // geometric center. frontCenterPos averages region bboxes, so on a
 // multi-region front it can sit ~100 tiles from where anyone is shooting
 // (7-22 acceptance caught center (263,96) vs the real fight at (360,105)).
-// The old crisis-card path deliberately used the defender centroid; the V1b
-// payload's switch to the geometric center was the regression this restores.
 //
-// Three-tier fallback: recently-engaged defenders → any in-front defender →
-// frontCenterPos. Friendly-only reads, so fog-safe by construction. The
-// `> 0` guards keep an initial-0 timestamp from reading as "just fought".
-const ANCHOR_ENGAGED_WINDOW_SEC = 10;
-
-function unitFoughtRecently(u: Unit, now: number): boolean {
-  if (u.lastAttackTime > 0 && now - u.lastAttackTime < ANCHOR_ENGAGED_WINDOW_SEC) return true;
-  if (u.lastDamagedAt !== undefined && u.lastDamagedAt > 0 &&
-      now - u.lastDamagedAt < ANCHOR_ENGAGED_WINDOW_SEC) {
-    return true;
-  }
-  return false;
-}
-
-/** The point a reinforcement promise (and its ETA) should be measured against. */
+// v4 §8 (user ruling 2026-08-04): this is now ONE FACE of the destination
+// ladder rather than a second implementation of it. The ETA promise and the
+// dispatch landing point must be the same point, and they can only be the same
+// point if they are the same function — 刀1 fixed the promise and left the
+// dispatch on the geometric center, which is exactly how a force ordered to
+// 中央战线 marched into empty desert (hand-test 2026-08-02 round 4).
+//
+// Two behaviour changes ride in with the shared ladder, both deliberate:
+//   - multi-cluster fronts resolve to the BIGGEST cluster, not the average of
+//     all engaged units (the average of a west fight and an east fight is
+//     ground where nobody is standing);
+//   - an EMPTY front now resolves to the friendly facility on it before
+//     falling back to the geometric center (§8.2 rung 5).
 export function battleAnchorFor(state: GameState, front: Front): Position | null {
-  const now = state.time;
-  const defenders: Unit[] = [];
-  const engaged: Unit[] = [];
-  state.units.forEach((u) => {
-    if (u.team !== "player" || u.hp <= 0 || u.state === "dead") return;
-    if (!isInsideFront(state, front, u.position)) return;
-    defenders.push(u);
-    if (unitFoughtRecently(u, now)) engaged.push(u);
-  });
-
-  const group = engaged.length > 0 ? engaged : defenders;
-  if (group.length === 0) return frontCenterPos(state, front);
-  const x = group.reduce((s, u) => s + u.position.x, 0) / group.length;
-  const y = group.reduce((s, u) => s + u.position.y, 0) / group.length;
-  return { x, y };
-}
-
-/** Check if a position is inside a front's region bounding boxes. */
-function isInsideFront(state: GameState, front: Front, pos: Position): boolean {
-  for (const rid of front.regionIds) {
-    const r = state.regions.get(rid);
-    if (r && pos.x >= r.bbox[0] && pos.x <= r.bbox[2] && pos.y >= r.bbox[1] && pos.y <= r.bbox[3]) {
-      return true;
-    }
-  }
-  return false;
+  return frontDestinationFor(state, front, "approach");
 }
 
 /** Average position of alive units in a list of unit IDs. */
@@ -507,7 +467,12 @@ export function findBestReinforcements(
   const front = resolveCrisisFront(state, crisis.locationTag);
   if (!front) return [];
 
-  const targetPos = frontCenterPos(state, front);
+  // v4 §8 ⑥ (2026-08-04): machine B measured every candidate's travel time to
+  // the front's GEOMETRIC CENTER while machine A measured to the fight, so on
+  // the same battlefield the same squad read 25s to machine A and 89s to
+  // machine B — and machine B's honesty gate then dropped a candidate that
+  // could in fact arrive in time. One ruler for both machines.
+  const targetPos = frontDestinationFor(state, front, "approach");
   if (!targetPos) return [];
 
   const { squadOutside, unassignedOutside } = scanBattlefield(state, front, targetPos);
