@@ -650,9 +650,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // player has seen the warning); "awaiting_reply" = the only phase where the
   // literal fast path or the LLM pendingDecision may consume. Unique id +
   // channel + session are re-verified at consumption (judgePendingConsumption).
-  /** v4 刀2b P1: set at send time when a BARE confirm answers a live proposal;
-   *  consumed at applyOrders. The instrument behind 刀A's revival ruling. */
-  const bareConfirmExecRef = useRef<{ escalateId: string } | null>(null);
+  /** v4 刀2b P1: set at send time on ANY bare confirm; consumed at applyOrders.
+   *  The instrument behind 刀A's revival ruling. escalateId === null means no
+   *  proposal was on the table — the Bucket A population itself (刀E §8 ⑧). */
+  const bareConfirmExecRef = useRef<{ escalateId: string | null } | null>(null);
   const pendingContractRef = useRef<{
     id: string;
     phase: "voicing" | "awaiting_reply";
@@ -1269,10 +1270,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // shelved. Either way the ruling is made on counted evidence, not vibes.
     // Stamped here (send time), consumed at applyOrders so only executions that
     // really moved troops are counted.
-    bareConfirmExecRef.current =
-      isConfirmReply(userMsg) && getActiveEscalation(ch, state.time)
-        ? { escalateId: getActiveEscalation(ch, state.time)!.actionId }
-        : null;
+    // 刀E (§8 ⑧, 2026-08-04): the getActiveEscalation precondition excluded the
+    // exact population this instrument exists to observe. Bucket A is "a bare
+    // confirm with NO structural handle" — no escalation on the table, no
+    // ticket — and the old condition recorded a row only when an escalation WAS
+    // on the table. The blind spot was the subject. Now every bare confirm is
+    // recorded; escalateId=null IS the Bucket A cell.
+    bareConfirmExecRef.current = isConfirmReply(userMsg)
+      ? { escalateId: getActiveEscalation(ch, state.time)?.actionId ?? null }
+      : null;
 
     // ── 绊索已删除（B 刀 2026-08-02）──────────────────────────────────────
     // v4 刀2b put a blocker here: a bare confirm with no pending contract and
