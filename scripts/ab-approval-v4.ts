@@ -435,6 +435,238 @@ function runKnife1Withdraw(): void {
 }
 
 // ============================================================
+// 刀F — attack 自己的档（回归修复；提案 §1-F / §3，2026-08-05）
+//
+// §8 把 attack 挂在 approach 档上，而 approach 的一级是"这条线上打得最凶的那处"。
+// 手测当场坐实：「拿下山脊战线」把 14 个人送到 (250,100) 中央雷达——那是我方 I1
+// 在打的地方，离敌方胜负点中央山脊 36.1 格、北部山脊 54.1 格；而 §8 之前的几何
+// 中心 (239,76) 离中央山脊只有 10.8 格。旧中心表现好是本线几何巧合（两个胜负点
+// 恰好夹住质心），所以修法不是回退，是给 attack 一档自己的：先打敌人的东西。
+//
+// 中立设施不进一档：中立 ≠ 敌方目标，而本局那个"打错的地方"恰恰是中立雷达。
+// ============================================================
+
+/** 山脊战线真形状：两个敌方胜负点 + 一个中立雷达 + 我方小簇正蹲在那个中立雷达上。 */
+const RIDGE_VP_NEAR: Position = { x: 230, y: 70 };  // 中央山脊 ea_miteirya_ridge ★VP
+const RIDGE_VP_FAR: Position = { x: 220, y: 55 };   // 北部山脊 ea_kidney_ridge ★VP
+const RIDGE_NEUTRAL: Position = { x: 250, y: 100 }; // 中央雷达 ea_observation_post（中立）
+
+function assaultFixture(): { state: GameState; front: Front; ourIds: number[]; squadIds: number[] } {
+  const state = emptyBattlefield();
+  const front = frontById(state, "front_ridge");
+  state.time = 1000;
+  // 我方小簇在中立雷达上交火 —— 手测那局的形状（I1 去占中央雷达，正在挨打）
+  const ourIds: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    ourIds.push(addUnit(state, RIDGE_NEUTRAL.x + i, RIDGE_NEUTRAL.y, {
+      lastAttackTime: state.time - 2, lastDamagedAt: state.time - 1,
+    }).id);
+  }
+  // 突击队在线外（东南），带编队以便 fromSquad 精确取源
+  const squadIds: number[] = [];
+  for (let i = 0; i < 6; i++) squadIds.push(addUnit(state, 300 + i, 130).id);
+  state.squads.push({
+    id: "F1", name: "突击分队", unitIds: squadIds,
+    leader: { name: "Reyes", rank: "squad_leader", personality: "balanced" },
+    currentMission: null, missionTarget: null, morale: 1,
+    formationStyle: "line", ownerCommander: "chen", leaderName: "Reyes", role: "leader",
+  });
+  return { state, front, ourIds, squadIds };
+}
+
+function runKnifeF(): void {
+  console.log("\n== 刀F attack 档：突击队打敌人的山头，不打自家遭遇战 ==");
+
+  const { state, front, ourIds, squadIds } = assaultFixture();
+  const ourCluster = { x: RIDGE_NEUTRAL.x + 1, y: RIDGE_NEUTRAL.y };
+  const approachPt = frontDestinationFor(state, front, "approach")!;
+  const assaultPt = frontDestinationFor(state, front, "assault")!;
+
+  check(
+    "TF0 前置 局造得对：我方小簇正蹲在中立雷达上交火，两个敌方胜负点在别处",
+    Math.abs(approachPt.x - ourCluster.x) < 0.01 && Math.abs(approachPt.y - ourCluster.y) < 0.01 &&
+      dist(ourCluster, RIDGE_VP_NEAR) > 30,
+    `approach=(${approachPt.x},${approachPt.y}) 我方簇=(${ourCluster.x},${ourCluster.y}) 离最近VP=${dist(ourCluster, RIDGE_VP_NEAR).toFixed(1)}`,
+  );
+
+  checkKnife(
+    "TF1 ★回归修复★ attack 落到敌方胜负点，不落自家交火簇、不落中立雷达",
+    dist(assaultPt, RIDGE_VP_NEAR) <= 5 &&
+      dist(assaultPt, ourCluster) > 30 && dist(assaultPt, RIDGE_NEUTRAL) > 30,
+    dist(assaultPt, ourCluster) <= 5,
+    `assault=(${assaultPt.x},${assaultPt.y}) 离VP=${dist(assaultPt, RIDGE_VP_NEAR).toFixed(1)} 离我方簇=${dist(assaultPt, ourCluster).toFixed(1)} 离中立雷达=${dist(assaultPt, RIDGE_NEUTRAL).toFixed(1)}`,
+  );
+  check(
+    "TF1b 同级多个胜负点时取离我方立足点最近的那个（打够得着的山头）",
+    dist(assaultPt, RIDGE_VP_NEAR) <= 5 && dist(assaultPt, RIDGE_VP_FAR) > 15,
+    `离近VP=${dist(assaultPt, RIDGE_VP_NEAR).toFixed(1)} 离远VP=${dist(assaultPt, RIDGE_VP_FAR).toFixed(1)}`,
+  );
+
+  // ★端到端·数兵+核坐标★
+  const r = resolveIntent(
+    { type: "attack", fromSquad: "F1", toFront: front.id, quantity: "all" } as Intent,
+    state, state.style,
+  );
+  const landings = r.orders.map((o) => o.target).filter((t): t is Position => !!t);
+  // 判据分两层：编队【质心】钉在 VP 上（≤2 格），单兵允许编队展开半径（≤10 格）。
+  // 6 人的进攻展开最外圈实测 7.8 格——那是队形不是落点错；把它当失败会把判据变成
+  // 在量队形。真正承重的是与我方簇的 36 格分离，两个阈值差 3 倍，量得动。
+  const centroid = landings.length
+    ? { x: landings.reduce((a, t) => a + t.x, 0) / landings.length,
+        y: landings.reduce((a, t) => a + t.y, 0) / landings.length }
+    : null;
+  checkKnife(
+    "TF2 ★端到端·数兵核坐标★ 「进攻山脊战线」6 个单位落在敌方胜负点上",
+    r.assignedUnitIds.length === squadIds.length &&
+      r.assignedUnitIds.every((id) => squadIds.includes(id)) &&
+      landings.length === squadIds.length &&
+      !!centroid && dist(centroid, RIDGE_VP_NEAR) <= 2 &&
+      landings.every((t) => dist(t, RIDGE_VP_NEAR) <= 10) &&
+      landings.every((t) => dist(t, ourCluster) > 30),
+    landings.length > 0 && landings.every((t) => dist(t, ourCluster) <= 10),
+    `assigned=${r.assignedUnitIds.length}/${squadIds.length} 质心=${centroid ? `(${centroid.x.toFixed(1)},${centroid.y.toFixed(1)})` : "-"} 离VP最远=${landings.length ? Math.max(...landings.map((t) => dist(t, RIDGE_VP_NEAR))).toFixed(1) : "-"} 离我方簇最近=${landings.length ? Math.min(...landings.map((t) => dist(t, ourCluster))).toFixed(1) : "-"}`,
+  );
+
+  // ── 负对照 1：修 attack 不许动 approach ──
+  const def = resolveIntent(
+    { type: "defend", fromSquad: "F1", toFront: front.id, quantity: "all" } as Intent,
+    state, state.style,
+  );
+  const defLandings = def.orders.map((o) => o.target).filter((t): t is Position => !!t);
+  check(
+    "TF3 ★负对照★ defend 到同一条线仍落我方簇（assault 档不得溢出到别的动词）",
+    defLandings.length === squadIds.length &&
+      defLandings.every((t) => dist(t, ourCluster) <= 5) &&
+      defLandings.every((t) => dist(t, RIDGE_VP_NEAR) > 30),
+    `landings=${JSON.stringify(defLandings.slice(0, 2))} 离我方簇=${defLandings[0] ? dist(defLandings[0], ourCluster).toFixed(1) : "-"}`,
+  );
+
+  // ── 负对照 2+3：线上没有敌设施 → 落回 approach 档；中立设施绝不当一档 ──
+  {
+    const st = assaultFixture().state;
+    const fr = frontById(st, "front_ridge");
+    // 把两个敌方胜负点打掉（hp=0），只剩中立雷达
+    for (const id of ["ea_kidney_ridge", "ea_miteirya_ridge"]) {
+      const f = st.facilities.get(id); if (f) f.hp = 0;
+    }
+    // 我方簇挪到别处，与中立雷达拉开距离，好判断落点到底跟谁走
+    st.units.forEach((u) => { if (u.team === "player") { u.position = { x: 215 + (u.id % 3), y: 60 }; } });
+    const elsewhere = { x: 216, y: 60 };
+    const d = frontDestinationFor(st, fr, "assault")!;
+    checkKnife(
+      "TF4 ★负对照★ 线上无敌设施 → 落回 approach 档（我方立足点），中立雷达绝不当目标",
+      dist(d, elsewhere) <= 3 && dist(d, RIDGE_NEUTRAL) > 30,
+      dist(d, RIDGE_NEUTRAL) <= 3,
+      `落点=(${d.x.toFixed(1)},${d.y.toFixed(1)}) 离我方簇=${dist(d, elsewhere).toFixed(1)} 离中立雷达=${dist(d, RIDGE_NEUTRAL).toFixed(1)}`,
+    );
+  }
+
+  // ── 负对照 4：retreat 一动不动 ──
+  // ★ 判据不能写成"撤退落点离敌 VP 够远"：本线几何中心 (239,76) 离中央山脊只有
+  //   10.8 格，这正是提案 §1-F 说的那个巧合。量"离得远"会把巧合当合同。
+  //   要量的是【撤退档走的还是它自己那条梯子】：三级兜底 = frontCenterPos。
+  const wd = frontDestinationFor(state, front, "withdraw")!;
+  const ridgeCenter = frontCenterPos(state, front)!;
+  check(
+    "TF5 ★负对照★ retreat 档一字未动（我方全在交火 → 仍走三级兜底 frontCenterPos，不是 assault 选的 VP）",
+    wd.x === ridgeCenter.x && wd.y === ridgeCenter.y &&
+      !(wd.x === assaultPt.x && wd.y === assaultPt.y),
+    `withdraw=(${wd.x},${wd.y}) frontCenterPos=(${ridgeCenter.x},${ridgeCenter.y}) assault=(${assaultPt.x},${assaultPt.y})`,
+  );
+
+  // ── T1 系列合同不动：assault 不许进 ETA 承诺那条路 ──
+  const anchor = battleAnchorFor(state, front)!;
+  check(
+    "TF6 ★边界★ battleAnchorFor 仍是 approach（ETA 承诺是增援语义，不是进攻语义）",
+    Math.abs(anchor.x - approachPt.x) < 0.01 && Math.abs(anchor.y - approachPt.y) < 0.01 &&
+      dist(anchor, RIDGE_VP_NEAR) > 30,
+    `anchor=(${anchor.x},${anchor.y}) approach=(${approachPt.x},${approachPt.y})`,
+  );
+  check("TF7 前置 我方小簇确实在册（局没造空）", ourIds.length === 3, `${ourIds.length}`);
+
+  // ── 档位次序三条（用户裁定 2026-08-05：效果最大处排序）──
+  //
+  // 1) 中央战线：全线唯一敌设施是西南角营房 (120,140)，非胜负点；我方在东头交火。
+  //    「我方交火簇」必须压过「敌方非VP设施」——否则「全军进攻中央战线」= 74 人
+  //    向 240 格外行军（实测；preflight 那 4 条红就是这么来的）。
+  {
+    const st = emptyBattlefield();
+    const fr = frontById(st, "front_center");
+    st.time = 1000;
+    const east = { x: 356, y: 108 }; // 东头，手测那局战况所在
+    for (let i = 0; i < 4; i++) {
+      addUnit(st, east.x + i, east.y, { lastAttackTime: st.time - 2, lastDamagedAt: st.time - 1 });
+    }
+    const barracks = st.facilities.get("ea_axis_barracks2")!;
+    const d = frontDestinationFor(st, fr, "assault")!;
+    check(
+      "TF8a 前置 该线无敌方胜负点，唯一敌设施是角落营房，且离我方交火处 > 200 格",
+      barracks.team === "enemy" && !(st.captureObjectives ?? []).includes(barracks.id) &&
+        dist(barracks.position, east) > 200,
+      `营房=(${barracks.position.x},${barracks.position.y}) 离东头=${dist(barracks.position, east).toFixed(1)}`,
+    );
+    checkKnife(
+      "TF8 ★次序★ 线上有我方交火时，敌方【非胜负点】设施不得成为落点（交火簇压过它）",
+      dist(d, east) <= 5 && dist(d, barracks.position) > 200,
+      dist(d, barracks.position) <= 5,
+      `落点=(${d.x.toFixed(1)},${d.y.toFixed(1)}) 离交火处=${dist(d, east).toFixed(1)} 离营房=${dist(d, barracks.position).toFixed(1)}`,
+    );
+  }
+
+  // 2) 敌军后方：四个敌设施、零胜负点、我方一人没有 ⇒ 必须落到敌方设施，
+  //    且取离 frontCenterPos 最近的那个（确定性），即敌军总部。
+  {
+    const st = emptyBattlefield();
+    const fr = frontById(st, "front_axis_rear");
+    st.time = 1000;
+    const hq = st.facilities.get("ea_rommel_hq")!;
+    const center = frontCenterPos(st, fr)!;
+    const d = frontDestinationFor(st, fr, "assault")!;
+    const enemyHere = [...st.facilities.values()].filter(
+      (f) => f.team === "enemy" && f.hp > 0 && dist(f.position, center) < 1e9 &&
+        fr.regionIds.some((rid) => { const r = st.regions.get(rid); return !!r &&
+          f.position.x >= r.bbox[0] && f.position.x <= r.bbox[2] &&
+          f.position.y >= r.bbox[1] && f.position.y <= r.bbox[3]; }),
+    );
+    check(
+      "TF9a 前置 敌军后方：多个敌设施、零胜负点、我方零人员",
+      enemyHere.length >= 3 && enemyHere.every((f) => !(st.captureObjectives ?? []).includes(f.id)),
+      enemyHere.map((f) => `${f.name}@${f.position.x},${f.position.y}`).join(" | "),
+    );
+    checkKnife(
+      "TF9 ★次序★ 无我方人员时落敌方设施：取离 frontCenterPos 最近的那个（敌军总部，确定性）",
+      d.x === hq.position.x && d.y === hq.position.y &&
+        enemyHere.every((f) => dist(hq.position, center) <= dist(f.position, center)),
+      d.x === center.x && d.y === center.y,
+      `落点=(${d.x},${d.y}) 敌总部=(${hq.position.x},${hq.position.y}) 中心=(${center.x},${center.y}) 各设施离中心=${enemyHere.map((f) => `${f.name}:${dist(f.position, center).toFixed(1)}`).join(" ")}`,
+    );
+  }
+
+  // 3) 敌非VP设施 压过 我方设施（第 4 档 > 第 5 档）：线上无我方人员，
+  //    同时存在敌方营房与我方据点 ⇒ 打敌人的，不是回自己家。
+  {
+    const st = emptyBattlefield();
+    const fr = frontById(st, "front_center");
+    st.time = 1000; // 线内零我方人员
+    const barracks = st.facilities.get("ea_axis_barracks2")!;
+    const ourPost = st.facilities.get("ea_player_central_post")!;
+    const d = frontDestinationFor(st, fr, "assault")!;
+    check(
+      "TF10a 前置 该线同时有敌方营房与我方前哨，且线内零我方人员",
+      barracks.team === "enemy" && ourPost.team === "player" &&
+        ![...st.units.values()].some((u) => u.team === "player"),
+      `营房=(${barracks.position.x},${barracks.position.y}) 我方前哨=(${ourPost.position.x},${ourPost.position.y})`,
+    );
+    checkKnife(
+      "TF10 ★次序★ 线上无我方人员时，敌方非VP设施压过我方设施（第4档 > 第5档）",
+      d.x === barracks.position.x && d.y === barracks.position.y,
+      d.x === ourPost.position.x && d.y === ourPost.position.y,
+      `落点=(${d.x},${d.y}) 敌营房=(${barracks.position.x},${barracks.position.y}) 我方前哨=(${ourPost.position.x},${ourPost.position.y})`,
+    );
+  }
+}
+
+// ============================================================
 // 刀2a — escalation tickets: the machine handle for "那批兵".
 //
 // The hardest tooth (user-promoted 2026-08-02): a cluster STRADDLING the front
@@ -1678,6 +1910,7 @@ function main(): void {
   }
   runKnife1();
   runKnife1Withdraw();
+  runKnifeF();
   runKnife2a();
   runKnife2b();
   runKnife2c();

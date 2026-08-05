@@ -1322,11 +1322,20 @@ export function findFacilityById(
  * the center only when the line is bare). Tags, facilities and explicit
  * coordinates are untouched: those already name a POINT the commander chose.
  *
- * Mode is read off the verb: a retreat resolves the SAME front to a different
- * point, because falling back onto the firefight is not a retreat.
+ * Mode is read off the verb: the same front resolves to three different points
+ * depending on what you are doing to it. Falling back onto the firefight is not
+ * a retreat, and charging at our own firefight is not an attack.
+ *
+ * 刀F (2026-08-05): attack moved off "approach". §8's opening ruling hung it
+ * there, and the live hand-test showed why that is wrong — approach's first
+ * rung is "the biggest fight on this line", so an assault ordered at a front
+ * where our own squad was skirmishing marched onto the skirmish instead of the
+ * enemy's victory point. See DIALOGUE_HANDTEST_LEDGER_AND_KNIFE_F_PROPOSAL_20260805.md §1-F.
  */
 function frontDestinationMode(intent: Intent): FrontDestinationMode {
-  return intent.type === "retreat" ? "withdraw" : "approach";
+  if (intent.type === "retreat") return "withdraw";
+  if (intent.type === "attack") return "assault";
+  return "approach";
 }
 
 /** Resolve attack/defend/recon target position from intent fields. */

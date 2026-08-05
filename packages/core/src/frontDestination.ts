@@ -153,10 +153,12 @@ export function unitFoughtRecently(u: Unit, now: number): boolean {
 // ── The ladder ──
 
 export type FrontDestinationMode =
-  /** Going TO the front: defend / reinforce / move / support / attack. */
+  /** Going TO the front to hold or help: defend / reinforce / move / support. */
   | "approach"
   /** Leaving it: retreat. Never lands on a cluster that is currently fighting. */
-  | "withdraw";
+  | "withdraw"
+  /** Taking it: attack. The objective is the enemy's, not our own line. */
+  | "assault";
 
 /** Alive friendly units standing inside the front. Same predicate battleAnchorFor
  *  has always used (commanders included — a body at the fight is a body at the
@@ -206,6 +208,45 @@ function friendlyFacilityIn(state: GameState, front: Front): Facility | null {
 }
 
 /**
+ * An enemy-held facility on this front. `objectivesOnly` splits the two rungs
+ * the assault ladder needs: victory points are a rung of their own, plain enemy
+ * facilities sit far lower down.
+ *
+ * Neutral facilities are NEVER returned — neutral is not the enemy, and the
+ * front's neutral radar being treated as a target is exactly the regression
+ * this rung exists to fix (hand-test 2026-08-05: an assault on 山脊战线 landed
+ * on the neutral 中央雷达 our own squad happened to be fighting at).
+ *
+ * Ties resolve by distance to `reference` — our foothold on that line, or the
+ * front center when we have none — then by id, so the choice never depends on
+ * Map iteration order.
+ *
+ * Fog: a facility's team and position are public metadata, the same read the
+ * friendly rung already makes. No enemy UNIT is read anywhere in this module.
+ */
+function enemyFacilityIn(
+  state: GameState,
+  front: Front,
+  reference: Position | null,
+  objectivesOnly: boolean,
+): Facility | null {
+  const objectives = new Set(state.captureObjectives ?? []);
+  let best: Facility | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const f of state.facilities.values()) {
+    if (f.team !== "enemy" || f.hp <= 0) continue;
+    if (objectives.has(f.id) !== objectivesOnly) continue;
+    if (!isInsideFront(state, front, f.position)) continue;
+    const d = reference ? tileDist(reference, f.position) : 0;
+    if (d < bestDist || (d === bestDist && best !== null && f.id < best.id)) {
+      best = f;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
+/**
  * Where an order that names only a FRONT should actually land.
  *
  * Returns null only when the front has no resolvable geometry at all (no
@@ -218,6 +259,50 @@ export function frontDestinationFor(
 ): Position | null {
   const now = state.time;
   const units = friendlyUnitsIn(state, front);
+
+  if (mode === "assault") {
+    // ── 刀F (regression fix + user ruling 2026-08-05) ──
+    //
+    // ONE principle generates the whole order: naming a REGION means "go change
+    // what happens in that region", so the landing point is where THIS VERB has
+    // the most effect. Ranking attack's options by that yields, top to bottom:
+    //
+    //   1. enemy victory point   — taking it changes who wins the battle
+    //   2. our biggest FIGHT     — tipping a live engagement decides that line
+    //   3. our biggest force     — massing on our own foothold projects from it
+    //   4. enemy plain facility  — real enemy ground, but no scoreboard effect
+    //   5. our own facility      — a place on the named front, effect near zero
+    //   6. frontCenterPos        — a statistic; last, as everywhere else
+    //
+    // Two measured cases pin the order. 山脊战线 (2 enemy VPs, our 3-man squad
+    // skirmishing on the front's NEUTRAL radar): §8 hung attack on the approach
+    // ladder, whose rung 1 is "our biggest fight", so 14 units marched onto our
+    // own skirmish — 36 tiles from the nearest VP, while the pre-§8 geometric
+    // center (239,76) happened to sit 10.8 tiles from it. That center reading
+    // better was a coincidence of this one front (its two VPs bracket the
+    // centroid), so the fix is attack's own ladder, not a revert. 中央战线 pins
+    // the other end: no VP, one enemy barracks in the far SW corner, our fight
+    // at the east end 240 tiles away — rung 2 beating rung 4 is what stops
+    // 「全军进攻中央战线」 from marching the army into the corner.
+    //
+    // ★ Rung 2 above rung 4 is deliberate and has a consequence worth stating
+    // out loud: on a front with NO victory point where we are already fighting,
+    // an attack still lands on our own fight. That is the same SHAPE as the
+    // regression above, kept on purpose — there the enemy had a VP to take;
+    // here winning the engagement in progress IS the largest available effect.
+    const reference = biggestClusterCentroid(units) ?? frontCenterPos(state, front);
+    const vp = enemyFacilityIn(state, front, reference, true);
+    if (vp) return { ...vp.position };
+    const fightingHere = biggestClusterCentroid(units.filter((u) => unitFoughtRecently(u, now)));
+    if (fightingHere) return fightingHere;
+    const standingHere = biggestClusterCentroid(units);
+    if (standingHere) return standingHere;
+    const enemyGround = enemyFacilityIn(state, front, reference, false);
+    if (enemyGround) return { ...enemyGround.position };
+    const ourFacility = friendlyFacilityIn(state, front);
+    if (ourFacility) return { ...ourFacility.position };
+    return frontCenterPos(state, front);
+  }
 
   if (mode === "withdraw") {
     // 1) Fall back ON something: a friendly facility is a strongpoint, and
@@ -235,6 +320,7 @@ export function frontDestinationFor(
     return frontCenterPos(state, front);
   }
 
+  // ── approach ──
   // 1) The fight itself — the most concentrated one, not the average of all.
   const fighting = biggestClusterCentroid(units.filter((u) => unitFoughtRecently(u, now)));
   if (fighting) return fighting;
