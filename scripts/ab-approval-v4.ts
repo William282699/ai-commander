@@ -26,7 +26,7 @@ import {
   battleAnchorFor,
   estimateSquadTravelTime,
 } from "../packages/core/src/crisisResponse";
-import { buildReinforceOptions } from "../packages/core/src/frontEscalationPayload";
+import { buildReinforceOptions, TASK_IDLE } from "../packages/core/src/frontEscalationPayload";
 import { frontDestinationFor } from "../packages/core/src/frontDestination";
 import { buildBattleBoard, boardToDigestLines } from "../packages/core/src/battleBoard";
 import { resolveIntent } from "../packages/core/src/tacticalPlanner";
@@ -1534,6 +1534,34 @@ function runKnifeA(): void {
     !!row && !new RegExp(`best_help=${squadLabel.replace(/[()]/g, "\\$&")}\\(`).test(row),
     row ?? "(无)",
   );
+  // ── ⑦「闲着」只准数真闲的（v4 §8, 2026-08-04）──
+  // fix1 的披露句把线外全部候选都算成"闲着"，其中包括正在交火的。可调度 ≠ 空闲：
+  // 把已经在打的兵报成余力，是把长官往二次投入上引。
+  {
+    resetEscalationTickets();
+    const mixed = lateCandidateFixture();
+    for (let i = 0; i < 4; i++) {
+      addUnit(mixed.state, 100 + i, 200, {
+        lastAttackTime: mixed.state.time - 1, lastDamagedAt: mixed.state.time - 1,
+      });
+    }
+    const opts = buildReinforceOptions(mixed.state, mixed.front).options;
+    const busy = opts.filter((o) => o.task === "交战中");
+    const free = opts.filter((o) => o.task === TASK_IDLE);
+    check(
+      "TA8d 前置 局造得对：线外一股 6 人闲着 + 一股 4 人交战中（都可调度）",
+      busy.length === 1 && busy[0].unitCount === 4 && free.length === 1 && free[0].unitCount === 6,
+      opts.map((o) => `${o.label}:${o.task}:${o.unitCount}`).join(" | "),
+    );
+    const mixedRow = buildFrontJudgmentLines(mixed.state).find((l) => l.includes("1. 北部战线"));
+    const m = mixedRow?.match(/线外(\d+)股\/(\d+)units 闲着/);
+    checkKnife(
+      "TA8e ★⑦★ 披露只数 task=无任务 的（交战中的兵不许被报成余力）",
+      !!m && m[1] === "1" && m[2] === "6",
+      !!m && m[1] === "2" && m[2] === "10",
+      mixedRow ?? "(无该行)",
+    );
+  }
 
   // 面⑦（机器 B）——本刀承重，三个消费者一次全喂
   checkKnife(

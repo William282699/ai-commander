@@ -63,6 +63,11 @@ const DISPLAY_BUDGET = 3;
 
 export type ReinforceTaskStatus = "交战中" | "守卫" | "巡逻" | "无任务" | "unknown";
 
+/** THE idle value. Exported so consumers that mean "actually free" test against
+ *  the source of truth instead of re-typing the string (v4 §8 ⑦: the disclosure
+ *  line called 10 units "闲着" while 4 of them were 交战中). */
+export const TASK_IDLE: ReinforceTaskStatus = "无任务";
+
 export interface ReinforceOption {
   /** Player-addressable label: "Blake(T5)" or "大本营附近未编组群". Never a bare internal id. */
   label: string;

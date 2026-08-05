@@ -18,7 +18,7 @@ import type { GameState, CrisisEvent, Front, Unit, Position } from "@ai-commande
 import { TILE_SIZE } from "@ai-commander/shared";
 import { assessCrisisEscalation } from "./crisisResponse";
 import { hasPlayerCombatPresence, freshFrontPowerRatio } from "./director";
-import { buildReinforceOptions, filterLateCandidates, groupTaskStatus, hpPctOf, nearestPlaceWithin, NAME_RADIUS_TILES } from "./frontEscalationPayload";
+import { buildReinforceOptions, filterLateCandidates, groupTaskStatus, hpPctOf, nearestPlaceWithin, NAME_RADIUS_TILES, TASK_IDLE } from "./frontEscalationPayload";
 import type { ReinforceOptionsResult } from "./frontEscalationPayload";
 
 /**
@@ -44,17 +44,24 @@ function describeNoHelp(
   clock: number | null,
 ): { text: string; named: ReinforceOptionsResult["options"][number] | null } {
   const timed = all.options.filter((o) => o.etaSec !== null);
-  if (timed.length > 0) {
+  // ⑦ (v4 §8, 2026-08-04): 闲着 means IDLE, and only the idle count may be
+  // spoken as such. Measured 2026-08-03: this line announced 「线外2股/10units
+  // 闲着」 with four of those units carrying task=交战中 — troops already in
+  // contact offered to the commander as spare. The reachability half below is
+  // still measured over ALL candidates: the question it answers is "how late
+  // would help be", and the soonest arrival answers that whoever it is.
+  const idle = all.options.filter((o) => o.task === TASK_IDLE);
+  if (timed.length > 0 && idle.length > 0) {
     // Gate emptied a non-empty set ⇒ every survivor had a finite eta above the
     // clock. Report the SOONEST one: "how late are we" is the actual question.
     const nearest = timed.reduce((a, b) => ((b.etaSec ?? 0) < (a.etaSec ?? 0) ? b : a));
-    const units = all.options.reduce((s, o) => s + o.unitCount, 0);
+    const units = idle.reduce((s, o) => s + o.unitCount, 0);
     const vs = clock !== null ? ` > survival ${clock}s` : "";
     return {
       // `named` rides back out so the caller can mint a handle for it: the
       // commander who hears "有 6 辆闲着但赶不到" must be able to say "还是让他们
       // 去" and have it land (B 刀 — address ≠ endorsement).
-      text: `线外${all.options.length}股/${units}units 闲着，最近 ${nearest.label} eta≈${nearest.etaSec}s${vs}，都赶不到`,
+      text: `线外${idle.length}股/${units}units 闲着，最近 ${nearest.label} eta≈${nearest.etaSec}s${vs}，都赶不到`,
       named: nearest,
     };
   }
