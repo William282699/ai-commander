@@ -131,6 +131,18 @@ function isEngaged(u: Unit, now: number): boolean {
   return false;
 }
 
+/**
+ * THE idle predicate: nothing ordered and nothing being done.
+ *
+ * Exported (H1, 2026-08-05) so the receipt's "these were pulled off a task"
+ * disclosure and the board's 无任务 label are the SAME ruler. A unit the
+ * envelope calls 闲着 must never be reported as torn off a mission, and vice
+ * versa; two predicates for one word is how those two faces drift apart.
+ */
+export function isUnitIdle(u: Unit): boolean {
+  return u.state === "idle" && u.orders.length === 0;
+}
+
 /** Map a uniform order/state picture to a task status; null = not uniform/typed. */
 function orderTaskOf(u: Unit): ReinforceTaskStatus | null {
   const active = u.orders.find((o) => o.action === "defend" || o.action === "hold" || o.action === "patrol");
@@ -138,7 +150,7 @@ function orderTaskOf(u: Unit): ReinforceTaskStatus | null {
   if (u.patrolTaskId !== null) return "巡逻";
   if (u.state === "patrolling") return "巡逻";
   if (u.state === "defending") return "守卫";
-  if (u.state === "idle" && u.orders.length === 0) return "无任务";
+  if (isUnitIdle(u)) return "无任务";
   return null; // moving/attacking/other → cannot type from orders alone
 }
 

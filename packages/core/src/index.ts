@@ -61,6 +61,9 @@ export {
   TICKET_TTL_SEC, NO_PROPOSAL_GUIDANCE,
 } from "./escalationTicket";
 export type { EscalationTicket, TicketResolution, TicketDestinationVerdict, EscalationWithTickets, CommanderRef } from "./escalationTicket";
+// H1 — 抽走带任务的部队必须说出口（披露，不是闸；user ruling 2026-08-05）
+export { describeCommittedPull } from "./committedUnits";
+export type { CommittedPullDisclosure } from "./committedUnits";
 // 手测账③ — command authority (dispatch is per-persona, not per-naming)
 export { checkDispatchAuthority, commanderDispatchPool, isDispatchIntent, combatRoleHolder } from "./commandAuthority";
 export type { AuthorityVerdict } from "./commandAuthority";

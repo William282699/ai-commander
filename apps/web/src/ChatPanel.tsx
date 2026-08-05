@@ -18,7 +18,7 @@ declare global {
 }
 import { OrgTree } from "./OrgTree";
 import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines, isAllFrontHint } from "@ai-commander/core";
-import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, isKnownForceRef, checkDispatchAuthority, retargetIntentForTicket, ticketDestinationVerdict } from "@ai-commander/core";
+import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, isKnownForceRef, checkDispatchAuthority, retargetIntentForTicket, ticketDestinationVerdict, describeCommittedPull } from "@ai-commander/core";
 import type { CommanderRef, EscalationTicket } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
@@ -2031,6 +2031,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       if (ttsEnabled) {
         speak(voiceConfirm, approveCommander);
       }
+      // H1 (§8 手测 03:15): read BEFORE applyOrders — that call overwrites
+      // state/orders, after which every unit looks equally busy on the NEW
+      // task and "what did we tear them off" is unrecoverable. Judgment is in
+      // core; this layer only prints the verdict.
+      const committedPull = describeCommittedPull(state, allAssignedUnitIds);
+
       const diagsBefore = new Set(state.diagnostics);
       applyOrders(state, allOrders);
 
@@ -2049,6 +2055,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           "info", ticketDispatchReceipt(s.ticket, s.dispatched, s.mode),
           state.time, ch, undefined, "command_ack",
         );
+      }
+
+      // H1: pulling committed troops is the commander's call — doing it without
+      // saying so is not. Disclosure only: nothing above was gated by this.
+      if (committedPull) {
+        addMessage("info", committedPull.line, state.time, ch, undefined, "command_ack");
       }
 
       // v4 刀2b P1: one exportable row per bare-confirm execution that actually

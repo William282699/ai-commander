@@ -28,6 +28,7 @@ import {
 } from "../packages/core/src/crisisResponse";
 import { buildReinforceOptions, TASK_IDLE } from "../packages/core/src/frontEscalationPayload";
 import { frontDestinationFor } from "../packages/core/src/frontDestination";
+import { describeCommittedPull } from "../packages/core/src/committedUnits";
 import { buildBattleBoard, boardToDigestLines } from "../packages/core/src/battleBoard";
 import { resolveIntent } from "../packages/core/src/tacticalPlanner";
 import { buildFrontJudgmentLines, commanderMood } from "../packages/core/src/commanderPresence";
@@ -662,6 +663,94 @@ function runKnifeF(): void {
       d.x === barracks.position.x && d.y === barracks.position.y,
       d.x === ourPost.position.x && d.y === ourPost.position.y,
       `落点=(${d.x},${d.y}) 敌营房=(${barracks.position.x},${barracks.position.y}) 我方前哨=(${ourPost.position.x},${ourPost.position.y})`,
+    );
+  }
+}
+
+// ============================================================
+// H1 — 抽走带任务的部队必须说出口（披露，不是闸；用户裁定 2026-08-05）
+//
+// 手测 03:15：一句「拿下山脊战线」派出 14 人，其中 10 个是长官 76 秒前亲自
+// 押到中央战线的增援。全军池 + busy 旁路是有意留宽的（"全军"就该是全军），
+// 裁定不动它——但抽走就得报账。
+//
+// ★ 判据：披露句里的数字必须 == 台架【独立重算】的 assignedUnitIds ∩ 忙碌集。
+//   谁报的数字对方重算才作数；读句子里的数字算自证。
+// ============================================================
+
+function runH1(): void {
+  console.log("\n== H1 抽走带任务的部队必须说出口 ==");
+
+  const state = emptyBattlefield();
+  state.time = 1000;
+  const front = frontById(state, "front_ridge");
+
+  // 忙碌组：中央战线东头，带 defend 单在身（长官刚押过去的那种）
+  const busyIds: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    const u = addUnit(state, 356 + i, 108, { state: "defending" });
+    u.orders = [{ unitIds: [u.id], action: "defend", target: { x: 356, y: 108 }, priority: 1 }];
+    busyIds.push(u.id);
+  }
+  // 闲置组：线外待命，零单零状态
+  const idleIds: number[] = [];
+  for (let i = 0; i < 5; i++) idleIds.push(addUnit(state, 300 + i, 130).id);
+
+  const all = [...busyIds, ...idleIds];
+  const pull = describeCommittedPull(state, all);
+  // 台架独立重算，绝不读句子里的数
+  const recount = all.filter((id) => {
+    const u = state.units.get(id)!;
+    return !(u.state === "idle" && u.orders.length === 0);
+  });
+  check(
+    "TH1a 前置 局造得对：4 个带 defend 任务 + 5 个真闲置",
+    recount.length === 4 && recount.every((id) => busyIds.includes(id)),
+    `重算忙碌=${recount.length} 忙碌组=${busyIds.length} 闲置组=${idleIds.length}`,
+  );
+  checkKnife(
+    "TH1 ★披露★ 抽走带任务的部队 → 回执侧说出口，数字 == 独立重算的交集",
+    !!pull && pull.count === recount.length &&
+      pull.unitIds.slice().sort((a, b) => a - b).join(",") === recount.slice().sort((a, b) => a - b).join(",") &&
+      pull.line.includes(String(recount.length)),
+    pull === null,
+    pull ? `count=${pull.count} 重算=${recount.length} 句子=「${pull.line}」` : "无披露句",
+  );
+  check(
+    "TH1b 披露句点名了任务去处（不是一句「有部队被抽走」了事）",
+    !!pull && pull.line.includes("设防") && pull.line.includes("中央战线"),
+    pull ? pull.line : "(无)",
+  );
+
+  // ── 负对照：全闲置派兵零披露行 ──
+  checkKnife(
+    "TH1c ★负对照★ 全闲置派兵 → 一个字都不说（披露不得退化成每次都响的噪音）",
+    describeCommittedPull(state, idleIds) === null,
+    describeCommittedPull(state, idleIds) !== null,
+    JSON.stringify(describeCommittedPull(state, idleIds)),
+  );
+  check(
+    "TH1d 边界 空名单/阵亡单位不产出披露行",
+    describeCommittedPull(state, []) === null &&
+      (() => { const u = state.units.get(busyIds[0])!; const hp = u.hp; u.hp = 0; u.state = "dead";
+        const r = describeCommittedPull(state, [busyIds[0]]); u.hp = hp; u.state = "defending"; return r === null; })(),
+  );
+
+  // ── 端到端：真派兵一次，数 assignedUnitIds ∩ 忙碌集 ──
+  {
+    const before = new Set(
+      [...state.units.values()].filter((u) => u.team === "player" && !(u.state === "idle" && u.orders.length === 0)).map((u) => u.id),
+    );
+    const r = resolveIntent(
+      { type: "attack", toFront: front.id, quantity: "all" } as Intent, state, state.style,
+    );
+    const pulled = r.assignedUnitIds.filter((id) => before.has(id));
+    const d = describeCommittedPull(state, r.assignedUnitIds);
+    checkKnife(
+      "TH1e ★端到端·数兵★ 一道「全军进攻」下去，披露数 == 派出名单里本来有任务的那些",
+      pulled.length > 0 && !!d && d.count === pulled.length,
+      pulled.length > 0 && d === null,
+      `assigned=${r.assignedUnitIds.length} 其中带任务=${pulled.length} 披露=${d ? d.count : "无"}`,
     );
   }
 }
@@ -1911,6 +2000,7 @@ function main(): void {
   runKnife1();
   runKnife1Withdraw();
   runKnifeF();
+  runH1();
   runKnife2a();
   runKnife2b();
   runKnife2c();
