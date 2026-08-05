@@ -39,7 +39,7 @@ import {
   mintEscalationTickets, lookupEscalationTicket, burnEscalationTicket, liveMembersOf,
   isTicketRef, isKnownForceRef, ticketPromptLine, resetEscalationTickets, TICKET_TTL_SEC,
   buildFrontEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
-  mintSpokenForce, _ticketsForTest, retargetIntentForTicket,
+  mintSpokenForce, _ticketsForTest, retargetIntentForTicket, ticketDestinationVerdict,
 } from "../packages/core/src/escalationTicket";
 import type { GameState, Unit, Front, Position, CrisisEvent, Intent } from "@ai-commander/shared";
 
@@ -869,17 +869,37 @@ function runKnifeB2(): void {
 
   // ── ★ 手测 02:50 的真凶：名单被当过滤器，交集为空 ──
   // 家法：会动兵的断言必须数 assignedUnitIds，不许读 log 字面。
+  //
+  // ★★ fixture 铁律（§7 的头号教训，2026-08-04 起执行）：本组票据一律走【生产
+  // 铸号路径】。上一版这里用的是手捏的对象字面量，它自带 anchor + targetFrontId，
+  // 而真实板子票据两样都没有——于是台架对它自己要防的那个 bug 发了假绿灯。
+  // 手捏的 fixture 只能证明手捏的世界。
   resetEscalationTickets();
   const disp = lateCandidateFixture();
   const roster = disp.state.squads.find((s) => s.id === "T9")!.unitIds;
-  const fakeTicket = {
-    gNumber: "G0", unitIds: [...roster], label: disp.squadLabel, unitCount: roster.length,
-    targetFrontId: disp.front.id, anchor: battleAnchorFor(disp.state, disp.front),
-    etaSec: 154, mintedAt: disp.state.time, burned: false,
-  };
-  const countFrom = (intent: Intent): { n: number; fromRoster: number; log: string } => {
+  const boardG = mintSpokenForce(disp.state, null, {
+    label: disp.squadLabel, memberIds: roster, etaSec: null,
+  });
+  const boardLook = boardG ? lookupEscalationTicket(boardG, disp.state.time) : null;
+  check(
+    "TB15a 前置 板子票据由生产铸号器产出，且形状就是真实的那种（anchor=null / 无所属战线）",
+    !!boardLook && boardLook.ok && boardLook.ticket.anchor === null &&
+      boardLook.ticket.targetFrontId === "" && boardLook.ticket.unitCount === roster.length,
+    boardLook && boardLook.ok
+      ? `${boardLook.ticket.gNumber} anchor=${boardLook.ticket.anchor === null ? "null" : "有"} front="${boardLook.ticket.targetFrontId}" ${boardLook.ticket.unitCount}units`
+      : "铸号失败",
+  );
+  if (!boardLook || !boardLook.ok) return;
+  const boardTicket = boardLook.ticket;
+
+  const countFrom = (intent: Intent): { n: number; fromRoster: number; log: string; landings: Position[] } => {
     const r = resolveIntent(intent, disp.state, disp.state.style, undefined, roster);
-    return { n: r.assignedUnitIds.length, fromRoster: r.assignedUnitIds.filter((i) => roster.includes(i)).length, log: r.log };
+    return {
+      n: r.assignedUnitIds.length,
+      fromRoster: r.assignedUnitIds.filter((i) => roster.includes(i)).length,
+      log: r.log,
+      landings: r.orders.map((o) => o.target).filter((t): t is Position => !!t),
+    };
   };
   const raw = countFrom({ type: "defend", toFront: disp.front.id } as Intent);
   check(
@@ -887,15 +907,16 @@ function runKnifeB2(): void {
     raw.n === 0 && raw.log.includes("框选的单位不在可调度范围内"),
     `assigned=${raw.n} log=${raw.log}`,
   );
-  const fixed = countFrom(retargetIntentForTicket(disp.state, { type: "defend", toFront: disp.front.id } as Intent, fakeTicket));
+  const fixed = countFrom(retargetIntentForTicket(disp.state, { type: "defend", toFront: disp.front.id } as Intent, boardTicket));
   checkKnife(
     "TB16 ★端到端·数兵★ 降级 front 提示后，冻结名单原样出发（承诺 6 == 实派 6）",
     fixed.n === roster.length && fixed.fromRoster === roster.length,
     fixed.n === 0,
     `assigned=${fixed.n}/${roster.length} 名单内=${fixed.fromRoster} log=${fixed.log}`,
   );
-  // ★ 手测第四局：兵动了，但开到了空沙漠——"去某条战线"解析成该线的【几何中心】，
-  // 而不是打仗的地方。刀1 当年只修了 ETA 承诺那一面，派兵这一面原样留着。
+
+  // ★ §7① 那条 bug 的真形态：板子号（自带 anchor 的路已删）+「去中央战线」。
+  // 判据量【落点坐标】，不是"调用了谁"——刀A 修的是路，这里验的是走完路到哪。
   const anchorPt = battleAnchorFor(disp.state, disp.front)!;
   const centerPt = frontCenterPos(disp.state, disp.front)!;
   check(
@@ -905,30 +926,113 @@ function runKnifeB2(): void {
     dist(anchorPt, centerPt) > 30,
     `anchor=(${anchorPt.x},${anchorPt.y}) center=(${centerPt.x},${centerPt.y}) d=${dist(anchorPt, centerPt).toFixed(1)}`,
   );
-  const sameFront = retargetIntentForTicket(disp.state, { type: "defend", toFront: disp.front.id } as Intent, fakeTicket);
   checkKnife(
-    "TB17 ★ 目的地就是本票据那条线时，落点用【战斗锚点】而非几何中心（承诺与执行同点）",
-    !!sameFront._targetPos && sameFront._targetPos.x === anchorPt.x && sameFront._targetPos.y === anchorPt.y,
-    sameFront.targetRegion === disp.front.id && !sameFront._targetPos,
-    `_targetPos=${sameFront._targetPos ? `(${sameFront._targetPos.x},${sameFront._targetPos.y})` : "无"} targetRegion=${sameFront.targetRegion ?? "无"}`,
+    "TB17 ★端到端·核坐标★ 板子号 +「去本战线」→ 兵落在打仗那处，不是几何中心",
+    fixed.n === roster.length && fixed.landings.length === roster.length &&
+      fixed.landings.every((t) => dist(t, anchorPt) <= 5) &&
+      fixed.landings.every((t) => dist(t, centerPt) > 30),
+    fixed.landings.length > 0 && fixed.landings.every((t) => dist(t, centerPt) <= 5),
+    `landings=${JSON.stringify(fixed.landings)} anchor=(${anchorPt.x},${anchorPt.y}) center=(${centerPt.x},${centerPt.y})`,
   );
   const otherFrontId = disp.state.fronts.find((f) => f.id !== disp.front.id)!.id;
-  const otherFront = retargetIntentForTicket(disp.state, { type: "defend", toFront: otherFrontId } as Intent, fakeTicket);
+  const otherFront = retargetIntentForTicket(disp.state, { type: "defend", toFront: otherFrontId } as Intent, boardTicket);
   check(
-    "TB17b ★边界★ 目的地是【别的】战线时锚点不得劫持（长官说去哪就去哪）",
+    "TB17b ★边界★ 目的地是【别的】战线时不得被劫持（长官说去哪就去哪）",
     otherFront.targetRegion === otherFrontId && !otherFront._targetPos && otherFront.toFront === undefined,
     `targetRegion=${otherFront.targetRegion ?? "无"} _targetPos=${otherFront._targetPos ? "有" : "无"}`,
   );
   check(
-    "TB17c 精确目的地（设施/标记点）优先于锚点——长官点了名的点不许被改",
-    (() => { const o = retargetIntentForTicket(disp.state, { type: "defend", targetFacility: "ea_alamein_town", toFront: disp.front.id } as Intent, fakeTicket);
+    "TB17c 精确目的地（设施/标记点）优先——长官点了名的点不许被改",
+    (() => { const o = retargetIntentForTicket(disp.state, { type: "defend", targetFacility: "ea_alamein_town", toFront: disp.front.id } as Intent, boardTicket);
       return o.targetFacility === "ea_alamein_town" && !o._targetPos && o.toFront === undefined; })(),
   );
+
+  // ── ★ 目的地裁决三分支（§8 条件二）──
+  //
+  // 票据是"指谁"的把手，从来不是"去哪"的把手。没写目的地时，引擎只有三条路是
+  // 诚实的：动词本身就地自足 → 就地办；撤退 → 走老合同；升级票据知道自己那条线
+  // → 用那条线。板子票据什么都不知道 —— 那就问，不猜。
+  const escFix = lateCandidateFixture(false); // 近处编队，过得了诚实闸 ⇒ 会铸升级号
+  const escBuilt = buildFrontEscalationWithTickets(escFix.state, makeCrisis(escFix.front));
+  const escTicket = escBuilt.tickets[0] ?? null;
   check(
-    "TB18 命令没给目的地时，落点回退到号里冻结的集合点（ETA 就是对它承诺的）",
-    (() => { const o = retargetIntentForTicket(disp.state, { type: "defend" } as Intent, fakeTicket);
-      return !!o._targetPos && o._targetPos.x === fakeTicket.anchor!.x; })(),
+    "TB18a 前置 升级票据也由生产入口产出，且带着自己那条战线",
+    !!escTicket && escTicket.targetFrontId === escFix.front.id,
+    escTicket ? `${escTicket.gNumber} front=${escTicket.targetFrontId}` : "(无票据)",
   );
+
+  // 分支 3a：就地自足动词 —— 执行，不反问，且回执说的是「就地设防」
+  // 「原地」的判据是【一个单位都没拿到目的地】（就地设防那条 order 的 target 是
+  // null），不是"落点离出发点近"——后者在原地和短距离移动之间分不清。
+  {
+    const v = ticketDestinationVerdict({ type: "defend" } as Intent, boardTicket, false);
+    const inPlace = countFrom(retargetIntentForTicket(disp.state, { type: "defend" } as Intent, boardTicket));
+    const receipt = ticketDispatchReceipt(boardTicket, inPlace.n, v.kind === "execute" ? v.receipt : "moved");
+    checkKnife(
+      "TB18 ★ 「让 G# 就地设防」→ 原地执行、不反问，回执不再谎称出发",
+      v.kind === "execute" && v.receipt === "in_place" &&
+        inPlace.n === roster.length && inPlace.landings.length === 0 &&
+        receipt.includes("就地设防") && !receipt.includes("出发"),
+      v.kind === "execute" && v.receipt === "moved",
+      `verdict=${v.kind}/${v.kind === "execute" ? v.receipt : v.reason} assigned=${inPlace.n} 有目的地的单位=${inPlace.landings.length} 回执=「${receipt}」`,
+    );
+  }
+
+  // 分支 3b：板子号 + 移动动词 + 没目的地 —— 零执行 + 反问「去哪」
+  checkKnife(
+    "TB18b ★ 板子号 + 移动动词 + 无目的地 → 零执行 + 反问（不许替长官挑地方）",
+    (() => { const v = ticketDestinationVerdict({ type: "attack" } as Intent, boardTicket, false);
+      return v.kind === "refuse" && v.reason === "no_destination" &&
+        v.line.includes(boardTicket.gNumber) && v.line.includes("去哪"); })(),
+    (() => { const v = ticketDestinationVerdict({ type: "attack" } as Intent, boardTicket, false);
+      return v.kind === "execute"; })(),
+    JSON.stringify(ticketDestinationVerdict({ type: "attack" } as Intent, boardTicket, false)),
+  );
+
+  // 分支 3c：升级号 + 移动动词 + 没目的地 —— 注入本票据那条战线，走 §8 梯子
+  if (escTicket) {
+    const v = ticketDestinationVerdict({ type: "attack" } as Intent, escTicket, false);
+    check(
+      "TB18c 升级号没写目的地 → 注入它自己那条战线（不是问，也不是猜）",
+      v.kind === "execute" && v.injectTargetRegion === escFix.front.id,
+      JSON.stringify(v),
+    );
+  }
+
+  // 分支 3d：裸 retreat —— 老合同（朝大本营），绝不改写成"撤向战斗锚点"
+  checkKnife(
+    "TB18d ★ 裸 retreat 保持 retreat-semantics-v1 老合同（不再被改写成撤进战场）",
+    (() => { const o = retargetIntentForTicket(disp.state, { type: "retreat" } as Intent, boardTicket);
+      const v = ticketDestinationVerdict(o, boardTicket, false);
+      return !o._targetPos && !o.targetRegion && !o.toFront &&
+        v.kind === "execute" && !v.injectTargetRegion; })(),
+    (() => { const o = retargetIntentForTicket(disp.state, { type: "retreat" } as Intent, boardTicket);
+      return !!o._targetPos; })(),
+    JSON.stringify(retargetIntentForTicket(disp.state, { type: "retreat" } as Intent, boardTicket)),
+  );
+
+  // 分支 2：假地名 —— 原字段名必须活到警告里（静默改写正是 §7③）
+  {
+    const bogus = retargetIntentForTicket(
+      disp.state, { type: "defend", toFront: "__不存在战线__" } as Intent, boardTicket,
+    );
+    checkKnife(
+      "TB18e ★ 查无此地的战线名原样留在 toFront（警告要报长官写的那个字段，不许改写成 targetRegion）",
+      bogus.toFront === "__不存在战线__" && bogus.targetRegion === undefined && !bogus._targetPos,
+      bogus.toFront === undefined && (bogus.targetRegion === "__不存在战线__" || !!bogus._targetPos),
+      `toFront=${bogus.toFront ?? "无"} targetRegion=${bogus.targetRegion ?? "无"} _targetPos=${bogus._targetPos ? "有" : "无"}`,
+    );
+    // softFix 清场之后（前端会清掉那个字段并报警），裁决必须是"问"，不是"办"。
+    const afterSoftFix = { ...bogus, toFront: undefined } as Intent;
+    checkKnife(
+      "TB18f ★ 假地名被清掉后 → 零执行 + 反问，绝不退化成「没写目的地」顺手执行",
+      (() => { const v = ticketDestinationVerdict(afterSoftFix, boardTicket, true);
+        return v.kind === "refuse" && v.reason === "unknown_place"; })(),
+      (() => { const v = ticketDestinationVerdict(afterSoftFix, boardTicket, true);
+        return v.kind === "execute"; })(),
+      JSON.stringify(ticketDestinationVerdict(afterSoftFix, boardTicket, true)),
+    );
+  }
 
   // ── 板子群行也要有号（手测 02:07 陈是从板子上念的那两股） ──
   resetEscalationTickets();
@@ -937,19 +1041,19 @@ function runKnifeB2(): void {
     buildBattleBoard(boardState),
     (row) => mintSpokenForce(boardState, null, { label: row.label, memberIds: row.memberIds, etaSec: null }),
   ).unassignedGroupLines;
-  const boardG = boardLines.join("\n").match(/handle=(G\d+)/)?.[1] ?? null;
+  const boardRowG = boardLines.join("\n").match(/handle=(G\d+)/)?.[1] ?? null;
   checkKnife(
     "TB19 ★ 板子群行也铸号（「附近有空闲部队吗」念出来的那几股必须可寻址）",
-    boardLines.length > 0 && boardG !== null,
-    boardLines.length > 0 && boardG === null,
+    boardLines.length > 0 && boardRowG !== null,
+    boardLines.length > 0 && boardRowG === null,
     boardLines.join(" | ") || "(无群行)",
   );
   check(
     "TB20 板子号解析回该群的冻结名单（不是标签，标签每帧会变）",
-    (() => { if (!boardG) return false;
-      const look = lookupEscalationTicket(boardG, boardState.time);
+    (() => { if (!boardRowG) return false;
+      const look = lookupEscalationTicket(boardRowG, boardState.time);
       return look.ok && look.ticket.unitIds.length > 0; })(),
-    boardG ?? "(无号)",
+    boardRowG ?? "(无号)",
   );
   check(
     "TB21 纯度 板子不给铸号器时字节不变、零 handle",

@@ -18,8 +18,8 @@ declare global {
 }
 import { OrgTree } from "./OrgTree";
 import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines, isAllFrontHint } from "@ai-commander/core";
-import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, isKnownForceRef, checkDispatchAuthority, retargetIntentForTicket } from "@ai-commander/core";
-import type { CommanderRef } from "@ai-commander/core";
+import { resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, isKnownForceRef, checkDispatchAuthority, retargetIntentForTicket, ticketDestinationVerdict } from "@ai-commander/core";
+import type { CommanderRef, EscalationTicket } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
@@ -1840,8 +1840,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // Day 10.5 box-select parameter), so tacticalPlanner is untouched and the
     // global pool is never consulted.
     const ticketRosters = new Map<Intent, number[]>();
-    const ticketReceipts: string[] = [];
-    const ticketsToBurn: string[] = [];
+    // v4 §8 刀B/刀C: the ticket itself has to survive to the dispatch loop now —
+    // the destination verdict needs it (which front was this raised for?) and
+    // the receipt needs it (whose label, and how many REALLY left). Keyed by
+    // intent identity; the intents array holds the same objects throughout.
+    const ticketByIntent = new Map<Intent, EscalationTicket>();
+    const ticketReceiptMode = new Map<Intent, "moved" | "in_place">();
 
     // 手测账③: who is being spoken to decides what they may move. This is the
     // ENGINE BACKSTOP — the primary fix is the prompt principle (a persona with
@@ -1889,8 +1893,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           return;
         }
         ticketRosters.set(intent, lawful);
-        ticketsToBurn.push(tk.ticket.gNumber);
-        ticketReceipts.push(ticketDispatchReceipt(tk.ticket, lawful.length));
+        ticketByIntent.set(intent, tk.ticket);
+        // 刀C: NO receipt is written here. It used to be — with lawful.length,
+        // before the resolver had run — and that is how a roster of 6 under a
+        // quantity=2 order dispatched 2 units and printed "6个单位出发了"
+        // (§7⑤). The receipt is settled after resolveIntent, off the real
+        // assignedUnitIds, or not printed at all.
         // The roster IS the scope now; leaving the G-number in fromSquad would
         // send the squad resolver looking for a squad that does not exist.
         intent.fromSquad = undefined;
@@ -1919,6 +1927,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         }
       }
 
+      // Snapshot BEFORE the soft-fix: afterwards "named a place that does not
+      // exist" and "named no place" are indistinguishable, and the ticket
+      // verdict below has to tell them apart (§7③).
+      const wroteDestination = !!(
+        intent._targetPos || intent.targetFacility || intent.targetRegion || intent.toFront
+      );
+
       // Soft-fix: clear hallucinated target fields (e.g. LLM invents a non-existent
       // tag/front/facility). Other valid fields in the same intent still drive execution.
       softFixTargetFields(intent, state, (field, value) => {
@@ -1931,6 +1946,25 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         setClarification("命令引用了不存在的目标，请重新描述");
         return;
       }
+
+      // v4 §8 刀B: a ticket is a handle on PEOPLE — it can never answer "where".
+      // Decided in core, routed here. TICKET-BOUND INTENTS ONLY: ordinary
+      // commands keep going through untouched, because the engine cannot tell a
+      // clear order that named no squad from a follow-up that got mis-bound, and
+      // gating both would put a confirmation card back in front of clear orders.
+      const boundTicket = ticketByIntent.get(intent);
+      if (boundTicket) {
+        const verdict = ticketDestinationVerdict(intent, boundTicket, wroteDestination);
+        if (verdict.kind === "refuse") {
+          addMessage("warning", verdict.line, state.time, ch, undefined, "command_ack");
+          setClarification(
+            verdict.reason === "unknown_place" ? "目的地无法定位，请换个地名" : "请指明目的地",
+          );
+          return;
+        }
+        if (verdict.injectTargetRegion) intent.targetRegion = verdict.injectTargetRegion;
+        ticketReceiptMode.set(intent, verdict.receipt);
+      }
     }
 
     const allOrders: ReturnType<typeof resolveIntent>["orders"] = [];
@@ -1938,6 +1972,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     let degradedCount = 0;
 
     const allAssignedUnitIds: number[] = [];
+    // 刀C: settled per intent, off what that intent's resolver actually assigned.
+    // An intent that produced no orders contributes NOTHING here — no receipt,
+    // and its ticket is not burned, so the proposal stays usable (the degraded
+    // warning above is already the honest word about what happened).
+    const settled: { ticket: EscalationTicket; dispatched: number; mode: "moved" | "in_place" }[] = [];
     for (const intent of intents) {
       // v4 刀2b: a ticket's frozen roster wins over the box-select snapshot —
       // the player approved THAT batch, not whatever is currently framed.
@@ -1950,6 +1989,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         addMessage("warning", result.log, state.time, ch, undefined, "command_ack");
       } else {
         addMessage("info", `执行: ${result.log}`, state.time, ch, undefined, "command_ack");
+      }
+      const boundTicket = ticketByIntent.get(intent);
+      if (boundTicket && result.orders.length > 0) {
+        settled.push({
+          ticket: boundTicket,
+          dispatched: result.assignedUnitIds.length,
+          mode: ticketReceiptMode.get(intent) ?? "moved",
+        });
       }
       for (const id of result.assignedUnitIds) reserved.add(id);
       allAssignedUnitIds.push(...result.assignedUnitIds);
@@ -1983,12 +2030,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
       // v4 刀2b: burn AFTER the orders are actually applied — a ticket that
       // failed to produce orders must stay usable. One-shot from here on: the
-      // same proposal can never dispatch twice. The receipt reports the number
-      // that REALLY left (casualties/re-tasked members already dropped out in
-      // liveMembersOf), so the promise is reconciled out loud, not assumed.
-      for (const g of ticketsToBurn) burnEscalationTicket(g);
-      for (const r of ticketReceipts) {
-        addMessage("info", r, state.time, ch, undefined, "command_ack");
+      // same proposal can never dispatch twice.
+      //
+      // 刀C (§8 ⑤): burn and receipt are now PER TICKET and settled from that
+      // intent's own result. A ticket whose order produced nothing is neither
+      // burned nor receipted — it was never spent. The number in the receipt is
+      // the number the resolver actually assigned, so quantity limits, terrain
+      // skips and casualties are all reconciled out loud rather than assumed.
+      for (const s of settled) {
+        burnEscalationTicket(s.ticket.gNumber);
+        addMessage(
+          "info", ticketDispatchReceipt(s.ticket, s.dispatched, s.mode),
+          state.time, ch, undefined, "command_ack",
+        );
       }
 
       // v4 刀2b P1: one exportable row per bare-confirm execution that actually
@@ -2002,11 +2056,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const targets = intents
           .map((i) => i.toFront ?? i.targetFacility ?? i.targetRegion ?? i.fromFront ?? "unspecified")
           .join("+");
+        const spent = settled.map((s) => s.ticket.gNumber);
         state.diagnostics.push({
           time: state.time,
           code: "V4_BARE_CONFIRM_EXEC",
-          message: `escalateId=${bce.escalateId} viaTicket=${ticketsToBurn.length > 0}` +
-            `${ticketsToBurn.length > 0 ? ` tickets=${ticketsToBurn.join(",")}` : ""}` +
+          message: `escalateId=${bce.escalateId ?? "none"} viaTicket=${spent.length > 0}` +
+            `${spent.length > 0 ? ` tickets=${spent.join(",")}` : ""}` +
             ` dispatched=${allAssignedUnitIds.length} target=${targets}`,
         });
       }

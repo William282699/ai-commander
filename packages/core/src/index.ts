@@ -56,11 +56,11 @@ export { buildFrontJudgmentLines, commanderMood, buildCommanderMoodLine, viewpor
 // approval-contract-v4 刀2 — escalation tickets (the machine handle for "那批兵")
 export {
   buildFrontEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
-  retargetIntentForTicket, mintSpokenForce,
+  retargetIntentForTicket, ticketDestinationVerdict, mintSpokenForce,
   burnEscalationTicket, isTicketRef, isKnownForceRef, resetEscalationTickets,
   TICKET_TTL_SEC, NO_PROPOSAL_GUIDANCE,
 } from "./escalationTicket";
-export type { EscalationTicket, TicketResolution, EscalationWithTickets, CommanderRef } from "./escalationTicket";
+export type { EscalationTicket, TicketResolution, TicketDestinationVerdict, EscalationWithTickets, CommanderRef } from "./escalationTicket";
 // 手测账③ — command authority (dispatch is per-persona, not per-naming)
 export { checkDispatchAuthority, commanderDispatchPool, isDispatchIntent, combatRoleHolder } from "./commandAuthority";
 export type { AuthorityVerdict } from "./commandAuthority";

@@ -27,8 +27,9 @@
 // no background task, no single slot — tickets are naturally multi-instance.
 // ============================================================
 
-import type { GameState, Front, Position, CrisisEvent, Intent } from "@ai-commander/shared";
+import type { GameState, Front, Position, CrisisEvent, Intent, IntentType } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
+import { isDispatchIntent } from "./commandAuthority";
 import { buildReinforceOptions, buildFrontEscalationPayload, filterLateCandidates } from "./frontEscalationPayload";
 import type { ReinforceOptionsResult } from "./frontEscalationPayload";
 import { battleAnchorFor } from "./crisisResponse";
@@ -65,7 +66,16 @@ export interface EscalationTicket {
   targetFrontId: string;
   /** Rally point the ETA promise was measured to (刀1 battleAnchorFor).
    *  null only when the front has no resolvable geometry at all — never a
-   *  (0,0) placeholder waiting for someone to remember to backfill it. */
+   *  (0,0) placeholder waiting for someone to remember to backfill it.
+   *
+   *  ★ v4 §8 (2026-08-04): READ-ONLY provenance for the ETA. It is no longer
+   *  injected into the dispatch path. It used to be, and a frozen point that
+   *  outlives the situation it was frozen in is how a bare 「快撤」 became
+   *  "retreat onto the enemy's position" (§7④) and how an unknown place name
+   *  became a silent rewrite to an old anchor (§7③). Execution now re-resolves
+   *  the destination at dispatch time through frontDestinationFor — the same
+   *  ladder the anchor itself came from, so the two still agree by
+   *  construction, they just no longer agree by freezing. */
   anchor: Position | null;
   /** Arrival estimate at mint time; null = unknown. Carried so the receipt can
    *  state the cost of sending a force the engine already called too slow —
@@ -380,9 +390,23 @@ export function resolveTicketReference(
  * 0 dispatched with toFront, 6 with the hints cleared).
  *
  * A ticket HAS no source front: its source is the roster. So fromFront is
- * dropped, toFront is moved to targetRegion (resolveTarget resolves a front id
- * there), and an order that named no destination at all falls back to the rally
- * point frozen with the ticket — the very point its ETA was promised against.
+ * dropped and toFront is moved to targetRegion, where resolveTarget resolves a
+ * front id through the §8 destination ladder.
+ *
+ * ★ v4 §8 (2026-08-04): the anchor-injection branch that used to sit here is
+ * GONE. It existed only to route around getFrontCenterPos, and now that the
+ * front branches of resolveTarget resolve properly there is nothing to route
+ * around. Its three measured defects go with it: a bare retreat rewritten to
+ * "retreat onto the fight" (§7④), an unknown place name silently rewritten to
+ * an old anchor with the offending field deleted before isValidTarget could
+ * see it (§7③), and a board-minted ticket (anchor === null) falling through to
+ * the geometric center anyway (§7①).
+ *
+ * ★ An UNRESOLVABLE toFront is left in place on purpose. Demoting it to
+ * targetRegion would make the downstream warning name a field the model never
+ * wrote — a silent rewrite of the commander's own words. Left where it is,
+ * softFixTargetFields reports 「toFront=<原话>」 and ticketDestinationVerdict
+ * turns it into a question instead of a guess.
  *
  * Pure, and in core on purpose: ChatPanel has no bench harness, and this is
  * exactly the kind of judgment that shipped reversed once already.
@@ -390,7 +414,9 @@ export function resolveTicketReference(
 export function retargetIntentForTicket(
   state: GameState,
   intent: Intent,
-  ticket: EscalationTicket,
+  /** Kept in the signature, no longer read: the one thing this took from the
+   *  ticket was its frozen anchor, and §8 deleted that path. */
+  _ticket: EscalationTicket,
 ): Intent {
   const out: Intent = { ...intent };
   // A ticket has no SOURCE front — its source is the frozen roster.
@@ -399,41 +425,113 @@ export function retargetIntentForTicket(
   // Precise, player-meant destinations win outright (a facility, a map tag, an
   // explicit coordinate): those name a POINT, and the commander chose it.
   const hasPreciseTarget = !!(out.targetFacility || out.targetRegion || out._targetPos);
-  const destFront = out.toFront ? findFront(state, out.toFront) : undefined;
 
-  // ★ Otherwise the ticket's own battle anchor beats the front hint (hand-test
-  // 2026-08-02 round 4). "去中央战线" resolves through getFrontCenterPos — the
-  // GEOMETRIC CENTRE of the front's region union, which on a multi-region front
-  // sits ~100 tiles from where anyone is shooting; the units marched into empty
-  // desert while the outpost they were sent to save was elsewhere. That is the
-  // exact 7-22 incident 刀1 fixed for the ETA PROMISE and never fixed for the
-  // DISPATCH. The anchor is where the fight is, and it is the very point this
-  // ticket's ETA was measured against — promise and execution agree by
-  // construction. Only used when the order's destination IS this ticket's front
-  // (or names no front at all); a handle pointed at some other line must go
-  // where the commander said, not where its escalation happened to be.
-  const anchorWins =
-    !!ticket.anchor && !hasPreciseTarget &&
-    (!destFront || destFront.id === ticket.targetFrontId);
-
-  if (anchorWins && ticket.anchor) {
-    out._targetPos = { x: ticket.anchor.x, y: ticket.anchor.y };
-  } else if (!hasPreciseTarget && out.toFront) {
+  if (hasPreciseTarget) {
+    out.toFront = undefined;
+  } else if (out.toFront && findFront(state, out.toFront)) {
     // Front hint demoted from SOURCE to DESTINATION (targetRegion resolves a
     // front id) — it must never reach resolveSourceUnits, where it would make
     // the pool "units already at the destination" and leave the roster with an
     // empty intersection (measured: 0 dispatched with toFront, 6 without).
     out.targetRegion = out.toFront;
+    out.toFront = undefined;
   }
-  out.toFront = undefined;
   return out;
+}
+
+// ── Where does a ticket-bound order actually go? (v4 §8 条件二, 2026-08-04) ──
+
+export type TicketDestinationVerdict =
+  /** Dispatch it. `injectTargetRegion` (when set) is the destination the engine
+   *  supplies because the order named none; `receipt` picks the wording. */
+  | { kind: "execute"; injectTargetRegion?: string; receipt: "moved" | "in_place" }
+  /** Zero execution + this question. A ticket is a handle on PEOPLE, never on a
+   *  place, so "where" is the one thing it can never fill in for the commander. */
+  | { kind: "refuse"; reason: "unknown_place" | "no_destination"; line: string };
+
+/** Verbs that are already complete without a destination: they act where the
+ *  force stands. Everything else needs somewhere to go. */
+const IN_PLACE_TYPES: ReadonlySet<IntentType> = new Set<IntentType>(["defend", "hold"]);
+
+/**
+ * THE destination decision for a ticket-bound order, in three cases:
+ *
+ *   1. a destination was written and survived validation → execute it;
+ *   2. one was written and did NOT survive (no such place) → refuse and ask,
+ *      never substitute (§7③: the substitute was an anchor frozen minutes ago);
+ *   3. none was written at all:
+ *      · defend/hold act in place — legal, and the receipt must say so
+ *        rather than claim a march that never happened (§7②);
+ *      · retreat keeps the retreat-semantics-v1 default (toward HQ, pinned
+ *        byte-for-byte in ab-retreat-semantics);
+ *      · an ESCALATION ticket knows which front it was raised for, so that
+ *        front becomes the destination and rides the §8 ladder;
+ *      · a BOARD ticket (targetFrontId === "") knows no front — and inventing
+ *        one is the whole family of soft-fixes this rung removes. Ask.
+ *
+ * Called only for intents the ticket layer actually bound. Non-ticket commands
+ * are untouched on purpose: the engine cannot tell "a new order that named no
+ * squad" from "a follow-up that got mis-bound", and gating both would put a
+ * confirmation card back in front of clear orders — the thing the 砍卡法 ruling
+ * removed (Bucket A, 审核档 §3-6).
+ */
+export function ticketDestinationVerdict(
+  intent: Intent,
+  ticket: EscalationTicket,
+  /** Did the model write ANY destination field before softFixTargetFields ran?
+   *  This is what separates case 2 from case 3 — after the soft-fix they look
+   *  identical, and treating "you named a place I can't find" as "you named no
+   *  place" is how a typo turns into a dispatch to somewhere else. */
+  wroteDestination: boolean,
+): TicketDestinationVerdict {
+  const hasDestination = !!(
+    intent._targetPos || intent.targetFacility || intent.targetRegion || intent.toFront
+  );
+  if (hasDestination) return { kind: "execute", receipt: "moved" };
+
+  if (wroteDestination) {
+    return {
+      kind: "refuse",
+      reason: "unknown_place",
+      line: `${ticket.label} 还在原地——您说的那个地方我在图上找不着。换个地名，或者说「原地守住」，我立刻办。`,
+    };
+  }
+
+  // Economy intents carry no destination by nature and can never be a dispatch.
+  if (!isDispatchIntent(intent.type)) return { kind: "execute", receipt: "moved" };
+  if (IN_PLACE_TYPES.has(intent.type)) return { kind: "execute", receipt: "in_place" };
+  if (intent.type === "retreat") return { kind: "execute", receipt: "moved" };
+  if (ticket.targetFrontId) {
+    return { kind: "execute", injectTargetRegion: ticket.targetFrontId, receipt: "moved" };
+  }
+  return {
+    kind: "refuse",
+    reason: "no_destination",
+    line: `${ticket.label}（${ticket.gNumber}）去哪？您给个地名或据点，我这就派。`,
+  };
 }
 
 /** Receipt after a dispatch: the REAL number that left, never the promised one.
  *  B 刀: when the handle carries an arrival estimate, the receipt states it —
  *  a force the engine called too slow may still be sent, but the commander is
- *  told what he just bought rather than only that it left. */
-export function ticketDispatchReceipt(ticket: EscalationTicket, dispatched: number): string {
+ *  told what he just bought rather than only that it left.
+ *
+ *  刀C (v4 §8 ⑤, 2026-08-04): `dispatched` must be counted from the resolver's
+ *  assignedUnitIds AFTER the dispatch, not from the roster before it. Measured
+ *  §7⑤: roster 6 + quantity=2 → 2 units moved, receipt said 6. And `mode`
+ *  exists because 「出发了」 is a lie about a defend-in-place order — the units
+ *  did what was asked without going anywhere (§7②). The ETA belongs only to
+ *  the marching case; there is no arrival to estimate when nobody departs. */
+export function ticketDispatchReceipt(
+  ticket: EscalationTicket,
+  dispatched: number,
+  mode: "moved" | "in_place" = "moved",
+): string {
+  if (mode === "in_place") {
+    return dispatched === ticket.unitCount
+      ? `${ticket.label} ${dispatched}个单位就地设防。`
+      : `${ticket.label} 实际能动的 ${dispatched} 个已就地设防（原报 ${ticket.unitCount} 个，其余已不在编）。`;
+  }
   const eta = ticket.etaSec !== null ? `，按估算约 ${ticket.etaSec} 秒到位` : "";
   return dispatched === ticket.unitCount
     ? `${ticket.label} ${dispatched}个单位出发了${eta}。`
