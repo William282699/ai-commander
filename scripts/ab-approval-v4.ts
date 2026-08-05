@@ -1561,6 +1561,23 @@ function runKnifeA(): void {
       !!m && m[1] === "2" && m[2] === "10",
       mixedRow ?? "(无该行)",
     );
+    // ⑦ 的另一半（Fable 裁定 2026-08-04）：被【点名】的那股也必须是闲着的。
+    // 数对了但点名点了交战群，是同一个病换了个位置——而且那股还会被铸号，
+    // 长官照着"闲着"那句话说「让他们去」就会把正在交火的兵抽出来。
+    const busyLabel = busy[0]?.label ?? "__none__";
+    const freeLabel = free[0]?.label ?? "__none__";
+    check(
+      "TA8f0 前置 交战那股确实更近（否则「限定 idle」这条不可测）",
+      (busy[0]?.etaSec ?? Infinity) < (free[0]?.etaSec ?? Infinity),
+      `交战中 ${busyLabel}:${busy[0]?.etaSec}s 闲着 ${freeLabel}:${free[0]?.etaSec}s`,
+    );
+    const named = mixedRow?.match(/最近 (\S+) eta≈/)?.[1] ?? null;
+    checkKnife(
+      "TA8f ★⑦·点名★ 「最近 X」只在闲着的里面挑（更近的交战群不得被点名/铸号）",
+      named === freeLabel && named !== busyLabel,
+      named === busyLabel,
+      `点名=${named ?? "(无)"} 闲着=${freeLabel} 交战中=${busyLabel}`,
+    );
   }
 
   // 面⑦（机器 B）——本刀承重，三个消费者一次全喂

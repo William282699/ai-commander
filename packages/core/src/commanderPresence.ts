@@ -43,18 +43,24 @@ function describeNoHelp(
   all: ReinforceOptionsResult,
   clock: number | null,
 ): { text: string; named: ReinforceOptionsResult["options"][number] | null } {
-  const timed = all.options.filter((o) => o.etaSec !== null);
-  // ⑦ (v4 §8, 2026-08-04): 闲着 means IDLE, and only the idle count may be
-  // spoken as such. Measured 2026-08-03: this line announced 「线外2股/10units
-  // 闲着」 with four of those units carrying task=交战中 — troops already in
-  // contact offered to the commander as spare. The reachability half below is
-  // still measured over ALL candidates: the question it answers is "how late
-  // would help be", and the soonest arrival answers that whoever it is.
+  // ⑦ (v4 §8, 2026-08-04): 闲着 means IDLE, and this whole sentence — count AND
+  // the force it names — may only speak about idle forces. Measured 2026-08-03:
+  // the line announced 「线外2股/10units 闲着」 with four of those units carrying
+  // task=交战中, troops already in contact offered to the commander as spare.
+  //
+  // fix (Fable ruling 2026-08-04): the "最近 X" half was first left measuring
+  // ALL candidates, on the argument that "how late would help be" is answered
+  // by the soonest arrival whoever it is. Measured consequence: a 交战中 group
+  // got NAMED — and handle-minted — inside a sentence that opens with 「闲着」.
+  // Same defect, moved from the count to the name. The sentence is about spare
+  // capacity, so every part of it is about spare capacity; a slower honest
+  // answer beats a faster one that offers troops already in a firefight.
   const idle = all.options.filter((o) => o.task === TASK_IDLE);
-  if (timed.length > 0 && idle.length > 0) {
+  const idleTimed = idle.filter((o) => o.etaSec !== null);
+  if (idleTimed.length > 0) {
     // Gate emptied a non-empty set ⇒ every survivor had a finite eta above the
     // clock. Report the SOONEST one: "how late are we" is the actual question.
-    const nearest = timed.reduce((a, b) => ((b.etaSec ?? 0) < (a.etaSec ?? 0) ? b : a));
+    const nearest = idleTimed.reduce((a, b) => ((b.etaSec ?? 0) < (a.etaSec ?? 0) ? b : a));
     const units = idle.reduce((s, o) => s + o.unitCount, 0);
     const vs = clock !== null ? ` > survival ${clock}s` : "";
     return {
