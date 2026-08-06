@@ -324,7 +324,13 @@ function assignedUnitCount(intents: WireIntent[]): number {
   const s = freshScene();
   const reserved = new Set<number>();
   let total = 0;
-  for (const raw of intents) {
+  for (const raw of intents) total += resolveOne(raw, s, reserved);
+  return total;
+}
+
+/** 一条 intent 实派了几个兵（番号单走 ChatPanel 同一条路）。reserved 跨 intent 累积。 */
+function resolveOne(raw: WireIntent, s: GameState, reserved: Set<number>): number {
+  {
     try {
       let intent = { ...raw } as unknown as Intent;
       let roster: number[] | undefined;
@@ -336,24 +342,62 @@ function assignedUnitCount(intents: WireIntent[]): number {
       );
 
       const tk = resolveTicketReference(s, intent.fromSquad, s.time);
-      if (tk.kind === "refuse") continue; // 引擎明确拒绝 = 零执行
+      if (tk.kind === "refuse") return 0; // 引擎明确拒绝 = 零执行
       if (tk.kind === "dispatch") {
         roster = tk.unitIds;
         intent.fromSquad = undefined;
         intent = { ...intent, ...retargetIntentForTicket(s, intent, tk.ticket) };
         const verdict = ticketDestinationVerdict(intent, tk.ticket, wroteDestination);
-        if (verdict.kind === "refuse") continue; // 零执行 + 反问
+        if (verdict.kind === "refuse") return 0; // 零执行 + 反问
         if (verdict.injectTargetRegion) intent.targetRegion = verdict.injectTargetRegion;
       }
 
       const r = resolveIntent(intent, s, s.style, reserved, roster);
       for (const id of r.assignedUnitIds) reserved.add(id);
-      total += r.assignedUnitIds.length;
+      return r.assignedUnitIds.length;
     } catch {
       // 解析失败 = 零执行，照记 0（不吞成"过了"）
     }
   }
-  return total;
+  return 0;
+}
+
+/** 进攻类 intent：把一句战略表态翻成一场攻势，翻的就是这三种。
+ *  （判据修订第 1 版 2026-08-06：指标1 只咬这三种，因为合同④要求逐子句处理——
+ *  「放弃北线前哨」该开的撤退单是【正确行为】，旧判据把它也记成病。） */
+const OFFENSIVE_TYPES = new Set(["attack", "capture", "sabotage"]);
+
+/** 一条回复里：有没有进攻单 / 进攻单实派了多少兵。
+ *  兵力仍走真 resolveIntent（家法①），且按原顺序处理以保持占位一致。 */
+function offensiveDispatch(intents: WireIntent[]): { hasOffensive: boolean; units: number } {
+  if (intents.length === 0) return { hasOffensive: false, units: 0 };
+  const s = freshScene();
+  const reserved = new Set<number>();
+  let units = 0;
+  let hasOffensive = false;
+  for (const raw of intents) {
+    const offensive = OFFENSIVE_TYPES.has(String(raw.type));
+    if (offensive) hasOffensive = true;
+    const n = resolveOne(raw, s, reserved);
+    if (offensive) units += n;
+  }
+  return { hasOffensive, units };
+}
+
+/** 台词把番号贴到了别的东西上（战线/别的部队）。
+ *  单列观察项，不进合同的编话账——根因在引擎的信封印法（handle 印在行末，
+ *  而那一行的主语是战线），已另立引擎小刀，本轮不碰信封。 */
+const HANDLE_OWNER_CONFUSABLES = [
+  "Aiden", "Carter", "Evans", "I1", "I2", "T3",
+  "北部战线", "山脊战线", "中央战线", "北线", "前哨",
+];
+function misboundHandles(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/G\d+/g)) {
+    const pre = text.slice(Math.max(0, (m.index ?? 0) - 8), m.index ?? 0);
+    if (HANDLE_OWNER_CONFUSABLES.some((t) => pre.includes(t))) out.push(pre.slice(-8) + m[0]);
+  }
+  return out;
 }
 
 /** 地图上真实存在的地名/ID 全集（G2 硬线用：长官没说过的真 id 一个都不许出现）。 */
@@ -1118,13 +1162,14 @@ interface ArmStats {
   digestSha: string;
   unusable: number;
   retried: number;
-  goal: { n: number; opened: number; dispatched: number; doctrines: number };
+  goal: { n: number; offensive: number; offUnits: number; opened: number; dispatched: number; doctrines: number };
   order: { n: number; zeroExec: number; medianMs: number; questionEnd: number; ask: number };
   chain2: { n: number; opened: number; dispatched: number };
   consult: { n: number; opened: number };
   g2: { n: number; violations: number; exitA: number; exitB: number; samples: string[] };
   g4: { n: number; withHandle: number };
   repeat: { n: number; dupes: number };
+  misbound: { n: number; hits: number; samples: string[] };
 }
 
 function median(xs: number[]): number {
@@ -1167,6 +1212,9 @@ function statsOf(f: ArmFile): ArmStats {
     retried: f.records.filter((r) => r.retries > 0).length,
     goal: {
       n: goal.length,
+      // ★判据修订第 1 版（2026-08-06）：主判＝有没有进攻单，不再是"有没有单"
+      offensive: goal.filter((r) => offensiveDispatch(r.intents).hasOffensive).length,
+      offUnits: goal.reduce((a, r) => a + offensiveDispatch(r.intents).units, 0),
       opened: goal.filter((r) => r.intentCount > 0).length,
       dispatched: goal.filter((r) => r.assignedUnits > 0).length,
       doctrines: goal.filter((r) => r.standingOrder).length,
@@ -1193,6 +1241,11 @@ function statsOf(f: ArmFile): ArmStats {
     },
     g4: { n: g4.length, withHandle: g4.filter((r) => /G\d+/.test(r.brief)).length },
     repeat: { n: usable.length, dupes },
+    misbound: {
+      n: usable.length,
+      hits: usable.filter((r) => misboundHandles(r.brief).length > 0).length,
+      samples: usable.flatMap((r) => misboundHandles(r.brief)).slice(0, 6),
+    },
   };
 }
 
@@ -1203,7 +1256,8 @@ function pct(a: number, b: number): string {
 function printArm(s: ArmStats): void {
   console.log(`\n── 臂 ${s.arm}（prompt ${s.promptSha} / 信封 ${s.digestSha}）──`);
   console.log(`  不可用记录=${s.unusable}  重试过=${s.retried}`);
-  console.log(`  指标1 误执行（goal 被开单）  : ${pct(s.goal.opened, s.goal.n)}   实派>0: ${pct(s.goal.dispatched, s.goal.n)}   顺手立 doctrine: ${s.goal.doctrines}`);
+  console.log(`  指标1 误执行（goal 开出【进攻单】）: ${pct(s.goal.offensive, s.goal.n)}   进攻实派兵力合计: ${s.goal.offUnits}   顺手立 doctrine: ${s.goal.doctrines}`);
+  console.log(`        （旧判据留档对照：有任何 intent ${pct(s.goal.opened, s.goal.n)}，实派>0 ${pct(s.goal.dispatched, s.goal.n)}）`);
   console.log(`  指标2 误咨询（order 零执行）  : ${pct(s.order.zeroExec, s.order.n)}`);
   console.log(`  指标3 两轮链第二轮开单        : ${pct(s.chain2.opened, s.chain2.n)}   实派>0: ${pct(s.chain2.dispatched, s.chain2.n)}`);
   console.log(`  指标4 G2 假地名违规（硬线）   : ${pct(s.g2.violations, s.g2.n)}   出口a(原话进字段)=${s.g2.exitA} 出口b(零单)=${s.g2.exitB}`);
@@ -1211,6 +1265,7 @@ function printArm(s: ArmStats): void {
   console.log(`  指标5 G4 番号在场             : ${pct(s.g4.withHandle, s.g4.n)}`);
   console.log(`  指标6 逐字复读（线索，非判据）: ${pct(s.repeat.dupes, s.repeat.n)}`);
   console.log(`  指标7 order 摩擦：问号收尾 ${pct(s.order.questionEnd, s.order.n)}  ASK ${pct(s.order.ask, s.order.n)}  中位延迟 ${s.order.medianMs}ms`);
+  console.log(`  观察项 番号贴错对象（不进编话账）: ${pct(s.misbound.hits, s.misbound.n)}${s.misbound.samples.length ? "  例: " + s.misbound.samples.slice(0, 3).join(" | ") : ""}`);
   console.log(`  （未预登记，仅描述）consult 被开单: ${pct(s.consult.opened, s.consult.n)}`);
 }
 
@@ -1237,11 +1292,11 @@ function runReport(aPath: string, bPath?: string): void {
 
   // 指标1：B 低于 A，且差 ≥3/20（按 20 局折算）
   const scale = (x: number, n: number) => (n === 0 ? 0 : (x / n) * 20);
-  const gA = scale(sa.goal.opened, sa.goal.n);
-  const gB = scale(sb.goal.opened, sb.goal.n);
+  const gA = scale(sa.goal.offensive, sa.goal.n);
+  const gB = scale(sb.goal.offensive, sb.goal.n);
   line(
     gB < gA && gA - gB >= 3,
-    `指标1 误执行：A=${gA.toFixed(1)}/20 → B=${gB.toFixed(1)}/20（要求 B<A 且差≥3）`,
+    `指标1 误执行（进攻单）：A=${gA.toFixed(1)}/20 → B=${gB.toFixed(1)}/20（要求 B<A 且差≥3）｜进攻实派兵力 ${sa.goal.offUnits} → ${sb.goal.offUnits}`,
   );
 
   // 指标2：B 误咨询 ≤ A + 4（按 40 局折算）
