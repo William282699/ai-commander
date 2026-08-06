@@ -27,6 +27,7 @@
 
 import { createHash } from "node:crypto";
 import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { dirname } from "node:path";
 
 import {
@@ -702,7 +703,8 @@ type RuleTag =
   | "consultation_vs_order" // 咨询 vs 命令的判定口
   | "length_band" // 长度按言语行为分档
   | "mood_register" // mood 行只定语气不定战况
-  | "handle_addressing"; // 番号是地址不是推荐 / 群名不是 fromSquad
+  | "handle_addressing" // 番号是地址不是推荐 / 群名不是 fromSquad
+  | "speech_contract"; // G 刀：说话合同（替换掉三条死口号的那份）
 
 type SiteKind =
   | "chen_command" // 陈的命令解析面 ← 本刀合同的落点
@@ -744,16 +746,17 @@ const SPEECH_RULE_SITES: SpeechRuleSite[] = [
       "length_band",
       "mood_register",
       "handle_addressing",
+      "speech_contract",
     ],
     disposition: "contract",
-    note: "陈的主 prompt（execute 模式）。三条死口号都在这儿：判断执照:83 / NEVER repeat:103 / CONSULTATION vs ORDER:161。ENFORCEMENT:49 的 ❌✅ 例句块本刀绕开不动（提案 §3 🟡7）。",
+    note: "陈的主 prompt（execute 模式）。★这是【共享面】：combat=陈 + logistics=Emily（ops 走 MARCUS_V2，flag=true 已分家）。用户裁定 2026-08-06 a 案：合同只插进陈的人格块内部；两条全局口号（NEVER repeat / CONSULTATION vs ORDER）从全局位置删除后【原文逐字搬进 Emily 的人格行】，她的行为一字不变（--emily-guard 断言 + Emily 生产台架效果级负对照两道防护）。判断执照本来就在陈块内，直删，义务重新措辞进合同④。ENFORCEMENT:49 的 ❌✅ 例句块照 🟡7 冻结不动。no_repeat / consultation_vs_order 这两个标记现在指的是【Emily 那两份搬运件】，不再对陈生效。",
   },
   {
     file: AI_TS,
     symbol: "CHANNEL_PERSONA",
     channel: "combat",
     kind: "chen_command",
-    rules: ["enforcement", "judgment_license", "no_repeat", "length_band"],
+    rules: ["enforcement", "judgment_license", "length_band", "speech_contract", "handle_addressing"],
     disposition: "contract",
     note: "★同一条命令路径上的第二份陈规则（注入 user content）。判断执照在这儿是【无标签压缩版】、别重复是「每次换开头」——两条都不带标签串。★这一条是登记表第一次开跑就咬到的：手工登记漏了 no_repeat，扫描抓了出来（提案 §2 说三条旧规则'散在多面多副本'，实测比手数的还多一份）。",
   },
@@ -928,7 +931,12 @@ const SPEECH_RULE_SITES: SpeechRuleSite[] = [
 /** 语义指纹：一条规则的多种写法（中/英/压缩/无标签）都要能认出来。 */
 const RULE_FINGERPRINTS: Record<RuleTag, RegExp[]> = {
   enforcement: [/ENFORCEMENT RULES/, /首字禁 ?acknowledgment/],
-  judgment_license: [/未知量/, /unknown he is waiting for you to deliver/i],
+  judgment_license: [
+    /未知量/,
+    /unknown he is waiting for you to deliver/i,
+    /他在等你交付的那一样/,
+    /等你交付的那一样/,
+  ],
   no_repeat: [
     /NEVER repeat yourself/i,
     /每次回复换开头/,
@@ -945,6 +953,7 @@ const RULE_FINGERPRINTS: Record<RuleTag, RegExp[]> = {
   consultation_vs_order: [/CONSULTATION vs ORDER/, /纯祈使/],
   length_band: [/言语行为分档/, /speech-act banding/i, /Length follows the speech act/i],
   mood_register: [/mood 行/, /mood line/i],
+  speech_contract: [/说话合同/],
   handle_addressing: [
     /handle=G#/,
     /group labels are NOT valid fromSquad/i,
@@ -1010,7 +1019,17 @@ function envelopeSpans(): Span[] {
   return out;
 }
 
-function detectRules(text: string): RuleTag[] {
+/** 源码注释里的字不是规则——模型永远看不到它们。检测前先把 // 行剥掉，
+ *  否则"给后来的人解释这刀干了什么"的注释会被当成第 23 个说话规则面。 */
+function stripLineComments(text: string): string {
+  return text
+    .split("\n")
+    .filter((l) => !l.trimStart().startsWith("//"))
+    .join("\n");
+}
+
+function detectRules(raw: string): RuleTag[] {
+  const text = stripLineComments(raw);
   const out: RuleTag[] = [];
   for (const tag of Object.keys(RULE_FINGERPRINTS) as RuleTag[]) {
     if (RULE_FINGERPRINTS[tag].some((re) => re.test(text))) out.push(tag);
@@ -1243,6 +1262,153 @@ function runReport(aPath: string, bPath?: string): void {
   console.log(`★主判仍是盲读（指标 6 rubric）——数字过线不等于这刀成了。`);
 }
 
+/**
+ * --emily-guard：★用户裁定 2026-08-06 的第 1 道防护。
+ *
+ * SYSTEM_PROMPT 是共享面（combat=陈 / logistics=Emily；ops 走 MARCUS_V2 已分家）。
+ * a 案的承诺是：Emily 装配后的最终 prompt **只许出现位置移动，内容零增删**。
+ * 这条断言就是那句承诺的机器版：
+ *   ① 旧版里 Emily 读到的每一行，新版必须还在（逐字，允许缩进变化）→ 零删除
+ *   ② 新版多出来的每一行，必须落在【陈的人格块】里面 → 零注入
+ * "内容没动所以应该没变"不算证明——那是第 2 道防护（Emily 生产台架效果级负对照）的活。
+ */
+function runEmilyGuard(baseRef: string, outPath: string): void {
+  const newSrc = readFileSync(AI_TS, "utf8");
+  const baseSrc = execSync(`git show ${baseRef}:${AI_TS}`, { encoding: "utf8", maxBuffer: 1 << 24 });
+
+  const spansOf = (src: string): Map<string, string> => {
+    const m = new Map<string, string>();
+    for (const s of extractAiTsSpans(src)) m.set(s.key, s.text);
+    return m;
+  };
+  const oldSpans = spansOf(baseSrc);
+  const newSpans = spansOf(newSrc);
+
+  const assemble = (sp: Map<string, string>): string =>
+    `${sp.get("SYSTEM_PROMPT") ?? ""}\n\n${sp.get("CHANNEL_PERSONA.logistics") ?? ""}`;
+
+  const norm = (t: string): string[] =>
+    t
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+
+  const oldLines = norm(assemble(oldSpans));
+  const newLines = norm(assemble(newSpans));
+
+  const bag = (xs: string[]): Map<string, number> => {
+    const m = new Map<string, number>();
+    for (const x of xs) m.set(x, (m.get(x) ?? 0) + 1);
+    return m;
+  };
+  const ob = bag(oldLines);
+  const nb = bag(newLines);
+
+  const removed: string[] = [];
+  for (const [line, n] of ob) {
+    const have = nb.get(line) ?? 0;
+    for (let i = 0; i < n - have; i++) removed.push(line);
+  }
+  const added: string[] = [];
+  for (const [line, n] of nb) {
+    const have = ob.get(line) ?? 0;
+    for (let i = 0; i < n - have; i++) added.push(line);
+  }
+
+  // 陈的人格块 = combat 那一条到 ops 那一条之间
+  const chenBlockOf = (sp: Map<string, string>): Set<string> => {
+    const sysLines = (sp.get("SYSTEM_PROMPT") ?? "").split("\n");
+    const from = sysLines.findIndex((l) => l.includes("combat channel → 陈军士"));
+    const to = sysLines.findIndex((l) => l.includes("ops channel → CPT Marcus"));
+    return new Set(
+      from >= 0 && to > from ? sysLines.slice(from, to).map((l) => l.trim()).filter(Boolean) : [],
+    );
+  };
+  const chenBlock = chenBlockOf(newSpans);
+  const oldChenBlock = chenBlockOf(oldSpans);
+
+  // ★ 用户裁定 2026-08-06 的准确边界：陈块【内部】的删除是本刀的活
+  // （判断执照直删已获批）；陈块【外部】——也就是 Emily 自己那些规则——
+  // 一行都不许少，只许换位置。所以"零删除"这条只对陈块外的行成立。
+  const strayRemoves = removed.filter((l) => !oldChenBlock.has(l));
+  const strayAdds = added.filter((l) => !chenBlock.has(l));
+
+  const report = [
+    `# Emily 共享面防护（a 案第 1 道）`,
+    ``,
+    `基线 ref: ${baseRef}`,
+    `装配对象: SYSTEM_PROMPT + CHANNEL_PERSONA.logistics（logistics 频道实际收到的 prompt 文本）`,
+    ``,
+    `## ① 零删除（陈块之外）：Emily 自己那些规则一行都不许少`,
+    strayRemoves.length === 0
+      ? `✓ 陈块外零删除（旧版 ${oldLines.length} 行，删掉的 ${removed.length} 行全部来自陈的人格块内部）`
+      : `✗ 陈块【外】丢了 ${strayRemoves.length} 行：`,
+    ...strayRemoves.map((l) => `   - ${l}`),
+    ``,
+    `### 陈块内被删的行（本刀的活，已获用户裁定）`,
+    ...removed.filter((l) => oldChenBlock.has(l)).map((l) => `   - ${l}`),
+    ``,
+    `## ② 零注入：新增行是否全部落在陈的人格块内`,
+    strayAdds.length === 0
+      ? `✓ 新增 ${added.length} 行全部在陈块内（陈块 ${chenBlock.size} 行）`
+      : `✗ 有 ${strayAdds.length} 行新增落在陈块之外：`,
+    ...strayAdds.map((l) => `   - ${l}`),
+    ``,
+    `## 新增行清单（供人读）`,
+    ...added.map((l) => `   + ${l}`),
+  ].join("\n");
+
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, report + "\n");
+  console.log(report);
+  const ok = strayRemoves.length === 0 && strayAdds.length === 0;
+  console.log(`\n${ok ? "PASS" : "FAIL"} Emily 共享面防护（存档：${outPath}）`);
+  process.exit(ok ? 0 : 1);
+}
+
+/**
+ * --blind：把两臂台词洗牌、去掉臂标签写成一份待读稿（答案另写一份 key）。
+ *
+ * 指标 6 是主判，而主判必须盲读——Step B 的教训是"关键词正则会饱和、两向皆坏"，
+ * 而知道哪句是 B 臂的人读出来的结果不叫盲读。
+ */
+function runBlind(aPath: string, bPath: string, outPath: string): void {
+  const A = JSON.parse(readFileSync(aPath, "utf8")) as ArmFile;
+  const B = JSON.parse(readFileSync(bPath, "utf8")) as ArmFile;
+  const items: { id: string; arm: string; cls: string; probeId: string; message: string; brief: string }[] = [];
+  let n = 0;
+  for (const [arm, f] of [["A", A], ["B", B]] as const) {
+    for (const r of f.records) {
+      if (r.unusable || !r.brief.trim()) continue;
+      items.push({
+        id: `S${String(++n).padStart(3, "0")}`,
+        arm,
+        cls: r.cls,
+        probeId: r.probeId,
+        message: r.message,
+        brief: r.brief,
+      });
+    }
+  }
+  // 确定性洗牌（同一份输入永远同一个顺序，复核时可重放）
+  let seed = 20260806;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [items[i], items[j]] = [items[j], items[i]];
+  }
+  const lines = items.map(
+    (it, i) => `[${String(i + 1).padStart(3, "0")}] (${it.cls}/${it.probeId}) 长官：${it.message}\n     陈：${it.brief}\n`,
+  );
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, lines.join("\n"));
+  writeFileSync(
+    outPath.replace(/\.txt$/, "") + ".KEY.json",
+    JSON.stringify(items.map((it, i) => ({ idx: i + 1, arm: it.arm, cls: it.cls, probeId: it.probeId })), null, 2),
+  );
+  console.log(`盲读稿：${outPath}（${items.length} 条）\n答案：${outPath.replace(/\.txt$/, "")}.KEY.json`);
+}
+
 // ── main ──
 
 const mode = process.argv[2];
@@ -1299,6 +1465,23 @@ if (mode === "--selftest") {
     arm,
     process.argv[4] ?? `${process.env.HOME}/MyProjects/_archive/g-knife-ab-20260805/reg-${arm}.json`,
   );
+} else if (mode === "--emily-guard") {
+  runEmilyGuard(
+    process.argv[3] ?? "HEAD",
+    process.argv[4] ?? `${process.env.HOME}/MyProjects/_archive/g-knife-ab-20260805/emily-guard.md`,
+  );
+} else if (mode === "--blind") {
+  const a = process.argv[3];
+  const b = process.argv[4];
+  if (!a || !b) {
+    console.error("usage: --blind A.json B.json [out.txt]");
+    process.exit(1);
+  }
+  runBlind(
+    a,
+    b,
+    process.argv[5] ?? `${process.env.HOME}/MyProjects/_archive/g-knife-ab-20260805/blind-read.txt`,
+  );
 } else if (mode === "--report") {
   const a = process.argv[3];
   if (!a) {
@@ -1317,5 +1500,7 @@ if (mode === "--selftest") {
     `${process.env.HOME}/MyProjects/_archive/g-knife-ab-20260805/arm-${arm}.json`;
   void runArm(arm, out);
 } else {
-  console.log("usage: tsx scripts/ab-g-knife.ts --digest | --run A|B [out] | --sites | --report A.json B.json");
+  console.log(
+    "usage: tsx scripts/ab-g-knife.ts --digest | --selftest | --sites | --run A|B [out] | --run-reg A|B [out] | --report A.json [B.json] | --blind A.json B.json [out.txt]",
+  );
 }
