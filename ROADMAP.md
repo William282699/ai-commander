@@ -36,7 +36,7 @@ Chen 危机时报真实增援候选+ETA，替换说谎的布尔字段。F1 已�
 `tag: emily-production-v1-done` · 提案 `EMILY_PRODUCTION_V1_PROPOSAL.md` · Codex 两轮裁决+条件批准 · bench `ab-emily-production.ts` --synthetic 38 断言（全部最终状态口径：queue 增量+钱油差值+回执；含用户审计补的燃油为零负例——零件回执必须报真实约束，钱油分界不合并）+ 真模型 12/12（fraction 时 quantity 精确缺席；咨询答"9辆主战或19辆轻型"独立上限不相加）· 手测对账：$3,500 咨询报 8/17 原数；"剩下的钱都生产主战坦克"→ queue+8×main_tank、$3,500→$300、fuel−80、回执 `main_tank ×8：花了 $3200，还剩 $300`。已合 main。
 挂账：stream 路径首答偶发不主动报数（事实已在 payload，追问即中；偶发波动非事实层缺陷，等真玩家反馈再议）。
 
-### ❄ 第 6 级 — 批准合同化【三版判退，雪藏 2026-07-24】
+### ❄→✅ 第 6 级 v1-v3.2 — 批准合同化【三版判退，雪藏 2026-07-24；v4 已复活收口，见下方"第 6 级 — 批准合同 v4"】
 v2（引擎模板问句）/v3（字符串校验）/v3.2（LLM 台词+引擎小条）连续三版：机制层全过 Codex 四轮+双跑 30/30 零错派，但用户手测判退——三个**结构病**：①会话焦点绑错（普通澄清问句插在合同后，"对的啊"误授权旧合同）②权力旁路（Bucket A 模型选兵自动执行仍在，合同不是唯一入口）③目标类型缺失（"夺回前哨"被降格成"增援战线"）；另 UI 确认件违反"对话是唯一界面"家法。**现场全部封存**：worktree `AI Commander-approval-contract` 工作分支停 `f83f032`（未获准合并），保护分支 `approval-contract-v3.2-failed-handtest`（17 实现 commit+判退全文 `HANDTEST_FAILURE_20260722.md`）。执行回到第 5 级现状：兵只听玩家自己的命令链。**将来重启=v4**，前置是第 6b 级判断执照（参谋敢提具体方案，批准才有对象）；§4b 跨频道身份规则随分支一起雪藏，重启时捞回。
 
 ### ✅ 第 6b 级 — 司令感 V1（Commander Presence）【全级收口 2026-07-28：Step A/B/C 三步完成；分支 `commander-presence-v1` 未合 main、未 push，是否合并等用户点头】
@@ -72,6 +72,19 @@ bench 家法新条目（写在 ab-dispatch-scope.ts 注释）：会动兵的断�
 **关键裁定与实证**：①跨 kind 翻转=有意保留（用户裁定："锁进山脊内部"需引入 kind 两级排序反而是更大语义改动）；北/镇反向翻转（非只南边）——北 1.4 的代价=残血前哨拉不走敌人，撞"只会一件事"时调 1.4 不撤刀；T2d 把两边钉死（北 140>120 前哨/南 60<90 前哨）②sweep 前后零漂移（三种子 72.0s/空城 11/13/18s 逐字节同）——但零漂移=「走不到」非「走到了不变」：台架剧本占自家前哨走 B/C，**sweep 对刀2 零回归保护，保护只来自探针断言**③negctl 恰 12+8+2 条真 FAIL 全部与手算逐格同址，Opus 独立复算零 P0④刀1 实测两臂对照：占南部高地一个结算周期 money +15/intel +10 分毫不差。
 **视觉语言四层定稿**：旗（十字/白星）=胜负点7个 · 菱形悬标=可占据点 · 地环+资源字=有产出 · 素图=不可占。挂账：刀1 结算画面（只夺2点拖满30分）与刀2 山脊手感专项判据未走完，外测中观察；Opus 记账=权重表可写全局、T1 分不出剧本/fallback 阈值（两份现同值）、GameCanvas:2545 结算 /3 硬编码（旧账）。
 **手测新账（不属本级，main 旧病实证）**：升级提案说"可以"不执行（批准合同三判退未合 main，"可以"绑不到 20 秒前的提案）+ "东北未编组群"是叙事对象不可点名（单子退化成无来源 defend→默认 few→1 个兵，台词说调群执行 1 兵）→ Opus 诊断档 `ESCALATION_ACK_V4_DIAGNOSIS_20260801.md`，归批准合同 v4 + Preflight V2 族。dev 环境：pretest-web@3008+pretest-api@3011（.claude/ 脚本+launch.json，worktree 需拷 .env）。
+
+### ✅ 第 6 级 — 批准合同 v4 + 对话审计 A/B 刀 + §8 目的地分档【收口 2026-08-05，tag `dialogue-ab-knife-v1-done` @5091bd3，合 main（ff）】
+第 6 级从雪藏复活并收口。**16 commit**（`eefc126..5091bd3`）分四批：v4 五刀（刀1 ETA 锚到战斗点 89s→25s / 刀2a-2c 番号登记簿=承诺那批==出发那批 / 刀3 互射钟赢时不谎报）→ 手测账①②③（路线实参截断、机器自言自语、调度权按人格算）→ 对话审计 A/B 刀（候选诚实闸五出口、拆绊索、说出口的部队都有临时番号）→ **§8 目的地分档五刀 + 刀F + H1**。提案 `APPROVAL_CONTRACT_V4_PROPOSAL.md`、审核档 `DIALOGUE_AB_KNIFE_REVIEW_BRIEF_20260803.md`、收官档 `DIALOGUE_HANDTEST_LEDGER_AND_KNIFE_F_PROPOSAL_20260805.md`。Fable 5 主审/裁定，Opus 5 实施。
+**§8 的病与修法**：一条战线是玩家能说的最笼统的目标，也曾是最不准的——`resolveTarget` 三个 front 分支全走**几何中心**（region bbox 平均值，一个统计量不是一个地方）。实测 front_center：标记点 (301,110)✓ / 设施 (361,105)✓ / 战线 (264,96)✗ 离该线前哨 97 格。新建 `packages/core/src/frontDestination.ts`：`frontDestinationFor(state, front, mode)` 三档梯子，**取最大簇不取平均**（西头一场东头一场，平均值落在两堆中间的空地）。approach=交火最大簇→全体最大簇→我方设施→中心；withdraw=我方设施→**未交火**最大簇→中心（撤退永不落进交火堆）；assault 见刀F。模块位置承重：crisisResponse→tacticalPlanner、frontEscalationPayload→crisisResponse，解析器只能坐三者之下 ⇒ 空间聚类与交火判据**搬家不复制**，`tacticalPlanner.getFrontCenterPos` 重复副本一并删。
+**刀F（本轮唯一自造回归，已修）**：开工令原文「attack 本刀也挂接近类」是错的——approach 一级是"这条线上打得最凶的那处"，于是「拿下山脊战线」把 14 人送去我方自己那场遭遇战（离敌 VP 36.1 格，而旧几何中心离它只有 10.8 格＝该线两 VP 恰好夹住质心的**巧合**）。修法不是回退，是 attack 自己的档位表，**一句原理生成全序**（点名区域＝去改变该区域战局，落点取该动词效果最大处）：敌方胜负点→我方交火最大簇→我方全体最大簇→敌方非VP设施→我方设施→中心。中立设施永不进任何一档。★ 二档在四档之上是有意的：无 VP 而我们正在打的线上 attack 仍落自家交火处（压住进行中的交战即最大可得效果）——写进注释防将来被当新回归重新发现。
+**H1（用户裁定 (a) 只加披露）**：全军池 + busy 旁路**一行不动**（"全军"就该是全军，清楚就办不打折），但抽走带任务的部队必须说出口。新增 `committedUnits.ts::describeCommittedPull`，判断在 core、ChatPanel 只路由一行、台词引擎署名不过 LLM（与 `ticketDispatchReceipt` 同族）；**必须在 applyOrders 之前读**——之后所有单位都忙于新任务，来源不可恢复。「闲置」收敛成 `isUnitIdle` 唯一一份，`orderTaskOf` 改调它（板子说"闲着"的兵，回执就不许说它被从任务上抽走＝同一把尺）。
+**台架终态**：typecheck 4 包过 · 12 个台架全绿 · `ab-approval-v4 --synthetic` **161 PASS** / `--negctl` **48 条 ★ 真 FAIL** · `ab-retreat-semantics` 五条字节快照（attack 一条按刀F 合同刷新并注明理由，另四条逐字未动）。**合同变更四条全部显式登记**：T1j 最大簇非平均、T1k 线内无兵先看我方设施、T1l 交火压人多（旧断言是同义反复）、retreat 快照 attack 项。
+**合并前置·三活体探针（真 LLM 链，判据一律效果级：读 intent JSON、数 assignedUnitIds、核落点坐标）**：
+①「拿下山脊战线」→ intent `toFront:front_ridge`，10 单位，落点质心 **(230,70) == 中央山脊 VP 误差 0**，离中立雷达 36.1 格；
+②「进攻敌军后方」→ 9 单位，落点质心 **(80,100) == 敌军总部 误差 0**，离该线几何中心 25 格；
+③「全军进攻山脊战线」→ 64 单位，披露句报 **19/64 两局，数字均 == 独立重算的 assignedUnitIds ∩ 忙碌集**；落点 (220,55) == 该线**仅存**敌方 VP（中央山脊已被探针①打下转我方，梯子自动推进到下一个敌方目标）。
+**活体验收 12 条 9 过 / 3 走不到**（B3/B4 引擎兜底被模型上游截住、E2 无样本恰证无乱绑；均**不得声称活体验证过**，G2 修掉后 B3/B4 会重新可达）。
+**遗留（不卡合并，全部立案）**：G刀 prompt 债四张脸＝G1 命令/商量边界双向塌（探针②③各撞一次：零 intent + **逐字复读同一句且该句为假**——陈说"山脊战线目前没有我方部队"时引擎里有我方 6 人在那儿交战）/ G2 模型把假地名静默映射成真地名（「卡拉马佐夫高地」→`ea_himeimat`）/ G3 台词自造执行事实（引擎回执已诚实，模型仍说"已出发"）/ G4 板子番号不念。H 族：H2 `handleThreadApprove` 不解析番号、H3 §2 同信封双号 roster 去重、H4 tag 进 `nearestPlaceWithin`、H5 闸的数偏悲观（实测 survival≈6s 实撑 30s+、ETA 偏大 3 倍，n=2 不动公式继续收数）、H6 `crisisResponse` 旧决策卡遗留 frontCenterPos。H1 披露句吵不吵的手感账留正常局判。
 
 ### 🔭 第 8 级 — Preflight V2：provenance
 Intent 字段分 playerCommand / unspecified / advisorProposal，根治 74 单位洞（该 bug 目前**有意放回**，手测撞到不是新 bug）。
