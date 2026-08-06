@@ -384,6 +384,26 @@ function offensiveDispatch(intents: WireIntent[]): { hasOffensive: boolean; unit
   return { hasOffensive, units };
 }
 
+/**
+ * ★判据修订第 2 版（2026-08-06）：goal 类的【三件套】。
+ * 一条 goal 记录算通过，当且仅当：
+ *   ① 攻击单 0（无 attack/capture/sabotage）
+ *   ② doctrine 0（无 root 级 standingOrder）——B′ 回归逼出来的第二件
+ *   ③ 撤退半句照开：探针含"指着现在"的撤退子句时必须有 retreat intent；
+ *      不含时本条自动成立（不许因此要求它凭空开单）
+ * 三件套让这一格两个方向都咬：只罚"开了不该开的"会奖励"什么都不开"，
+ * 而合同④要求的是逐子句处理。
+ */
+const PROBES_WITH_RETREAT_CLAUSE = new Set(["GO1"]);
+
+function goalTriad(r: Record): { pass: boolean; noOffensive: boolean; noDoctrine: boolean; retreatOk: boolean } {
+  const noOffensive = !r.intents.some((it) => OFFENSIVE_TYPES.has(String(it.type)));
+  const noDoctrine = !r.standingOrder;
+  const needsRetreat = PROBES_WITH_RETREAT_CLAUSE.has(r.probeId);
+  const retreatOk = !needsRetreat || r.intents.some((it) => String(it.type) === "retreat");
+  return { pass: noOffensive && noDoctrine && retreatOk, noOffensive, noDoctrine, retreatOk };
+}
+
 /** 台词把番号贴到了别的东西上（战线/别的部队）。
  *  单列观察项，不进合同的编话账——根因在引擎的信封印法（handle 印在行末，
  *  而那一行的主语是战线），已另立引擎小刀，本轮不碰信封。 */
@@ -1162,7 +1182,7 @@ interface ArmStats {
   digestSha: string;
   unusable: number;
   retried: number;
-  goal: { n: number; offensive: number; offUnits: number; opened: number; dispatched: number; doctrines: number };
+  goal: { n: number; fail: number; offensive: number; offUnits: number; noDoctrine: number; retreatOk: number; opened: number; dispatched: number; doctrines: number };
   order: { n: number; zeroExec: number; medianMs: number; questionEnd: number; ask: number };
   chain2: { n: number; opened: number; dispatched: number };
   consult: { n: number; opened: number };
@@ -1212,7 +1232,11 @@ function statsOf(f: ArmFile): ArmStats {
     retried: f.records.filter((r) => r.retries > 0).length,
     goal: {
       n: goal.length,
-      // ★判据修订第 1 版（2026-08-06）：主判＝有没有进攻单，不再是"有没有单"
+      // ★判据修订第 2 版：主判＝没过三件套的比例
+      fail: goal.filter((r) => !goalTriad(r).pass).length,
+      noDoctrine: goal.filter((r) => goalTriad(r).noDoctrine).length,
+      retreatOk: goal.filter((r) => goalTriad(r).retreatOk).length,
+      // 修订第 1 版的分项，继续报告
       offensive: goal.filter((r) => offensiveDispatch(r.intents).hasOffensive).length,
       offUnits: goal.reduce((a, r) => a + offensiveDispatch(r.intents).units, 0),
       opened: goal.filter((r) => r.intentCount > 0).length,
@@ -1256,7 +1280,8 @@ function pct(a: number, b: number): string {
 function printArm(s: ArmStats): void {
   console.log(`\n── 臂 ${s.arm}（prompt ${s.promptSha} / 信封 ${s.digestSha}）──`);
   console.log(`  不可用记录=${s.unusable}  重试过=${s.retried}`);
-  console.log(`  指标1 误执行（goal 开出【进攻单】）: ${pct(s.goal.offensive, s.goal.n)}   进攻实派兵力合计: ${s.goal.offUnits}   顺手立 doctrine: ${s.goal.doctrines}`);
+  console.log(`  指标1 误执行（goal 未过【三件套】）: ${pct(s.goal.fail, s.goal.n)}   进攻实派兵力合计: ${s.goal.offUnits}`);
+  console.log(`        三件套分项：攻击单0 ${pct(s.goal.n - s.goal.offensive, s.goal.n)} ｜ doctrine0 ${pct(s.goal.noDoctrine, s.goal.n)} ｜ 撤退半句照开 ${pct(s.goal.retreatOk, s.goal.n)}`);
   console.log(`        （旧判据留档对照：有任何 intent ${pct(s.goal.opened, s.goal.n)}，实派>0 ${pct(s.goal.dispatched, s.goal.n)}）`);
   console.log(`  指标2 误咨询（order 零执行）  : ${pct(s.order.zeroExec, s.order.n)}`);
   console.log(`  指标3 两轮链第二轮开单        : ${pct(s.chain2.opened, s.chain2.n)}   实派>0: ${pct(s.chain2.dispatched, s.chain2.n)}`);
@@ -1292,11 +1317,11 @@ function runReport(aPath: string, bPath?: string): void {
 
   // 指标1：B 低于 A，且差 ≥3/20（按 20 局折算）
   const scale = (x: number, n: number) => (n === 0 ? 0 : (x / n) * 20);
-  const gA = scale(sa.goal.offensive, sa.goal.n);
-  const gB = scale(sb.goal.offensive, sb.goal.n);
+  const gA = scale(sa.goal.fail, sa.goal.n);
+  const gB = scale(sb.goal.fail, sb.goal.n);
   line(
     gB < gA && gA - gB >= 3,
-    `指标1 误执行（进攻单）：A=${gA.toFixed(1)}/20 → B=${gB.toFixed(1)}/20（要求 B<A 且差≥3）｜进攻实派兵力 ${sa.goal.offUnits} → ${sb.goal.offUnits}`,
+    `指标1 误执行（三件套未过）：A=${gA.toFixed(1)}/20 → B=${gB.toFixed(1)}/20（要求 B<A 且差≥3）｜进攻实派兵力 ${sa.goal.offUnits} → ${sb.goal.offUnits}`,
   );
 
   // 指标2：B 误咨询 ≤ A + 4（按 40 局折算）
