@@ -429,20 +429,18 @@ export function unitsInBox(state: GameState, box: TileBox): Unit[] {
 }
 
 /**
- * Speakable name for a point. Player-planted tags FIRST — a tag is precision
- * the player chose to spend, so it outranks a standing facility at the same
- * range — then the shared facility/front resolver. Same NAME_RADIUS as every
- * other location phrase; unresolvable is null, never an approximation.
- * (nearestPlaceWithin itself is shared with escalation/preflight and stays
- * untouched — this wraps it.)
+ * Speakable name for a point — now an ALIAS of `nearestPlaceWithin`.
+ *
+ * 第 8 级 刀4：这里曾经是"这点叫什么"的第二份实现（标记优先，然后委托给共享
+ * 解析器）。Step C 当时不许改 nearestPlaceWithin 本体，那是当级的爆炸半径管控，
+ * 代价是两份定义并存——一份认标记（只服务 PLAYER_VIEW），一份不认（服务候选
+ * label / SQUADS loc= / preflight 来源地）。同一个点在长官耳朵里有两个名字。
+ *
+ * 本刀把标记扫描搬进 nearestPlaceWithin 本体，两份合成一份，这里只留别名：
+ * Step C 的调用面一个字不用改，而全部消费面同时获得标记命名。
+ * export 保留——它是 core/index.ts 的公开面。
  */
 export function placeNameAt(state: GameState, p: Position): string | null {
-  let bestTag: { name: string; d: number } | null = null;
-  for (const t of state.tags) {
-    const d = Math.hypot(t.position.x - p.x, t.position.y - p.y);
-    if (!bestTag || d < bestTag.d) bestTag = { name: t.name, d };
-  }
-  if (bestTag !== null && bestTag.d <= NAME_RADIUS_TILES) return bestTag.name;
   return nearestPlaceWithin(state, p);
 }
 

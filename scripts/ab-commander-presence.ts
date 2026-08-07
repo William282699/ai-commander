@@ -42,8 +42,10 @@ import {
   buildPlayerViewLines,
   type ViewportGeometry,
 } from "../packages/core/src/commanderPresence";
-import { buildReinforceOptions, filterLateCandidates } from "../packages/core/src/frontEscalationPayload";
-import type { GameState, Unit, Squad } from "@ai-commander/shared";
+import { buildReinforceOptions, filterLateCandidates, nearestPlaceWithin } from "../packages/core/src/frontEscalationPayload";
+import { resolveIntent } from "../packages/core/src/tacticalPlanner";
+import { canUnitEnterTile } from "../packages/core/src/movementRules";
+import type { GameState, Unit, Squad, Intent } from "@ai-commander/shared";
 
 // ── Harness ──
 
@@ -705,6 +707,208 @@ function runSynthetic(): void {
     const dWith = buildDigest(s, [u.id], [], []);
     const block = `---PLAYER_SELECTED---\n#${u.id} ${u.type} hp=${u.hp}/${u.maxHp} @(${u.position.x},${u.position.y}) sq=none\n`;
     check("P20 selected pipe waters exactly one section", dWith.includes(block) && dWith.replace(block, "") === dWithout, `has=${dWith.includes(block)}`);
+  }
+
+  // ============================================================
+  // 第 8 级 刀4 — 玩家标记进"就近地名"
+  //
+  // 判据一律走生产路径：label 从 buildReinforceOptions 取，不自拼；
+  // 闭环那条数 assignedUnitIds，不看 label 文本（第 6b 级"字面对、执行错"教训）。
+  // ============================================================
+  console.log("\n== 刀4 tag → nearestPlaceWithin（标记也是地名）==");
+
+  /** 一支停在旷野里的未编组闲兵群：远离一切设施与战线中心，名字只能靠标记。 */
+  function idleGroupAtUnnamedSpot(): { s: GameState; spot: { x: number; y: number }; ids: number[] } {
+    const s = emptyBattlefield();
+    s.time = 240;
+    // 选点必须同时满足两条，缺一台架就测不到东西：①生产解析器叫不出名字（否则
+    // K4-1 的"修前无名"不成立）②兵站得上去、标记那格也走得到——否则 resolveIntent
+    // 一律 degraded「目标地形不可达」，闭环那条会以 0 单位"通过"：空转断言白过，
+    // 第 7 级刚吃过这个亏。用生产 canUnitEnterTile 判，不自造地形判定。
+    let spot: { x: number; y: number } | null = null;
+    const walkable = (x: number, y: number): boolean =>
+      canUnitEnterTile("infantry", Math.round(x), Math.round(y), s);
+    for (let y = 2; y < s.mapHeight && !spot; y += 3) {
+      for (let x = 2; x < s.mapWidth && !spot; x += 3) {
+        if (placeNameAt(s, { x, y }) !== null) continue;
+        if (walkable(x, y) && walkable(x + 1, y) && walkable(x + 3, y)) spot = { x, y };
+      }
+    }
+    if (!spot) throw new Error("地图上找不到「无名 + 可通行」的点，本刀不可测");
+    const ids = [addUnit(s, spot.x, spot.y).id, addUnit(s, spot.x + 1, spot.y).id];
+    return { s, spot, ids };
+  }
+
+  const groupLabel = (s: GameState): string =>
+    buildReinforceOptions(s, null).options.map((o) => o.label).join("|");
+
+  // K4-1 正例：标记半径内的群，label 带标记名（生产 label，不自拼）
+  {
+    const { s, spot } = idleGroupAtUnnamedSpot();
+    const before = groupLabel(s);
+    s.tags.push({ id: "tag_1", name: "制高点", position: { x: spot.x + 3, y: spot.y }, createdAt: 0 });
+    const after = groupLabel(s);
+    check(
+      "K4-1 标记半径内的未编组群 label 带标记名（修前叫不出名字）",
+      !before.includes("制高点") && after.includes("制高点") && after.includes("未编组群"),
+      `修前=${before} 修后=${after}`,
+    );
+  }
+
+  // K4-2 标记赢过更近的设施（语义从 placeNameAt 原样移植，不是"更准"，是长官花的精度）
+  {
+    const s = emptyBattlefield();
+    let fpos: { x: number; y: number } | null = null;
+    let fname = "";
+    s.facilities.forEach((f) => { if (!fpos) { fpos = { ...f.position }; fname = f.name; } });
+    const p = fpos as unknown as { x: number; y: number };
+    check("K4-2a 前置 该点本来解析成设施名", nearestPlaceWithin(s, p) === fname, `${nearestPlaceWithin(s, p)}`);
+    s.tags.push({ id: "tag_1", name: "司令旗", position: { x: p.x + 5, y: p.y }, createdAt: 0 });
+    check(
+      "K4-2 标记赢过更近的设施（设施 0 格、标记 5 格，仍报标记）",
+      nearestPlaceWithin(s, p) === "司令旗",
+      `${nearestPlaceWithin(s, p)}`,
+    );
+  }
+
+  // K4-3 别名等价：placeNameAt 塌缩之后与 nearestPlaceWithin 逐点同答
+  {
+    const { s, spot } = idleGroupAtUnnamedSpot();
+    s.tags.push({ id: "tag_1", name: "制高点", position: { x: spot.x + 3, y: spot.y }, createdAt: 0 });
+    let same = true;
+    let firstDiff = "";
+    for (let y = 1; y < s.mapHeight; y += 11) {
+      for (let x = 1; x < s.mapWidth; x += 11) {
+        const a = placeNameAt(s, { x, y });
+        const b = nearestPlaceWithin(s, { x, y });
+        if (a !== b) { same = false; if (!firstDiff) firstDiff = `(${x},${y}) ${a} vs ${b}`; }
+      }
+    }
+    check("K4-3 placeNameAt 是 nearestPlaceWithin 的别名（全图抽样逐点同答）", same, firstDiff);
+  }
+
+  // K4-4 ★闭环·数 assignedUnitIds★：信封印出去的标记名，写回单子必须解析得到
+  //      —— 与刀2 的番号前缀同一条原则：引擎自己印出去的名字，引擎必须认得回来。
+  {
+    const { s, spot, ids } = idleGroupAtUnnamedSpot();
+    s.tags.push({ id: "tag_1", name: "制高点", position: { x: spot.x + 3, y: spot.y }, createdAt: 0 });
+    const label = groupLabel(s);
+    check("K4-4a 前置 label 确实印出了标记名", label.includes("制高点"), label);
+
+    // 模型把它刚听见的**名字**写回 targetRegion（不是 tag_1）
+    const byName = resolveIntent(
+      { type: "defend", targetRegion: "制高点", quantity: "all" } as Intent, s, s.style,
+    );
+    const byId = resolveIntent(
+      { type: "defend", targetRegion: "tag_1", quantity: "all" } as Intent, s, s.style,
+    );
+    const assignedName = [...new Set(byName.orders.flatMap((o) => o.unitIds))].sort((a, b) => a - b);
+    const assignedId = [...new Set(byId.orders.flatMap((o) => o.unitIds))].sort((a, b) => a - b);
+    // 落点不能钉单张 order 的 target：defend 会按队形把人摊开，orders[0] 只是摊开后的
+    // 一格。钉两样——①名字路径与 id 路径**逐字节同一张单**（这就是闭环本身）
+    // ②落点质心 == 标记那一格（证明去的是标记，不是别处）。
+    const ordersKey = (r: { orders: { unitIds: number[]; action: string; target?: { x: number; y: number } | null }[] }): string =>
+      JSON.stringify(r.orders.map((o) => ({ u: [...o.unitIds].sort((a, b) => a - b), a: o.action, t: o.target })));
+    const lands = byName.orders.map((o) => o.target).filter((t): t is { x: number; y: number } => !!t);
+    const cx = lands.reduce((s2, t) => s2 + t.x, 0) / (lands.length || 1);
+    const cy = lands.reduce((s2, t) => s2 + t.y, 0) / (lands.length || 1);
+    check(
+      "K4-4 ★闭环★ 写回标记【名字】== 写回 tag id：逐字节同一张单，落点质心落在标记上",
+      assignedName.length > 0 &&
+        assignedName.join(",") === assignedId.join(",") &&
+        ordersKey(byName) === ordersKey(byId) &&
+        lands.length > 0 && Math.abs(cx - (spot.x + 3)) < 0.51 && Math.abs(cy - spot.y) < 0.51,
+      `assigned=[${assignedName}] 质心=(${cx.toFixed(2)},${cy.toFixed(2)}) 标记=(${spot.x + 3},${spot.y}) 同单=${ordersKey(byName) === ordersKey(byId)}`,
+    );
+    check(
+      "K4-4b 闭环兜底：这批兵确实是标记旁那两个（不是全图乱抓）",
+      assignedName.join(",") === [...ids].sort((a, b) => a - b).join(","),
+      `assigned=[${assignedName}] 期望=[${ids}]`,
+    );
+    // 负对照：没印出去的东西不许认（不是同义词表）
+    const bogus = resolveIntent(
+      { type: "defend", targetRegion: "那个高地", quantity: "all" } as Intent, s, s.style,
+    );
+    const bogusLand = bogus.orders[0]?.target;
+    check(
+      "K4-4c ★负对照★ 引擎没印过的说法不解析成标记（禁同义词表）",
+      !bogusLand || !(bogusLand.x === spot.x + 3 && bogusLand.y === spot.y),
+      `落点=${JSON.stringify(bogusLand)} 标记=(${spot.x + 3},${spot.y})`,
+    );
+  }
+
+  // K4-5 ★负对照★ 无标记的对局：全信封逐字节不变
+  {
+    const base = twoFrontCrisis();
+    check("K4-5a 前置 该对局本来没有标记", base.tags.length === 0, `tags=${base.tags.length}`);
+    const d1 = buildDigest(base, [], [], []);
+    const c1 = buildBattleContextV2(base, "combat", { playerIntent: "", openCommitments: [] });
+    const j1 = buildFrontJudgmentLines(base).join("\n");
+    // 与一个从头到尾没碰过 tags 的同构局逐字节比：本刀在无标记对局上必须是空操作
+    const twin = twoFrontCrisis();
+    check(
+      "K4-5 ★负对照★ 无标记对局：DigestV1 / BattleContextV2 / 判读行三面逐字节不变",
+      d1 === buildDigest(twin, [], [], []) &&
+        c1 === buildBattleContextV2(twin, "combat", { playerIntent: "", openCommitments: [] }) &&
+        j1 === buildFrontJudgmentLines(twin).join("\n"),
+    );
+  }
+
+  // K4-6 ★负对照★ 半径边界：量的必须是命名真正用的那个点（群/分队的**质心**），
+  //      不是随便一个成员——从成员量 13 格，质心可能才 11 格，那测的是别的东西。
+  //      12 格内改名、13 格外不改名，两头都钉，边界才算被钉住。
+  {
+    const mk = (offset: number | null): string => {
+      const { s, spot } = idleGroupAtUnnamedSpot();
+      // 群质心 = 两个兵的中点
+      const cx = spot.x + 0.5, cy = spot.y;
+      if (offset !== null) {
+        s.tags.push({ id: "tag_1", name: "远标记", position: { x: cx + offset, y: cy }, createdAt: 0 });
+      }
+      return groupLabel(s);
+    };
+    const none = mk(null);
+    const inside = mk(12);
+    const outside = mk(13);
+    check(
+      "K4-6 ★负对照★ 标记在质心 13 格外：群 label 与无标记时逐字节相同",
+      outside === none,
+      `无标记=${none} 13格=${outside}`,
+    );
+    check(
+      "K4-6b 边界对照：12 格内确实改名（证明 13 格是「刚好够不着」，不是「哪儿都不生效」）",
+      inside !== none && inside.includes("远标记"),
+      `无标记=${none} 12格=${inside}`,
+    );
+  }
+
+  // K4-7 ★负对照★ 半径外的标记对整封信的唯一影响 = ---TAGS--- 清单本身
+  //      （那是 Day 15 就有的玩家标记清单，不是命名面；把它与命名分开钉住，
+  //      将来谁在命名面上漏了半径判断，这条会红）
+  {
+    const base = twoFrontCrisis();
+    const far = twoFrontCrisis();
+    const anyUnit = [...far.units.values()].find((u) => u.team === "player")!;
+    far.tags.push({
+      id: "tag_1", name: "远标记",
+      position: { x: anyUnit.position.x + 200, y: anyUnit.position.y }, createdAt: 0,
+    });
+    const a = buildDigest(base, [], [], []).split("\n");
+    const b = buildDigest(far, [], [], []).split("\n");
+    const added = b.filter((l) => !a.includes(l));
+    const removed = a.filter((l) => !b.includes(l));
+    check(
+      "K4-7 ★负对照★ 远标记对 DigestV1 的唯一影响是 ---TAGS--- 两行，命名面零变化",
+      removed.length === 0 && added.length === 2 &&
+        added[0] === "---TAGS---" && added[1].startsWith("tag_1:"),
+      `+${JSON.stringify(added)} -${JSON.stringify(removed)}`,
+    );
+    check(
+      "K4-7b 远标记不改判读行与 BattleContextV2",
+      buildFrontJudgmentLines(far).join("\n") === buildFrontJudgmentLines(base).join("\n") &&
+        buildBattleContextV2(far, "combat", { playerIntent: "", openCommitments: [] }) ===
+          buildBattleContextV2(base, "combat", { playerIntent: "", openCommitments: [] }),
+    );
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);

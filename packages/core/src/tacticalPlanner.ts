@@ -133,6 +133,32 @@ export function isIntentSupported(type: IntentType): boolean {
  * toFront/fromFront fields. This single-pass normalization moves them to
  * targetRegion so all downstream resolvers get clean front-only fields.
  */
+/**
+ * THE one answer to "does this string name a player map marker".
+ *
+ * 第 8 级 刀4（闭环，与刀2 的番号前缀同一条原则）：
+ * **引擎自己印出去的名字，引擎必须认得回来。**
+ * 刀4 之后信封会开始印标记的**名字**（「制高点附近未编组群」、SQUADS 的 loc=、
+ * preflight 的来源地），而这两处判定原本只认 `tag_1` 这种 id ——
+ * 模型把它刚听见的名字写回 targetRegion，引擎就一脸茫然。
+ *
+ * 匹配只有两档，都是精确的：id，或者**引擎打印出去的那个 name 本身**。
+ * 没有同义词表、没有模糊包含（红线二）——"制高点"能解析是因为引擎印过
+ * 这四个字，不是因为谁枚举了地名的说法。trim + 大小写归一是同一个字符串的
+ * 不同写法，不是另一个词。
+ *
+ * 并列（同名两个标记）先入者赢，与 nearestPlaceWithin 的 tie-break 同规则。
+ */
+export function findTagRef(state: GameState, raw: string | undefined | null) {
+  if (!raw) return undefined;
+  const key = raw.trim();
+  if (key.length === 0) return undefined;
+  const lower = key.toLowerCase();
+  const tags = state.tags ?? [];
+  return tags.find((t) => t.id.toLowerCase() === lower)
+    ?? tags.find((t) => t.name.trim().toLowerCase() === lower);
+}
+
 function normalizeIntentLocations(intent: Intent, state: GameState): Intent {
   const normalized = { ...intent };
   for (const field of ["toFront", "fromFront"] as const) {
@@ -140,7 +166,7 @@ function normalizeIntentLocations(intent: Intent, state: GameState): Intent {
     if (!val) continue;
     if (findFront(state, val)) continue; // genuine front — keep it
     // Not a front: check if tag or region
-    const isTag = state.tags?.some(t => t.id === val);
+    const isTag = !!findTagRef(state, val);
     const isRegion = state.regions.has(val);
     if (isTag || isRegion) {
       // Move to targetRegion (resolveTarget handles tags/regions there)
@@ -254,7 +280,7 @@ function describeTargetForLog(intent: Intent, state: GameState): string {
     if (fac) return fac.name;
   }
   if (intent.targetRegion) {
-    const tag = state.tags?.find((t) => t.id === intent.targetRegion);
+    const tag = findTagRef(state, intent.targetRegion);
     if (tag) return tag.name;
     // Mirrors getRegionCenter's lookup: exact id, then id/name includes.
     let region = state.regions.get(intent.targetRegion);
@@ -1352,7 +1378,8 @@ function resolveTarget(intent: Intent, state: GameState): Position | null {
   const mode = frontDestinationMode(intent);
   if (intent.targetRegion) {
     // Day 15: check tags first, then regions, then fronts
-    const tag = state.tags?.find(t => t.id === intent.targetRegion);
+    // 刀4: findTagRef 认 id 也认引擎印出去的那个名字（闭环，见其注释）
+    const tag = findTagRef(state, intent.targetRegion);
     if (tag) return { x: Math.round(tag.position.x), y: Math.round(tag.position.y) };
     const pos = getRegionCenter(state, intent.targetRegion);
     if (pos) return pos;

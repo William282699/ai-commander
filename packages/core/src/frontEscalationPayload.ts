@@ -213,9 +213,31 @@ function etaOf(state: GameState, memberIds: number[], anchor: Position | null): 
 
 // ── Location phrase (contract v3 §3; shared by squads and groups) ──
 
-/** Nearest named place (standing facility or front center) within NAME_RADIUS;
- *  null beyond it. Used both for static naming and destination resolution. */
+/** Nearest named place within NAME_RADIUS; null beyond it. Used both for static
+ *  naming and destination resolution.
+ *
+ *  ── 第 8 级 刀4：玩家插的标记也是地名 ──
+ *  以前这里只扫设施与战线中心，于是一支停在玩家自己插的标记点旁边的闲兵，
+ *  长官听到的只能是"东北方向未编组群"——他明明在那儿插了一面旗。
+ *
+ *  **标记优先**：半径内有标记就用标记名，哪怕设施更近。理由不是"标记更准"，
+ *  是**精度是长官自己花力气标出来的**，引擎没有资格用一个通用地名盖过它。
+ *  这条语义原样来自 Step C 的 placeNameAt（现已塌缩成本函数的别名），
+ *  同一个 NAME_RADIUS_TILES，不新设常量。
+ *
+ *  并列时先入者赢（strict `<`）——与塌缩前的 placeNameAt 逐字同规则。
+ *  刻意不按 tag id 排序：id 是 "tag_1"/"tag_10" 这种字符串，字典序会把 tag_10
+ *  排在 tag_2 前面，那不是"确定性"，那是另一种任意。
+ *
+ *  标记零雾风险：tag 是玩家自己插的，不含任何敌情读数。 */
 export function nearestPlaceWithin(state: GameState, p: Position): string | null {
+  let bestTag: { name: string; d: number } | null = null;
+  for (const t of state.tags ?? []) {
+    const d = dist(p, t.position);
+    if (!bestTag || d < bestTag.d) bestTag = { name: t.name, d };
+  }
+  if (bestTag !== null && bestTag.d <= NAME_RADIUS_TILES) return bestTag.name;
+
   let best: { name: string; d: number } | null = null;
   state.facilities.forEach((f) => {
     if (f.hp <= 0) return;
