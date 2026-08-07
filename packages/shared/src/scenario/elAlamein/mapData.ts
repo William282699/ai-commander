@@ -25,21 +25,40 @@ export const EL_ALAMEIN_REGIONS: Region[] = [
   },
 
   // === Northern Coastal Zone ===
+  //
+  // envelope-precision 刀3 (2026-08-07): the south edge came down 55 → 44 so the
+  // northern ridge VP (220,55) belongs to ONE front. The eastern half of the old
+  // strip (x316-490 × y45-55) is the HQ→north supply corridor and had nothing to
+  // catch it, so `northern_coastal_e` below picks it up — same front, no gap.
+  // Parent-before-child array order is load-bearing: getRegionCenter matches by
+  // fuzzy `includes` and returns the FIRST hit, so "北部沿海" must keep meaning
+  // this block, not the new east segment.
   {
     id: "northern_coastal",
     name: "北部沿海",
-    bbox: [200, 22, 490, 55],
+    bbox: [200, 22, 490, 44],
     terrainMix: { road: 0.3, plains: 0.3, hills: 0.2, urban: 0.2 },
     passability: { armor: true, infantry: true, naval: false },
     chokepoints: [],
-    adjacent: ["british_hq_area", "tel_el_eisa", "kidney_ridge_zone", "minefield_zone"],
+    adjacent: ["british_hq_area", "tel_el_eisa", "kidney_ridge_zone", "minefield_zone_n", "northern_coastal_e"],
     strategicValue: ["highway", "coastal_approach"],
-    facilities: ["ea_alamein_town"],
+    facilities: ["ea_alamein_town", "ea_player_coastal_post"],
+  },
+  {
+    id: "northern_coastal_e",
+    name: "北部沿海东段",
+    bbox: [316, 45, 490, 55],
+    terrainMix: { road: 0.3, plains: 0.4, hills: 0.1, urban: 0.2 },
+    passability: { armor: true, infantry: true, naval: false },
+    chokepoints: [],
+    adjacent: ["northern_coastal", "british_hq_area"],
+    strategicValue: ["highway", "coastal_approach"],
+    facilities: [],
   },
   {
     id: "tel_el_eisa",
     name: "北沿海高地",
-    bbox: [225, 26, 260, 48],
+    bbox: [225, 26, 260, 44],
     terrainMix: { hills: 0.7, plains: 0.2, urban: 0.1 },
     passability: { armor: true, infantry: true, naval: false },
     chokepoints: [],
@@ -73,40 +92,89 @@ export const EL_ALAMEIN_REGIONS: Region[] = [
   },
 
   // === Minefield Zone (Devil's Gardens) ===
+  //
+  // 刀3: the old single rectangle [248,38,315,125] straddled three fronts at once.
+  // Split north/south; x248-260 goes back to the ridge blocks that already cover
+  // it and y≤44 to the coast. NOTE (R15, registered): the PAINTED minefield is
+  // terrainGen's fill(255,42,308,118) — after the split roughly 1100 painted tiles
+  // sit in ridge blocks rather than in a region named 雷区. That is a map-narration
+  // mismatch only: nothing reads region.passability/terrainMix (movement reads
+  // state.terrain), so armour still cannot drive through the mines.
   {
     id: "minefield_zone",
     name: "魔鬼花园雷区",
-    bbox: [248, 38, 315, 125],
+    bbox: [276, 85, 315, 125],
     terrainMix: { swamp: 0.6, plains: 0.3, hills: 0.1 },
     passability: { armor: false, infantry: true, naval: false },
     chokepoints: [],
-    adjacent: ["northern_coastal", "kidney_ridge_zone", "miteirya_ridge_zone", "ruweisat_zone", "central_desert"],
+    adjacent: ["minefield_zone_n", "ruweisat_zone", "central_desert"],
     strategicValue: ["obstacle", "minefield"],
     facilities: ["ea_fuel_depot"],
   },
+  {
+    id: "minefield_zone_n",
+    name: "魔鬼花园雷区北段",
+    bbox: [261, 45, 315, 80],
+    terrainMix: { swamp: 0.6, plains: 0.3, hills: 0.1 },
+    passability: { armor: false, infantry: true, naval: false },
+    chokepoints: [],
+    adjacent: ["northern_coastal", "kidney_ridge_zone", "miteirya_ridge_zone", "minefield_zone", "central_desert"],
+    strategicValue: ["obstacle", "minefield"],
+    facilities: [],
+  },
 
   // === Central Desert ===
+  // ruweisat's north edge 85 → 81 (R12): the 5-row seam x230-260 × y81-84 left by
+  // the minefield split had an enemy main tank standing in it at turn 0 — a unit
+  // that belongs to no front is invisible to every power/judgment/crisis reader.
   {
     id: "ruweisat_zone",
     name: "中部山脊",
-    bbox: [230, 85, 275, 115],
+    bbox: [230, 81, 275, 115],
     terrainMix: { hills: 0.5, plains: 0.3, road: 0.2 },
     passability: { armor: true, infantry: true, naval: false },
     chokepoints: [],
-    adjacent: ["miteirya_ridge_zone", "central_desert", "minefield_zone", "southern_desert"],
+    adjacent: ["miteirya_ridge_zone", "central_desert", "central_desert_s", "minefield_zone", "southern_desert"],
     strategicValue: ["high_ground", "central_position"],
     facilities: ["ea_observation_post"],
   },
+  // 刀3: the old [120,80,370,140] swallowed the Axis rear whole (60×60) and the
+  // ruweisat ridge entirely. Split into three; the EAST block keeps the id and the
+  // name so `ea_player_central_post` keeps its regionId and "中央沙漠" as a spoken
+  // destination keeps meaning a place on our side of the line. Array order matters:
+  // getRegionCenter takes the FIRST fuzzy `includes` hit, so the parent stays first.
   {
     id: "central_desert",
     name: "中央沙漠",
-    bbox: [120, 80, 370, 140],
+    bbox: [276, 80, 370, 137],
     terrainMix: { plains: 0.6, road: 0.2, hills: 0.2 },
     passability: { armor: true, infantry: true, naval: false },
     chokepoints: [],
-    adjacent: ["ruweisat_zone", "british_hq_area", "axis_rear", "minefield_zone", "southern_desert"],
+    adjacent: ["ruweisat_zone", "british_hq_area", "minefield_zone", "minefield_zone_n", "central_desert_s", "southern_desert"],
     strategicValue: ["open_terrain"],
-    facilities: ["ea_ammo_depot"],
+    facilities: ["ea_player_central_post"],
+  },
+  {
+    id: "central_desert_w",
+    name: "中央沙漠西段",
+    bbox: [181, 81, 229, 137],
+    terrainMix: { plains: 0.6, road: 0.2, hills: 0.2 },
+    passability: { armor: true, infantry: true, naval: false },
+    chokepoints: [],
+    adjacent: ["axis_rear", "miteirya_ridge_zone", "central_desert_s", "southern_desert"],
+    strategicValue: ["open_terrain"],
+    facilities: [],
+  },
+  {
+    id: "central_desert_s",
+    name: "中央沙漠南缘",
+    bbox: [230, 116, 275, 137],
+    terrainMix: { plains: 0.6, road: 0.2, hills: 0.2 },
+    passability: { armor: true, infantry: true, naval: false },
+    chokepoints: [],
+    adjacent: ["ruweisat_zone", "central_desert", "central_desert_w", "southern_desert"],
+    strategicValue: ["open_terrain"],
+    facilities: [],
   },
 
   // === Southern Sector ===
@@ -117,9 +185,9 @@ export const EL_ALAMEIN_REGIONS: Region[] = [
     terrainMix: { plains: 0.4, hills: 0.4, road: 0.2 },
     passability: { armor: true, infantry: true, naval: false },
     chokepoints: [],
-    adjacent: ["central_desert", "british_hq_area", "himeimat_zone", "alam_halfa_zone"],
+    adjacent: ["central_desert", "central_desert_w", "central_desert_s", "british_hq_area", "himeimat_zone", "alam_halfa_zone"],
     strategicValue: ["flanking_route"],
-    facilities: [],
+    facilities: ["ea_ammo_depot"],
   },
   {
     id: "alam_halfa_zone",
@@ -130,7 +198,7 @@ export const EL_ALAMEIN_REGIONS: Region[] = [
     chokepoints: [],
     adjacent: ["southern_desert", "british_hq_area"],
     strategicValue: ["high_ground", "defensive_anchor"],
-    facilities: [],
+    facilities: ["ea_player_south_post"],
   },
   {
     id: "himeimat_zone",
@@ -152,7 +220,7 @@ export const EL_ALAMEIN_REGIONS: Region[] = [
     terrainMix: { plains: 0.5, road: 0.2, urban: 0.2, hills: 0.1 },
     passability: { armor: true, infantry: true, naval: false },
     chokepoints: [],
-    adjacent: ["central_desert", "himeimat_zone", "kidney_ridge_zone", "miteirya_ridge_zone"],
+    adjacent: ["central_desert_w", "himeimat_zone", "kidney_ridge_zone", "miteirya_ridge_zone"],
     strategicValue: ["headquarters", "production", "supply_base"],
     facilities: ["ea_rommel_hq", "ea_axis_barracks", "ea_axis_airfield", "ea_axis_barracks2"],
   },
@@ -346,7 +414,11 @@ export const EL_ALAMEIN_FACILITIES: Facility[] = [
     team: "neutral",
     hp: 400,
     maxHp: 400,
-    regionId: "central_desert",
+    // 刀3 (R4): was "central_desert", which no rectangle ever contained this point
+    // — geometry put it in southern_desert while director.frontIdForRegion read the
+    // declared id, so one facility answered to two fronts depending on who asked.
+    // The fact follows the geometry; its FACILITY_* events now belong to the south.
+    regionId: "southern_desert",
     strategicEffect: "+25 Ammo/30s",
     captureProgress: 0,
     capturingTeam: null,
@@ -476,10 +548,14 @@ export const EL_ALAMEIN_FACILITIES: Facility[] = [
 // ──────────────────────────────────────────────
 
 export const EL_ALAMEIN_FRONTS: Front[] = [
+  // 刀3 invariant (ab-mapdata-audit): every point belongs to AT MOST ONE front.
+  // Region rectangles may still nest INSIDE a front (tel_el_eisa ⊂ northern_coastal
+  // is geography, not ambiguity) — the invariant is deliberately stated at front
+  // level, because that is the level every power/judgment/crisis reader asks at.
   {
     id: "front_coastal",
     name: "1. 北部战线",
-    regionIds: ["northern_coastal", "tel_el_eisa"],
+    regionIds: ["northern_coastal", "northern_coastal_e", "tel_el_eisa"],
     playerPower: 0,
     enemyPower: 0,
     enemyPowerKnown: false,
@@ -501,7 +577,7 @@ export const EL_ALAMEIN_FRONTS: Front[] = [
   {
     id: "front_center",
     name: "3. 中央战线",
-    regionIds: ["central_desert", "minefield_zone"],
+    regionIds: ["central_desert", "central_desert_w", "central_desert_s", "minefield_zone", "minefield_zone_n"],
     playerPower: 0,
     enemyPower: 0,
     enemyPowerKnown: false,

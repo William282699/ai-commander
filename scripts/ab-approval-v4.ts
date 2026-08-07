@@ -27,7 +27,7 @@ import {
   estimateSquadTravelTime,
 } from "../packages/core/src/crisisResponse";
 import { buildReinforceOptions, TASK_IDLE } from "../packages/core/src/frontEscalationPayload";
-import { frontDestinationFor } from "../packages/core/src/frontDestination";
+import { frontDestinationFor, isInsideFront } from "../packages/core/src/frontDestination";
 import { describeCommittedPull } from "../packages/core/src/committedUnits";
 import { buildBattleBoard, boardToDigestLines } from "../packages/core/src/battleBoard";
 import { resolveIntent } from "../packages/core/src/tacticalPlanner";
@@ -46,14 +46,82 @@ import type { GameState, Unit, Front, Position, CrisisEvent, Intent } from "@ai-
 
 // ── Harness ──
 
+/** ★ negctl 的**逐条**期望：把修复摘掉之后，红的必须正好是这 48 条，一条不多一条不少。
+ *
+ *  为什么钉集合不钉条数：见 redNames 的注释。这张表是判据，不是记录——
+ *  **实测与它对不上时，先查是哪一颗牙掉了，不许改这张表去迁就实测**。
+ *  合法更新的唯一场合：确实增删了 ★ 断言，且在 commit message 里写明增删了哪几条。 */
+const NEGCTL_EXPECTED_RED: readonly string[] = [
+    "★ T1f 升级 payload etaSec 锚到战斗点",
+    "★ T1i 态势板 best_help eta == 升级 payload etaSec（同源，防分叉）",
+    "★ T1j ★合同变更★ 兜底二级 无人交火 → 【最大簇】质心（东头 4 人），不是全体平均",
+    "★ T1k ★合同变更★ 线内无兵但有我方设施 → 落到该设施（不是空沙漠中心）",
+    "★ T1l ★合同变更★ 交火簇压过人更多的安静簇（一级压二级，不是比人数）",
+    "★ T1w ★ 同一条线：援兵去打仗那头，撤退去我方据点那头（两档不同点）",
+    "★ T1w2 ★ 无设施可退时撤向【未交火】那簇，援兵仍去交火那簇",
+    "★ T1w3 ★端到端·数兵核坐标★ 「撤到中央战线」= 4 个单位落在我方前哨附近，不在战场上",
+    "★ TF1 ★回归修复★ attack 落到敌方胜负点，不落自家交火簇、不落中立雷达",
+    "★ TF2 ★端到端·数兵核坐标★ 「进攻山脊战线」6 个单位落在敌方胜负点上",
+    "★ TF4 ★负对照★ 线上无敌设施 → 落回 approach 档（我方立足点），中立雷达绝不当目标",
+    "★ TF8 ★次序★ 线上有我方交火时，敌方【非胜负点】设施不得成为落点（交火簇压过它）",
+    "★ TF9 ★次序★ 无我方人员时落敌方设施：取离 frontCenterPos 最近的那个（敌军总部，确定性）",
+    "★ TF10 ★次序★ 线上无我方人员时，敌方非VP设施压过我方设施（第4档 > 第5档）",
+    "★ TH1 ★披露★ 抽走带任务的部队 → 回执侧说出口，数字 == 独立重算的交集",
+    "★ TH1c ★负对照★ 全闲置派兵 → 一个字都不说（披露不得退化成每次都响的噪音）",
+    "★ TH1e ★端到端·数兵★ 一道「全军进攻」下去，披露数 == 派出名单里本来有任务的那些",
+    "★ T2d ★牙★ 番号快照 == 升级候选的 5 人（不是板子的 10 人）",
+    "★ T2e ★牙★ 快照里零个线内单位（不抽已交战的兵）",
+    "★ T3i ★ 番号翻成冻结名单（5 人，全是线外那批）",
+    "★ T5b ★端到端★ 活跃番号过闸（这正是活体冒烟被拦下的那一步）",
+    "★ T5d ★ 烧过的号闸层照样放行（闸不查生死，否则就是第二真相源）",
+    "★ T5f ★ 幻觉号 G99 闸层放行（形状合法即可）",
+    "★ T4h ★行为★ 赢面零升级提案（诚实闸：守得住就不开口）",
+    "★ T4k ★ 说话面 事实包 赢面 = null（不是缺数，是诚实答案）",
+    "★ T4m ★ 说话面 态势板 赢面 survival=stable（不再谎报倒计时）",
+    "★ T4o ★ 说话面 复盘基线 赢面 = null（§6c-4 盲区修复：压着打不再有钟）",
+    "★ T4r ★ 晚到候选不进 payload（提一个来不及的案＝噪声冒充选择）",
+    "★ T4s ★ 同一次过滤也挡住铸号（陈不能提的案，绝不存在号）",
+    "★ TA8 ★面⑤★ 态势板有钟行不再推销晚到候选（信封自相矛盾就此闭合）",
+    "★ TA8e ★⑦★ 披露只数 task=无任务 的（交战中的兵不许被报成余力）",
+    "★ TA8f ★⑦·点名★ 「最近 X」只在闲着的里面挑（更近的交战群不得被点名/铸号）",
+    "★ TA9 ★面⑦★ 机器 B：晚到候选不再当 bestCandidate（「艾登一人可增援」的同族出口）",
+    "★ TA10 ★面⑦·连带★ 废候选不再把 dilemma 降级成 safe_reinforce（被吞掉的问句回来了）",
+    "★ TA11 ★面⑦·端到端★ director beat 升为 cross_front_dilemma 且不再点名废援兵",
+    "★ TA19 ★⑥★ 机器 B 装闸后同样留下它（两机同尺，不再一个说 25s 一个说 89s）",
+    "★ TB4 ★ 绊索已拆：ChatPanel 不再引用 NO_PROPOSAL_GUIDANCE（咨询后的「可以」必须能进 LLM）",
+    "★ TB8 ★ 被说成「赶不到」的部队照样铸号（番号是地址，不是背书）",
+    "★ TB9 ★端到端★ 号解析回的正是行里点名的那批人（承诺==执行，不是就近抓一支）",
+    "★ TB13 ★ 推荐出来的部队也带 handle（fromSquad 有合法把手可写）",
+    "★ TB16 ★端到端·数兵★ 降级 front 提示后，冻结名单原样出发（承诺 6 == 实派 6）",
+    "★ TB17 ★端到端·核坐标★ 板子号 +「去本战线」→ 兵落在打仗那处，不是几何中心",
+    "★ TB18 ★ 「让 G# 就地设防」→ 原地执行、不反问，回执不再谎称出发",
+    "★ TB18b ★ 板子号 + 移动动词 + 无目的地 → 零执行 + 反问（不许替长官挑地方）",
+    "★ TB18d ★ 裸 retreat 保持 retreat-semantics-v1 老合同（不再被改写成撤进战场）",
+    "★ TB18e ★ 查无此地的战线名原样留在 toFront（警告要报长官写的那个字段，不许改写成 targetRegion）",
+    "★ TB18f ★ 假地名被清掉后 → 零执行 + 反问，绝不退化成「没写目的地」顺手执行",
+    "★ TB19 ★ 板子群行也铸号（「附近有空闲部队吗」念出来的那几股必须可寻址）",
+];
+
+
 let failCount = 0;
 let passCount = 0;
 const NEGCTL = process.argv[2] === "--negctl";
 
+/** 每条红掉的断言的名字（声明序）。negctl 比对的是这个**集合**，不是条数。
+ *
+ *  ★ 第 8 级 刀3 加的：原来的收口是 `failCount > 0 → NEGCTL OK`。审计实测过
+ *  一次换手——地图动过之后 48 变 47，看着只少一条，逐条一比是 **6 颗 ★ 牙静默
+ *  变绿、4 条前置塌成红**。只数条数的负对照分不出"修复承重"和"牙掉了又碰巧
+ *  有别的东西红了"。 */
+const redNames: string[] = [];
+
 function check(name: string, ok: boolean, detail = ""): void {
   console.log(`${ok ? "PASS" : "FAIL"} ${name}${ok || !detail ? "" : ` — ${detail}`}`);
   if (ok) passCount++;
-  else failCount++;
+  else {
+    failCount++;
+    redNames.push(name);
+  }
 }
 
 /** ★ = load-bearing on the knife. Inverted under --negctl (pre-fix expectation). */
@@ -143,6 +211,8 @@ function etaTo(state: GameState, ids: number[], anchor: Position): number | null
 
 const BATTLE: Position = { x: 360, y: 105 };
 const RELIEF: Position = { x: 380, y: 150 }; // outside both bboxes, near the fight
+/** The quiet west-end garrison of scenarioKnife1 — 刀3 重钉，见其用处的注释。 */
+const QUIET_GARRISON: Position = { x: 185, y: 90 };
 
 /** Fight at the east end of front_center; a 10-unit relief group just outside. */
 function scenarioKnife1(opts: { engagedTimestamps: boolean; defendersInFront: boolean }): {
@@ -164,8 +234,12 @@ function scenarioKnife1(opts: { engagedTimestamps: boolean; defendersInFront: bo
     }
     // A quiet garrison at the WEST end, inside the same front, never engaged.
     // Tier 2 of the fallback must not let these drag the anchor west.
+    //
+    // ★ 第 8 级 刀3 重钉（与 WEST_CLUSTER 是两个坐标，都要动）：原写死 (130,90)，
+    // 切图后掉出 front_center → T1j 的两簇局塌成一簇局。这一处比 WEST_CLUSTER 更险：
+    // 它塌了**没有任何断言会红**，T1j/T1j-neg 照样绿，只是不再测任何东西。
     for (let i = 0; i < 2; i++) {
-      addUnit(state, 130 + i, 90, { lastAttackTime: 0, lastDamagedAt: undefined });
+      addUnit(state, QUIET_GARRISON.x + i, QUIET_GARRISON.y, { lastAttackTime: 0, lastDamagedAt: undefined });
     }
   }
 
@@ -183,8 +257,14 @@ function scenarioKnife1(opts: { engagedTimestamps: boolean; defendersInFront: bo
 
 // 两簇同线（v4 §8）：东头 / 西头各一堆，只有一堆带交火时间戳。分档合同的两个
 // 承重点都要靠它——「取最大簇不取平均」与「交火压人多」在单簇局里都测不出来。
+//
+// ★ 第 8 级 刀3 重钉：西头原在 (130,90)，那是 central_desert 西缘还在 x=120 的年代
+// （那个矩形把敌军后方整块吞进了中央战线）。切完之后 front_center 从 x=181 起，
+// (130,90) 归敌军后方——两簇局会塌成一簇局，而"取最大簇"与"取全体平均"在一簇局里
+// 答案相同：**断言不会红，只会变成同义反复**。新坐标必须仍在 front_center 内
+// （central_desert_w [181,81,229,137]）。
 const EAST_CLUSTER: Position = { x: 360, y: 105 }; // central_desert 东端
-const WEST_CLUSTER: Position = { x: 130, y: 90 };  // 同一条线的西端，相距 230 格
+const WEST_CLUSTER: Position = { x: 185, y: 90 };  // 同一条线的西端，相距 175 格
 
 function twoClusterFront(opts: {
   eastN: number;
@@ -222,11 +302,32 @@ function runKnife1(): void {
   if (!center || !anchor) throw new Error("anchor/center null in a constructed front");
 
   // ── Construction validity (前置：局造得对，断言才有意义) ──
+  //
+  // 刀3 前的值是 (263,96)（5a1f195 事故档同值）。中央战线拆成五块之后中心移到
+  // (273,103)——**这条断言变红正是它该干的活**：地图在脚下动了，本刀的所有 fixture
+  // 都要重看一遍。所以这里仍然钉字面值（动了就红），另加一条独立重算校验它确实是
+  // "各 region 矩形中心的平均"这个定义本身，而不是钉了个不知从哪来的数。
   check(
-    "T1a 前置 front_center 几何中心 == (263,96)（与 5a1f195 事故档同值）",
-    center.x === 263 && center.y === 96,
+    "T1a 前置 front_center 几何中心 == (273,102)（刀3 前为 (263,96)）",
+    center.x === 273 && center.y === 102,
     `实得 (${center.x},${center.y})`,
   );
+  {
+    let sx = 0, sy = 0, n = 0;
+    for (const rid of front.regionIds) {
+      const r = state.regions.get(rid);
+      if (!r) continue;
+      sx += (r.bbox[0] + r.bbox[2]) / 2;
+      sy += (r.bbox[1] + r.bbox[3]) / 2;
+      n += 1;
+    }
+    const defX = Math.round(sx / n), defY = Math.round(sy / n);
+    check(
+      "T1a2 前置 几何中心 == 五块 region 矩形中心的平均（定义级复算，不抄生产结果）",
+      n === 5 && center.x === defX && center.y === defY,
+      `生产 (${center.x},${center.y}) 定义 (${defX},${defY}) n=${n}`,
+    );
+  }
   check(
     "T1b 前置 战斗锚点落在交战守军身上（东端 x≈360）",
     Math.abs(anchor.x - (BATTLE.x + 1.5)) < 0.01 && Math.abs(anchor.y - BATTLE.y) < 0.01,
@@ -284,9 +385,25 @@ function runKnife1(): void {
   //   出处：DIALOGUE_AB_KNIFE_REVIEW_BRIEF_20260803.md §8.2 / §8.4-3。
   const quiet = scenarioKnife1({ engagedTimestamps: false, defendersInFront: true });
   const quietAnchor = battleAnchorFor(quiet.state, quiet.front);
-  // 局里两堆：东头 4 人（x≈361.5）、西头 2 人（x≈130.5）。新合同取东头那簇。
+  // 局里两堆：东头 4 人、西头 2 人。新合同取东头那簇。
+  //
+  // ★ 第 8 级 刀3：修复前期望 `meanOfAllX` 原本写死 `(4*361.5 + 2*130.5)/6 = 284.5`。
+  // 常数化的期望值是个陷阱——西头驻军一旦掉出这条线，局里只剩一簇，"最大簇"与
+  // "全体平均"答案相同，而这条断言仍然绿：它不再能区分修复前后的两种行为，
+  // 变成了同义反复。现在改为**从 state 用生产的战线成员判定重算**：谁在线内由
+  // isInsideFront 说了算，fixture 一塌，下面的前置断言当场红。
+  const inFrontXs: number[] = [];
+  quiet.state.units.forEach((u) => {
+    if (u.team !== "player" || u.hp <= 0) return;
+    if (isInsideFront(quiet.state, quiet.front, u.position)) inFrontXs.push(u.position.x);
+  });
+  const meanOfAllX = inFrontXs.reduce((s, x) => s + x, 0) / (inFrontXs.length || 1);
   const biggestX = BATTLE.x + 1.5;
-  const meanOfAllX = (4 * (BATTLE.x + 1.5) + 2 * 130.5) / 6; // 旧合同的答案 = 284.5
+  check(
+    "T1j0 前置 两簇都在线内（6 人：东头 4 + 西头 2），且两个答案确实不同",
+    inFrontXs.length === 6 && Math.abs(biggestX - meanOfAllX) > 50,
+    `线内 ${inFrontXs.length} 人 最大簇 ${biggestX.toFixed(2)} 全体平均 ${meanOfAllX.toFixed(2)}`,
+  );
   checkKnife(
     "T1j ★合同变更★ 兜底二级 无人交火 → 【最大簇】质心（东头 4 人），不是全体平均",
     !!quietAnchor && Math.abs(quietAnchor.x - biggestX) < 0.01,
@@ -649,20 +766,45 @@ function runKnifeF(): void {
     const st = emptyBattlefield();
     const fr = frontById(st, "front_center");
     st.time = 1000; // 线内零我方人员
-    const barracks = st.facilities.get("ea_axis_barracks2")!;
+
+    // ★ 第 8 级 刀3：这条合同原来的 fixture 是 `ea_axis_barracks2`(120,140)。它当时
+    // 在中央战线**只因为 central_desert 的西缘伸到 x=120 把敌军后方整块吞了进来**——
+    // 那正是本刀切掉的病。切完之后中央战线一个敌方设施都没有了，第 4 档在这条线上
+    // 失去了 fixture。
+    // 按 R14 裁定：不删牙、不换弱断言，改为**在测试态内造一个中央线内的敌方非 VP
+    // 设施**（字段与生产设施同形，只活在这一个局部 state 里，不碰地图数据）。
+    // 它必须不在 captureObjectives 里，否则测的就变成第 1 档了。
+    const plantedId = "bench_axis_supply_dump";
+    st.facilities.set(plantedId, {
+      id: plantedId,
+      name: "轴心野战补给点（台架）",
+      type: "ammo_depot",
+      tags: ["bench-fixture"],
+      position: { x: 300, y: 110 },   // inside central_desert[276,80,370,137]
+      team: "enemy",
+      hp: 300,
+      maxHp: 300,
+      regionId: "central_desert",
+      strategicEffect: "",
+      captureProgress: 0,
+      capturingTeam: null,
+    });
+    const dump = st.facilities.get(plantedId)!;
     const ourPost = st.facilities.get("ea_player_central_post")!;
     const d = frontDestinationFor(st, fr, "assault")!;
     check(
-      "TF10a 前置 该线同时有敌方营房与我方前哨，且线内零我方人员",
-      barracks.team === "enemy" && ourPost.team === "player" &&
+      "TF10a 前置 该线同时有敌方非VP设施与我方前哨、线内零我方人员，且该敌设施不是胜负点",
+      dump.team === "enemy" && ourPost.team === "player" &&
+        isInsideFront(st, fr, dump.position) && isInsideFront(st, fr, ourPost.position) &&
+        !(st.captureObjectives ?? []).includes(plantedId) &&
         ![...st.units.values()].some((u) => u.team === "player"),
-      `营房=(${barracks.position.x},${barracks.position.y}) 我方前哨=(${ourPost.position.x},${ourPost.position.y})`,
+      `敌设施=(${dump.position.x},${dump.position.y}) 我方前哨=(${ourPost.position.x},${ourPost.position.y})`,
     );
     checkKnife(
       "TF10 ★次序★ 线上无我方人员时，敌方非VP设施压过我方设施（第4档 > 第5档）",
-      d.x === barracks.position.x && d.y === barracks.position.y,
+      d.x === dump.position.x && d.y === dump.position.y,
       d.x === ourPost.position.x && d.y === ourPost.position.y,
-      `落点=(${d.x},${d.y}) 敌营房=(${barracks.position.x},${barracks.position.y}) 我方前哨=(${ourPost.position.x},${ourPost.position.y})`,
+      `落点=(${d.x},${d.y}) 敌设施=(${dump.position.x},${dump.position.y}) 我方前哨=(${ourPost.position.x},${ourPost.position.y})`,
     );
   }
 }
@@ -765,8 +907,11 @@ function runH1(): void {
 // promised, silently.
 // ============================================================
 
-const STRADDLE_INSIDE: Position = { x: 360, y: 138 }; // inside central_desert[120,80,370,140]
-const STRADDLE_OUTSIDE: Position = { x: 360, y: 143 }; // outside, 5 tiles away → same cluster
+// 刀3 重钉：南缘 140→137，原来的 (360,138) 出线了，"同名不同成员"的坑就不成立了
+// （板子 10 人 == 升级 5 人，T2b 前置当场红）。两点必须一个在 front_center 内、
+// 一个在外，且相距 5 格以内——否则它们不再是同一个空间簇，坑也就不是那个坑。
+const STRADDLE_INSIDE: Position = { x: 360, y: 135 }; // inside central_desert[276,80,370,137]
+const STRADDLE_OUTSIDE: Position = { x: 360, y: 140 }; // outside, 5 tiles away → same cluster
 
 function scenarioStraddle(): { state: GameState; front: Front; insideIds: number[]; outsideIds: number[] } {
   const state = emptyBattlefield();
@@ -2011,13 +2156,25 @@ function main(): void {
 
   console.log(`\nPASS=${passCount} FAIL=${failCount}`);
   if (NEGCTL) {
+    const got = [...redNames].sort();
+    const want = [...NEGCTL_EXPECTED_RED].sort();
+    const missing = want.filter((n) => !got.includes(n));   // 牙掉了：本该红的变绿了
+    const extra = got.filter((n) => !want.includes(n));     // 新红：多半是前置/fixture 塌了
+    const ok = missing.length === 0 && extra.length === 0;
+    if (!ok) {
+      if (missing.length) console.log(`  ★ 掉牙（本该红却绿了）${missing.length} 条：\n    - ${missing.join("\n    - ")}`);
+      if (extra.length) console.log(`  ！ 意外变红 ${extra.length} 条（多半是前置或 fixture 塌了）：\n    - ${extra.join("\n    - ")}`);
+    }
     console.log(
-      failCount > 0
-        ? `NEGCTL OK — ${failCount} 条 ★ 断言真 FAIL（修复确实承重）`
-        : "NEGCTL BAD — 零 FAIL，说明 ★ 断言是同义反复，不是真判据",
+      ok
+        ? `NEGCTL OK — 红的正是登记在案的那 ${failCount} 条，修复确实承重`
+        : `NEGCTL BAD — 红集合与登记表对不上（掉牙 ${missing.length} / 意外 ${extra.length}）：` +
+          "先查是哪一边变了，不许改期望表迁就实测",
     );
+    process.exit(ok ? 0 : 1);
   } else {
     console.log(failCount === 0 ? "ALL PASS" : `${failCount} FAILED`);
+    process.exit(failCount === 0 ? 0 : 1);
   }
 }
 
