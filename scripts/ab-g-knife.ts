@@ -1019,6 +1019,11 @@ const RULE_FINGERPRINTS: Record<RuleTag, RegExp[]> = {
   mood_register: [/mood 行/, /mood line/i],
   speech_contract: [/说话合同/],
   handle_addressing: [
+    // 第 8 级 刀2：印法从行尾 `handle=G#` 改成紧贴部队名的 `名[临时编队G#]`。
+    // 改的是**指纹**（规则的新写法），SPEECH_RULE_SITES 的登记条目一个字没动——
+    // 规则还是那条规则，只是它在源码里长这样了。旧写法保留：一处漏改会被
+    // 断言 C 抓成"规则集合漂移"，而不是安静地当成"这一面没这条规则"。
+    /\[临时编队G#\]/,
     /handle=G#/,
     /group labels are NOT valid fromSquad/i,
     /LABEL is NOT a valid fromSquad/i,
@@ -1352,6 +1357,27 @@ function runReport(aPath: string, bPath?: string): void {
  *   ② 新版多出来的每一行，必须落在【陈的人格块】里面 → 零注入
  * "内容没动所以应该没变"不算证明——那是第 2 道防护（Emily 生产台架效果级负对照）的活。
  */
+/**
+ * 共享面（SYSTEM_PROMPT + CHANNEL_PERSONA.logistics）上历次**经裁**的变更。
+ *
+ * 这份清单印进每次 guard 报告里，而不是一次性追加到 emily-guard.md ——
+ * 那个文件每跑一次都被 writeFileSync 重写，追加的裁定记录下一次就没了。
+ * 记录要活下来，就得由生成它的那支笔每次重写一遍。
+ *
+ * ★ carve-out 的操作定义（两次触发合起来才说得清，2026-08-07/08）：
+ *     旧行**因线变而为假** → 必须改（留着＝共享面上挂一句假话）；
+ *     线变了旧行**仍然为真** → 不碰（那不是例外，是本来就无权改）。
+ *   绊线的职责是逼停待裁——两次都停对了，一次判"无权改"，一次判"必须改"。
+ */
+const REGISTERED_SHARED_SURFACE_RULINGS: readonly string[] = [
+  "2026-08-07 第 8 级 fix B：ai.ts tag 格式指称【判退·回退】——旧文说的是「值 tag_1」，" +
+    "新印法 `\"名字\"(tag_1)` 里 id 仍在，旧文句句属实 ⇒ carve-out 前提不成立，无权改。",
+  "2026-08-08 第 8 级 刀2：ai.ts 解析器 prompt 的番号 token 指称【授权·已改】——" +
+    "旧文写 `any ---FRONT_JUDGMENT--- row's handle=G# token`，而刀2 后 `handle=` 全仓绝迹，" +
+    "该句字面为假、把模型指向一个不存在的 token ⇒ 必须改。§O-4 原文授权 + Fable 裁定。" +
+    "同句位、只换形的指称，不加规则不加例句；保留 `a force handle — a G-number` 短语。",
+];
+
 function runEmilyGuard(baseRef: string, outPath: string): void {
   const newSrc = readFileSync(AI_TS, "utf8");
   const baseSrc = execSync(`git show ${baseRef}:${AI_TS}`, { encoding: "utf8", maxBuffer: 1 << 24 });
@@ -1436,6 +1462,10 @@ function runEmilyGuard(baseRef: string, outPath: string): void {
     ``,
     `## 新增行清单（供人读）`,
     ...added.map((l) => `   + ${l}`),
+    ``,
+    `## 共享面上【经裁】的变更（历次）`,
+    `将来任何人看到共享面上的这些 diff，应读作「经裁的变更」，不是漂移。`,
+    ...REGISTERED_SHARED_SURFACE_RULINGS.map((r) => `   · ${r}`),
   ].join("\n");
 
   mkdirSync(dirname(outPath), { recursive: true });

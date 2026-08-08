@@ -240,17 +240,53 @@ export function buildFrontEscalationWithTickets(
  * to "pick something reasonable" (that soft-fix is the 74/85 family).
  */
 export function lookupEscalationTicket(raw: string, now: number): TicketLookup {
-  const key = raw.trim().toUpperCase();
-  const t = tickets.get(key);
+  const key = normalizeForceRef(raw);
+  const t = key === null ? undefined : tickets.get(key);
   if (!t) return { ok: false, reason: "unknown" };
   if (t.burned) return { ok: false, reason: "burned", ticket: t };
   if (now - t.mintedAt > TICKET_TTL_SEC) return { ok: false, reason: "expired", ticket: t };
   return { ok: true, ticket: t };
 }
 
-/** True iff the string looks like a ticket reference at all (G + digits). */
+// ── 号怎么印、怎么认（第 8 级 刀2）──
+//
+// 病：`handle=G7` 是行尾一个独立 token，而那一行的主语是**战线**。
+// 「1. 北部战线: … best_help=Aiden(I1)(3units …) handle=G2」——模型把号绑给了
+// 行首那个名字，9/131。根因是**语法位置**，不是措辞：G 刀在合同里补了
+// 「号只指部队」之后从 17 腰斩到 9，没归零——措辞治不了语法。
+//
+// 刀：号永远紧跟部队名，`名[临时编队G7]`；行尾独立 token 废除。
+// 「临时编队」是自描述——冻结的那批本来就不是编制分队，说出口反而更准（R6）。
+//
+// 印与认写在一起，是为了它们能被证明互逆：**印出去的形，必须认得回来**
+// （与刀4 的 tag 名字归一同一条原则）。
+
+const HANDLE_PREFIX = "临时编队";
+
+/** 号贴在部队名紧邻处的印法。**唯一**一处定义这个形状。 */
+export function forceHandleTag(gNumber: string): string {
+  return `[${HANDLE_PREFIX}${gNumber}]`;
+}
+
+/**
+ * 把写来的部队引用归一成登记簿的 key。
+ *
+ * 只剥**我们自己印的那一个前缀**（外加整段抄行时带出来的方括号），再照旧判
+ * `G\d+`——这是对自家打印格式的解析闭环，不是同义词表（红线二不违）。
+ * `isTicketRef` / `lookupEscalationTicket` / `isKnownForceRef` 三处共用这一个。
+ * fail-closed 不变：`临时编队2` / `G2X` / `编队G2` 一律拒绝。
+ */
+function normalizeForceRef(raw: string): string | null {
+  let s = raw.trim();
+  if (s.startsWith("[") && s.endsWith("]")) s = s.slice(1, -1).trim();
+  if (s.startsWith(HANDLE_PREFIX)) s = s.slice(HANDLE_PREFIX.length).trim();
+  return /^G\d+$/i.test(s) ? s.toUpperCase() : null;
+}
+
+/** True iff the string looks like a force reference at all (G + digits,
+ *  optionally wearing the 「临时编队」 prefix we print). */
 export function isTicketRef(raw: string): boolean {
-  return /^G\d+$/i.test(raw.trim());
+  return normalizeForceRef(raw) !== null;
 }
 
 /** A commander as the reference predicate needs to see one: the key the model
@@ -295,7 +331,8 @@ export function isKnownForceRef(
 
 /** One-shot: a consumed ticket can never dispatch twice. */
 export function burnEscalationTicket(gNumber: string): void {
-  const t = tickets.get(gNumber.trim().toUpperCase());
+  const key = normalizeForceRef(gNumber);
+  const t = key === null ? undefined : tickets.get(key);
   if (t) t.burned = true;
 }
 
@@ -323,8 +360,9 @@ export function liveMembersOf(state: GameState, ticket: EscalationTicket): numbe
  */
 export function ticketPromptLine(minted: EscalationTicket[]): string | null {
   if (minted.length === 0) return null;
-  const list = minted.map((t) => `${t.gNumber}=${t.label}(${t.unitCount}units)`).join("｜");
-  return `本案候选编号：${list}\nfromSquad="G编号" 即调陈所述那批（编号是合法把手，群名仍然不是）。`;
+  // 刀2：候选行也印自描述的号，与判读行/板子行同一个形。
+  const list = minted.map((t) => `${HANDLE_PREFIX}${t.gNumber}=${t.label}(${t.unitCount}units)`).join("｜");
+  return `本案候选编号：${list}\nfromSquad="${HANDLE_PREFIX}G编号" 即调陈所述那批（编号是合法把手，群名仍然不是）。`;
 }
 
 // ── The translation decision (pure; ChatPanel keeps only thin glue) ──
@@ -358,7 +396,7 @@ export function resolveTicketReference(
 
   const look = lookupEscalationTicket(rawFromSquad, now);
   if (!look.ok) {
-    const g = rawFromSquad.trim().toUpperCase();
+    const g = rawFromSquad.trim().toUpperCase(); // 仅用于兜底话术里回显长官原话
     const line =
       look.reason === "expired"
         ? `那个增援案已经过时了——现在还要动兵的话，您说一声，我按当下的情况重新点人。`

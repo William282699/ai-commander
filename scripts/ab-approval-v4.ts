@@ -38,7 +38,7 @@ import { captureDecisionReview } from "../packages/core/src/decisionReview";
 import { filterLateCandidates } from "../packages/core/src/frontEscalationPayload";
 import {
   mintEscalationTickets, lookupEscalationTicket, burnEscalationTicket, liveMembersOf,
-  isTicketRef, isKnownForceRef, ticketPromptLine, resetEscalationTickets, TICKET_TTL_SEC,
+  isTicketRef, isKnownForceRef, ticketPromptLine, resetEscalationTickets, TICKET_TTL_SEC, forceHandleTag,
   buildFrontEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
   mintSpokenForce, _ticketsForTest, retargetIntentForTicket, ticketDestinationVerdict,
 } from "../packages/core/src/escalationTicket";
@@ -89,9 +89,9 @@ const NEGCTL_EXPECTED_RED: readonly string[] = [
     "★ TA11 ★面⑦·端到端★ director beat 升为 cross_front_dilemma 且不再点名废援兵",
     "★ TA19 ★⑥★ 机器 B 装闸后同样留下它（两机同尺，不再一个说 25s 一个说 89s）",
     "★ TB4 ★ 绊索已拆：ChatPanel 不再引用 NO_PROPOSAL_GUIDANCE（咨询后的「可以」必须能进 LLM）",
-    "★ TB8 ★ 被说成「赶不到」的部队照样铸号（番号是地址，不是背书）",
+    "★ TB8 ★ 被说成「赶不到」的部队照样铸号，且号紧贴它的名字（地址≠背书）",
     "★ TB9 ★端到端★ 号解析回的正是行里点名的那批人（承诺==执行，不是就近抓一支）",
-    "★ TB13 ★ 推荐出来的部队也带 handle（fromSquad 有合法把手可写）",
+    "★ TB13 ★ 推荐出来的部队也带号，且号紧贴它的名字（fromSquad 有合法把手可写）",
     "★ TB16 ★端到端·数兵★ 降级 front 提示后，冻结名单原样出发（承诺 6 == 实派 6）",
     "★ TB17 ★端到端·核坐标★ 板子号 +「去本战线」→ 兵落在打仗那处，不是几何中心",
     "★ TB18 ★ 「让 G# 就地设防」→ 原地执行、不反问，回执不再谎称出发",
@@ -191,6 +191,20 @@ function makeCrisis(front: Front): CrisisEvent {
     message: `${front.name} 态势需要决断`,
     time: 0,
   };
+}
+
+// ── 刀2（第 8 级）：号紧贴部队名的读法 ──
+//
+// 旧断言问的是"这一行里有没有 handle=G#"，那正是本刀要杀的形状：号在行尾，
+// 而行的主语是战线。新断言问的是**号贴没贴在那支部队的名字后面**——
+// 严格更强，且它直接量的就是本刀的合同。
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+/** 紧跟 `forceLabel` 之后的号；号在别处（哪怕同一行）一律 null。 */
+function handleAfter(row: string, forceLabel: string): string | null {
+  const m = row.match(new RegExp(`${escapeRe(forceLabel)}\\[临时编队(G\\d+)\\]`));
+  return m ? m[1] : null;
 }
 
 /** Production ETA convention (frontEscalationPayload.etaOf): ceil, never a fake 0. */
@@ -565,9 +579,9 @@ function runKnife1Withdraw(): void {
 // ============================================================
 
 /** 山脊战线真形状：两个敌方胜负点 + 一个中立雷达 + 我方小簇正蹲在那个中立雷达上。 */
-const RIDGE_VP_NEAR: Position = { x: 230, y: 70 };  // 中央山脊 ea_miteirya_ridge ★VP
+const RIDGE_VP_NEAR: Position = { x: 230, y: 70 };  // 驼峰山脊 ea_miteirya_ridge ★VP（第 8 级改名前叫「中央山脊」）
 const RIDGE_VP_FAR: Position = { x: 220, y: 55 };   // 北部山脊 ea_kidney_ridge ★VP
-const RIDGE_NEUTRAL: Position = { x: 250, y: 100 }; // 中央雷达 ea_observation_post（中立）
+const RIDGE_NEUTRAL: Position = { x: 250, y: 100 }; // 烽火台 ea_observation_post（中立；改名前叫「中央雷达」）
 
 function assaultFixture(): { state: GameState; front: Front; ourIds: number[]; squadIds: number[] } {
   const state = emptyBattlefield();
@@ -1259,9 +1273,9 @@ function runKnifeB2(): void {
   const pureRow1 = buildFrontJudgmentLines(pure.state).find((l) => l.includes("1. 北部战线"));
   const pureRow2 = buildFrontJudgmentLines(pure.state).find((l) => l.includes("1. 北部战线"));
   check(
-    "TB6 纯度 无铸号器时行内无 handle=，且零铸号（台架/心跳/复算不得产生副作用）",
-    !!pureRow1 && !pureRow1.includes("handle=") && pureRow1 === pureRow2 &&
-      _ticketsForTest().length === 0,
+    "TB6 纯度 无铸号器时行内无番号标记（新旧两种形都不许有），且零铸号",
+    !!pureRow1 && !pureRow1.includes("handle=") && !pureRow1.includes("[临时编队") &&
+      pureRow1 === pureRow2 && _ticketsForTest().length === 0,
     `tickets=${_ticketsForTest().length} row=${pureRow1 ?? "(无)"}`,
   );
 
@@ -1270,7 +1284,8 @@ function runKnifeB2(): void {
   const late = lateCandidateFixture();
   const lateRow = buildFrontJudgmentLines(late.state, (f, o) => mintSpokenForce(late.state, f, o))
     .find((l) => l.includes("1. 北部战线"));
-  const lateG = lateRow?.match(/handle=(G\d+)/)?.[1] ?? null;
+  // 刀2：不再问"行里有没有号"，问"号贴没贴在被点名的那支后面"——严格更强。
+  const lateG = lateRow ? handleAfter(lateRow, late.squadLabel) : null;
   check(
     "TB7 前置 该行确实是「披露赶不到」形态（best_help=none + 点名 + 赶不到）",
     !!lateRow && lateRow.includes("best_help=none(") && lateRow.includes(late.squadLabel) &&
@@ -1278,7 +1293,7 @@ function runKnifeB2(): void {
     lateRow ?? "(无)",
   );
   checkKnife(
-    "TB8 ★ 被说成「赶不到」的部队照样铸号（番号是地址，不是背书）",
+    "TB8 ★ 被说成「赶不到」的部队照样铸号，且号紧贴它的名字（地址≠背书）",
     lateG !== null,
     lateG === null,
     `handle=${lateG ?? "(无)"} row=${lateRow ?? ""}`,
@@ -1316,21 +1331,21 @@ function runKnifeB2(): void {
   const nearRow = buildFrontJudgmentLines(near.state, (f, o) => mintSpokenForce(near.state, f, o))
     .find((l) => l.includes("1. 北部战线"));
   check(
-    "TB12 前置 近处编队过闸，该行是推荐形态（best_help=<番号>）",
-    !!nearRow && nearRow.includes(`best_help=${near.squadLabel}(`),
+    "TB12 前置 近处编队过闸，该行是推荐形态（best_help=<名>[临时编队G#](<事实>)）",
+    !!nearRow && new RegExp(`best_help=${escapeRe(near.squadLabel)}\\[临时编队G\\d+\\]\\(`).test(nearRow),
     nearRow ?? "(无)",
   );
   checkKnife(
-    "TB13 ★ 推荐出来的部队也带 handle（fromSquad 有合法把手可写）",
-    !!nearRow && /handle=G\d+/.test(nearRow),
-    !!nearRow && !/handle=G\d+/.test(nearRow),
+    "TB13 ★ 推荐出来的部队也带号，且号紧贴它的名字（fromSquad 有合法把手可写）",
+    !!nearRow && handleAfter(nearRow, near.squadLabel) !== null,
+    !!nearRow && !/\[临时编队G\d+\]/.test(nearRow),
     nearRow ?? "(无)",
   );
   check(
     "TB14 表头在铸号时才挂番号说明（没铸号的信封不多话）",
     buildFrontJudgmentLines(near.state, (f, o) => mintSpokenForce(near.state, f, o))[0]
-      .includes("handle=G#") &&
-      !buildFrontJudgmentLines(near.state)[0].includes("handle=G#"),
+      .includes("[临时编队G#]") &&
+      !buildFrontJudgmentLines(near.state)[0].includes("[临时编队G#]"),
   );
 
   // ── ★ 手测 02:50 的真凶：名单被当过滤器，交集为空 ──
@@ -1507,7 +1522,8 @@ function runKnifeB2(): void {
     buildBattleBoard(boardState),
     (row) => mintSpokenForce(boardState, null, { label: row.label, memberIds: row.memberIds, etaSec: null }),
   ).unassignedGroupLines;
-  const boardRowG = boardLines.join("\n").match(/handle=(G\d+)/)?.[1] ?? null;
+  // 板子行形如 `- 群名[临时编队G1]: …`；断言号贴在群名与冒号之间，不是行尾。
+  const boardRowG = boardLines.join("\n").match(/^- .+?\[临时编队(G\d+)\]: /m)?.[1] ?? null;
   checkKnife(
     "TB19 ★ 板子群行也铸号（「附近有空闲部队吗」念出来的那几股必须可寻址）",
     boardLines.length > 0 && boardRowG !== null,
@@ -1523,8 +1539,92 @@ function runKnifeB2(): void {
   );
   check(
     "TB21 纯度 板子不给铸号器时字节不变、零 handle",
-    !boardToDigestLines(buildBattleBoard(boardState)).unassignedGroupLines.join("").includes("handle="),
+    (() => { const j = boardToDigestLines(buildBattleBoard(boardState)).unassignedGroupLines.join("");
+      return !j.includes("handle=") && !j.includes("[临时编队"); })(),
   );
+
+  // ============================================================
+  // 第 8 级 刀2 — 印法改成 `名[临时编队G#]`：印与认必须互逆
+  // ============================================================
+  console.log("\n== 刀2 番号印到部队名紧邻处 ==");
+
+  // K2-1/2 行尾 handle= 从全部铸号面绝迹（不是"这一行没有"，是"哪儿都没有"）
+  {
+    resetEscalationTickets();
+    const st = lateCandidateFixture(false).state;
+    const judge = buildFrontJudgmentLines(st, (f, o) => mintSpokenForce(st, f, o)).join("\n");
+    const boardL = boardToDigestLines(
+      buildBattleBoard(st),
+      (row) => mintSpokenForce(st, null, { label: row.label, memberIds: row.memberIds, etaSec: null }),
+    ).unassignedGroupLines.join("\n");
+    const promptLine = ticketPromptLine(mintEscalationTickets(st, frontById(st, "front_coastal"))) ?? "";
+    const all = [judge, boardL, promptLine].join("\n");
+    check(
+      "K2-1 全部铸号面零 ` handle=` 残留（行尾独立 token 已废除）",
+      all.length > 0 && !all.includes("handle="),
+      all.split("\n").find((l) => l.includes("handle=")) ?? "",
+    );
+    check(
+      "K2-2 候选编号行也用自描述号（临时编队G#=…）",
+      promptLine.includes("临时编队G") && promptLine.includes('fromSquad="临时编队G编号"'),
+      promptLine.split("\n").join(" / "),
+    );
+  }
+
+  // K2-3/4/5 ★印认互逆★：引擎印出去的形，引擎自己必须认得回来
+  {
+    resetEscalationTickets();
+    const st = lateCandidateFixture(false).state;
+    const minted = mintEscalationTickets(st, frontById(st, "front_coastal"));
+    const g = minted[0]?.gNumber ?? "";
+    const printed = forceHandleTag(g);     // "[临时编队G1]"
+    const spoken = printed.slice(1, -1);   // 模型照着念："临时编队G1"
+    const ids = (raw: string): string => {
+      const r = resolveTicketReference(st, raw, st.time, [], false);
+      return r.kind === "dispatch" ? [...r.unitIds].sort((a, b) => a - b).join(",") : r.kind;
+    };
+    check(
+      "K2-3 ★印认互逆★ 印出去的形（含带方括号整段抄）与裸 G 号派同一批兵",
+      g !== "" && ids(g).includes(",") === ids(spoken).includes(",") &&
+        ids(spoken) === ids(g) && ids(printed) === ids(g) && ids(g) !== "not_a_ticket",
+      `裸=${ids(g)} 念=${ids(spoken)} 抄=${ids(printed)}`,
+    );
+    const bad = ["临时编队2", "G2X", "编队G2", "临时编队 G2 号", ""];
+    check(
+      "K2-4 ★负对照★ 形不对一律拒绝（只剥我们自己印的那一个前缀，不是同义词表）",
+      bad.every((r) => !isTicketRef(r)),
+      bad.filter((r) => isTicketRef(r)).join(" ; "),
+    );
+    check(
+      "K2-5 isKnownForceRef 与 isTicketRef 同源（三处共用一个 normalizer）",
+      isKnownForceRef(st, spoken, []) && isKnownForceRef(st, printed, []) &&
+        !isKnownForceRef(st, "临时编队2", []),
+    );
+  }
+
+  // K2-6/7 ★硬约束★ 号只进【行的拼装】，绝不进 option.label / ticket.label：
+  //   label 会进回执 → 污染了回执里番号双打印；ab-front-escalation 的三条
+  //   `endsWith("未编组群")` 也会当场翻。
+  {
+    resetEscalationTickets();
+    const st = lateCandidateFixture(false).state;
+    const front = frontById(st, "front_coastal");
+    const opts = buildReinforceOptions(st, front);
+    const minted = mintEscalationTickets(st, front);
+    const dirty = [...opts.options.map((o) => o.label), ...minted.map((t) => t.label)]
+      .filter((l) => l.includes("临时编队") || l.includes("handle="));
+    check(
+      "K2-6 ★硬约束★ option.label 与 ticket.label 里零番号（号只活在行的拼装里）",
+      minted.length > 0 && dirty.length === 0,
+      dirty.join(" ; "),
+    );
+    check(
+      "K2-7 回执里号最多出现一次（label 干净的直接后果）",
+      minted.length > 0 &&
+        (ticketDispatchReceipt(minted[0], minted[0].unitCount).match(/G\d+/g) ?? []).length <= 1,
+      minted.length > 0 ? ticketDispatchReceipt(minted[0], minted[0].unitCount) : "(无票)",
+    );
+  }
 }
 
 // ============================================================

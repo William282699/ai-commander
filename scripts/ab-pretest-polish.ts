@@ -387,11 +387,11 @@ function T2_negctl(): void {
     Object.assign(OBJECTIVE_PRESSURE_WEIGHT, saved);
   }
   const fails = failCount - before;
-  // 期望恰 8：每臂 3 条数值 FAIL（中央山脊 ×1.0 平权同值不挂——精准不误伤）+ 1 条严格排序 FAIL。
+  // 期望恰 8：每臂 3 条数值 FAIL（驼峰山脊 ×1.0 平权同值不挂——精准不误伤）+ 1 条严格排序 FAIL。
   console.log(`\nNEGCTL-刀2 结果：${fails} 条 FAIL（期望恰 8）`);
   if (fails === 8) {
     failCount = before;
-    console.log("NEGCTL-刀2 PASS —— 排序与数值断言在平权世界里真的会挂，中央山脊(×1.0)零误伤");
+    console.log("NEGCTL-刀2 PASS —— 排序与数值断言在平权世界里真的会挂，驼峰山脊(×1.0)零误伤");
   } else {
     console.log("NEGCTL-刀2 FAIL —— 负对照失真，检查权重表或断言");
   }

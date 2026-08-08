@@ -313,7 +313,7 @@ export function generateDigestV1(
       // group labels are observation handles, not order-addressable units.
       // B 刀: the label is still not a reference (it is recomputed every frame),
       // but the row's handle IS — that is the whole point of minting one.
-      digest += `---UNASSIGNED_UNITS--- (spatial groups; the group LABEL is NOT a valid fromSquad — 用行末的 handle=G# 才是这批人的合法把手)\n`;
+      digest += `---UNASSIGNED_UNITS--- (spatial groups; the group LABEL is NOT a valid fromSquad — 用群名后方括号里的[临时编队G#]才是这批人的合法把手)\n`;
       for (const line of board.unassignedGroupLines) {
         digest += `${line}\n`;
       }

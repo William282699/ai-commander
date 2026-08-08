@@ -19,6 +19,7 @@ import { TILE_SIZE } from "@ai-commander/shared";
 import { assessCrisisEscalation } from "./crisisResponse";
 import { hasPlayerCombatPresence, freshFrontPowerRatio } from "./director";
 import { buildReinforceOptions, filterLateCandidates, groupTaskStatus, hpPctOf, nearestPlaceWithin, NAME_RADIUS_TILES, TASK_IDLE } from "./frontEscalationPayload";
+import { forceHandleTag } from "./escalationTicket";
 import type { ReinforceOptionsResult } from "./frontEscalationPayload";
 
 /**
@@ -42,6 +43,9 @@ import type { ReinforceOptionsResult } from "./frontEscalationPayload";
 function describeNoHelp(
   all: ReinforceOptionsResult,
   clock: number | null,
+  /** 刀2：号必须贴在**被点名的那支部队**后面，所以铸号发生在造句时，
+   *  不再由调用方事后追加到行尾。不传=不铸号（纯度路径字节不变）。 */
+  tagFor?: (o: ReinforceOptionsResult["options"][number]) => string,
 ): { text: string; named: ReinforceOptionsResult["options"][number] | null } {
   // ⑦ (v4 §8, 2026-08-04): 闲着 means IDLE, and this whole sentence — count AND
   // the force it names — may only speak about idle forces. Measured 2026-08-03:
@@ -67,7 +71,7 @@ function describeNoHelp(
       // `named` rides back out so the caller can mint a handle for it: the
       // commander who hears "有 6 辆闲着但赶不到" must be able to say "还是让他们
       // 去" and have it land (B 刀 — address ≠ endorsement).
-      text: `线外${idle.length}股/${units}units 闲着，最近 ${nearest.label} eta≈${nearest.etaSec}s${vs}，都赶不到`,
+      text: `线外${idle.length}股/${units}units 闲着，最近 ${nearest.label}${tagFor ? tagFor(nearest) : ""} eta≈${nearest.etaSec}s${vs}，都赶不到`,
       named: nearest,
     };
   }
@@ -150,11 +154,13 @@ export function buildFrontJudgmentLines(
   const body: string[] = [];
   const engagedUnknown: string[] = [];
   const noForce: string[] = [];
-  /** ` handle=G13` when a minter is supplied and the force has members. */
+  /** `[临时编队G13]` when a minter is supplied and the force has members.
+   *  刀2：号紧跟部队名，不再是行尾独立 token——行的主语是战线，行尾的号会被
+   *  绑给行首那个名字（9/131 实测）。印法唯一定义在 escalationTicket。 */
   const handleOf = (front: Front, option: { label: string; memberIds: number[]; etaSec: number | null } | undefined): string => {
     if (!mintHandle || !option) return "";
     const g = mintHandle(front, option);
-    return g ? ` handle=${g}` : "";
+    return g ? forceHandleTag(g) : "";
   };
 
   for (const front of state.fronts) {
@@ -195,13 +201,13 @@ export function buildFrontJudgmentLines(
         const top = all.shown[0];
         if (top) {
           const eta = top.etaSec !== null ? `eta≈${top.etaSec}s` : "eta=unknown";
-          line += ` best_help=${top.label}(${top.unitCount}units ${top.task} ${eta})${handleOf(front, top)}`;
+          line += ` best_help=${top.label}${handleOf(front, top)}(${top.unitCount}units ${top.task} ${eta})`;
         } else {
           // F1 on this face too: no candidate ≠ no friendlies. Nothing was
           // filtered here (null clock), so this can only mean the candidate set
           // is genuinely empty — say which of the two truths it is.
-          const nh = describeNoHelp(all, null);
-          line += ` best_help=none(${nh.text})${handleOf(front, nh.named ?? undefined)}`;
+          const nh = describeNoHelp(all, null, (o) => handleOf(front, o));
+          line += ` best_help=none(${nh.text})`;
         }
         engagedUnknown.push(line);
       }
@@ -231,7 +237,7 @@ export function buildFrontJudgmentLines(
     const top = filterLateCandidates(unfiltered, clock).shown[0];
     if (top) {
       const eta = top.etaSec !== null ? `eta≈${top.etaSec}s` : "eta=unknown";
-      line += ` best_help=${top.label}(${top.unitCount}units ${top.task} ${eta})${handleOf(front, top)}`;
+      line += ` best_help=${top.label}${handleOf(front, top)}(${top.unitCount}units ${top.task} ${eta})`;
     } else {
       // fix1 (手测 2026-08-02): the gate's empty set must SPEAK, not vanish.
       // Silence here answered "有没有可支援部队" with "只有 Blake" while six
@@ -239,8 +245,8 @@ export function buildFrontJudgmentLines(
       // not being recommended; the commander decides what to do with a force
       // that arrives late — and B 刀 gives that force a handle so the decision
       // can actually be executed.
-      const nh = describeNoHelp(unfiltered, clock);
-      line += ` best_help=none(${nh.text})${handleOf(front, nh.named ?? undefined)}`;
+      const nh = describeNoHelp(unfiltered, clock, (o) => handleOf(front, o));
+      line += ` best_help=none(${nh.text})`;
     }
 
     body.push(line);
@@ -260,7 +266,7 @@ export function buildFrontJudgmentLines(
       // recommend and refusing to let the commander reach them are different
       // things. Only stated when handles were actually minted this frame.
       (mintHandle
-        ? " | handle=G# 是这支部队的临时番号，可直接作为 fromSquad 下令；它只是地址，不代表引擎推荐——赶不到的部队同样有号，长官坚持要派就照号派"
+        ? " | 部队名后方括号里的[临时编队G#]是这支部队的临时番号，可直接作为 fromSquad 下令；它只是地址，不代表引擎推荐——赶不到的部队同样有号，长官坚持要派就照号派"
         : ""),
     ...body,
     ...engagedUnknown,

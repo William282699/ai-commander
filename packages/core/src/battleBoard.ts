@@ -26,6 +26,7 @@
 // ============================================================
 
 import type { GameState, Unit } from "@ai-commander/shared";
+import { forceHandleTag } from "./escalationTicket";
 import {
   buildReinforceOptions,
   locationPhraseFor,
@@ -132,7 +133,9 @@ function squadSuffix(row: BoardSquadRow): string {
 
 function groupLine(row: BoardGroupRow, handle: string): string {
   const task = row.task !== "unknown" ? ` ${row.task}` : "";
-  return `- ${row.label}: ${row.unitCount}units(${row.composition}) hp=${row.hpPct}%${task}${handle}`;
+  // 刀2：号紧跟群名（`未编组群[临时编队G4]: …`），不再挂在行尾——
+  // 行尾的号会被绑给行首那个名字，而群行行首恰好就是这支部队，属巧合不是设计。
+  return `- ${row.label}${handle}: ${row.unitCount}units(${row.composition}) hp=${row.hpPct}%${task}`;
 }
 
 /** B 刀: mints an addressable handle for a board row. Passed IN because minting
@@ -153,7 +156,7 @@ export function boardToDigestLines(
   const shown = board.groups.slice(0, MAX_GROUP_LINES);
   const unassignedGroupLines = shown.map((row) => {
     const g = mintHandle ? mintHandle(row) : null;
-    return groupLine(row, g ? ` handle=${g}` : "");
+    return groupLine(row, g ? forceHandleTag(g) : "");
   });
   const omitted = board.groups.length - shown.length;
   if (omitted > 0) {

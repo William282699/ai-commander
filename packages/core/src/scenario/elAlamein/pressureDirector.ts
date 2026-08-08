@@ -483,7 +483,7 @@ function pickFormation(kind: PressureKind, phase: PressurePhase): FormationStyle
 //     P4's rotation memory must not skew its strategic pick.
 
 // pretest-polish-v1 刀2: 三山脊性格 — (A) recapture 分支的每目标权重。
-// 北部山脊死保 / 阿拉曼镇要冲 / 中央山脊基准 / 南部高地软肋，
+// 北部山脊死保 / 阿拉曼镇要冲 / 驼峰山脊基准 / 南部高地软肋，
 // "打哪个"从此取决于目标价值，不再只看哪个近哪个空。
 // 乘在基础分（100/70）之后、historyPenalty 之前：惩罚是"最近打过这儿"的轮换
 // 记忆，量纲是绝对分，跟着目标价值一起缩放会污染轮换语义（提案 v2 P1①；今天
@@ -492,7 +492,7 @@ function pickFormation(kind: PressureKind, phase: PressurePhase): FormationStyle
 export const OBJECTIVE_PRESSURE_WEIGHT: Record<string, number> = {
   ea_kidney_ridge: 1.4,    // 北部山脊 — 死保
   ea_alamein_town: 1.2,    // 阿拉曼镇 — 要冲
-  ea_miteirya_ridge: 1.0,  // 中央山脊 — 基准
+  ea_miteirya_ridge: 1.0,  // 驼峰山脊 — 基准
   ea_himeimat: 0.6,        // 南部高地 — 软肋
 };
 
