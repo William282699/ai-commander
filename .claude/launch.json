@@ -4,8 +4,114 @@
     {
       "name": "web",
       "runtimeExecutable": "/bin/bash",
-      "runtimeArgs": [".claude/start-dev.sh"],
+      "runtimeArgs": [
+        ".claude/start-dev.sh"
+      ],
       "port": 3003
+    },
+    {
+      "name": "presence-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-presence-web.sh"
+      ],
+      "port": 3005
+    },
+    {
+      "name": "dispatch-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-dispatch-web.sh"
+      ],
+      "port": 3006
+    },
+    {
+      "name": "capture-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-capture-web.sh"
+      ],
+      "port": 3007
+    },
+    {
+      "name": "pretest-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-pretest-web.sh"
+      ],
+      "port": 3008
+    },
+    {
+      "name": "pretest-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-pretest-api.sh"
+      ],
+      "port": 3011
+    },
+    {
+      "name": "approval-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-approval-web.sh"
+      ],
+      "port": 3012
+    },
+    {
+      "name": "approval-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-approval-api.sh"
+      ],
+      "port": 3013
+    },
+    {
+      "name": "gknife-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-gknife-web.sh"
+      ],
+      "port": 3015
+    },
+    {
+      "name": "gknife-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-gknife-api.sh"
+      ],
+      "port": 3014
+    },
+    {
+      "name": "approval-v4-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-approval-v4-api.sh"
+      ],
+      "port": 3012
+    },
+    {
+      "name": "approval-v4-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-approval-v4-web.sh"
+      ],
+      "port": 3009
+    },
+    {
+      "name": "envelope-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-envelope-api.sh"
+      ],
+      "port": 3016
+    },
+    {
+      "name": "envelope-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-envelope-web.sh"
+      ],
+      "port": 3017
     }
   ]
 }
