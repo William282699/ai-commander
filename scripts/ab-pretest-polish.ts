@@ -174,10 +174,10 @@ function T1_negctl(): void {
 // 模块级 p4TargetHistory 在本进程从未被写入）。
 
 const RIDGE_ORDER = ["ea_kidney_ridge", "ea_alamein_town", "ea_miteirya_ridge", "ea_himeimat"];
-const RIDGE_NAMES: Record<string, string> = {
-  ea_kidney_ridge: "北部山脊", ea_alamein_town: "阿拉曼镇",
-  ea_miteirya_ridge: "中央山脊", ea_himeimat: "南部高地",
-};
+/** 断言名里的人话地名，**从生产 state 取**，不在台架里写死一份。
+ *  第 8 级改名刀在这儿逮到一张硬编码显示名表（`ea_miteirya_ridge: "中央山脊"`）：
+ *  设施改了名，这张表会安静地继续印旧名——断言照绿，报告骗人。同一把尺，读生产的 name。 */
+const ridgeName = (s: GameState, id: string): string => s.facilities.get(id)?.name ?? id;
 
 /** 四目标同时进入 (A) 分支的两种姿势：held=玩家已占（基础分 100）；
  *  capturing=敌持有但玩家占领中（基础分 70）。 */
@@ -198,14 +198,14 @@ function runT2Grid(mode: "held" | "capturing", base: number, tag: string): void 
     recap.length === 4, `实际 ${recap.length}`);
   for (const c of recap) {
     const expected = base * (OBJECTIVE_PRESSURE_WEIGHT[c.targetId] ?? 1.0);
-    check(`${tag} ${RIDGE_NAMES[c.targetId]} score=${base}×${OBJECTIVE_PRESSURE_WEIGHT[c.targetId]}`,
+    check(`${tag} ${ridgeName(s, c.targetId)} score=${base}×${OBJECTIVE_PRESSURE_WEIGHT[c.targetId]}`,
       Math.abs(c.score - expected) < 1e-9, `实际 ${c.score}，期望 ${expected}`);
   }
   const sorted = [...recap].sort((a, b) => b.score - a.score);
   const strictlyDesc = sorted.every((c, i) => i === 0 || sorted[i - 1].score > c.score);
   check(`${tag} 候选分严格按权重表排序：北>镇>中央>南（无并列）`,
     strictlyDesc && sorted.map(c => c.targetId).join(",") === RIDGE_ORDER.join(","),
-    `实际 ${sorted.map(c => `${RIDGE_NAMES[c.targetId]}:${c.score}`).join(" ")}`);
+    `实际 ${sorted.map(c => `${ridgeName(s, c.targetId)}:${c.score}`).join(" ")}`);
 }
 
 function T2_ridge_weights(): void {
@@ -376,7 +376,7 @@ function T2_negctl(): void {
       check(`${tag} 四候选仍在（平权不该丢候选）`, recap.length === 4);
       for (const c of recap) {
         const expected = base * (saved[c.targetId] ?? 1.0);
-        check(`${tag} ${RIDGE_NAMES[c.targetId]} 原权重期望 ${expected}`,
+        check(`${tag} ${ridgeName(s, c.targetId)} 原权重期望 ${expected}`,
           Math.abs(c.score - expected) < 1e-9, `实际 ${c.score}`);
       }
       const sorted = [...recap].sort((a, b) => b.score - a.score);

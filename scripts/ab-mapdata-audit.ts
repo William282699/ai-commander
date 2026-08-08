@@ -27,6 +27,7 @@
 import { createInitialGameState } from "@ai-commander/core";
 import { isInsideFront } from "../packages/core/src/frontDestination";
 import { renderRegionLabels } from "../apps/web/src/rendererCanvas";
+import { findFacilityById } from "../packages/core/src/tacticalPlanner";
 import type { GameState, Front, Region } from "@ai-commander/shared";
 
 const NEGCTL = process.argv.includes("--negctl");
@@ -311,6 +312,50 @@ function assertMapLabelSet(): void {
   );
 }
 
+// ============================================================
+// ⑨ 改名刀的"加不减"：新名要认，旧名也必须还认得
+//
+// 「中央」命名空间里原来挤着五个东西，改名刀拆走敌方侧两个。但长官的旧习惯和
+// 语音识别的旧结果不会跟着一起改——I2 家法：别名只加不减。
+// 判据走**生产解析器** findFacilityById，不是比对字符串表。
+// ============================================================
+
+const RENAMED: { id: string; newName: string; oldNames: string[] }[] = [
+  { id: "ea_miteirya_ridge", newName: "驼峰山脊", oldNames: ["中央山脊"] },
+  // 「中部山脊」是 ruweisat_zone 的旧显示名：region 没有别名字段，而这个设施
+  // 就站在那块地里，所以旧名挂它身上（落点差 2.5 格，比"找不到"强得多）。
+  { id: "ea_observation_post", newName: "烽火台", oldNames: ["中央雷达", "中部山脊"] },
+];
+
+function assertRenameAliases(): void {
+  const bad: string[] = [];
+  for (const r of RENAMED) {
+    const fac = state.facilities.get(r.id);
+    if (!fac) { bad.push(`${r.id} 不存在`); continue; }
+    if (fac.name !== r.newName) bad.push(`${r.id} 显示名=${fac.name} 期望=${r.newName}`);
+    for (const spoken of [r.newName, ...r.oldNames]) {
+      const hit = findFacilityById(state, spoken);
+      if (!hit || hit.id !== r.id) {
+        bad.push(`「${spoken}」解析到 ${hit?.id ?? "(null)"}，期望 ${r.id}`);
+      }
+    }
+  }
+  check(
+    "⑨",
+    "改名实体：新名与全部旧名都解析到同一个设施（别名只加不减）",
+    bad.length === 0,
+    bad.join(" ; "),
+  );
+  // 负对照：没印过、也没登记过别名的说法不许解析成设施——别名表不是同义词表
+  const bogus = findFacilityById(state, "驼峰高地");
+  check(
+    "⑨b",
+    "★负对照★ 没登记过的近似说法（「驼峰高地」）不解析成设施",
+    !bogus,
+    `解析到 ${bogus?.id ?? "(null)"}`,
+  );
+}
+
 // ── report mode ──
 
 function runReport(): void {
@@ -362,6 +407,7 @@ if (REPORT) {
   assertSeamBudget();
   assertNoUnitDoubleCounted();
   assertMapLabelSet();
+  assertRenameAliases();
 
   console.log(`\nPASS=${pass} FAIL=${fail}`);
   if (NEGCTL) {

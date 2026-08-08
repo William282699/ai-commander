@@ -131,7 +131,9 @@ export const EL_ALAMEIN_REGIONS: Region[] = [
   // that belongs to no front is invisible to every power/judgment/crisis reader.
   {
     id: "ruweisat_zone",
-    name: "中部山脊",
+    // 改名刀：「中部山脊」→「乱石岭」（只改显示名，id 不动）。旧名作为可说的地名
+    // 挂在 ea_observation_post.tags 里保住——region 本身没有别名字段。
+    name: "乱石岭",
     bbox: [230, 81, 275, 115],
     terrainMix: { hills: 0.5, plains: 0.3, road: 0.2 },
     passability: { armor: true, infantry: true, naval: false },
@@ -353,9 +355,16 @@ export const EL_ALAMEIN_FACILITIES: Facility[] = [
   },
   {
     id: "ea_miteirya_ridge",
-    name: "中央山脊",
+    // 改名刀（第 8 级，用户二轮拍板 2026-08-07）：「中央山脊」→「驼峰山脊」。
+    // 「中央」这个命名空间里挤了五个东西——中央战线 / 中央沙漠 / 中央前哨（我方）
+    // / 中央山脊（敌 VP）/ 中央雷达（中立）——长官说「中央」时，模型抓错邻居是
+    // 结构性的，不是措辞不小心。拆的是敌方侧那两个，玩家侧三个一个字不动。
+    // 定名取语音识别友好的常用词（音译名「米泰里亚」在二轮被否）。
+    // 只改显示名，id 不动；旧名留在下面 tags[] 里当别名——加不减（I2 家法），
+    // 长官的旧习惯与 STT 照旧解析。tags 从不进信封，纯解析用，零字节代价。
+    name: "驼峰山脊",
     type: "radar",
-    tags: ["miteirya", "ridge", "strongpoint", "据点", "敌三号", "中央山脊", "Miteirya Ridge"],
+    tags: ["miteirya", "ridge", "strongpoint", "据点", "敌三号", "中央山脊", "驼峰山脊", "Miteirya Ridge"],
     position: { x: 230, y: 70 },
     team: "enemy",
     hp: 400,
@@ -443,9 +452,14 @@ export const EL_ALAMEIN_FACILITIES: Facility[] = [
   },
   {
     id: "ea_observation_post",
-    name: "中央雷达",
+    // 改名刀：「中央雷达」→「烽火台」。它是中立的，却坐在「中央」命名空间正中间——
+    // 刀F 那场事故（「拿下山脊战线」把 14 个人送到 (250,100)）就在这儿。
+    // 「中部山脊」也挂进来当别名：ruweisat_zone 的旧显示名改叫「乱石岭」之后，
+    // region 没有 tags[] 这种别名字段，而这个设施就站在那块地里——长官说旧名，
+    // 落点差 2.5 格，比"找不到那个地方"强得多（加不减）。
+    name: "烽火台",
     type: "radar",
-    tags: ["observation", "Ruweisat", "vision", "中央雷达", "沙漠雷达", "Ruweisat Observation Post"],
+    tags: ["observation", "Ruweisat", "vision", "中央雷达", "沙漠雷达", "烽火台", "中部山脊", "Ruweisat Observation Post"],
     position: { x: 250, y: 100 },
     team: "neutral",
     hp: 300,
