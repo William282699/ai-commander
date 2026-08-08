@@ -451,6 +451,13 @@ function detectPositionCritical(state: GameState): void {
     }
 
     if (localEnemyHp <= 0) continue;
+    // ★ H3（手测 2026-08-08）：这个「战力比」与 FRONT_JUDGMENT 行里的 `ratio=`
+    //   **不是同一个量**，只是重名：
+    //     这里    = 我方HP ÷ 敌军HP，只数交火圈/bbox 内，且**不过滤雾**；
+    //     JUDGMENT = 我方DPS ÷ 【可见】敌军DPS，全线，过滤雾。
+    //   两个都是真的，方向也都是"我方÷敌方"，但答的不是一个问题——实测同一局
+    //   里一个报 29%、另一个报 0.71，长官看着像自相矛盾。
+    //   **本刀只如实标注，不归一**：归一要吃第 9/10 级的校准数据（LEDGER C2）。
     const ratio = localPlayerHp / localEnemyHp;
     if (ratio >= 0.3) continue;
 
@@ -480,7 +487,7 @@ function detectPositionCritical(state: GameState): void {
       emit(
         state,
         "POSITION_CRITICAL",
-        `${front.name} 快顶不住了——战力比 ${(ratio * 100).toFixed(0)}%，正承受重火力。${squadTag}`,
+        `${front.name} 快顶不住了——战力比 ${(ratio * 100).toFixed(0)}%（我方兵力值÷敌军，就近清点），正承受重火力。${squadTag}`,
         "critical",
         front.id,
         true, // actionRequired

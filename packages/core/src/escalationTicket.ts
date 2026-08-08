@@ -248,7 +248,7 @@ export function buildFrontEscalationWithTickets(
   );
   const payload = buildFrontEscalationPayload(state, crisis, result);
   const minted = front ? mintEscalationTickets(state, front, result) : [];
-  return { payload, tickets: minted, promptLine: ticketPromptLine(minted) };
+  return { payload, tickets: minted, promptLine: ticketPromptLine(state, minted) };
 }
 
 /**
@@ -299,7 +299,7 @@ export function buildFacilityEscalationWithTickets(
   return {
     payload: buildFacilityEscalationPayload(facts, situationType as never, rawSignal),
     tickets: minted,
-    promptLine: ticketPromptLine(minted),
+    promptLine: ticketPromptLine(state, minted),
   };
 }
 
@@ -338,6 +338,51 @@ export function forceHandleTag(gNumber: string): string {
 }
 
 /**
+ * 冻结名单恰好是**某支活着的编制队的全员**时，返回那支队；否则 null。
+ *
+ * 「全员」= 双向相等：名单里每个都是该队成员，且该队每个活着的成员都在名单里。
+ * 单向包含不够——子集也满足"每个都是成员"，而子集正是 R6 要叫「临时编队」的那类。
+ */
+function wholeSquadOf(state: GameState, memberIds: readonly number[]): { id: string; leaderName: string } | null {
+  if (memberIds.length === 0) return null;
+  const ids = new Set(memberIds);
+  for (const sq of state.squads ?? []) {
+    if (sq.role !== "leader") continue;
+    const alive = sq.unitIds.filter((id) => {
+      const u = state.units.get(id);
+      return u !== undefined && u.hp > 0 && u.state !== "dead";
+    });
+    if (alive.length !== ids.size) continue;
+    if (alive.every((id) => ids.has(id))) return { id: sq.id, leaderName: sq.leaderName };
+  }
+  return null;
+}
+
+/**
+ * 这支部队在行里该带什么号——**R6 修订 v2（Fable 裁定 2026-08-08，手测 H4）**。
+ *
+ * 病：R6 原裁定「统一用[临时编队G#]」的理由是"冻结的那批本来就不是编制分队"，
+ * 那对**子集**成立；但候选是**整支编制队**时，这句话是纯粹说错——
+ * 实测信封把 `Aiden(I1)` 印成 `Aiden(I1)[临时编队G1]`，再配上同行的
+ * 「1股…闲着」，陈照账本念就成了「空闲部队」，**玩家编队时挣来的那个名字没了**。
+ * 长官花力气编的队，参谋当面把它降级成一股临时的闲兵。
+ *
+ * 修订：**名单==某支活着编制队的全员 ⇒ 不加任何标签**。它的名与号已经在 label
+ * 里（`Aiden(I1)`），而 `I1` 本来就是合法 fromSquad——它不需要借一个临时号。
+ * 子集 / 空间群 / 跨队拼盘 ⇒ 照 R6 原样 `[临时编队G#]`。
+ *
+ * 票照铸不误（冻结/burn/verdict 机器一个字节没动）：号仍在登记簿里，模型写
+ * `fromSquad="G7"` 照样解析得到那批冻结名单。本次改的**只是印不印**。
+ */
+export function forceHandleTagFor(
+  state: GameState,
+  gNumber: string,
+  memberIds: readonly number[],
+): string {
+  return wholeSquadOf(state, memberIds) ? "" : forceHandleTag(gNumber);
+}
+
+/**
  * 把写来的部队引用归一成登记簿的 key。
  *
  * 只剥**我们自己印的那一个前缀**（外加整段抄行时带出来的方括号），再照旧判
@@ -349,7 +394,31 @@ function normalizeForceRef(raw: string): string | null {
   let s = raw.trim();
   if (s.startsWith("[") && s.endsWith("]")) s = s.slice(1, -1).trim();
   if (s.startsWith(HANDLE_PREFIX)) s = s.slice(HANDLE_PREFIX.length).trim();
-  return /^G\d+$/i.test(s) ? s.toUpperCase() : null;
+  if (/^G\d+$/i.test(s)) return s.toUpperCase();
+  return glued(raw.trim());
+}
+
+/**
+ * 名字和号**粘成一串**时的归一（手测 H1，2026-08-08）。
+ *
+ * 病：刀2 之后信封印的是 `战狼点附近未编组群[临时编队G45]`——名字与号紧挨着。
+ * 模型抄"这支部队的引用"时整段抄进 fromSquad，实测抄成 `战狼点附近未编组群G45`
+ * （连方括号都省了）。旧归一只认真空里的号，于是这条引用**连票据登记簿都没查**
+ * 就被判成"这实体不存在"，命令零执行、白费一轮。号很可能还是活的。
+ *
+ * fail-closed 的切法：剥掉尾号之后，**剩下的前缀必须逐字等于那张票自己的 label**。
+ * 只认「我们自己印出去的那个组合」——不是模糊匹配，不是同义词表（红线二不违）。
+ * 一个恰好以 G 数字结尾的真分队名不会被误吞：它的前缀对不上任何一张票的 label。
+ */
+function glued(s: string): string | null {
+  const m = s.match(/^(.*?)\s*(?:\[\s*)?(?:临时编队)?\s*(G\d+)\s*\]?$/i);
+  if (!m) return null;
+  const prefix = m[1].trim();
+  if (prefix.length === 0) return null;          // 裸号已在上面处理过
+  const key = m[2].toUpperCase();
+  const t = tickets.get(key);
+  if (!t) return null;                            // 号都不认识，谈不上前缀匹配
+  return t.label.trim() === prefix ? key : null;  // 前缀必须逐字等于这张票的 label
 }
 
 /** True iff the string looks like a force reference at all (G + digits,
@@ -427,10 +496,15 @@ export function liveMembersOf(state: GameState, ticket: EscalationTicket): numbe
  * ("group labels are NOT valid fromSquad") — that rule stays TRUE for labels;
  * this grants the NUMBER, which is a different handle.
  */
-export function ticketPromptLine(minted: EscalationTicket[]): string | null {
+export function ticketPromptLine(state: GameState, minted: EscalationTicket[]): string | null {
   if (minted.length === 0) return null;
   // 刀2：候选行也印自描述的号，与判读行/板子行同一个形。
-  const list = minted.map((t) => `${HANDLE_PREFIX}${t.gNumber}=${t.label}(${t.unitCount}units)`).join("｜");
+  // R6 修订 v2：整支编制队报它自己的名与号，不冠「临时编队」。
+  const list = minted
+    .map((t) => (wholeSquadOf(state, t.unitIds)
+      ? `${t.label}(${t.unitCount}units)`
+      : `${HANDLE_PREFIX}${t.gNumber}=${t.label}(${t.unitCount}units)`))
+    .join("｜");
   return `本案候选编号：${list}\nfromSquad="${HANDLE_PREFIX}G编号" 即调陈所述那批（编号是合法把手，群名仍然不是）。`;
 }
 

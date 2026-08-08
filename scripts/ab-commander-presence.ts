@@ -317,10 +317,10 @@ function runSynthetic(): void {
     // fix1：F1 教训上板——"无候选"绝不能读成"无友军"。手测现场：长官问
     // "有没有可支援部队"，参谋答"只有 Blake"，六辆闲着的坦克被藏掉。
     check(
-      "A8b fix1 空集必须披露存在（有闲兵就报股数/人数，没有就明说无友军）",
+      "A8b fix1 空集必须披露存在（有闲兵就报支数/人数，没有就明说无友军）",
       gatedTop
         ? true
-        : !!coastal && (/线外\d+股\/\d+units/.test(coastal) ||
+        : !!coastal && (/线外\d+支\/\d+units/.test(coastal) ||
             /front 外有\d+个友军单位/.test(coastal) || coastal.includes("战场上无其他友军")),
       coastal,
     );

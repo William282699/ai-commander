@@ -1028,7 +1028,7 @@ function runKnife2a(): void {
   check("T2n 番号同局单调递增、永不复用", overlap.length === 0, `重号 ${overlap.map((t) => t.gNumber).join(",")}`);
 
   // ── prompt 许可行 ──
-  const line = ticketPromptLine(minted);
+  const line = ticketPromptLine(state, minted);
   check("T2o 许可行含号与人数", !!line && line.includes(g) && line.includes(`${groupTicket.unitCount}units`), line ?? "null");
   check(
     "T2p 许可行明说群名仍非把手（不推翻两堵墙的禁令）",
@@ -1300,7 +1300,10 @@ function runKnifeB2(): void {
   );
   if (lateG) {
     const look = lookupEscalationTicket(lateG, late.state.time);
-    const expected = late.state.squads.find((s) => s.id === "T9")?.unitIds ?? [];
+    // H4 起本 fixture 是空间群，没有 squad 实体可查——期望名单直接取生产候选表里
+    // 那一支的成员（仍然不自拼：从 buildReinforceOptions 取，不是手写 id 列表）。
+    const expected = buildReinforceOptions(late.state, late.front).options
+      .find((o) => o.label === late.squadLabel)?.memberIds ?? [];
     checkKnife(
       "TB9 ★端到端★ 号解析回的正是行里点名的那批人（承诺==执行，不是就近抓一支）",
       look.ok && look.ticket.label === late.squadLabel &&
@@ -1357,7 +1360,9 @@ function runKnifeB2(): void {
   // 手捏的 fixture 只能证明手捏的世界。
   resetEscalationTickets();
   const disp = lateCandidateFixture();
-  const roster = disp.state.squads.find((s) => s.id === "T9")!.unitIds;
+  // H4：本 fixture 是空间群，名单从生产候选表取（不手捏 —— 见上面那条 fixture 铁律）
+  const roster = buildReinforceOptions(disp.state, disp.front).options
+    .find((o) => o.label === disp.squadLabel)!.memberIds;
   const boardG = mintSpokenForce(disp.state, null, {
     label: disp.squadLabel, memberIds: roster, etaSec: null,
   });
@@ -1557,7 +1562,7 @@ function runKnifeB2(): void {
       buildBattleBoard(st),
       (row) => mintSpokenForce(st, null, { label: row.label, memberIds: row.memberIds, etaSec: null }),
     ).unassignedGroupLines.join("\n");
-    const promptLine = ticketPromptLine(mintEscalationTickets(st, frontById(st, "front_coastal"))) ?? "";
+    const promptLine = ticketPromptLine(st, mintEscalationTickets(st, frontById(st, "front_coastal"))) ?? "";
     const all = [judge, boardL, promptLine].join("\n");
     check(
       "K2-1 全部铸号面零 ` handle=` 残留（行尾独立 token 已废除）",
@@ -1627,7 +1632,122 @@ function runKnifeB2(): void {
   }
 
   runKnife1Facility();
+  runHandtestFixes();
 }
+
+// ============================================================
+// 手测 fix 族（2026-08-08 用户实机四幕 → Fable 裁定）
+//   H1 粘连引用归一 · H4 编制队不叫「临时编队」 · H3 战力比三面标方向
+// ============================================================
+
+function runHandtestFixes(): void {
+  console.log("\n== 手测 fix：H1 粘连引用 / H4 编制队身份 / H3 战力比方向 ==");
+
+  // ── H1：印出去的形，认得回来（含实测那一种：省掉方括号的粘连）──
+  {
+    resetEscalationTickets();
+    const st = lateCandidateFixture(false).state;
+    const t = mintEscalationTickets(st, frontById(st, "front_coastal"))[0];
+    const ids = (raw: string): string => {
+      const r = resolveTicketReference(st, raw, st.time, [], false);
+      return r.kind === "dispatch" ? [...r.unitIds].sort((a, b) => a - b).join(",") : r.kind;
+    };
+    const base = ids(t.gNumber);
+    check(
+      "H1-1 ★闭环★ 信封原样的粘连形 `名[临时编队G#]` 与裸号派同一批兵",
+      base !== "not_a_ticket" && ids(`${t.label}${forceHandleTag(t.gNumber)}`) === base,
+      `裸=${base} 粘连=${ids(`${t.label}${forceHandleTag(t.gNumber)}`)}`,
+    );
+    check(
+      "H1-2 ★闭环★ 实测那一种（模型省掉方括号）`名G#` 也认",
+      ids(`${t.label}${t.gNumber}`) === base && ids(`${t.label} ${t.gNumber}`) === base,
+      `无括号=${ids(`${t.label}${t.gNumber}`)} 带空格=${ids(`${t.label} ${t.gNumber}`)}`,
+    );
+    check(
+      "H1-3 ★负对照·fail-closed★ 号活着但前缀对不上该票 label → 拒（不是模糊匹配）",
+      !isTicketRef(`某某群${t.gNumber}`) && !isTicketRef(`${t.label}G9999`),
+      `某某群${t.gNumber}=${isTicketRef(`某某群${t.gNumber}`)} 前缀对号不存在=${isTicketRef(`${t.label}G9999`)}`,
+    );
+    check(
+      "H1-4 ★负对照★ 旧的拒绝集合一个不漏（临时编队2 / G2X / 编队G2）",
+      ["临时编队2", "G2X", "编队G2", ""].every((r) => !isTicketRef(r)),
+    );
+  }
+
+  // ── H4：整支编制队印自己的名与号，任何面不得称「临时编队」──
+  {
+    resetEscalationTickets();
+    const sqFix = lateSquadFixture(false);
+    const row = buildFrontJudgmentLines(sqFix.state, (f, o) => mintSpokenForce(sqFix.state, f, o))
+      .find((l) => l.includes("1. 北部战线"));
+    check(
+      "H4-1 ★R6 修订 v2★ 判读行里整支编制队不带「临时编队」，只印 Farrell(T9)",
+      !!row && row.includes(sqFix.squadLabel) && !row.includes("临时编队"),
+      row ?? "(无)",
+    );
+    check(
+      "H4-2 它的把手是它自己的编号（T9 本来就是合法 fromSquad）",
+      isKnownForceRef(sqFix.state, sqFix.squadId, []) &&
+        isKnownForceRef(sqFix.state, "Farrell", []),
+    );
+    const pl = ticketPromptLine(sqFix.state,
+      mintEscalationTickets(sqFix.state, frontById(sqFix.state, "front_coastal"))) ?? "";
+    check(
+      "H4-3 候选编号行同一条规则：编制队报名与号，不冠「临时编队」",
+      pl.includes(sqFix.squadLabel) && !pl.split("\n")[0].includes(`临时编队G`),
+      pl.split("\n")[0],
+    );
+    // 反面：空间群仍旧带号（R6 原样，只收窄不推翻）
+    resetEscalationTickets();
+    const grpFix = lateCandidateFixture(false);
+    const grpRow = buildFrontJudgmentLines(grpFix.state, (f, o) => mintSpokenForce(grpFix.state, f, o))
+      .find((l) => l.includes("1. 北部战线"));
+    check(
+      "H4-4 ★负对照★ 空间群照旧 `名[临时编队G#]`（R6 只被收窄，没被推翻）",
+      !!grpRow && handleAfter(grpRow, grpFix.squadLabel) !== null,
+      grpRow ?? "(无)",
+    );
+    // rider（Fable 批）：披露句量词 股→支；被点名那支跟随同一身份规则。
+    // 用【远】fixture 才走得到披露分支（近的会进推荐分支）。
+    resetEscalationTickets();
+    const farGrp = lateCandidateFixture(true);
+    const farGrpRow = buildFrontJudgmentLines(farGrp.state, (f, o) => mintSpokenForce(farGrp.state, f, o))
+      .find((l) => l.includes("1. 北部战线")) ?? "";
+    resetEscalationTickets();
+    const farSq = lateSquadFixture(true);
+    const farSqRow = buildFrontJudgmentLines(farSq.state, (f, o) => mintSpokenForce(farSq.state, f, o))
+      .find((l) => l.includes("1. 北部战线")) ?? "";
+    check(
+      "H4-5 rider 披露句量词是「支」不是「股」（编制队有编制，不论股）",
+      /线外\d+支\/\d+units 闲着/.test(farGrpRow) && /线外\d+支\/\d+units 闲着/.test(farSqRow) &&
+        !farGrpRow.includes("股") && !farSqRow.includes("股"),
+      `群=${farGrpRow.slice(0, 120)} / 队=${farSqRow.slice(0, 120)}`,
+    );
+    check(
+      "H4-6 ★披露句里被点名的那支也跟随身份规则★ 群带号 / 编制队不带「临时编队」",
+      farGrpRow.includes("best_help=none(") && handleAfter(farGrpRow, farGrp.squadLabel) !== null &&
+        farSqRow.includes("best_help=none(") && farSqRow.includes(farSq.squadLabel) &&
+        !farSqRow.includes("临时编队"),
+      `群=${farGrpRow.slice(0, 140)}\n        队=${farSqRow.slice(0, 140)}`,
+    );
+  }
+
+  // ── H3：三个面各自说清自己是什么数（如实标注，不归一）──
+  {
+    const st = lateCandidateFixture(false).state;
+    const header = buildFrontJudgmentLines(st)[0] ?? "";
+    check(
+      "H3-1 JUDGMENT 节头写明 ratio 的方向与口径（我方DPS÷可见敌军DPS）",
+      header.includes("ratio=我方DPS÷【可见】敌军DPS"),
+      header.slice(0, 200),
+    );
+    check(
+      "H3-2 节头对 ratio 的说明与 survival/eta 并列（同类定义指称，不是新规则）",
+      header.includes("survival=") && header.includes("eta=") && header.includes("ratio="),
+    );
+  }
+}
+
 
 // ============================================================
 // 第 8 级 刀1 — 危机票据带设施名
@@ -2168,10 +2288,31 @@ const faceKey = (f: { file: string; token: FaceToken; nth: number }): string =>
   `${f.file}|${f.token}#${f.nth}`;
 
 /** front_coastal 输面（互射钟 30s）+ 一支编队。far=true 时远在西南、绝对来不及。 */
+/**
+ * front_coastal 输面（互射钟 30s）+ 一支线外部队。far=true 时远在西南、绝对来不及。
+ *
+ * ★ 第 8 级 H4 起，这支部队是【未编组空间群】而不是编制分队。
+ *   理由：本组 TB 断言测的是**号的机器**——「赶不到的也要可寻址」「推荐的也要
+ *   可寻址」「号翻回冻结名单」。号存在的意义就是给**没有别的把手**的部队用；
+ *   编制分队自带 `Farrell(T9)` 这个合法 fromSquad，按 R6 修订 v2 不再铸临时号，
+ *   拿它当这组断言的主角会让六颗牙集体失去对象（实测：3 条红 + 3 条被
+ *   `if (lateG)` 静默跳过）。编制队那一支另有专门断言，见 TB8s/TB13s。
+ */
 function lateCandidateFixture(far = true): { state: GameState; front: Front; squadLabel: string } {
   const { state, front } = exchangeFixture({ defenders: [360], enemies: [60, 60, 60] });
-  const ids: number[] = [];
   const [ox, oy] = far ? [60, 260] : [252, 60]; // 远：eta ≫ 30s；近：赶得上
+  for (let i = 0; i < 6; i++) addUnit(state, ox + i, oy);
+  // label 从生产候选表取，不自拼（台架家法：不抄第二份构造）
+  const label = buildReinforceOptions(state, front).options
+    .find((o) => o.memberIds.length === 6)?.label ?? "(未找到候选)";
+  return { state, front, squadLabel: label };
+}
+
+/** 同样的输面，但线外那支是【整支编制分队】—— H4 的主角。 */
+function lateSquadFixture(far = true): { state: GameState; front: Front; squadLabel: string; squadId: string } {
+  const { state, front } = exchangeFixture({ defenders: [360], enemies: [60, 60, 60] });
+  const ids: number[] = [];
+  const [ox, oy] = far ? [60, 260] : [252, 60];
   for (let i = 0; i < 6; i++) ids.push(addUnit(state, ox + i, oy).id);
   state.squads.push({
     id: "T9", name: "远征分队", unitIds: ids,
@@ -2179,7 +2320,7 @@ function lateCandidateFixture(far = true): { state: GameState; front: Front; squ
     currentMission: null, missionTarget: null, morale: 1,
     formationStyle: "line", ownerCommander: "chen", leaderName: "Farrell", role: "leader",
   });
-  return { state, front, squadLabel: "Farrell(T9)" };
+  return { state, front, squadLabel: "Farrell(T9)", squadId: "T9" };
 }
 
 /**
@@ -2291,9 +2432,9 @@ function runKnifeA(): void {
   // fix1（手测 2026-08-02）：闸清空 ≠ 沉默。沉默把"有没有可支援部队"答成"只有
   // Blake"，六辆闲着的坦克被藏掉——F1 教训（无候选≠无友军）此前只写在升级面。
   check(
-    "TA8b ★fix1★ 空集必须开口：披露存在（股数/人数）+ 最近 eta + 赶不到",
+    "TA8b ★fix1★ 空集必须开口：披露存在（支数/人数）+ 最近 eta + 赶不到",
     !!row && row.includes("best_help=none(") && row.includes(squadLabel) &&
-      /线外\d+股\/\d+units/.test(row) && /eta≈\d+s/.test(row) && row.includes("赶不到"),
+      /线外\d+支\/\d+units/.test(row) && /eta≈\d+s/.test(row) && row.includes("赶不到"),
     row ?? "(无)",
   );
   check(
@@ -2316,12 +2457,12 @@ function runKnifeA(): void {
     const busy = opts.filter((o) => o.task === "交战中");
     const free = opts.filter((o) => o.task === TASK_IDLE);
     check(
-      "TA8d 前置 局造得对：线外一股 6 人闲着 + 一股 4 人交战中（都可调度）",
+      "TA8d 前置 局造得对：线外一支 6 人闲着 + 一支 4 人交战中（都可调度）",
       busy.length === 1 && busy[0].unitCount === 4 && free.length === 1 && free[0].unitCount === 6,
       opts.map((o) => `${o.label}:${o.task}:${o.unitCount}`).join(" | "),
     );
     const mixedRow = buildFrontJudgmentLines(mixed.state).find((l) => l.includes("1. 北部战线"));
-    const m = mixedRow?.match(/线外(\d+)股\/(\d+)units 闲着/);
+    const m = mixedRow?.match(/线外(\d+)支\/(\d+)units 闲着/);
     checkKnife(
       "TA8e ★⑦★ 披露只数 task=无任务 的（交战中的兵不许被报成余力）",
       !!m && m[1] === "1" && m[2] === "6",

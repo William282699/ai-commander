@@ -19,7 +19,7 @@ import { TILE_SIZE } from "@ai-commander/shared";
 import { assessCrisisEscalation } from "./crisisResponse";
 import { hasPlayerCombatPresence, freshFrontPowerRatio } from "./director";
 import { buildReinforceOptions, filterLateCandidates, groupTaskStatus, hpPctOf, nearestPlaceWithin, NAME_RADIUS_TILES, TASK_IDLE } from "./frontEscalationPayload";
-import { forceHandleTag } from "./escalationTicket";
+import { forceHandleTagFor } from "./escalationTicket";
 import type { ReinforceOptionsResult } from "./frontEscalationPayload";
 
 /**
@@ -71,7 +71,7 @@ function describeNoHelp(
       // `named` rides back out so the caller can mint a handle for it: the
       // commander who hears "有 6 辆闲着但赶不到" must be able to say "还是让他们
       // 去" and have it land (B 刀 — address ≠ endorsement).
-      text: `线外${idle.length}股/${units}units 闲着，最近 ${nearest.label}${tagFor ? tagFor(nearest) : ""} eta≈${nearest.etaSec}s${vs}，都赶不到`,
+      text: `线外${idle.length}支/${units}units 闲着，最近 ${nearest.label}${tagFor ? tagFor(nearest) : ""} eta≈${nearest.etaSec}s${vs}，都赶不到`,
       named: nearest,
     };
   }
@@ -160,7 +160,8 @@ export function buildFrontJudgmentLines(
   const handleOf = (front: Front, option: { label: string; memberIds: number[]; etaSec: number | null } | undefined): string => {
     if (!mintHandle || !option) return "";
     const g = mintHandle(front, option);
-    return g ? forceHandleTag(g) : "";
+    // R6 修订 v2：整支编制队不贴「临时编队」——它的名与号已在 label 里（Aiden(I1)）。
+    return g ? forceHandleTagFor(state, g, option.memberIds) : "";
   };
 
   for (const front of state.fronts) {
@@ -260,7 +261,7 @@ export function buildFrontJudgmentLines(
     // numbers (handtest round-3 followup: Chen recited his own earlier
     // escalation question's ask-time numbers over this frame's current ones —
     // the stale source sits in the same envelope, so the correction must too).
-    "---FRONT_JUDGMENT--- (CURRENT values for this reply — numbers quoted in earlier questions/escalations are ask-time snapshots, superseded by these; survival=committed HP vs visible enemy DPS, eta=straight-line terrain estimate; read these numbers — do NOT hand-compute distance/time from coordinates)" +
+    "---FRONT_JUDGMENT--- (CURRENT values for this reply — numbers quoted in earlier questions/escalations are ask-time snapshots, superseded by these; survival=committed HP vs visible enemy DPS, ratio=我方DPS÷【可见】敌军DPS（>1 我方占优；雾里的敌军不计入，所以它可能偏乐观）, eta=straight-line terrain estimate; read these numbers — do NOT hand-compute distance/time from coordinates)" +
       // B 刀: the handle is an ADDRESS, not an endorsement — it is printed for
       // forces the row just declared too slow as well, because refusing to
       // recommend and refusing to let the commander reach them are different
@@ -353,7 +354,7 @@ export function commanderMood(state: GameState): CommanderMood {
     } else {
       // Engaged with a visible enemy but no imminent collapse: tense on the
       // fight itself; the ratio is the fog-gated fact that sizes it.
-      consider(1, t ?? Infinity, `${front.name}交战中，战力比${ratio.toFixed(2)}`);
+      consider(1, t ?? Infinity, `${front.name}交战中，战力比${ratio.toFixed(2)}（我方DPS÷可见敌军DPS）`);
     }
   }
 
