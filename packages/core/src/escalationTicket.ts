@@ -34,7 +34,7 @@ import { buildReinforceOptions, buildFrontEscalationPayload, filterLateCandidate
 import type { ReinforceOptionsResult } from "./frontEscalationPayload";
 import { battleAnchorFor } from "./crisisResponse";
 import { findFront } from "./tacticalPlanner";
-import { frontEscalationFacts } from "./director";
+import { frontEscalationFacts, facilityEscalationFacts, buildFacilityEscalationPayload, FACILITY_GATE } from "./director";
 
 /**
  * Ticket validity, in seconds of GAME time (state.time) — the same clock and
@@ -64,6 +64,10 @@ export interface EscalationTicket {
   /** unitIds.length at mint — the number Chen promised out loud. */
   unitCount: number;
   targetFrontId: string;
+  /** 第 8 级 刀1：设施危机铸的票带着**那个设施**。前线族恒不带（字段缺席），
+   *  所以前线族票据逐字节不变。消费时 ticketDestinationVerdict 的设施档凭它
+   *  把精确目的地注入单子——「派他们去」不再退化成「去那条线上某处」。 */
+  targetFacilityId?: string;
   /** Rally point the ETA promise was measured to (刀1 battleAnchorFor).
    *  null only when the front has no resolvable geometry at all — never a
    *  (0,0) placeholder waiting for someone to remember to backfill it.
@@ -112,21 +116,31 @@ export function resetEscalationTickets(): void {
  */
 export function mintEscalationTickets(
   state: GameState,
-  front: Front,
+  /** null = 设施危机：这批票不属于任何一条战线的"线外候选"，池子是全图。 */
+  front: Front | null,
   /** The candidate set already built for this tick. Production ALWAYS passes it
    *  (via buildFrontEscalationWithTickets) so the payload Chen speaks from and
    *  the tickets are literally the same objects — not two constructions that
    *  happen to agree today. */
   precomputed?: ReinforceOptionsResult,
+  /** 第 8 级 刀1（R13）：锚点覆盖必须**穿过 mint**，不能只喂给候选构造。
+   *
+   *  票面的 `anchor`/`etaSec` 是那句 ETA 承诺的 provenance；`battleAnchorFor`
+   *  给的是"这条线上打得最凶的那处"，正是手测那笔账里援兵被送去的地方。
+   *  只修候选侧、不修 mint 侧，payload 的 ETA 会好、冻在票上的还是旧点——
+   *  一句承诺两个来源，正是 v4 刀1 当初消灭过的形状。 */
+  override?: { anchor?: Position | null; targetFacilityId?: string },
 ): EscalationTicket[] {
   const result = precomputed ?? buildReinforceOptions(state, front);
   // The rally point the ETA promise was made against (刀1). Computed HERE, not
   // backfilled by the caller: a placeholder that depends on a later call is a
   // placeholder that eventually ships.
-  const anchor = battleAnchorFor(state, front);
+  const anchor = override?.anchor !== undefined
+    ? override.anchor
+    : (front ? battleAnchorFor(state, front) : null);
   const out: EscalationTicket[] = [];
   for (const opt of result.shown) {
-    const t = mintOne(state, front, opt, anchor);
+    const t = mintOne(state, front, opt, anchor, override?.targetFacilityId);
     if (t) out.push(t);
   }
   return out;
@@ -138,6 +152,7 @@ function mintOne(
   front: Front | null,
   opt: { label: string; memberIds: number[]; etaSec: number | null },
   anchor: Position | null,
+  targetFacilityId?: string,
 ): EscalationTicket | null {
   if (opt.memberIds.length === 0) return null;
   seq += 1;
@@ -147,6 +162,8 @@ function mintOne(
     label: opt.label,
     unitCount: opt.memberIds.length,
     targetFrontId: front?.id ?? "",
+    // 缺席而不是 undefined 赋值：前线族票据的对象形状逐字节不变。
+    ...(targetFacilityId ? { targetFacilityId } : {}),
     anchor: anchor ? { x: anchor.x, y: anchor.y } : null,
     etaSec: opt.etaSec,
     mintedAt: state.time,
@@ -232,6 +249,58 @@ export function buildFrontEscalationWithTickets(
   const payload = buildFrontEscalationPayload(state, crisis, result);
   const minted = front ? mintEscalationTickets(state, front, result) : [];
   return { payload, tickets: minted, promptLine: ticketPromptLine(minted) };
+}
+
+/**
+ * 第 8 级 刀1：设施家族危机的**票据机器**（镜像 buildFrontEscalationWithTickets）。
+ *
+ * 病：设施名在引擎里只活在设施家族事件上（FACILITY_CONTESTED / CAPTURE_STALLED），
+ * 而这一族升级时走 facFacts 分支，**一张票都不铸**（GameCanvas :475 原
+ * `withTickets = facFacts ? null : …`）。玩家在前哨危机语境下说「派他们去」，
+ * 模型手上没有任何号可绑，单子退化成普通命令，精确目的地在传递中丢掉——
+ * 援兵去了战线别处，前哨没人管。
+ *
+ * 三条口径：
+ *  - **候选池 = 全图 − 设施身边那圈**（R9 乙案）。战线口径「线外才算候选」对设施
+ *    危机不成立：最该派的往往正是同线但在别处闲着的那坨人。身边那圈要排除——
+ *    他们正在那儿挨打，不是援兵。
+ *  - **ETA 一律量到设施坐标**，候选侧与 mint 侧同一个点（R13）。
+ *  - **诚实闸口径**：设施危机没有互射钟 ⇒ clock=null ⇒ 不滤。
+ *    缺席的数不许当判决（engaged-unknown 行的同一条原则）。
+ *
+ * payload **字节不变**（buildFacilityEscalationPayload 原样调用）——号只走
+ * ticketPromptLine 进 ---ACTIVE_ESCALATION---，既有管道，零新接线。
+ */
+export function buildFacilityEscalationWithTickets(
+  state: GameState,
+  facilityId: string,
+  situationType: string,
+  rawSignal: string,
+): EscalationWithTickets | null {
+  const facts = facilityEscalationFacts(state, facilityId);
+  const facility = state.facilities.get(facilityId);
+  if (!facts || !facility) return null;
+
+  const result = buildReinforceOptions(state, null, {
+    anchorOverride: facility.position,
+    excludeNear: { center: facility.position, radius: FACILITY_GATE.NEAR_RADIUS }, // 与 payload 的 nearby_forces_ours 同一把尺
+  });
+  // 设施危机无互射钟 → 不滤。仍然走这道闸，是为了将来这里长出钟时不会被绕过。
+  const shown = filterLateCandidates(result, null);
+
+  // `front` 只用来给票**记账**（targetFrontId）：池子已经由上面的 precomputed
+  // 全图构造定死，anchor 也由 override 定死。设施若丢了，verdict 的设施档会跳过，
+  // 票凭这个 front 落回战线档 —— 这正是 §O-3 要的降级路径。
+  const front = state.fronts.find((f) => f.regionIds.includes(facility.regionId)) ?? null;
+  const minted = mintEscalationTickets(state, front, shown, {
+    anchor: facility.position,
+    targetFacilityId: facilityId,
+  });
+  return {
+    payload: buildFacilityEscalationPayload(facts, situationType as never, rawSignal),
+    tickets: minted,
+    promptLine: ticketPromptLine(minted),
+  };
 }
 
 /**
@@ -482,7 +551,7 @@ export function retargetIntentForTicket(
 export type TicketDestinationVerdict =
   /** Dispatch it. `injectTargetRegion` (when set) is the destination the engine
    *  supplies because the order named none; `receipt` picks the wording. */
-  | { kind: "execute"; injectTargetRegion?: string; receipt: "moved" | "in_place" }
+  | { kind: "execute"; injectTargetRegion?: string; injectTargetFacility?: string; receipt: "moved" | "in_place" }
   /** Zero execution + this question. A ticket is a handle on PEOPLE, never on a
    *  place, so "where" is the one thing it can never fill in for the commander. */
   | { kind: "refuse"; reason: "unknown_place" | "no_destination"; line: string };
@@ -514,6 +583,8 @@ const IN_PLACE_TYPES: ReadonlySet<IntentType> = new Set<IntentType>(["defend", "
  * removed (Bucket A, 审核档 §3-6).
  */
 export function ticketDestinationVerdict(
+  /** 刀1：设施档要判"那个据点还在不在、还是不是我们的"——那是 state 才知道的事。 */
+  state: GameState,
   intent: Intent,
   ticket: EscalationTicket,
   /** Did the model write ANY destination field before softFixTargetFields ran?
@@ -539,6 +610,21 @@ export function ticketDestinationVerdict(
   if (!isDispatchIntent(intent.type)) return { kind: "execute", receipt: "moved" };
   if (IN_PLACE_TYPES.has(intent.type)) return { kind: "execute", receipt: "in_place" };
   if (intent.type === "retreat") return { kind: "execute", receipt: "moved" };
+  // 第 8 级 刀1：设施票带着它是为哪个据点铸的——那是比"某条战线"精确得多的
+  // 目的地，长官说「派他们去」时要的正是它。
+  //
+  // 位置是合同：**在 retreat 档之后**（撤退的默认落点由 retreat-semantics-v1
+  // 逐字节钉死，设施档不许插到它前面），**在 targetFrontId 档之前**（有精确
+  // 目的地就不该退回战线级）。
+  //
+  // 设施已丢（转敌/打没）⇒ 跳过，落回下面的战线档：夺回是 attack 语义，
+  // 与"增援我们还守着的据点"不是一回事，那一档另说。
+  if (ticket.targetFacilityId) {
+    const fac = state.facilities.get(ticket.targetFacilityId);
+    if (fac && fac.hp > 0 && fac.team === "player") {
+      return { kind: "execute", injectTargetFacility: ticket.targetFacilityId, receipt: "moved" };
+    }
+  }
   if (ticket.targetFrontId) {
     return { kind: "execute", injectTargetRegion: ticket.targetFrontId, receipt: "moved" };
   }

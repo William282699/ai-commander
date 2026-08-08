@@ -736,7 +736,7 @@ export function frontEscalationFacts(state: GameState, crisis: CrisisEvent): Esc
 // status, nearby forces, whether help is available). Pure read.
 
 /** Tunables for the facility worthiness gate (A4). One place to tune from playtest. */
-const FACILITY_GATE = {
+export const FACILITY_GATE = {
   /** A capture this far along counts as "genuinely being taken". Conservative. */
   PROGRESS_ASK_THRESHOLD: 0.34,
   /** Radius (tiles) around the facility for the nearby-force tally. */

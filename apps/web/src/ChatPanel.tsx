@@ -1960,7 +1960,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // gating both would put a confirmation card back in front of clear orders.
       const boundTicket = ticketByIntent.get(intent);
       if (boundTicket) {
-        const verdict = ticketDestinationVerdict(intent, boundTicket, wroteDestination);
+        const verdict = ticketDestinationVerdict(state, intent, boundTicket, wroteDestination);
         if (verdict.kind === "refuse") {
           addMessage("warning", verdict.line, state.time, ch, undefined, "command_ack");
           setClarification(
@@ -1969,6 +1969,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           return;
         }
         if (verdict.injectTargetRegion) intent.targetRegion = verdict.injectTargetRegion;
+        // 刀1：设施票带来的精确目的地。镜像上面 injectTargetRegion 的既有模式——
+        // 引擎自己的 id，与该模式同样不过 isValidTarget：合法性已经在 verdict 的
+        // 设施档里判过（据点还在、还是我们的，才会走到这里）。
+        if (verdict.injectTargetFacility) intent.targetFacility = verdict.injectTargetFacility;
         ticketReceiptMode.set(intent, verdict.receipt);
       }
     }

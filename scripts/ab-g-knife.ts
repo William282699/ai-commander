@@ -347,7 +347,7 @@ function resolveOne(raw: WireIntent, s: GameState, reserved: Set<number>): numbe
         roster = tk.unitIds;
         intent.fromSquad = undefined;
         intent = { ...intent, ...retargetIntentForTicket(s, intent, tk.ticket) };
-        const verdict = ticketDestinationVerdict(intent, tk.ticket, wroteDestination);
+        const verdict = ticketDestinationVerdict(s, intent, tk.ticket, wroteDestination);
         if (verdict.kind === "refuse") return 0; // 零执行 + 反问
         if (verdict.injectTargetRegion) intent.targetRegion = verdict.injectTargetRegion;
       }

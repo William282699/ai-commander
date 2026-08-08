@@ -55,7 +55,7 @@ export { captureDecisionReview, enqueueDecisionReview, assessDecisionReview, des
 export { buildFrontJudgmentLines, commanderMood, buildCommanderMoodLine, viewportToTileBox, unitsInBox, placeNameAt, buildPlayerViewLines } from "./commanderPresence";
 // approval-contract-v4 刀2 — escalation tickets (the machine handle for "那批兵")
 export {
-  buildFrontEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
+  buildFrontEscalationWithTickets, buildFacilityEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
   retargetIntentForTicket, ticketDestinationVerdict, mintSpokenForce,
   burnEscalationTicket, isTicketRef, isKnownForceRef, resetEscalationTickets,
   TICKET_TTL_SEC, NO_PROPOSAL_GUIDANCE,

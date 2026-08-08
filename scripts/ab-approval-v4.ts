@@ -39,7 +39,7 @@ import { filterLateCandidates } from "../packages/core/src/frontEscalationPayloa
 import {
   mintEscalationTickets, lookupEscalationTicket, burnEscalationTicket, liveMembersOf,
   isTicketRef, isKnownForceRef, ticketPromptLine, resetEscalationTickets, TICKET_TTL_SEC, forceHandleTag,
-  buildFrontEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
+  buildFrontEscalationWithTickets, buildFacilityEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
   mintSpokenForce, _ticketsForTest, retargetIntentForTicket, ticketDestinationVerdict,
 } from "../packages/core/src/escalationTicket";
 import type { GameState, Unit, Front, Position, CrisisEvent, Intent } from "@ai-commander/shared";
@@ -1446,7 +1446,7 @@ function runKnifeB2(): void {
   // 「原地」的判据是【一个单位都没拿到目的地】（就地设防那条 order 的 target 是
   // null），不是"落点离出发点近"——后者在原地和短距离移动之间分不清。
   {
-    const v = ticketDestinationVerdict({ type: "defend" } as Intent, boardTicket, false);
+    const v = ticketDestinationVerdict(disp.state, { type: "defend" } as Intent, boardTicket, false);
     const inPlace = countFrom(retargetIntentForTicket(disp.state, { type: "defend" } as Intent, boardTicket));
     const receipt = ticketDispatchReceipt(boardTicket, inPlace.n, v.kind === "execute" ? v.receipt : "moved");
     checkKnife(
@@ -1462,17 +1462,17 @@ function runKnifeB2(): void {
   // 分支 3b：板子号 + 移动动词 + 没目的地 —— 零执行 + 反问「去哪」
   checkKnife(
     "TB18b ★ 板子号 + 移动动词 + 无目的地 → 零执行 + 反问（不许替长官挑地方）",
-    (() => { const v = ticketDestinationVerdict({ type: "attack" } as Intent, boardTicket, false);
+    (() => { const v = ticketDestinationVerdict(disp.state, { type: "attack" } as Intent, boardTicket, false);
       return v.kind === "refuse" && v.reason === "no_destination" &&
         v.line.includes(boardTicket.gNumber) && v.line.includes("去哪"); })(),
-    (() => { const v = ticketDestinationVerdict({ type: "attack" } as Intent, boardTicket, false);
+    (() => { const v = ticketDestinationVerdict(disp.state, { type: "attack" } as Intent, boardTicket, false);
       return v.kind === "execute"; })(),
-    JSON.stringify(ticketDestinationVerdict({ type: "attack" } as Intent, boardTicket, false)),
+    JSON.stringify(ticketDestinationVerdict(disp.state, { type: "attack" } as Intent, boardTicket, false)),
   );
 
   // 分支 3c：升级号 + 移动动词 + 没目的地 —— 注入本票据那条战线，走 §8 梯子
   if (escTicket) {
-    const v = ticketDestinationVerdict({ type: "attack" } as Intent, escTicket, false);
+    const v = ticketDestinationVerdict(escFix.state, { type: "attack" } as Intent, escTicket, false);
     check(
       "TB18c 升级号没写目的地 → 注入它自己那条战线（不是问，也不是猜）",
       v.kind === "execute" && v.injectTargetRegion === escFix.front.id,
@@ -1484,7 +1484,7 @@ function runKnifeB2(): void {
   checkKnife(
     "TB18d ★ 裸 retreat 保持 retreat-semantics-v1 老合同（不再被改写成撤进战场）",
     (() => { const o = retargetIntentForTicket(disp.state, { type: "retreat" } as Intent, boardTicket);
-      const v = ticketDestinationVerdict(o, boardTicket, false);
+      const v = ticketDestinationVerdict(disp.state, o, boardTicket, false);
       return !o._targetPos && !o.targetRegion && !o.toFront &&
         v.kind === "execute" && !v.injectTargetRegion; })(),
     (() => { const o = retargetIntentForTicket(disp.state, { type: "retreat" } as Intent, boardTicket);
@@ -1507,11 +1507,11 @@ function runKnifeB2(): void {
     const afterSoftFix = { ...bogus, toFront: undefined } as Intent;
     checkKnife(
       "TB18f ★ 假地名被清掉后 → 零执行 + 反问，绝不退化成「没写目的地」顺手执行",
-      (() => { const v = ticketDestinationVerdict(afterSoftFix, boardTicket, true);
+      (() => { const v = ticketDestinationVerdict(disp.state, afterSoftFix, boardTicket, true);
         return v.kind === "refuse" && v.reason === "unknown_place"; })(),
-      (() => { const v = ticketDestinationVerdict(afterSoftFix, boardTicket, true);
+      (() => { const v = ticketDestinationVerdict(disp.state, afterSoftFix, boardTicket, true);
         return v.kind === "execute"; })(),
-      JSON.stringify(ticketDestinationVerdict(afterSoftFix, boardTicket, true)),
+      JSON.stringify(ticketDestinationVerdict(disp.state, afterSoftFix, boardTicket, true)),
     );
   }
 
@@ -1623,6 +1623,201 @@ function runKnifeB2(): void {
       minted.length > 0 &&
         (ticketDispatchReceipt(minted[0], minted[0].unitCount).match(/G\d+/g) ?? []).length <= 1,
       minted.length > 0 ? ticketDispatchReceipt(minted[0], minted[0].unitCount) : "(无票)",
+    );
+  }
+
+  runKnife1Facility();
+}
+
+// ============================================================
+// 第 8 级 刀1 — 危机票据带设施名
+//
+// 病：设施名在引擎里只活在设施家族事件上（FACILITY_CONTESTED / CAPTURE_STALLED），
+// 而这一族升级**一张票都不铸**。玩家在前哨危机语境下说「派他们去」，模型手上没有
+// 任何号可绑，单子退化成普通命令 —— 精确目的地在传递中丢掉，援兵去了战线别处，
+// 前哨没人管（用户手测第 1 笔）。
+//
+// 判据一律效果级：数 assignedUnitIds、核每张 Order 的落点坐标，不读回执台词。
+// ============================================================
+
+const POST_ID = "ea_player_central_post";
+
+/** 前哨正在被夺的现场：过 worthiness 闸（progress > 0.34）。
+ *  三坨我方兵，位置是本 fixture 的全部承重点：
+ *    A 贴着前哨（NEAR_RADIUS 内）—— 他们正在那儿挨打，**不是**援兵；
+ *    B 同一条战线、但在线的另一头闲着 —— **旧口径拿不到号的正是这批**（R9）；
+ *    C 线外闲着 —— 旧口径下唯一的候选。 */
+function facilityCrisisFixture(): {
+  state: GameState; post: { position: Position }; nearIds: number[]; sameFrontIds: number[]; outsideIds: number[];
+} {
+  const state = emptyBattlefield();
+  state.time = 1000;
+  const post = state.facilities.get(POST_ID)!;
+  post.team = "player";
+  post.capturingTeam = "enemy";
+  post.captureProgress = 0.6;
+
+  const nearIds: number[] = [];
+  for (let i = 0; i < 2; i++) nearIds.push(addUnit(state, post.position.x + 2 + i, post.position.y).id);
+  // 同线另一头：front_center 里离前哨足够远（> NEAR_RADIUS）的地方
+  const sameFrontIds: number[] = [];
+  for (let i = 0; i < 3; i++) sameFrontIds.push(addUnit(state, 290 + i, 110).id);
+  const outsideIds: number[] = [];
+  for (let i = 0; i < 2; i++) outsideIds.push(addUnit(state, RELIEF.x + i, RELIEF.y).id);
+  return { state, post, nearIds, sameFrontIds, outsideIds };
+}
+
+function runKnife1Facility(): void {
+  console.log("\n== 刀1 危机票据带设施名 ==");
+
+  // ── 正例：设施危机铸票，票带设施，号能翻成冻结名单，落点==设施坐标 ──
+  resetEscalationTickets();
+  const fx = facilityCrisisFixture();
+  const built = buildFacilityEscalationWithTickets(fx.state, POST_ID, "facility_contested", "前哨被夺");
+  check("K1-0 前置 设施危机产出票据机器（修前这一族一张票都不铸）", !!built && built.tickets.length > 0,
+    built ? `${built.tickets.length} 张` : "(null)");
+  if (!built || built.tickets.length === 0) return;
+
+  const t0 = built.tickets[0];
+  check(
+    "K1-1 票据冻结了那个设施（前线族恒不带此字段）",
+    t0.targetFacilityId === POST_ID,
+    `targetFacilityId=${t0.targetFacilityId ?? "(缺席)"}`,
+  );
+  check(
+    "K1-2 ★R13★ 票面 anchor 量到设施坐标（不是该线打得最凶那处）",
+    !!t0.anchor && t0.anchor.x === fx.post.position.x && t0.anchor.y === fx.post.position.y,
+    `anchor=${JSON.stringify(t0.anchor)} 设施=${JSON.stringify(fx.post.position)}`,
+  );
+
+  // ★R9★ 候选池：同线另一头那批**必须**拿得到号；贴着前哨那批**必须**拿不到
+  {
+    const allMembers = new Set(built.tickets.flatMap((t) => t.unitIds));
+    check(
+      "K1-3 ★R9★ 同战线、在别处闲着的那批进了候选（旧口径「线外才算候选」会把他们排除）",
+      fx.sameFrontIds.every((id) => allMembers.has(id)),
+      `候选=[${[...allMembers].sort((a, b) => a - b)}] 同线闲兵=[${fx.sameFrontIds}]`,
+    );
+    check(
+      "K1-4 ★R9★ 贴着前哨那批不进候选（他们在那儿挨打，不是援兵——自我增援谬误）",
+      fx.nearIds.every((id) => !allMembers.has(id)),
+      `候选=[${[...allMembers].sort((a, b) => a - b)}] 圈内=[${fx.nearIds}]`,
+    );
+  }
+
+  // ★端到端★：回单 fromSquad=G# 且**不写目的地** → 数兵 + 核落点
+  {
+    // ★ 动词要挑走得到设施档的：defend/hold 在**就地档**就返回了（那一档排在设施档
+    //   之前，是合同的一部分——K1-N4 专门钉它）。首版这里写 defend，台架当场把
+    //   档位顺序摆了出来：`{kind:"execute",receipt:"in_place"}`，无注入字段。
+    const verdict = ticketDestinationVerdict(fx.state, { type: "attack" } as Intent, t0, false);
+    check(
+      "K1-5 verdict 走设施档并注入那个设施（attack：越过 in_place 与 retreat 两档）",
+      verdict.kind === "execute" && verdict.injectTargetFacility === POST_ID,
+      JSON.stringify(verdict),
+    );
+    // 端到端走生产那条路：verdict 注入 → retarget → resolveIntent（冻结名单作硬约束）
+    const intent: Intent = { type: "attack", fromSquad: t0.gNumber } as Intent;
+    if (verdict.kind === "execute" && verdict.injectTargetFacility) {
+      intent.targetFacility = verdict.injectTargetFacility;
+    }
+    // ★ 镜像生产那条路（ChatPanel:1910）：**名单即作用域，G 号必须先清掉**——
+    //   留着它，分队解析器会去找一个不存在的分队，然后一个兵都不派。
+    //   首版忘了这一步，K1-6 报 assigned=[]：不是引擎的错，是台架没走生产的路。
+    intent.fromSquad = undefined;
+    const retargeted = retargetIntentForTicket(fx.state, intent, t0);
+    const r = resolveIntent(retargeted, fx.state, fx.state.style, undefined, t0.unitIds);
+    const assigned = [...r.assignedUnitIds].sort((a, b) => a - b);
+    const lands = r.orders.map((o) => o.target).filter((p): p is Position => !!p);
+    const frozen = new Set(t0.unitIds);
+    const maxD = lands.length
+      ? Math.max(...lands.map((p) => Math.hypot(p.x - fx.post.position.x, p.y - fx.post.position.y)))
+      : Infinity;
+    check(
+      "K1-6 ★端到端·数兵核坐标★ 号翻成冻结名单，且每张 Order 都落在前哨身上（不是友军簇）",
+      assigned.length > 0 && assigned.every((id) => frozen.has(id)) && lands.length > 0 && maxD <= 3,
+      `assigned=[${assigned}] ⊆冻结=${assigned.every((id) => frozen.has(id))} 落点最远偏离=${maxD.toFixed(2)} 设施=${JSON.stringify(fx.post.position)}`,
+    );
+  }
+
+  // ── 负对照六条（§O-3，一条不少）──
+  // ① 前线族票据不带 facilityId，verdict 照旧走战线档
+  {
+    resetEscalationTickets();
+    const ff = lateCandidateFixture(false);
+    const fb = buildFrontEscalationWithTickets(ff.state, makeCrisis(ff.front));
+    const ft = fb.tickets[0];
+    const v = ticketDestinationVerdict(ff.state, { type: "attack" } as Intent, ft, false);
+    check(
+      "K1-N1 ★负对照★ 前线族票据无 targetFacilityId，verdict 仍走战线档（该族字节不变）",
+      !!ft && ft.targetFacilityId === undefined &&
+        v.kind === "execute" && v.injectTargetRegion === ft.targetFrontId && !v.injectTargetFacility,
+      `facilityId=${ft?.targetFacilityId ?? "(缺席)"} verdict=${JSON.stringify(v)}`,
+    );
+  }
+  // ② 消费前设施转敌 → 设施档跳过，落回战线档（夺回是 attack 语义，另说）
+  {
+    const lost = facilityCrisisFixture();
+    resetEscalationTickets();
+    const b2 = buildFacilityEscalationWithTickets(lost.state, POST_ID, "facility_contested", "前哨被夺")!;
+    lost.state.facilities.get(POST_ID)!.team = "enemy";   // 消费前丢了
+    const v = ticketDestinationVerdict(lost.state, { type: "attack" } as Intent, b2.tickets[0], false);
+    check(
+      "K1-N2 ★负对照★ 设施已转敌 → 设施档跳过，落回战线档",
+      v.kind === "execute" && !v.injectTargetFacility && v.injectTargetRegion === b2.tickets[0].targetFrontId,
+      JSON.stringify(v),
+    );
+  }
+  // ③ 玩家自己写了目的地 → 原样赢，引擎不插手
+  {
+    const fx3 = facilityCrisisFixture();
+    resetEscalationTickets();
+    const b3 = buildFacilityEscalationWithTickets(fx3.state, POST_ID, "facility_contested", "前哨被夺")!;
+    const v = ticketDestinationVerdict(
+      fx3.state, { type: "attack", toFront: "front_coastal" } as Intent, b3.tickets[0], true,
+    );
+    check(
+      "K1-N3 ★负对照★ 玩家写了目的地 → 原样执行，设施档不覆盖他的话",
+      v.kind === "execute" && !v.injectTargetFacility && !v.injectTargetRegion,
+      JSON.stringify(v),
+    );
+  }
+  // ④ defend/hold 就地档、retreat 默认档：位置在设施档之前，字节不变
+  {
+    const fx4 = facilityCrisisFixture();
+    resetEscalationTickets();
+    const b4 = buildFacilityEscalationWithTickets(fx4.state, POST_ID, "facility_contested", "前哨被夺")!;
+    const hold = ticketDestinationVerdict(fx4.state, { type: "hold" } as Intent, b4.tickets[0], false);
+    const ret = ticketDestinationVerdict(fx4.state, { type: "retreat" } as Intent, b4.tickets[0], false);
+    check(
+      "K1-N4 ★负对照★ hold 走就地档、retreat 走默认档 —— 两档都排在设施档之前，未被截胡",
+      hold.kind === "execute" && hold.receipt === "in_place" && !hold.injectTargetFacility &&
+        ret.kind === "execute" && ret.receipt === "moved" && !ret.injectTargetFacility,
+      `hold=${JSON.stringify(hold)} retreat=${JSON.stringify(ret)}`,
+    );
+  }
+  // ⑤ 纯度：不经铸号入口就零铸票
+  {
+    resetEscalationTickets();
+    const fx5 = facilityCrisisFixture();
+    facilityEscalationFacts(fx5.state, POST_ID);
+    buildReinforceOptions(fx5.state, null);
+    check(
+      "K1-N5 ★负对照★ 只读事实/候选而不走铸号入口 → 零铸票（心跳与台架不得有副作用）",
+      _ticketsForTest().length === 0,
+      `tickets=${_ticketsForTest().length}`,
+    );
+  }
+  // ⑥ N2：说谎布尔与候选行不许互相打脸
+  {
+    const fx6 = facilityCrisisFixture();
+    resetEscalationTickets();
+    const facts = facilityEscalationFacts(fx6.state, POST_ID)!;
+    const b6 = buildFacilityEscalationWithTickets(fx6.state, POST_ID, "facility_contested", "前哨被夺")!;
+    check(
+      "K1-N6 idle_reinforcement_available 与候选行不矛盾（布尔说有 ⇒ 票据行也得有）",
+      !facts.idleReinforcementAvailable || b6.tickets.length > 0,
+      `布尔=${facts.idleReinforcementAvailable} 票据=${b6.tickets.length}`,
     );
   }
 }
@@ -1911,6 +2106,12 @@ const CANDIDATE_FACES: CandidateFace[] = [
     machine: "A", policy: "gated-upstream", note: "mint：生产恒传 precomputed（已被下一处滤过）" },
   { file: "packages/core/src/escalationTicket.ts", token: "buildReinforceOptions", nth: 2,
     machine: "A", policy: "gate", note: "升级 payload + 铸号（一次过滤同喂两处）" },
+  // 第 8 级 刀1：设施家族的票据机器。nth:3 —— 新调用点**追加在既有两处之后**，
+  // 所以 nth:1/nth:2 的语义没有位移（这张表按"文件内第 n 次出现"锚定，插在前面会
+  // 让两条 policy 注释静默挂错行：绿着的错）。TA1 在本刀首跑即咬到未登记的它。
+  { file: "packages/core/src/escalationTicket.ts", token: "buildReinforceOptions", nth: 3,
+    machine: "A", policy: "gate-null-clock",
+    note: "设施升级 payload + 铸号：全图池−身边圈，ETA 量到设施；设施危机无互射钟 ⇒ 钟恒 null ⇒ 不滤" },
   { file: "packages/core/src/frontEscalationPayload.ts", token: "buildReinforceOptions", nth: 1,
     machine: "A", policy: "gate", note: "payload builder 自带 filterLateCandidates" },
   { file: "packages/core/src/commanderPresence.ts", token: "buildReinforceOptions", nth: 1,

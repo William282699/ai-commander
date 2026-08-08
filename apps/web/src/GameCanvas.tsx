@@ -57,6 +57,7 @@ import {
   snapshotForDirector,
   frontEscalationFacts,
   buildFrontEscalationWithTickets,
+  buildFacilityEscalationWithTickets,
   resetEscalationTickets,
   facilityEscalationFacts,
   buildFacilityEscalationPayload,
@@ -107,6 +108,10 @@ const EVENT_CHANNEL_MAP: Record<ReportEventType, Channel> = {
   SUPPLY_LOW: "logistics",
   FACILITY_CAPTURED: "ops",
   FACILITY_LOST: "ops",
+  // ★ 这两行是 FALLBACK。第 8 级 刀1 起，设施族危机改由 facilityCrisisChannel()
+  //   按"丢了会不会输"分档：玩家 keypoint ∪ 总部 → combat，其余仍走这里的 ops。
+  //   两条旧裁定（7c.1-stab A3 / 2026-07-29）**对非 keypoint 事件继续有效**，
+  //   仅在 keypoint 那一半被修订，理由见 facilityCrisisChannel 的注释。
   FACILITY_CONTESTED: "ops", // 7c.1-stab A3: stolen/contested objectives are Marcus's domain, not Chen's
   CAPTURE_STALLED: "ops",    // user ruling 2026-07-29: its four nearest relatives (CAPTURED / LOST /
                              // CONTESTED / MISSION_STALLED) all live in ops, and combat is the busiest
@@ -120,6 +125,30 @@ const EVENT_CHANNEL_MAP: Record<ReportEventType, Channel> = {
   ECONOMY_SURPLUS: "logistics",
   ECONOMY_REPORT: "logistics",
 };
+
+/**
+ * 第 8 级 刀1（R1/R10）：设施危机喊哪个频道，按**丢了会不会输**分，不按设施清单。
+ *
+ * 病：FACILITY_CONTESTED / CAPTURE_STALLED 一律走 ops（7c.1-stab A3 与 2026-07-29
+ * 两条旧裁定）。而 ops 频道所有派单都被人格闸拦死——`commanderDispatchPool` 实测
+ * 开局 chen=74 / marcus=0 / emily=0。于是「我的前哨正在被夺，怎么办？」这句问句，
+ * 落在一个**永远无法直接答「派」的频道**上。玩家得自己切到陈那儿重新讲一遍。
+ *
+ * 修订依据（新证据）：ops 人格闸使问句答不了「派」；且 keypoint 类事件稀疏
+ * （全图 3 前哨 + 总部，30/60s 冷却），不会淹掉 combat。
+ * **旧裁定对非 keypoint 事件继续有效**：兵营/机场/修理厂被夺仍归 Marcus，
+ * 打敌方 VP 的占领停滞也仍归 Marcus（检测器对非我方设施才跑）。
+ *
+ * 写成判定式而不是设施清单：地图换了、剧本换了，"丢了会输的东西"自己会变，
+ * 一张手写清单不会。
+ */
+function facilityCrisisChannel(state: GameState, facilityId: string): Channel {
+  const f = state.facilities.get(facilityId);
+  if (!f || f.team !== "player") return "ops";
+  const keypoints = state.scenarioWinConfig?.friendlyKeypoints ?? [];
+  const losingIsLosing = keypoints.includes(facilityId) || f.type === "headquarters";
+  return losingIsLosing ? "combat" : "ops";
+}
 
 // ── Phase 3: Feature flags ──
 const ENABLE_STAFF_ASK = true;
@@ -472,11 +501,17 @@ function escalateCrisisToConversation(
   // v4 刀2b: ONE core call builds the payload AND mints this proposal's tickets
   // off the SAME candidate construction — the payload Chen speaks from and the
   // numbers the model may quote can never describe different groups.
-  const withTickets = facFacts ? null : buildFrontEscalationWithTickets(state, crisis);
+  // 刀1：设施家族从此也铸票。原来这里是 `facFacts ? null : …`——设施族一张票都不铸，
+  // 于是「派他们去」在前哨危机语境下没有任何号可绑，精确目的地在传递中丢掉。
+  const withTickets = facFacts
+    ? buildFacilityEscalationWithTickets(state, crisis.locationTag, situationType, crisis.message)
+    : buildFrontEscalationWithTickets(state, crisis);
   const miniFacts = facFacts
     ? buildFacilityEscalationPayload(facFacts, situationType, crisis.message)
     : // V1b: front payload from the ONE core builder (shared with the A/B bench)
       withTickets!.payload;
+  // ★ 设施族 payload 逐字节不变：上面这一行照旧自己构造，新入口只提供号。
+  //   ab-capture-stall 全绿是这条的硬线。
 
   // Neutral fallback — one open question, no defensive assumption, no option menu.
   const fallback =
@@ -1771,7 +1806,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         // Real decision-point events (FACILITY_LOST, SQUAD_HEAVY_LOSS, etc.) still pass through.
         if (evt.type === "ECONOMY_REPORT" || evt.type === "ECONOMY_SURPLUS") continue;
 
-        const channel = EVENT_CHANNEL_MAP[evt.type] || "ops";
+        const channel =
+          (evt.type === "FACILITY_CONTESTED" || evt.type === "CAPTURE_STALLED") && evt.entityId
+            ? facilityCrisisChannel(state, evt.entityId)
+            : EVENT_CHANNEL_MAP[evt.type] || "ops";
         const level: MessageLevel =
           evt.severity === "critical" ? "urgent" : evt.severity === "warning" ? "warning" : "info";
 

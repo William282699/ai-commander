@@ -333,14 +333,42 @@ export function compassOctant(state: GameState, p: Position): string {
 export function buildReinforceOptions(
   state: GameState,
   front: Front | null,
+  /** 第 8 级 刀1（R9 乙案）：设施危机的候选池与战线危机不是一回事。
+   *
+   *  战线危机问的是「线外谁能来」——线内的人已经投入了，他们就是 survival/ratio
+   *  描述的对象。设施危机问的不是这个：北线前哨挨打时，最该派的往往正是**同在
+   *  北部战线、但在别处闲着**的那坨人。照战线口径他们连号都拿不到，长官点不到。
+   *
+   *  所以设施危机传 front=null（全图为池）+ 下面两个参数：
+   *   - anchorOverride：ETA 量到**设施**，不是量到该线打得最凶那处；
+   *   - excludeNear：把设施身边那圈人排除掉——他们正在那儿挨打，不是援兵。
+   *     （自我增援谬误：prompt 规则 [D] 只覆盖 UNDER_ATTACK 消息面，不覆盖此面。
+   *     半径与 payload 的 nearby_forces_ours 同一常量＝同一把尺。）
+   *
+   *  三个参数全可选、默认关；不传时既有调用方逐字节不变。 */
+  opts?: {
+    anchorOverride?: Position | null;
+    excludeNear?: { center: Position; radius: number } | null;
+  },
 ): ReinforceOptionsResult {
   const bboxes = front ? frontBboxes(state, front) : [];
   // v4 刀1: the ETA promise is measured to where the FIGHT is, not to the
   // front's geometric center. Every downstream consumer of etaSec (the
   // escalation question and commanderPresence's best_help row) inherits the
   // fix from this one line — they all read this builder's output.
-  const anchor = front ? battleAnchorFor(state, front) : null;
-  const outsideFront = (p: Position): boolean => bboxes.length === 0 || !insideBboxes(bboxes, p);
+  const anchor = opts?.anchorOverride !== undefined
+    ? opts.anchorOverride
+    : (front ? battleAnchorFor(state, front) : null);
+  const ring = opts?.excludeNear ?? null;
+  const ringR2 = ring ? ring.radius * ring.radius : 0;
+  const insideRing = (p: Position): boolean => {
+    if (!ring) return false;
+    const dx = p.x - ring.center.x;
+    const dy = p.y - ring.center.y;
+    return dx * dx + dy * dy <= ringR2;
+  };
+  const outsideFront = (p: Position): boolean =>
+    !insideRing(p) && (bboxes.length === 0 || !insideBboxes(bboxes, p));
 
   // Dispatchable pool (friendly-only; commanders and manual-only excluded).
   const pool = new Map<number, Unit>();
