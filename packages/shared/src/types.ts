@@ -186,6 +186,15 @@ export interface Region {
   adjacent: string[];
   strategicValue: string[];
   facilities: string[];
+  /** Don't draw this region's name on the map (第 8 级 fix A).
+   *
+   *  刀3 把三个大矩形切成了子块，好让"一点至多属于一条战线"成立。那是**归属判定**
+   *  需要的粒度，不是长官需要看见的粒度——屏上多出四个"…东段/…西段/…南缘/…北段"，
+   *  读起来像地图变复杂了，其实地形一格没动。
+   *
+   *  用数据标记，不用名字模式：将来谁给子块起个不带"段"字的名字，基于后缀的过滤
+   *  会静默失效，这个 flag 不会。可选字段，additive——不写就照旧画。 */
+  hideMapLabel?: true;
 }
 
 // --- Chokepoint ---

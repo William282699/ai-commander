@@ -898,9 +898,12 @@ function runSynthetic(): void {
     const added = b.filter((l) => !a.includes(l));
     const removed = a.filter((l) => !b.includes(l));
     check(
+      // fix B：---TAGS--- 行改名字前置 `"名字"(tag_id) @(x,y)`。断言随格式更新，
+      // 不放宽——仍然逐字钉住行首是名字、id 在括号里、坐标在后。
       "K4-7 ★负对照★ 远标记对 DigestV1 的唯一影响是 ---TAGS--- 两行，命名面零变化",
       removed.length === 0 && added.length === 2 &&
-        added[0] === "---TAGS---" && added[1].startsWith("tag_1:"),
+        added[0] === "---TAGS---" &&
+        /^"远标记"\(tag_1\) @\(\d+,\d+\)$/.test(added[1]),
       `+${JSON.stringify(added)} -${JSON.stringify(removed)}`,
     );
     check(

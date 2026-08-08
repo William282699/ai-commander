@@ -1132,7 +1132,7 @@ export function renderRouteLabels(
 
 export function renderRegionLabels(
   ctx: CanvasRenderingContext2D,
-  regions: { id: string; name: string; bbox: [number, number, number, number] }[],
+  regions: { id: string; name: string; bbox: [number, number, number, number]; hideMapLabel?: true }[],
   camera: Camera,
 ): void {
   if (camera.zoom > 0.9) return; // only show when zoomed out enough
@@ -1144,6 +1144,7 @@ export function renderRegionLabels(
   ctx.globalAlpha = 0.5;
 
   for (const region of regions) {
+    if (region.hideMapLabel) continue; // fix A：切出来的归属子块不占屏上地名
     const [x1, y1, x2, y2] = region.bbox;
     const cx = ((x1 + x2) / 2) * TILE_SIZE;
     const cy = ((y1 + y2) / 2) * TILE_SIZE;

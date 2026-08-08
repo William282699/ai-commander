@@ -201,12 +201,17 @@ export function generateDigestV1(
   }
 
   // Day 15: Tags (player map markers)
+  //
+  // 第 8 级 fix B：名字前置。刀4 之后引擎会在候选 label / SQUADS loc= / preflight
+  // 台词里印出标记的**名字**，长官听到的也是名字——而这一行原本 id 打头
+  // (`tag_1:"制高点"`)，读起来像"这一行讲的是 tag_1"。名字前置让行首就是长官
+  // 会说出口的那个词，id 退到括号里当把手。两个都印，两个都解析得回来。
   if (state.tags && state.tags.length > 0) {
     digest += `---TAGS---\n`;
     const maxTags = 12;
     for (let i = 0; i < Math.min(state.tags.length, maxTags); i++) {
       const t = state.tags[i];
-      digest += `${t.id}:"${t.name}" @(${Math.round(t.position.x)},${Math.round(t.position.y)})\n`;
+      digest += `"${t.name}"(${t.id}) @(${Math.round(t.position.x)},${Math.round(t.position.y)})\n`;
     }
     if (state.tags.length > maxTags) {
       digest += `...+${state.tags.length - maxTags} more\n`;

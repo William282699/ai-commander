@@ -54,6 +54,7 @@ export const EL_ALAMEIN_REGIONS: Region[] = [
     adjacent: ["northern_coastal", "british_hq_area"],
     strategicValue: ["highway", "coastal_approach"],
     facilities: [],
+    hideMapLabel: true, // fix A：归属判定要的子块，不是长官要看的地名
   },
   {
     id: "tel_el_eisa",
@@ -121,6 +122,7 @@ export const EL_ALAMEIN_REGIONS: Region[] = [
     adjacent: ["northern_coastal", "kidney_ridge_zone", "miteirya_ridge_zone", "minefield_zone", "central_desert"],
     strategicValue: ["obstacle", "minefield"],
     facilities: [],
+    hideMapLabel: true, // fix A：归属判定要的子块，不是长官要看的地名
   },
 
   // === Central Desert ===
@@ -164,6 +166,7 @@ export const EL_ALAMEIN_REGIONS: Region[] = [
     adjacent: ["axis_rear", "miteirya_ridge_zone", "central_desert_s", "southern_desert"],
     strategicValue: ["open_terrain"],
     facilities: [],
+    hideMapLabel: true, // fix A：归属判定要的子块，不是长官要看的地名
   },
   {
     id: "central_desert_s",
@@ -175,6 +178,7 @@ export const EL_ALAMEIN_REGIONS: Region[] = [
     adjacent: ["ruweisat_zone", "central_desert", "central_desert_w", "southern_desert"],
     strategicValue: ["open_terrain"],
     facilities: [],
+    hideMapLabel: true, // fix A：归属判定要的子块，不是长官要看的地名
   },
 
   // === Southern Sector ===

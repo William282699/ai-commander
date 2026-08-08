@@ -26,6 +26,7 @@
 
 import { createInitialGameState } from "@ai-commander/core";
 import { isInsideFront } from "../packages/core/src/frontDestination";
+import { renderRegionLabels } from "../apps/web/src/rendererCanvas";
 import type { GameState, Front, Region } from "@ai-commander/shared";
 
 const NEGCTL = process.argv.includes("--negctl");
@@ -262,6 +263,54 @@ function assertNoUnitDoubleCounted(): void {
   );
 }
 
+// ============================================================
+// ⑦ 屏上地名（fix A）：切出来的归属子块不占标签，屏上就是刀3 前那一套
+//
+// 判据是**数据标记**不是名字模式：断言"没打 hideMapLabel 的 region 集合 ==
+// 刀3 前那 12 个 id"。若哪天有人给子块起个不带"段/缘"字的名字，
+// 基于后缀的断言会静默放行，这条不会。
+// ============================================================
+
+/** 刀3 之前地图上就有的 region（= 屏上本来会画名字的那一套，逐字节不变）。 */
+const PRE_KNIFE3_REGION_IDS = [
+  "british_hq_area", "northern_coastal", "tel_el_eisa", "kidney_ridge_zone",
+  "miteirya_ridge_zone", "minefield_zone", "ruweisat_zone", "central_desert",
+  "southern_desert", "alam_halfa_zone", "himeimat_zone", "axis_rear",
+].sort();
+
+function assertMapLabelSet(): void {
+  const labelled = regions.filter((r) => !r.hideMapLabel).map((r) => r.id).sort();
+  const hidden = regions.filter((r) => r.hideMapLabel).map((r) => r.id).sort();
+  check(
+    "⑦",
+    `屏上地名集合 == 刀3 前那 ${PRE_KNIFE3_REGION_IDS.length} 个（新切的子块一律不占标签）`,
+    labelled.join(",") === PRE_KNIFE3_REGION_IDS.join(","),
+    `屏上=[${labelled.join(",")}] 隐藏=[${hidden.join(",")}]`,
+  );
+
+  // ⑧ 效果级：直接跑**生产的** renderRegionLabels，用只记账的假 ctx 收它到底画了什么。
+  //   ⑦ 量的是数据（谁打了 flag），⑧ 量的是渲染函数认不认这个 flag——两件事。
+  //   顺带啃掉 LEDGER H1「GameCanvas 接线无台架可测」的一角：这一层原来只能靠人眼。
+  const drawn: string[] = [];
+  const fakeCtx = {
+    canvas: { width: 1e5, height: 1e5 },   // 视口开满，排除"没画"其实是"被剔到屏外"
+    font: "", textAlign: "", textBaseline: "", globalAlpha: 1, fillStyle: "",
+    fillText: (t: string) => { drawn.push(t); },
+  };
+  renderRegionLabels(
+    fakeCtx as unknown as CanvasRenderingContext2D,
+    regions,
+    { x: 0, y: 0, zoom: 0.35 } as never,
+  );
+  const wantNames = regions.filter((r) => !r.hideMapLabel).map((r) => r.name).sort();
+  check(
+    "⑧",
+    "生产 renderRegionLabels 实际画出的标签 == 未打 hideMapLabel 的那些（渲染层认这个 flag）",
+    drawn.length > 0 && [...drawn].sort().join(",") === wantNames.join(","),
+    `实画 ${drawn.length} 个=[${[...drawn].sort().join(",")}] 期望=[${wantNames.join(",")}]`,
+  );
+}
+
 // ── report mode ──
 
 function runReport(): void {
@@ -312,6 +361,7 @@ if (REPORT) {
   assertRegionFacilityListsDerived();
   assertSeamBudget();
   assertNoUnitDoubleCounted();
+  assertMapLabelSet();
 
   console.log(`\nPASS=${pass} FAIL=${fail}`);
   if (NEGCTL) {
