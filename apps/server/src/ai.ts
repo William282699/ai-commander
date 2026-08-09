@@ -18,7 +18,7 @@ import type {
   Intent,
   IntentType,
 } from "@ai-commander/shared";
-import { createProvider, getProviderConfig, describeProviderConfig, type LLMProvider, type ChatMessage } from "./providers.js";
+import { createProvider, getProviderConfig, describeProviderConfig, buildContent, type LLMProvider, type ChatMessage, type AudioAttachment } from "./providers.js";
 
 // Re-export for index.ts boot logging
 export { describeProviderConfig };
@@ -676,11 +676,13 @@ async function callDeepSeek(
   userMessage: string,
   options?: { temperature?: number; maxTokens?: number },
   channel?: string,
+  /** 语音输入 V1：在场时，userMessage 原样当 text part、录音跟在它后面。 */
+  audio?: AudioAttachment,
 ): Promise<string> {
   const provider = getProvider(channel);
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: userMessage },
+    { role: "user", content: buildContent(userMessage, audio) },
   ];
   return provider.chat(messages, {
     temperature: options?.temperature ?? 0.4,
@@ -741,6 +743,8 @@ export async function callAdvisor(
   playerMessage: string,
   styleNote: string,
   channel?: string,
+  /** 语音输入 V1：录音附件。缺席＝走到 buildContent 等于没走（拼装逐字节不变）。 */
+  audio?: AudioAttachment,
 ): Promise<AdvisorResult> {
   const mode = resolveAdvisorMode(channel);
   const systemPrompt = withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest);
@@ -757,7 +761,7 @@ ${styleNote}
 指挥官命令：${playerMessage}`;
 
   try {
-    const raw = await callDeepSeek(systemPrompt, userContent, undefined, channel);
+    const raw = await callDeepSeek(systemPrompt, userContent, undefined, channel, audio);
     let validated = sanitize(raw);
 
     // Non-stream delimiter recovery (mirror of callAdvisorStream): models
@@ -999,6 +1003,8 @@ export async function* callAdvisorStream(
   playerMessage: string,
   styleNote: string,
   channel?: string,
+  /** 语音输入 V1：录音附件；非流兜底路一并转交，两条路的耳朵是同一只。 */
+  audio?: AudioAttachment,
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): AsyncGenerator<{ type: "text"; content: string } | { type: "options"; content: any }> {
   const mode = resolveAdvisorMode(channel);
@@ -1019,7 +1025,7 @@ ${styleNote}
 
   // If provider doesn't support streaming, fall back to non-streaming
   if (!provider.chatStream) {
-    const result = await callAdvisor(digest, playerMessage, styleNote, channel);
+    const result = await callAdvisor(digest, playerMessage, styleNote, channel, audio);
     if (result.data.brief) {
       yield { type: "text", content: result.data.brief };
     }
@@ -1029,7 +1035,7 @@ ${styleNote}
 
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: userContent },
+    { role: "user", content: buildContent(userContent, audio) },
   ];
 
   try {

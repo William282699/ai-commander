@@ -4,9 +4,42 @@
 // Switch via LLM_PROVIDER env var: "deepseek" | "openai" | "claude"
 // ============================================================
 
+// ── 语音输入 V1：音频附件与多模态 content ──
+//
+// 三个"缝"在这里命名导出（AudioAttachment / buildContent / channelAcceptsAudio），
+// 不是为了好看：V1.5 的 ops 转写中继（/api/transcribe）要复用同一套线上形状，
+// 若把类型内联进调用点、把 provider 判定抄进路由 handler，中继就只能复制第二份
+// ——placeNameAt 与 getFrontCenterPos 那一族的病。命名一次，两边共用。
+
+/** 一段录音。V1 只有 wav（探针实证该端点吃 wav；webm/opus 未测）。 */
+export interface AudioAttachment {
+  /** base64，不带 `data:` 前缀 */
+  data: string;
+  format: "wav";
+}
+
+/** OpenAI 兼容多模态片段。纯文本调用继续直接传 string，不包装。 */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "input_audio"; input_audio: { data: string; format: string } };
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ContentPart[];
+}
+
+/**
+ * 把「文本 + 可选音频」拼成 provider 认得的 content。
+ *
+ * ★ 无音频时返回**传进来的那个字符串本身**（不是等值的新串）——这是"信封拼装
+ * 零改动"负对照的地基：打字回合走到这里等同于没走，assembly 逐字节不可能变。
+ */
+export function buildContent(text: string, audio?: AudioAttachment): string | ContentPart[] {
+  if (!audio) return text;
+  return [
+    { type: "text", text },
+    { type: "input_audio", input_audio: { data: audio.data, format: audio.format } },
+  ];
 }
 
 export interface ChatOptions {
@@ -170,7 +203,21 @@ class ClaudeProvider implements LLMProvider {
     this.model = model;
   }
 
+  /**
+   * fail-closed：Anthropic 的多模态是另一套 block 格式，这里绝不静默把音频丢掉
+   * 再当纯文本发出去——那会变成"长官说了话、模型什么都没听见、引擎照样出单"。
+   * 注意这**只是第二道**：第一道是 channelAcceptsAudio（挂 provider 能力，
+   * 而不是挂 provider 类）——deepseek 与 gemini 共用 OpenAICompatibleProvider，
+   * 只在这里 throw 挡不住 ops。
+   */
+  private assertTextOnly(messages: ChatMessage[]): void {
+    if (messages.some((m) => typeof m.content !== "string")) {
+      throw new Error("ClaudeProvider 不支持多模态 content parts（fail-closed）");
+    }
+  }
+
   async chat(messages: ChatMessage[], options?: ChatOptions): Promise<string> {
+    this.assertTextOnly(messages);
     const systemMsg = messages.find((m) => m.role === "system");
     const nonSystemMsgs = messages.filter((m) => m.role !== "system");
 
@@ -203,6 +250,7 @@ class ClaudeProvider implements LLMProvider {
   }
 
   async *chatStream(messages: ChatMessage[], options?: ChatOptions): AsyncIterable<string> {
+    this.assertTextOnly(messages);
     const systemMsg = messages.find((m) => m.role === "system");
     const nonSystemMsgs = messages.filter((m) => m.role !== "system");
 
@@ -381,6 +429,28 @@ export function getProviderConfig(channel?: string): ProviderConfig {
   }
 
   return { provider, apiKey, baseUrl, model, keyEnvVar };
+}
+
+// ── 语音输入 V1：哪些频道的耳朵吃得下音频 ──
+//
+// 双条件，缺一不可：
+//   ① 显式白名单＝**语义闸**。.env 只设了 LLM_PROFILE 与 LLM_PROFILE_OPS，
+//      所以 group 的 provider 同样是 gemini——单靠 provider 推导会把群聊圈进来，
+//      而 GROUP_SYSTEM_PROMPT 是冻结面（D2）；ops 用的是 deepseek 那颗脑子，
+//      换耳朵归 V1.5 的转写中继，不归这条通道。
+//   ② provider==="gemini"＝**配置闸**。将来 .env 换 profile，能力自动收回，
+//      不会留下"白名单说可以、模型其实听不了"的洞。
+const VOICE_INPUT_CHANNELS: readonly string[] = ["combat", "logistics"];
+
+/** 服务端入场校验用（fail-closed 的第一道，也是唯一一道硬的）。 */
+export function channelAcceptsAudio(channel?: string): boolean {
+  if (!channel || !VOICE_INPUT_CHANNELS.includes(channel)) return false;
+  return getProviderConfig(channel).provider === "gemini";
+}
+
+/** /api/health 报给客户端的名单；不在名单里的频道，🎤 走现状 Web Speech。 */
+export function voiceEnabledChannels(): string[] {
+  return VOICE_INPUT_CHANNELS.filter((ch) => getProviderConfig(ch).provider === "gemini");
 }
 
 // ── Per-channel diagnostics (D2=B: strict isProviderConfigured) ──

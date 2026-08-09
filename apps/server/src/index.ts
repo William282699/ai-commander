@@ -16,6 +16,8 @@ const envResult = dotenvConfig({ path: ENV_PATH });
 import express from "express";
 import cors from "cors";
 import { callAdvisor, callAdvisorStream, callGroupAdvisor, callLightBrief, isProviderConfigured, describeProviderConfig } from "./ai.js";
+import { voiceEnabledChannels } from "./providers.js";
+import { rejectCommandBody, audioOf } from "./voiceInput.js";
 import { ttsRouter } from "./routes/tts.js";
 
 const app = express();
@@ -31,7 +33,15 @@ const PLAYTEST_DISABLED =
   process.env.PLAYTEST_ENABLED === "false";
 
 app.use(cors());
-app.use(express.json({ limit: "100kb" }));
+
+// 语音输入 V1：只有两条命令路由允许大 body（b64 WAV，30s@16kHz ≈ 1.28MB）。
+// ★ 不能靠"给这两条路由单独挂个大 limit"——全局解析器先跑，1.28MB 会在到达
+// 路由之前就被 100kb 打回。所以在同一个位置按路径二选一：命令路由 4mb，
+// 其余（/api/log-event、/api/brief、/api/tts…）一个字节没放宽。
+const jsonSmall = express.json({ limit: "100kb" });
+const jsonLarge = express.json({ limit: "4mb" });
+const AUDIO_ROUTES = new Set(["/api/command", "/api/command-stream"]);
+app.use((req, res, next) => (AUDIO_ROUTES.has(req.path) ? jsonLarge : jsonSmall)(req, res, next));
 
 // Gate runs after JSON parser (so 503 JSON body is well-formed) but before
 // every route, including /api/tts.
@@ -82,6 +92,9 @@ app.get("/api/health", (_req, res) => {
     status: "ok",
     time: Date.now(),
     llmConfigured: isProviderConfigured(),
+    // 语音输入 V1：客户端启动拉一次，只有名单里的频道 🎤 走录音路。
+    // 拉不到时客户端 fail-closed 回现状 Web Speech（web 侧负责）。
+    voiceChannels: voiceEnabledChannels(),
   });
 });
 
@@ -93,17 +106,21 @@ app.post("/api/command", async (req, res) => {
     res.status(400).json({ error: "digest (string) 必填" });
     return;
   }
-  if (!message || typeof message !== "string") {
-    res.status(400).json({ error: "message (string) 必填" });
+  const reject = rejectCommandBody(req.body?.audio, message, channel);
+  if (reject) {
+    res.status(400).json({ error: reject });
     return;
   }
+  const audio = audioOf(req.body);
+  const playerText = typeof message === "string" ? message : "";
 
   // Step 6a: escalateId (when present) ties this reply back to the crisis
   // escalation the player is responding to. JSON.stringify drops it when absent.
-  logEvent({ type: "command", route: "command", sessionId, escalateId, channel: channel || "", message });
+  // voice: 语音回合 message 为空，这一行会是空的——heard 日志在步 2 补。
+  logEvent({ type: "command", route: "command", sessionId, escalateId, channel: channel || "", message: playerText, voice: audio ? true : undefined });
 
   try {
-    const result = await callAdvisor(digest, message, styleNote || "", channel || "");
+    const result = await callAdvisor(digest, playerText, styleNote || "", channel || "", audio);
     // result always has data (fallback if LLM failed)
     if (result.warning) {
       res.json({ ...result.data, warning: result.warning });
@@ -125,14 +142,17 @@ app.post("/api/command-stream", async (req, res) => {
     res.status(400).json({ error: "digest (string) 必填" });
     return;
   }
-  if (!message || typeof message !== "string") {
-    res.status(400).json({ error: "message (string) 必填" });
+  const reject = rejectCommandBody(req.body?.audio, message, channel);
+  if (reject) {
+    res.status(400).json({ error: reject });
     return;
   }
+  const audio = audioOf(req.body);
+  const playerText = typeof message === "string" ? message : "";
 
   // Step 6a: escalateId (when present) ties this reply back to the crisis
   // escalation the player is responding to. JSON.stringify drops it when absent.
-  logEvent({ type: "command", route: "command-stream", sessionId, escalateId, channel: channel || "", message });
+  logEvent({ type: "command", route: "command-stream", sessionId, escalateId, channel: channel || "", message: playerText, voice: audio ? true : undefined });
 
   // SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -141,7 +161,7 @@ app.post("/api/command-stream", async (req, res) => {
   res.flushHeaders();
 
   try {
-    for await (const event of callAdvisorStream(digest, message, styleNote || "", channel || "")) {
+    for await (const event of callAdvisorStream(digest, playerText, styleNote || "", channel || "", audio)) {
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     }
     res.write("data: [DONE]\n\n");
