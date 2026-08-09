@@ -4,13 +4,25 @@
 // 独立成模块（§X-5 第三缝）：V1.5 的 ops 转写中继要复用同一个录音件，
 // 写在 PTT 事件处理器里就只能复制第二份。
 //
-// 采集路线（只用稳定 API，不碰已废弃的 ScriptProcessor、也不引 AudioWorklet 模块）：
-//   MediaRecorder（浏览器原生，容器随浏览器）
-//     → decodeAudioData → OfflineAudioContext 重采样到 16kHz 单声道
-//     → Int16 PCM + WAV 头 → base64
-// 中间那段 webm 只是过路，**发出去的永远是 wav**：探针实证该端点吃 wav，
-// webm/opus 至今没测过（本机无 ffmpeg/opusenc、afconvert 写 opus 失败），
-// 不许拿没测过的容器上场。
+// 采集路线：getUserMedia → **直采 PCM**（ScriptProcessor）→ OfflineAudioContext
+//   重采样 16kHz 单声道 → Int16 PCM + WAV 头 → 分块 base64。
+//
+// ★为什么直采 PCM 而不是 MediaRecorder：**合同就是这么定的**（提案 §2-A：
+//   「采 PCM → 16kHz mono WAV；不用 MediaRecorder 的 webm/opus」）。步 3 首版
+//   拿 MediaRecorder 当中间件（webm 只过路、发出去仍是 wav）是偏离合同，已改回。
+//   理由不用测也成立：opus 是有损压缩，而这一刀的全部价值押在"耳朵听得出玩家
+//   自造的标记名"上（消融：无信封 0/4 → 带信封 4/4），采集端没有理由先压一道。
+//
+//   ⚠ 留痕（防后人拿错证据）：步 3 冒烟里我一度用"经 MediaRecorder 的转写掉了
+//   「战狼点」、直接重采样没掉"来论证这件事——**那个对照不成立**。冒烟的假麦克风
+//   是 MediaStreamDestination → MediaStreamSource 的合成往返，它自己就掉字
+//   （换成直采 PCM 之后、把开口延后 1 秒排除掐头之后，「战狼点」照样丢）。
+//   两个采集实现都被同一个夹具伤害 ⇒ 那组数**判不了 opus 与 PCM 的高下**。
+//   采集保真度的裁决权在步 6 的真麦手测，这里不宣称。
+//
+// ScriptProcessor 已被标记废弃，这里仍然选它：零构建配置、目标浏览器全支持、
+//   当场可验；AudioWorklet 是更正确的替代（要单独的 worklet 模块 + Vite 的
+//   URL 处理），登记为 demo 后项。MVP 铁律 5：能跑 > 优雅。
 //
 // 16kHz 是承重项不是口味：30s@16k 单声道 16bit = 960KB → b64 1.28MB，
 // 舒服地待在服务端 4mb 之内；同样 30 秒换 48kHz 就是 b64 3.84MB，贴死那条线。
@@ -36,7 +48,6 @@ export interface VoiceRecorderHandle {
 export function isVoiceCaptureSupported(): boolean {
   return typeof navigator !== "undefined"
     && !!navigator.mediaDevices?.getUserMedia
-    && typeof MediaRecorder !== "undefined"
     && typeof AudioContext !== "undefined";
 }
 
@@ -57,70 +68,73 @@ export async function startVoiceRecording(): Promise<VoiceRecorderHandle> {
     },
   });
 
-  const chunks: Blob[] = [];
-  const rec = new MediaRecorder(stream);
-  rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-  rec.start();
+  const ctx = new AudioContext();
+  const source = ctx.createMediaStreamSource(stream);
+  // 4096 帧一批：再小 onaudioprocess 太频繁，再大松手时尾巴丢得多。
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  // ★ 必须接到 destination 才会被调度，但**中间挂一个 gain=0**：
+  //   直接接过去等于把麦克风原声播回喇叭（长官会听见自己 + 喂给 AEC 一个假回声）。
+  const mute = ctx.createGain();
+  mute.gain.value = 0;
 
-  const startedAt = Date.now();
-  let capped: number | undefined = window.setTimeout(() => {
-    if (rec.state === "recording") rec.stop();
-  }, MAX_SECONDS * 1000);
+  const chunks: Float32Array[] = [];
+  let frames = 0;
+  const maxFrames = MAX_SECONDS * ctx.sampleRate;
+  proc.onaudioprocess = (e) => {
+    if (frames >= maxFrames) return;
+    const src = e.inputBuffer.getChannelData(0);
+    chunks.push(new Float32Array(src)); // 必须拷贝：这块缓冲下一批会被复用
+    frames += src.length;
+  };
+  source.connect(proc);
+  proc.connect(mute);
+  mute.connect(ctx.destination);
 
   const teardown = () => {
-    if (capped !== undefined) { clearTimeout(capped); capped = undefined; }
-    stream.getTracks().forEach((t) => t.stop());
+    proc.onaudioprocess = null;
+    try { source.disconnect(); proc.disconnect(); mute.disconnect(); } catch { /* 已断开 */ }
+    stream.getTracks().forEach((t) => t.stop()); // 释放麦克风
+    void ctx.close();
   };
 
   return {
     cancel() {
-      if (rec.state === "recording") rec.stop();
       chunks.length = 0;
       teardown();
     },
     async stop(): Promise<VoiceRecording | null> {
-      if (rec.state === "recording") {
-        await new Promise<void>((resolve) => { rec.onstop = () => resolve(); rec.stop(); });
-      }
+      const rate = ctx.sampleRate;
       teardown();
-      const elapsed = (Date.now() - startedAt) / 1000;
-      if (chunks.length === 0 || elapsed < 0.3) return null; // 手滑点一下，不算命令
+      if (frames === 0) return null;
+      const durationSec = frames / rate;
+      if (durationSec < 0.3) return null; // 手滑点一下，不算命令
 
       try {
-        const raw = await new Blob(chunks).arrayBuffer();
-        const wav = await toWav16k(raw);
-        if (!wav) return null;
-        return { data: wav.base64, format: "wav", durationSec: wav.durationSec };
+        const flat = new Float32Array(frames);
+        let at = 0;
+        for (const c of chunks) { flat.set(c.subarray(0, Math.min(c.length, frames - at)), at); at += c.length; if (at >= frames) break; }
+        const base64 = await resampleToWav16k(flat, rate);
+        return { data: base64, format: "wav", durationSec };
       } catch {
-        return null; // 解码失败＝没听到，交给上层走 fail-closed，不发半个包
+        return null; // 采集/重采样出问题＝没听到，交给上层 fail-closed，不发半个包
       }
     },
   };
 }
 
-/** 任意浏览器容器 → 16kHz 单声道 WAV base64。 */
-async function toWav16k(raw: ArrayBuffer): Promise<{ base64: string; durationSec: number } | null> {
-  const ctx = new AudioContext();
-  let decoded: AudioBuffer;
-  try {
-    decoded = await ctx.decodeAudioData(raw.slice(0));
-  } finally {
-    void ctx.close();
-  }
-  if (decoded.duration <= 0) return null;
-
-  const frames = Math.max(1, Math.ceil(decoded.duration * TARGET_RATE));
+/** 任意采样率的单声道 Float32 → 16kHz WAV base64。 */
+async function resampleToWav16k(samples: Float32Array, rate: number): Promise<string> {
+  if (rate === TARGET_RATE) return encodeWavBase64(samples, TARGET_RATE);
+  const frames = Math.max(1, Math.round((samples.length * TARGET_RATE) / rate));
   const off = new OfflineAudioContext(1, frames, TARGET_RATE);
+  const buf = off.createBuffer(1, samples.length, rate);
+  buf.getChannelData(0).set(samples);
   const src = off.createBufferSource();
-  src.buffer = decoded;
+  src.buffer = buf;
   src.connect(off.destination);
   src.start();
-  const resampled = await off.startRendering();
-
-  return {
-    base64: encodeWavBase64(resampled.getChannelData(0), TARGET_RATE),
-    durationSec: decoded.duration,
-  };
+  const out = await off.startRendering();
+  return encodeWavBase64(out.getChannelData(0), TARGET_RATE);
 }
 
 /** Float32 [-1,1] → 16-bit PCM WAV → base64。
