@@ -56,6 +56,8 @@ const listeners = new Set<() => void>();
 // That way both windows share a single source of truth.
 interface MessageStoreShape {
   addMessage: typeof addMessage;
+  /** 语音输入 V1：弹出面板里说话时，回填也要落到 opener 那份真相源上。 */
+  updateLastPlayerMessage: typeof updateLastPlayerMessage;
   clearMessages: typeof clearMessages;
   getMessages: typeof getMessages;
   getGroupChatMessages: typeof getGroupChatMessages;
@@ -128,6 +130,28 @@ export function addMessage(
   }
 
   listeners.forEach((fn) => fn());
+}
+
+/**
+ * 语音输入 V1：把长官那条气泡的正文换掉（🎤 占位 → 陈听到的原话）。
+ *
+ * 只认「该频道最后一条 from==="player"」——语音回合发出后 loading 锁着输入，
+ * 长官不可能在这中间插进第二条，所以"最后一条"就是这一条。
+ * 之所以不做成 updateMessage(id)：那要求 addMessage 返回 id，而 addMessage
+ * 在 MessageStoreShape 里（跨窗口桥的契约），改它的签名比加一个函数贵。
+ * 找不到就静默什么都不做——回填失败最坏是气泡停在 🎤，不制造别的后果。
+ */
+export function updateLastPlayerMessage(channel: Channel, text: string): void {
+  const p = getOpenerStore();
+  if (p) { p.updateLastPlayerMessage(channel, text); return; }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.channel === channel && m.from === "player") {
+      messages[i] = { ...m, text };
+      listeners.forEach((fn) => fn());
+      return;
+    }
+  }
 }
 
 export function clearMessages(): void {

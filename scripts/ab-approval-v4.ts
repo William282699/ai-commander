@@ -1176,11 +1176,15 @@ type ConfirmSitePolicy =
   | "context-only"; // 调整上下文/状态，但不拦截 LLM 调用
 
 interface ConfirmSite {
-  token: "isConfirmReply" | "isCancelReply";
+  // 语音输入 V1 起把 isDeclineReply 一并纳入扫描：它跟 isCancelReply 并排出现、
+  // 干的是同一件事（清掉在案升级），却因为不在名单里而从来没被这道护栏看着。
+  token: "isConfirmReply" | "isCancelReply" | "isDeclineReply";
   nth: number;
   policy: ConfirmSitePolicy;
   note: string;
 }
+
+const CONFIRM_TOKENS = ["isConfirmReply", "isCancelReply", "isDeclineReply"] as const;
 
 /** ChatPanel 里确认词判定的全部活调用点。**新增一个就必须先登记并声明政策。** */
 const CONFIRM_WORD_SITES: ConfirmSite[] = [
@@ -1192,6 +1196,18 @@ const CONFIRM_WORD_SITES: ConfirmSite[] = [
     note: "V4_BARE_CONFIRM_EXEC 打点：裸确认答复在案升级时记一行，不改路由" },
   { token: "isCancelReply", nth: 2, policy: "context-only",
     note: "取消/推辞时清掉在案升级，避免串到下一条命令；消息照常进 LLM" },
+  // ── 语音输入 V1 步3：语音回合读的是 heard，不是输入框，所以同族判定各多一处。
+  //    时点从 send 挪到了 heard 到达（send 时长官这句话还没被听写出来）。
+  //    ★ 政策不变：词表仍然是捷径/打点/上下文，不是法官——语音回合的
+  //    "批不批"照旧走 LLM 的 pendingDecision 单法官（§V-4 Q3 裁定）。
+  { token: "isDeclineReply", nth: 1, policy: "context-only",
+    note: "打字回合：推辞词清掉在案升级（与 isCancelReply#2 并排，同一条 if）" },
+  { token: "isCancelReply", nth: 3, policy: "context-only",
+    note: "语音回合：按 heard 清在案升级（打字回合那处的语音孪生，时点在 heard 到达）" },
+  { token: "isDeclineReply", nth: 2, policy: "context-only",
+    note: "同上，与 isCancelReply#3 并排在同一条 if 里" },
+  { token: "isConfirmReply", nth: 3, policy: "telemetry",
+    note: "语音回合：V4_BARE_CONFIRM_EXEC 打点按 heard 补章（D⑥ 登记的时点迁移）" },
 ];
 
 const CHATPANEL = "apps/web/src/ChatPanel.tsx";
@@ -1205,8 +1221,8 @@ function runKnifeB1(): void {
   src.forEach((raw, i) => {
     const line = raw.trim();
     if (line.startsWith("//") || line.startsWith("*") || line.startsWith("/*")) return;
-    if (/^(export )?function is(Confirm|Cancel)Reply\(/.test(line)) return; // 定义本身不算
-    for (const token of ["isConfirmReply", "isCancelReply"]) {
+    if (/^(export )?function is(Confirm|Cancel|Decline)Reply\(/.test(line)) return; // 定义本身不算
+    for (const token of CONFIRM_TOKENS) {
       if (!new RegExp(`\\b${token}\\(`).test(line)) continue;
       const nth = (seen.get(token) ?? 0) + 1;
       seen.set(token, nth);

@@ -27,6 +27,7 @@ import { buildContent, channelAcceptsAudio, voiceEnabledChannels } from "../apps
 import { rejectCommandBody, MAX_AUDIO_B64 } from "../apps/server/src/voiceInput";
 import { withVoiceReinforcement } from "../apps/server/src/ai";
 import { canAutoExecute, decideBucket } from "../apps/web/src/autoExecuteGate";
+import { encodeWavBase64 } from "../apps/web/src/voiceRecorder";
 
 let bad = 0;
 const check = (label: string, ok: boolean, detail = ""): void => {
@@ -355,6 +356,37 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
       );
     }
   }
+}
+
+// ── ⑦ WAV 封装：采集链上唯一一段纯计算，也是最难在真机上看出错的一段 ──
+// 头写错了服务端不会报错、模型也不会抱怨，只会"听不清"——这种错必须由台架抓。
+{
+  const n = 400;
+  const pcm = new Float32Array(n);
+  for (let i = 0; i < n; i++) pcm[i] = Math.sin((i / 16000) * 2 * Math.PI * 440);
+  pcm[0] = 0; pcm[1] = 1; pcm[2] = -1; pcm[3] = 2; pcm[4] = -2; // 含越界值，测钳制
+
+  const b64 = encodeWavBase64(pcm, 16000);
+  const buf = Buffer.from(b64, "base64");
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const tag = (o: number, len: number) => buf.subarray(o, o + len).toString("latin1");
+
+  check("N44 长度 = 44 字节头 + 每样本 2 字节", buf.length === 44 + n * 2, `${buf.length}`);
+  check("N45 RIFF/WAVE/fmt /data 四个块标", tag(0, 4) === "RIFF" && tag(8, 8) === "WAVEfmt " && tag(36, 4) === "data");
+  check("N46 PCM 单声道 16bit", dv.getUint16(20, true) === 1 && dv.getUint16(22, true) === 1 && dv.getUint16(34, true) === 16);
+  check("N47 ★采样率写的是 16000（服务端 4mb 上限就押在这个数上）★", dv.getUint32(24, true) === 16000);
+  check("N48 byteRate/blockAlign 与格式自洽", dv.getUint32(28, true) === 16000 * 2 && dv.getUint16(32, true) === 2);
+  check("N49 RIFF size = 36 + 数据字节数；data size = 数据字节数",
+    dv.getUint32(4, true) === 36 + n * 2 && dv.getUint32(40, true) === n * 2);
+  check("N50 ★越界样本被钳到端点，不是回绕成反号★",
+    dv.getInt16(44 + 1 * 2, true) === 0x7fff && dv.getInt16(44 + 2 * 2, true) === -0x8000 &&
+    dv.getInt16(44 + 3 * 2, true) === 0x7fff && dv.getInt16(44 + 4 * 2, true) === -0x8000,
+    `[${dv.getInt16(46, true)}, ${dv.getInt16(48, true)}, ${dv.getInt16(50, true)}, ${dv.getInt16(52, true)}]`);
+  check("N51 静音样本写 0", dv.getInt16(44, true) === 0);
+  // 分块 base64（1MB 一次性展开会爆栈）：拿一段够长的样本走一遍那条分支
+  const big = encodeWavBase64(new Float32Array(0x8000 * 2 + 123), 16000);
+  check("N52 大缓冲走分块 base64 分支，长度仍自洽",
+    Buffer.from(big, "base64").length === 44 + (0x8000 * 2 + 123) * 2);
 }
 
 console.log(bad === 0 ? "\nALL SYNTHETIC PASS" : `\n${bad} 条不过`);

@@ -28,8 +28,11 @@ import { isKnownLocation, isValidTarget, detectStaleSquadRefs, canAutoExecute, d
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
 import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
+import { startVoiceRecording, isVoiceCaptureSupported, type VoiceRecording, type VoiceRecorderHandle } from "./voiceRecorder";
+import { probeVoiceChannels, channelUsesVoiceCapture } from "./voiceCapability";
 import {
   addMessage,
+  updateLastPlayerMessage,
   getActiveChannel,
   setActiveChannel,
   getGroupChatMessages,
@@ -465,9 +468,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   const SpeechRecCtor = typeof window !== "undefined"
     ? (window.SpeechRecognition ?? window.webkitSpeechRecognition ?? null)
     : null;
-  const [pttStatus, setPttStatus] = useState<PTTStatus>(SpeechRecCtor ? "idle" : "unsupported");
+  const [pttStatus, setPttStatus] = useState<PTTStatus>(
+    SpeechRecCtor || isVoiceCaptureSupported() ? "idle" : "unsupported",
+  );
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pttRecRef = useRef<any>(null);
+
+  // ── 语音输入 V1：录音路（陈/Emily 的频道走这条，马克斯与群聊仍走 Web Speech）──
+  // session 而不是裸 handle：长官可能在 getUserMedia 还没弹完权限就松手，
+  // 那一下必须把还没到手的录音也取消掉，否则麦克风一直开着。
+  const voiceSessionRef = useRef<{ handle: VoiceRecorderHandle | null; aborted: boolean } | null>(null);
+  const sendVoiceRef = useRef<((v: VoiceRecording) => void) | null>(null);
+
+  // 能力名单启动拉一次；拉不到就保持空名单＝全部走 Web Speech（fail-closed 回现状）。
+  useEffect(() => { void probeVoiceChannels(); }, []);
 
   // ── TTS (Text-to-Speech) for streaming readback ──
   // Implementation lives in ./tts/* — ChatPanel only touches 3 functions
@@ -477,7 +491,26 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   const [ttsEnabled, setTtsEnabled] = useState(false);
 
   const startPTT = useCallback(() => {
-    if (!SpeechRecCtor || loading) return;
+    if (loading) return;
+
+    // 语音输入 V1：这个频道的耳朵吃得下音频、且浏览器录得了音 → 走录音路。
+    // 群聊不在名单里（GROUP_SYSTEM_PROMPT 冻结），ops 也不在（deepseek 的脑子）。
+    const voiceCh = COMMANDER_CHANNEL[selectedCommanders[0]];
+    if (!isGroupChat && channelUsesVoiceCapture(voiceCh) && isVoiceCaptureSupported()) {
+      // 按下即掐 TTS：陈的声音正从喇叭里出来，AEC 之外再加一道——
+      // 让他的话被录进长官的命令里，是这条路独有的新病。
+      cancel();
+      const session: { handle: VoiceRecorderHandle | null; aborted: boolean } = { handle: null, aborted: false };
+      voiceSessionRef.current = session;
+      setPttStatus("listening");
+      startVoiceRecording().then(
+        (h) => { if (session.aborted) h.cancel(); else session.handle = h; },
+        () => { voiceSessionRef.current = null; setPttStatus("error"); },
+      );
+      return;
+    }
+
+    if (!SpeechRecCtor) return;
     const rec = new SpeechRecCtor();
     rec.lang = "zh-CN";
     rec.interimResults = true;
@@ -520,9 +553,25 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     pttRecRef.current = rec;
     setPttStatus("listening");
     rec.start();
-  }, [SpeechRecCtor, loading]);
+  }, [SpeechRecCtor, loading, selectedCommanders, isGroupChat]);
 
   const stopPTT = useCallback(() => {
+    const session = voiceSessionRef.current;
+    if (session) {
+      voiceSessionRef.current = null;
+      if (!session.handle) {
+        // 权限还没弹完就松手了：把还没到手的那次录音也标记取消。
+        session.aborted = true;
+        setPttStatus("idle");
+        return;
+      }
+      void session.handle.stop().then((rec) => {
+        setPttStatus("idle");
+        // 太短/无声/解码失败 → rec 为 null，什么都不发（不猜、不发空包）。
+        if (rec) sendVoiceRef.current?.(rec);
+      });
+      return;
+    }
     if (pttRecRef.current) {
       pttRecRef.current.stop();
     }
@@ -980,12 +1029,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   };
 
   // ── sendCommand (0.4: migrated from CommandPanel) ──
-  const sendCommand = async () => {
+  // 语音输入 V1：带 voice 时这一轮的"长官说了什么"要等陈把 heard 交回来才知道
+  // ——所有读文本的地方都推迟到 processAdvisorData 里结算（见那儿的语音结算块）。
+  const sendCommand = async (voice?: VoiceRecording) => {
     const state = getState();
     if (state) syncGameEpoch(state); // synchronous — closes the poll race before the fast path
-    if (!state || !message.trim()) return;
+    if (!state || (!voice && !message.trim())) return;
 
-    const userMsg = message.trim();
+    const isVoiceTurn = !!voice;
+    const userMsg = voice ? "" : message.trim();
     setLoading(true);
     setError(null);
     setApprovedIdx(null);
@@ -999,7 +1051,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     const primaryChannel = COMMANDER_CHANNEL[selectedCommanders[0]];
 
     // Add player message to feed (mark as groupChat if in ALL mode so it stays out of individual channels)
-    addMessage("info", userMsg, state.time, primaryChannel, "player", "player", isGroupChat ? true : undefined);
+    // 语音回合先放一个占位；陈说完话之后（options 事件到达时）换成他听到的原话。
+    // (a) 案：回填时点是"整条回复念完之后"，不是 ~2s——用户 2026-08-09 拍板，
+    // (b) 流首 heard 事件登记为 demo 后升级项。
+    addMessage("info", isVoiceTurn ? "🎤 …" : userMsg, state.time, primaryChannel, "player", "player", isGroupChat ? true : undefined);
 
     // Chat commands are not constrained by map box-selection.
     // Only manual unit control (right-click move) uses selectedUnitIds as hard constraint.
@@ -1125,7 +1180,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // can't bleed into the player's NEXT, unrelated command.
     if (activeEsc && (isCancelReply(userMsg) || isDeclineReply(userMsg))) clearEscalation(ch);
 
-    commanderMemoryRef.current[ch].playerIntent = userMsg;
+    // 语音回合此刻还不知道长官说了什么——写空串会把上一条意图抹掉，
+    // 所以推迟到 heard 结算（打字回合逐字不变）。
+    if (!isVoiceTurn) commanderMemoryRef.current[ch].playerIntent = userMsg;
     // Step C: water the existing selected-ids pipe (DigestV1's PLAYER_SELECTED
     // section renders from it; BattleContextV2 ignores it and gets the ids via
     // PLAYER_VIEW below instead).
@@ -1163,7 +1220,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       setDeclinedContext(null);
     }
 
-    pushContext(channelContextRef.current, ch, { role: "user", text: userMsg, time: state.time });
+    // 语音回合的 user 侧同样推迟到 heard 结算——必须排在 assistant 文本入 context
+    // 之前，才保得住 user→assistant 的顺序（本轮信封在上面就拼好了，不受影响）。
+    if (!isVoiceTurn) pushContext(channelContextRef.current, ch, { role: "user", text: userMsg, time: state.time });
 
     // Helper: process a completed AdvisorResponse (shared by streaming & non-streaming paths)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1177,6 +1236,31 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         syncGameEpoch(getState() ?? state);
         return;
       }
+
+      // ── 语音输入 V1：heard 结算（本轮唯一一次，打字回合整块跳过）──
+      //
+      // send 时长官这句话还没被听写出来，所有读文本的地方都推迟到了这里。
+      // 顺序讲究：user 侧 pushContext 必须排在下面那些 assistant 推送之前，
+      // 否则下一轮的"最近在聊什么"会变成一段没人问的独白（直接喂大 F2）。
+      const heard = typeof data?.heard === "string" && data.heard.trim().length > 0
+        ? data.heard.trim()
+        : "";
+      if (isVoiceTurn) {
+        if (heard) {
+          updateLastPlayerMessage(ch, heard);                       // ① 气泡：🎤 → 他听到的原话
+          commanderMemoryRef.current[ch].playerIntent = heard;      // ③
+          pushContext(channelContextRef.current, ch, { role: "user", text: heard, time: state.time }); // ②
+          if (activeEsc && (isCancelReply(heard) || isDeclineReply(heard))) clearEscalation(ch);       // ⑤
+          bareConfirmExecRef.current = isConfirmReply(heard)        // ⑥ 记账时点从 send 挪到这里
+            ? { escalateId: getActiveEscalation(ch, state.time)?.actionId ?? null }
+            : null;
+        } else {
+          // 没听清：气泡如实停在占位，上下文补一行——不补的话下一轮只剩
+          // assistant 的话，"最近在聊什么"会变成单边独白。
+          pushContext(channelContextRef.current, ch, { role: "user", text: "（语音·未转写）", time: state.time });
+        }
+      }
+
       // ── 地基二: pending semantic consumption, judged BEFORE anything else.
       // The verdict maps through pendingVerdictRoute — the ONE bench-testable
       // table of what may execute. stale (wrong id / cross-channel / expired /
@@ -1311,7 +1395,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
         const gate: { auto: boolean; reason?: string; playerNamedSquad?: boolean } =
           (Array.isArray(data.options) && data.options.length >= 1)
-          ? canAutoExecute((data.options as AdvisorOption[])[0], userMsg, state, [], isGroupChat, COMMANDER_REFS)
+          // ④ 语音回合喂 heard——闸靠正则在长官的话里找锚（番号/领队名/「选中」），
+          //   没有文本它会把每一句都当成"长官没点名"。
+          ? canAutoExecute((data.options as AdvisorOption[])[0], isVoiceTurn ? heard : userMsg, state, [], isGroupChat, COMMANDER_REFS)
           : { auto: false };
 
         const requestId = crypto.randomUUID();
@@ -1365,8 +1451,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             gate,
             hasOption: opt0 != null,
             staleRefCount: staleRefs.length,
-            voiceTurn: false,
-            heardPresent: false,
+            voiceTurn: isVoiceTurn,
+            heardPresent: heard.length > 0,
           });
 
           // `&& opt0` 只为让 TS 收窄类型——decideBucket 判到 "A" 时 hasOption 必为真，
@@ -1499,7 +1585,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const streamRes = await fetch(`${API_URL}/api/command-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId }),
+        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined }),
       });
 
       if (!streamRes.ok || !streamRes.body) {
@@ -1602,7 +1688,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const res = await fetch(`${API_URL}/api/command`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId }),
+          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined }),
         });
         const data = await res.json();
         processAdvisorData(data);
@@ -1616,6 +1702,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     }
     setLoading(false);
   };
+
+  // 松手时 stopPTT 要把这次录音发出去，而它是 useCallback、定义在 sendCommand
+  // 之前——用 ref 转一手。（现状那条 Web Speech 路的旧解法是"去点一下发送按钮"，
+  // 同一个问题；录音路不经过输入框，就不必再借 DOM。）
+  sendVoiceRef.current = (v: VoiceRecording) => { void sendCommand(v); };
 
   // ── handleApprove (0.4: migrated from CommandPanel) ──
   const handleApprove = (opt: AdvisorOption, idx: number, mode: "auto" | "manual" = "manual", ctx?: ExecContext, sourceResponse?: DisplayResponse) => {
@@ -2567,7 +2658,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           <button
             data-send-btn
             className="dp-dock-btn dp-dock-btn--send"
-            onClick={sendCommand}
+            onClick={() => void sendCommand()}
             disabled={loading || !message.trim()}
             style={{ opacity: loading || !message.trim() ? 0.5 : 1 }}
           >{loading ? "..." : "发送"}</button>
@@ -2719,7 +2810,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         {hasTTS && (<button onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}>{ttsEnabled ? "🔊" : "🔇"}</button>)}
         {onCreateSquad && (<button onClick={() => onCreateSquad(selectedCommanders[0])} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
         {onDeclareWar && canDeclareWar && (<button onClick={onDeclareWar} style={warBtnStyle} title="向敌方宣战">宣战</button>)}
-        <button data-send-btn onClick={sendCommand} disabled={loading || !message.trim()} style={{ ...sendBtnStyle, opacity: loading || !message.trim() ? 0.5 : 1 }}>{loading ? "..." : "发送"}</button>
+        <button data-send-btn onClick={() => void sendCommand()} disabled={loading || !message.trim()} style={{ ...sendBtnStyle, opacity: loading || !message.trim() ? 0.5 : 1 }}>{loading ? "..." : "发送"}</button>
       </div>
       </div>
       </div>

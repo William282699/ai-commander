@@ -112,6 +112,22 @@
         ".claude/start-envelope-web.sh"
       ],
       "port": 3017
+    },
+    {
+      "name": "voice-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-voice-api.sh"
+      ],
+      "port": 3018
+    },
+    {
+      "name": "voice-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-voice-web.sh"
+      ],
+      "port": 3019
     }
   ]
 }
