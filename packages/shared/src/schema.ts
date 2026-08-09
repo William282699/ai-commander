@@ -302,6 +302,16 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
   // non-empty options) — the decision must never be dropped by either path.
   const pendingDecision = parsePendingDecision(obj.pendingDecision);
 
+  // 语音输入 V1: heard = 模型转写的长官原话。同 pendingDecision 一样，这里是
+  // 全仓**唯一**能给 AdvisorResponse 装上 heard 的地方——本函数是白名单重建，
+  // 没登记的根级字段一律静默消失。所以下面两条 return 都要带上它。
+  // （反过来说：createFallbackResponse 是手写字面量、根本不经过这儿，
+  //   所以任何兜底回执一定没有 heard——语音回合的 fail-closed 判定因此同时
+  //   罩住了"模型漏字段"和"通讯故障走兜底"两种情况。）
+  // 只做一件规范化：去掉首尾空白；空串按缺席算，不制造一个"听到了但没内容"的假在场。
+  const heardRaw = typeof obj.heard === "string" ? obj.heard.trim() : "";
+  const heard = heardRaw.length > 0 ? heardRaw : undefined;
+
   // Day 13 Layer B: LLM may return empty options[] to reject invalid commands.
   // Phase 2: NOOP responseType with options:[] is a valid conversational response.
   if (obj.options.length === 0) {
@@ -317,6 +327,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
       standingOrder,
       cancelDoctrine: cancelDoctrineId,
       pendingDecision,
+      heard,
     };
   }
 
@@ -384,6 +395,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
     standingOrder,
     cancelDoctrine: cancelDoctrineId,
     pendingDecision,
+    heard,
   };
 }
 

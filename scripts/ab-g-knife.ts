@@ -768,7 +768,8 @@ type RuleTag =
   | "length_band" // 长度按言语行为分档
   | "mood_register" // mood 行只定语气不定战况
   | "handle_addressing" // 番号是地址不是推荐 / 群名不是 fromSquad
-  | "speech_contract"; // G 刀：说话合同（替换掉三条死口号的那份）
+  | "speech_contract" // G 刀：说话合同（替换掉三条死口号的那份）
+  | "voice_transcript"; // 语音输入 V1：heard 的义务 +「不要顺句」那条原则
 
 type SiteKind =
   | "chen_command" // 陈的命令解析面 ← 本刀合同的落点
@@ -782,7 +783,8 @@ type Disposition =
   | "keep" // 本刀不动，也不属二期
   | "legacy_phase2" // 别的人格 / 别的模型，G 刀二期
   | "frozen_phase2" // 共享面，本刀冻结，G 刀二期
-  | "engine_untouched"; // 引擎侧，本刀零改动
+  | "engine_untouched" // 引擎侧，本刀零改动
+  | "voice_input_v1"; // 语音输入 V1 新开的面（只在带音频那一轮出现）
 
 interface SpeechRuleSite {
   file: string;
@@ -990,6 +992,26 @@ const SPEECH_RULE_SITES: SpeechRuleSite[] = [
     disposition: "engine_untouched",
     note: "当前值优先于提问时快照；番号是地址不是推荐。账本条款与番号条款都依赖它。",
   },
+  // ── 语音输入 V1 新增两面（2026-08-09，步 2）──
+  // 先登记后施工，不等台架来提醒：--sites 的 B 断言只在**指纹命中**时才响，
+  // 而新面天生没有旧指纹——靠它提醒等于没有护栏（Opus 审 P1-10 更正了这一点）。
+  // 照刀2 先例：新面进表 + 同 commit 补一条新指纹。
+  {
+    file: AI_TS,
+    symbol: "VOICE_COMMAND_NOTE",
+    kind: "shared_face",
+    rules: [],
+    disposition: "voice_input_v1",
+    note: "user content 尾巴，只在带音频那一轮出现：告诉模型「指挥官命令：」后面为空不是漏字、原话在附件语音里。**不含规则**（规则全在 withVoiceReinforcement），所以 rules 为空——登记它是为了 A 断言：这一面被删掉或改名必须有人知道。共享面（combat+logistics 同读），已进 REGISTERED_SHARED_SURFACE_RULINGS。",
+  },
+  {
+    file: AI_TS,
+    symbol: "withVoiceReinforcement",
+    kind: "shared_face",
+    rules: ["voice_transcript"],
+    disposition: "voice_input_v1",
+    note: "语音回合的【本次强制】：JSON 根级必须含 heard=逐字转写 + 一条语义原则「不要顺句、不要拿信封里的名字补没听清的音」+ 转写不进正文（正文会被 TTS 念出来）。位置照抄 withPendingReinforcement（同一个位置把 pendingDecision 的 MISSING 从 45/45 钉成 0）。★那条原则是 N2 的对症药：探针两次独立复算都拍到「音频含糊 → 模型交付顺过的意思而非逐字原话」，而 heard 会被当原话去找锚点。共享面（combat+logistics 同读），已进 REGISTERED_SHARED_SURFACE_RULINGS。",
+  },
 ];
 
 /** 语义指纹：一条规则的多种写法（中/英/压缩/无标签）都要能认出来。 */
@@ -1029,6 +1051,10 @@ const RULE_FINGERPRINTS: Record<RuleTag, RegExp[]> = {
     /LABEL is NOT a valid fromSquad/i,
     /a force handle — a G-number/i,
   ],
+  // 语音输入 V1：两条写法都指同一条规则——义务（heard 必须在）与
+  // 原则（逐字，不许顺句）。故意不写 /heard/ 这种宽指纹：它会把注释里
+  // 顺口提到 heard 的面也钓上来，B 断言就成了噪音源。
+  voice_transcript: [/逐字转写/, /根级 "heard"/],
 };
 
 interface Span {
@@ -1372,6 +1398,12 @@ function runReport(aPath: string, bPath?: string): void {
 const REGISTERED_SHARED_SURFACE_RULINGS: readonly string[] = [
   "2026-08-07 第 8 级 fix B：ai.ts tag 格式指称【判退·回退】——旧文说的是「值 tag_1」，" +
     "新印法 `\"名字\"(tag_1)` 里 id 仍在，旧文句句属实 ⇒ carve-out 前提不成立，无权改。",
+  "2026-08-09 语音输入 V1 步2：共享面新增两段【授权·新增，只在带音频那一轮出现】——" +
+    "`VOICE_COMMAND_NOTE`（user content 尾巴：原话在附件语音里）与 " +
+    "`withVoiceReinforcement`（system prompt 尾巴：heard 的义务 + 不许顺句）。" +
+    "★这不是 carve-out（没有旧行为假），是**新增**：Emily 也换耳朵是用户裁定（§V-4 Q2），" +
+    "所以她的 prompt 在语音回合会多这两段。打字回合两段都不出现、共享面逐字节不变" +
+    "——emily-guard 因此仍然全绿，但它扫不到 userContent 模板，登记不能靠它提醒（Opus 审 P1-9）。",
   "2026-08-08 第 8 级 刀2：ai.ts 解析器 prompt 的番号 token 指称【授权·已改】——" +
     "旧文写 `any ---FRONT_JUDGMENT--- row's handle=G# token`，而刀2 后 `handle=` 全仓绝迹，" +
     "该句字面为假、把模型指向一个不存在的 token ⇒ 必须改。§O-4 原文授权 + Fable 裁定。" +

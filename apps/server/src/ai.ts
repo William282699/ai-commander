@@ -738,6 +738,36 @@ function withPendingReinforcement(systemPrompt: string, digest: string): string 
 【本次强制】上下文包含 ---PENDING_CONTRACT---（一条等待批准的高影响命令）。你返回的 JSON【必须】含根级 "pendingDecision" 字段，取值只能是 "authorize" / "cancel" / "amend" / null（JSON 的 null 字面量，不是字符串）。按 PENDING CONTRACT DECISION 规则做语义判断；这句话与该合同无关时也必须显式返回 null。缺失该字段视为无效输出。`;
 }
 
+// ── 语音输入 V1: 耳朵在场时的两句话 ──
+//
+// 分两处写，因为它们答的不是同一个问题：
+//   · VOICE_COMMAND_NOTE 贴在 user content 尾巴，回答「命令在哪儿」——
+//     语音回合「指挥官命令：」后面是空的，不说一句模型会以为漏字。
+//   · withVoiceReinforcement 贴在 system prompt 尾巴，钉「你必须交回什么」——
+//     位置照抄 pendingDecision 的先例（同一个位置把 MISSING 从 45/45 钉成 0）。
+// 两句都只在带音频的那一轮出现；打字回合一个字节都不多。
+
+/** user content 尾巴：只说命令在哪儿，不说规则。 */
+const VOICE_COMMAND_NOTE = `
+
+（指挥官这一句是说出来的，录音在附件里；上面「指挥官命令：」后面为空不是漏字。）`;
+
+/**
+ * heard 的义务与其唯一一条语义原则。
+ *
+ * ★「不要顺句」这条不是措辞洁癖，是 N2 那笔账的对症药：探针两次独立复算都拍到
+ * 同一个形状——音频含糊时模型交付的是**顺过的意思**而不是逐字的原话
+ * （「派两个步兵班」→「两队步兵」；「El Alamein」→ 换成信封里的地名）。
+ * 而 heard 会被当成长官的原话去找锚点（他到底点没点名部队），一句被顺过的话
+ * 会让引擎替他做他没做的决定。写成一条原则、不挂同义词表（红线二）。
+ */
+export function withVoiceReinforcement(systemPrompt: string, hasAudio: boolean): string {
+  if (!hasAudio) return systemPrompt;
+  return systemPrompt + `
+
+【本次强制】指挥官这一句走的是语音。你返回的 JSON【必须】含根级 "heard" 字段＝你听到的那句话的**逐字转写**。没听清的那几个字就照你听到的音写下来、或直说没听清——**不要把话顺通顺，也不要拿信封里现成的名字去补你没听清的音**：引擎把 heard 当长官的原话用（回填他的气泡、判断他点没点名部队），顺过一次，引擎就会替他做一个他没做的决定。转写只进 heard 字段，正文里不要复述它（正文会被念出来给他听）。缺失该字段视为无效输出。`;
+}
+
 export async function callAdvisor(
   digest: string,
   playerMessage: string,
@@ -747,7 +777,10 @@ export async function callAdvisor(
   audio?: AudioAttachment,
 ): Promise<AdvisorResult> {
   const mode = resolveAdvisorMode(channel);
-  const systemPrompt = withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest);
+  const systemPrompt = withVoiceReinforcement(
+    withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest),
+    !!audio,
+  );
   const persona = (channel && CHANNEL_PERSONA[channel]) || "";
   const digestLabel = mode === "marcus_consult"
     ? "战场压缩摘要（BattleContextV2格式）"
@@ -758,7 +791,7 @@ ${digest}
 指挥官风格参数：
 ${styleNote}
 
-指挥官命令：${playerMessage}`;
+指挥官命令：${playerMessage}` + (audio ? VOICE_COMMAND_NOTE : "");
 
   try {
     const raw = await callDeepSeek(systemPrompt, userContent, undefined, channel, audio);
@@ -1008,7 +1041,10 @@ export async function* callAdvisorStream(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): AsyncGenerator<{ type: "text"; content: string } | { type: "options"; content: any }> {
   const mode = resolveAdvisorMode(channel);
-  const systemPrompt = withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest);
+  const systemPrompt = withVoiceReinforcement(
+    withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest),
+    !!audio,
+  );
   const persona = (channel && CHANNEL_PERSONA[channel]) || "";
   const digestLabel = mode === "marcus_consult"
     ? "战场压缩摘要（BattleContextV2格式）"
@@ -1019,7 +1055,7 @@ ${digest}
 指挥官风格参数：
 ${styleNote}
 
-指挥官命令：${playerMessage}`;
+指挥官命令：${playerMessage}` + (audio ? VOICE_COMMAND_NOTE : "");
 
   const provider = getProvider(channel);
 

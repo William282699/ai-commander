@@ -766,6 +766,14 @@ export interface AdvisorResponse {
    *  undefined = field missing/invalid (protocol failure when a contract was
    *  pending); null = model explicitly判定为普通新命令. */
   pendingDecision?: PendingDecision;
+  /** 语音输入 V1：模型转写的长官原话（只有语音回合才有）。
+   *
+   *  它不是装饰，是三样东西的输入：长官气泡的正文、`canAutoExecute` 找锚点的
+   *  文本、以及 I2/D4 要的真语音日志。**缺席即 fail-closed**——语音回合没有
+   *  heard 时引擎不许替长官猜他说了什么（客户端据此禁入 bucket A）。
+   *  与 pendingDecision 同族：白名单重建会静默吃掉没登记的根级字段，
+   *  schema 的**两条 return 路径**都必须带。 */
+  heard?: string;
   standingOrder?: {
     type: string;
     locationTag: string;

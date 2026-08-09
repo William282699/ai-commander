@@ -86,6 +86,19 @@ function logEvent(o: Record<string, unknown>): void {
   console.log("[EVENT] " + JSON.stringify({ t: Date.now(), ...o }));
 }
 
+/**
+ * 语音输入 V1：把陈听到的原话落一行。
+ *
+ * 这就是 I2「必须基于真 STT log，禁脑内枚举」等的那份样本——第一次有了长官
+ * 说了什么的逐字记录，可以拿去跟票据实派的部队对账（D4/F2 也吃这份数据）。
+ * 现状只到 console / `fly logs`：JSONL 落盘属 O6，随 A5 记录仪缓办（§P 已裁），
+ * 手测阶段的样本人工归档。
+ */
+function logHeard(sessionId: unknown, channel: unknown, heard: unknown): void {
+  if (typeof heard !== "string" || heard.length === 0) return;
+  logEvent({ type: "voice_heard", sessionId, channel: channel || "", heard });
+}
+
 // Health check
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -121,6 +134,7 @@ app.post("/api/command", async (req, res) => {
 
   try {
     const result = await callAdvisor(digest, playerText, styleNote || "", channel || "", audio);
+    if (audio) logHeard(sessionId, channel, result.data.heard);
     // result always has data (fallback if LLM failed)
     if (result.warning) {
       res.json({ ...result.data, warning: result.warning });
@@ -162,6 +176,7 @@ app.post("/api/command-stream", async (req, res) => {
 
   try {
     for await (const event of callAdvisorStream(digest, playerText, styleNote || "", channel || "", audio)) {
+      if (audio && event.type === "options") logHeard(sessionId, channel, event.content?.heard);
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     }
     res.write("data: [DONE]\n\n");
