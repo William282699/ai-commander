@@ -275,10 +275,17 @@ export type Bucket = "auto" | "A" | "B";
 
 export function decideBucket(input: BucketInput): Bucket {
   const { gate, hasOption, staleRefCount, voiceTurn, heardPresent } = input;
-  if (gate.auto && hasOption) return "auto";
 
   // 语音回合没拿到转写 ⇒ 引擎不知道长官说了什么 ⇒ 不许当"他没点名"处理。
+  //
+  // ★这一句必须排在**所有**自动出口之前，包括下面的 gate.auto 捷径。
+  // 起初它排在捷径之后，于是漏了一格：canAutoExecute 对 produce/trade 是
+  // `continue` 直通 auto:true（经济动作没有部队锚，见上），语音听不清时会
+  // **静默花钱**。给长官的承诺是"没听清就反问"，没写"经济单除外"——所以判定
+  // 收敛成一句话：**语音回合 heard 缺席 ⇒ 一律 B，没有任何自动出口。**
   if (voiceTurn && !heardPresent) return "B";
+
+  if (gate.auto && hasOption) return "auto";
 
   const bucketA = staleRefCount === 0 && hasOption &&
     (gate.reason === "no_anchor" || (gate.reason === "anchor_mismatch" && !gate.playerNamedSquad));

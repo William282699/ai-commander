@@ -322,6 +322,39 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
       `bucket=${cut.bucket} 会动 ${moved.length} 人`,
     );
   }
+
+  // ── 经济单没有豁免（Fable 步2.5 审出的格子）──
+  //
+  // canAutoExecute 对 produce/trade **直接 continue**（:175）——经济动作没有部队锚，
+  // 一条清楚的生产命令不该被锚闸卡住。后果：纯生产/交易单会走到 `auto:true`，
+  // 而 decideBucket 的 `gate.auto` 捷径排在 fail-closed 之前 ⇒ 语音回合听不清时
+  // **照样自动花钱**。兜底到不了这格（fallback 三条都是 defend/attack/recon，
+  // 会被锚闸拦），但真模型语音回合返回纯生产单又漏 heard 时会中。
+  // §V-6 对长官的承诺是"没听清就反问"，没有写"经济单除外"。
+  {
+    const econOpt = (type: "produce" | "trade"): AdvisorOption => ({
+      label: "A: 生产", description: "生产",
+      intent: { type, urgency: "medium" },
+      intents: [{ type, urgency: "medium" }],
+    } as unknown as AdvisorOption);
+
+    for (const t of ["produce", "trade"] as const) {
+      const gate = canAutoExecute(econOpt(t), "", state, [], false, refs);
+      const voice = decideBucket({ gate, hasOption: true, staleRefCount: 0, voiceTurn: true, heardPresent: false });
+      const typed = decideBucket({ gate, hasOption: true, staleRefCount: 0, voiceTurn: false, heardPresent: false });
+      const heardOk = decideBucket({ gate, hasOption: true, staleRefCount: 0, voiceTurn: true, heardPresent: true });
+      check(
+        `V10${t === "trade" ? "b" : "a"} ★语音回合 heard 缺席 + 纯 ${t} 单 → 仍是 B（没听清就没有自动出口，经济单不豁免）★`,
+        voice === "B",
+        `gate.auto=${gate.auto} bucket=${voice}`,
+      );
+      check(
+        `V11${t === "trade" ? "b" : "a"} 零影响守卫：打字回合与「语音+heard 在场」下的 ${t} 单仍走 auto`,
+        typed === "auto" && heardOk === "auto",
+        `typed=${typed} heardOk=${heardOk}`,
+      );
+    }
+  }
 }
 
 console.log(bad === 0 ? "\nALL SYNTHETIC PASS" : `\n${bad} 条不过`);
