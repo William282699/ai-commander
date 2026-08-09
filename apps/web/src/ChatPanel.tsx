@@ -23,6 +23,8 @@ import type { CommanderRef, EscalationTicket } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
 import { buildDigestForChannel } from "./digestHelper";
+// Phase 1 的闸已搬去 autoExecuteGate.ts（零行为变化）——留在组件闭包里台架够不到。
+import { isKnownLocation, isValidTarget, detectStaleSquadRefs, canAutoExecute, decideBucket } from "./autoExecuteGate";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
 import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
@@ -102,55 +104,6 @@ function pickVoiceConfirm(commander: Commander): string {
 
 // ── Phase 1: Shared intent target validator (from CommandPanel) ──
 
-/** Check if a string matches any known location: front, tag, region, or facility. */
-function isKnownLocation(val: string, state: GameState): boolean {
-  if (findFront(state, val)) return true;
-  if (state.tags?.some(t => t.id === val)) return true;
-  if (state.regions.has(val)) return true;
-  const lower = val.toLowerCase();
-  for (const [, r] of state.regions) {
-    if (r.id.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower)) return true;
-  }
-  for (const [, f] of state.facilities) {
-    if (f.id.toLowerCase() === lower || f.name.toLowerCase().includes(lower)) return true;
-  }
-  return false;
-}
-
-function isValidTarget(intent: Intent, state: GameState): boolean {
-  if (intent.targetRegion && !isKnownLocation(intent.targetRegion, state)) return false;
-  if (intent.targetFacility) {
-    // Guard: empty string would match everything via includes("")
-    const trimmed = intent.targetFacility.trim();
-    if (trimmed.length === 0) return false;
-    // Fuzzy match: accept facility ID, name, or tag (not just strict ID).
-    // This lets LLM output like "El Alamein" match facility ea_alamein_town.
-    const hint = trimmed.toLowerCase();
-    let found = state.facilities.has(intent.targetFacility);
-    if (!found) {
-      for (const [, f] of state.facilities) {
-        if (
-          f.id.toLowerCase() === hint ||
-          f.name.toLowerCase().includes(hint) ||
-          f.tags.some(t => t.toLowerCase().includes(hint))
-        ) {
-          found = true;
-          break;
-        }
-      }
-    }
-    if (!found) return false;
-  }
-  if (intent.toFront && !isKnownLocation(intent.toFront, state)) return false;
-  if (intent.fromFront && !isKnownLocation(intent.fromFront, state)) return false;
-  // v4 §6c-3c: ONE predicate owns "is this a known force reference" (core).
-  // The private copy that used to live here had never heard of tickets, so a
-  // correct fromSquad="G1" died as an unknown squad. Ticket VALIDITY is not
-  // judged here — see isKnownForceRef's contract.
-  if (intent.fromSquad && !isKnownForceRef(state, intent.fromSquad, COMMANDER_REFS)) return false;
-  return true;
-}
-
 /**
  * Clear target fields that reference non-existent locations/facilities so the
  * intent can still execute on its remaining valid fields. The prior behavior
@@ -204,176 +157,6 @@ function softFixTargetFields(
     warn("fromFront", intent.fromFront);
     intent.fromFront = undefined;
   }
-}
-
-/**
- * LLM responses can reference squads that died while the request was in flight
- * (the digest sent ~5-10s ago named them alive; by the time the response comes
- * back, they're KIA). The engine-layer soft-fix in handleApprove catches this
- * when the player approves the option, but the advisor's *spoken* brief is
- * already on screen saying things like "长官，Aiden 带兵撤回总部…" — a false
- * narrative about a dead squad.
- *
- * This returns the list of fromSquad references in the response that no longer
- * resolve to a living squad (or a commander key). Caller can surface a warning
- * after the brief so the player immediately sees that the response is stale
- * without tearing down the streaming brief itself.
- */
-function detectStaleSquadRefs(
-  options: AdvisorOption[] | undefined,
-  state: GameState,
-): string[] {
-  if (!options || options.length === 0) return [];
-  const opt = options[0];
-  const intents = opt.intents ?? (opt.intent ? [opt.intent] : []);
-  const stale = new Set<string>();
-  for (const intent of intents) {
-    if (!intent?.fromSquad) continue;
-    const fs = intent.fromSquad.toLowerCase();
-
-    // v4 §6c-3c: commander keys AND ticket numbers are alive-by-definition here.
-    // Commander keys aggregate many squads (never flagged stale unless the
-    // player named a dead one); ticket numbers are judged — unknown / expired /
-    // burned — by resolveTicketReference alone. A liveness check here would be
-    // a SECOND owner of ticket validity, which is the bug this fix removes.
-    if (isKnownForceRef(state, intent.fromSquad, COMMANDER_REFS) &&
-        !state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs)) {
-      continue;
-    }
-
-    // Leader-name or squad-ID → find the squad entity
-    const squad = state.squads?.find(s =>
-      s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs,
-    );
-    if (!squad) {
-      // Entity doesn't exist at all — clearly stale
-      stale.add(intent.fromSquad);
-      continue;
-    }
-
-    // Entity exists, but it may be "KIA-but-lingering": the squad shell
-    // persists in state.squads while all its units are dead. resolveSourceUnits
-    // rejects this downstream with "分队 X 无可用单位", but by that point the
-    // player has already read the advisor brief claiming the squad will do
-    // things. Treat any squad with zero living dispatchable units as stale.
-    const unitIds = collectUnitsUnder(state, squad.id);
-    const hasLiving = unitIds.some(id => {
-      const u = state.units.get(id);
-      return u && u.state !== "dead" && u.hp > 0;
-    });
-    if (!hasLiving) stale.add(intent.fromSquad);
-  }
-  return [...stale];
-}
-
-// ── Phase 1: Deterministic auto-execute gate (from CommandPanel) ──
-
-function canAutoExecute(
-  option: AdvisorOption,
-  userMessage: string,
-  state: GameState,
-  selectedIds?: readonly number[],
-  isGroupChat?: boolean,
-): { auto: boolean; reason?: string; playerNamedSquad?: boolean } {
-  // Group chat forces manual approval
-  if (isGroupChat) return { auto: false, reason: "group_chat" };
-
-  const intents = option.intents ?? [option.intent];
-  if (intents.length === 0) return { auto: false, reason: "no_intents" };
-
-  // Parse user text for anchors: squad IDs (T3, I1, ...) and selected-units keywords
-  const squadIdsInText = new Set(
-    (userMessage.match(/\b[TIANF]\d+\b/gi) ?? []).map(s => s.toUpperCase()),
-  );
-  const hasSelectedKeyword =
-    /\bselected\b/i.test(userMessage) || /选中|圈起来|这队|这支/.test(userMessage);
-
-  // Collect anchor names (active squad leaders + commander keys) present in the user's text.
-  // ASCII names use \b word boundary; CJK names fall back to substring match.
-  const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const mentionedAnchors = new Set<string>();
-  const anchorCandidates: string[] = [];
-  for (const sq of state.squads ?? []) {
-    if (sq.leaderName) anchorCandidates.push(sq.leaderName);
-  }
-  for (const c of ["chen", "marcus", "emily"]) anchorCandidates.push(c);
-  for (const name of anchorCandidates) {
-    const lower = name.toLowerCase();
-    const isAscii = /^[\x00-\x7f]+$/.test(name);
-    const pattern = isAscii ? `\\b${escapeRegex(name)}\\b` : escapeRegex(name);
-    if (new RegExp(pattern, "i").test(userMessage)) mentionedAnchors.add(lower);
-  }
-
-  // Validate each intent independently — multi-intent is fine as long as every
-  // intent clears the same safety bar a single intent would.
-  for (const intent of intents) {
-    // produce/trade are economy actions with no squad anchor — a clear command
-    // should execute without the squad gate it would otherwise fail (no_anchor).
-    // Affordability stays the engine's call; failures surface as Emily feedback
-    // after applyOrders (Step 2).
-    if (intent.type === "produce" || intent.type === "trade") continue;
-
-    if (!isValidTarget(intent, state)) return { auto: false, reason: "invalid_intent_fields" };
-
-    // high_impact only fires when the intent has NO explicit scope (no fromSquad).
-    // With fromSquad set (squad ID / leader name / commander key), resolveIntent
-    // restricts "all" to units under that squad/commander — not global conscription,
-    // so it's safe to auto-execute. Unscoped "all" IS a global draft → force confirm.
-    //
-    // dispatch-scope-v1 2b: retreat/defend join the list — the 74/85 full-army
-    // retreat auto-executed because the type list stopped at attack/sabotage.
-    // For these two, a NAMED fromFront (not the 全军 entrance) is real scope:
-    // since the scope fix, "all" resolves within that front, so the headline
-    // 「让北线前哨的部队都撤退」 executes in one sentence (砍卡法) while the
-    // unscoped / 全军-entrance retreat must first voice its numbers. The
-    // attack/sabotage condition is byte-unchanged on purpose — loosening their
-    // confirm for front-scoped orders is a separate, user-callable decision.
-    const qty = intent.quantity;
-    const frontScoped = typeof intent.fromFront === "string" &&
-      intent.fromFront.trim().length > 0 && !isAllFrontHint(intent.fromFront);
-    const isHighImpact = !intent.fromSquad &&
-      (qty === "all" || qty === "most") &&
-      ((intent.type === "attack" || intent.type === "sabotage") ||
-        ((intent.type === "retreat" || intent.type === "defend") && !frontScoped));
-    if (isHighImpact) return { auto: false, reason: "high_impact" };
-
-    if (intent.fromSquad) {
-      const fs = intent.fromSquad.toLowerCase();
-      const isSquadId = /^[A-Z]\d+$/i.test(intent.fromSquad);
-      const squad = state.squads?.find(s =>
-        s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs,
-      );
-
-      // Accept anchor if user's text mentions this intent's source in any form:
-      // the exact squad ID, the intent's leaderName/commander, or (if fromSquad is
-      // a squad ID) the squad's leaderName. Covers "Aiden去..." (leader name) and
-      // "T3 attack" (squad ID) and LLM-translated cross-refs between them.
-      let anchored = false;
-      if (isSquadId && squadIdsInText.has(intent.fromSquad.toUpperCase())) anchored = true;
-      if (!anchored && mentionedAnchors.has(fs)) anchored = true;
-      if (!anchored && squad) {
-        if (squad.id && squadIdsInText.has(squad.id.toUpperCase())) anchored = true;
-        if (squad.leaderName && mentionedAnchors.has(squad.leaderName.toLowerCase())) anchored = true;
-      }
-      // Step 5 (revised): the mission_conflict gate was removed. It only read
-      // squad.currentMission, which player commands never set — they create a
-      // TaskCard in state.tasks instead, and only capture/sabotage intents bind a
-      // Mission (createMission → currentMission). So it fired inconsistently
-      // (capture/sabotage only) and missed the common attack/defend TaskCards shown
-      // bottom-left — false, half-wired protection. A real Mission Interrupt Flow
-      // (linking TaskCard ↔ currentMission) is deferred; for now there's no gate.
-      //
-      // anchor_mismatch + player named a squad → possible misread (ask, bucket B);
-      // anchor_mismatch + player named nothing → advisor picked for them (bucket A).
-      if (!anchored) return { auto: false, reason: "anchor_mismatch", playerNamedSquad: squadIdsInText.size > 0 || mentionedAnchors.size > 0 };
-    } else {
-      // No fromSquad — auto only if player has selected units AND used a selected keyword
-      if (!hasSelectedKeyword) return { auto: false, reason: "no_anchor" };
-      if (!selectedIds || selectedIds.length === 0) return { auto: false, reason: "no_selected_units" };
-    }
-  }
-
-  return { auto: true };
 }
 
 // Step 5 — high_impact local confirmation. Deterministic, frontend-only word lists
@@ -976,7 +759,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           addMessage("warning", `目标 ${field}=${value} 不存在，已忽略此字段`, state.time, thread.channel, undefined, "command_ack");
         });
 
-        if (!isValidTarget(intent, state)) {
+        if (!isValidTarget(intent, state, COMMANDER_REFS)) {
           const field = intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
           addMessage("warning", `目标 ${field} 不存在`, state.time, thread.channel, undefined, "command_ack");
           return;
@@ -1528,7 +1311,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
         const gate: { auto: boolean; reason?: string; playerNamedSquad?: boolean } =
           (Array.isArray(data.options) && data.options.length >= 1)
-          ? canAutoExecute((data.options as AdvisorOption[])[0], userMsg, state, [], isGroupChat)
+          ? canAutoExecute((data.options as AdvisorOption[])[0], userMsg, state, [], isGroupChat, COMMANDER_REFS)
           : { auto: false };
 
         const requestId = crypto.randomUUID();
@@ -1559,7 +1342,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
           // Safety net stays: a brief that references squads which died in-flight must
           // never blind-execute — it disqualifies bucket A and falls through to ask/warn.
-          const staleRefs = detectStaleSquadRefs(data.options as AdvisorOption[] | undefined, state);
+          const staleRefs = detectStaleSquadRefs(data.options as AdvisorOption[] | undefined, state, COMMANDER_REFS);
 
           // Bucket A — clear command, player named no squad of their own → the advisor
           // picked. Auto-execute the recommended option; the persona's own reply and
@@ -1573,10 +1356,22 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           // 「是，长官。Aiden继续推进」, which carry who/where between them.
           // If "I picked for you" ever needs saying again, it is the LLM's line to
           // write in its own voice — never a template that three personas recite.
-          const bucketA = staleRefs.length === 0 && opt0 != null &&
-            (reason === "no_anchor" || (reason === "anchor_mismatch" && !gate.playerNamedSquad));
+          //
+          // 判定本体已搬进 autoExecuteGate.decideBucket（这里只路由）——它是本刀
+          // 那条新安全行为的落点，留在闭包里就没有任何机器断言看得见它。
+          // voiceTurn/heardPresent 由步 3 的语音回合接线喂进来；打字回合两者恒 false，
+          // decideBucket 逐字等价于原来这两行。
+          const bucket = decideBucket({
+            gate,
+            hasOption: opt0 != null,
+            staleRefCount: staleRefs.length,
+            voiceTurn: false,
+            heardPresent: false,
+          });
 
-          if (bucketA) {
+          // `&& opt0` 只为让 TS 收窄类型——decideBucket 判到 "A" 时 hasOption 必为真，
+          // 语义上是重复的，不是第二道判定。
+          if (bucket === "A" && opt0) {
             setClarification(null);
             setTimeout(() => handleApprove(opt0, 0, "auto", execCtx, data as DisplayResponse), 0);
           } else {
@@ -1946,7 +1741,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         addMessage("warning", `目标 ${field}=${value} 不存在，已忽略此字段`, state.time, ch, undefined, "command_ack");
       });
 
-      if (!isValidTarget(intent, state)) {
+      if (!isValidTarget(intent, state, COMMANDER_REFS)) {
         const field = intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
         addMessage("warning", `目标 ${field} 不存在`, state.time, ch, undefined, "command_ack");
         setClarification("命令引用了不存在的目标，请重新描述");

@@ -20,9 +20,13 @@
 
 import { readFileSync } from "node:fs";
 import { validateAdvisorResponse, createFallbackResponse } from "@ai-commander/shared";
+import type { GameState, AdvisorOption, Unit } from "@ai-commander/shared";
+import { createInitialGameState, resolveIntent } from "@ai-commander/core";
+import type { CommanderRef } from "@ai-commander/core";
 import { buildContent, channelAcceptsAudio, voiceEnabledChannels } from "../apps/server/src/providers";
 import { rejectCommandBody, MAX_AUDIO_B64 } from "../apps/server/src/voiceInput";
 import { withVoiceReinforcement } from "../apps/server/src/ai";
+import { canAutoExecute, decideBucket } from "../apps/web/src/autoExecuteGate";
 
 let bad = 0;
 const check = (label: string, ok: boolean, detail = ""): void => {
@@ -178,6 +182,146 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     "N43 ★两条命令路都调了 withVoiceReinforcement（一条漏掉＝那条路的 heard 义务没钉）★",
     aiSrc.split("withVoiceReinforcement(").length - 1 === 3, // 1 声明 + 2 调用
   );
+}
+
+// ── ⑥ 自动执行闸：④点名不符 + P0-1 heard 缺席 ──
+//
+// 判据全部效果级（家法①）：判到 "A" 的那一臂**跑 resolveIntent 数 assignedUnitIds**，
+// 看实际动的是谁——不看回执台词，也不只看闸返回的字符串。
+// 每条正断言都配一条摘刀：把接线拿掉（不传 heard / 不说这是语音回合），
+// 结论必须翻面，否则这条断言测的是同义反复。
+{
+  const refs: readonly CommanderRef[] = [
+    { key: "chen", label: "陈军士" },
+    { key: "marcus", label: "马克斯上尉" },
+    { key: "emily", label: "艾米莉中尉" },
+  ];
+
+  // 两支队：I1「Aiden」4 人在沿海，I2「Blake」3 人在山脊。
+  const state = createInitialGameState("el_alamein");
+  state.units.clear();
+  state.squads = [];
+  state.missions = [];
+  let tmpl: Unit | null = null;
+  createInitialGameState("el_alamein").units.forEach((u) => {
+    if (!tmpl && u.team === "player" && u.type === "infantry") tmpl = u;
+  });
+  if (!tmpl) throw new Error("no player infantry in el_alamein opening");
+  let nextId = 9000;
+  const spawn = (x: number, y: number): number => {
+    const u: Unit = { ...structuredClone(tmpl as Unit), id: nextId++, position: { x, y }, state: "idle", orders: [], waypoints: [] };
+    state.units.set(u.id, u);
+    return u.id;
+  };
+  const mkSquad = (id: string, leaderName: string, unitIds: number[]) => {
+    state.squads.push({
+      id, name: `${leaderName} squad`, unitIds,
+      leader: { name: leaderName, rank: "sergeant", personality: "balanced" },
+      currentMission: null, missionTarget: null, morale: 1, formationStyle: "line",
+      ownerCommander: "chen", leaderName, role: "leader",
+    } as unknown as GameState["squads"][number]);
+  };
+  const aidenIds = [spawn(300, 30), spawn(302, 30), spawn(304, 30), spawn(306, 30)];
+  const blakeIds = [spawn(220, 65), spawn(222, 65), spawn(224, 65)];
+  mkSquad("I1", "Aiden", aidenIds);
+  mkSquad("I2", "Blake", blakeIds);
+
+  const optFrom = (fromSquad: string): AdvisorOption => ({
+    label: "A: 增援", description: "增援",
+    intent: { type: "defend", fromSquad, toFront: "front_center", urgency: "medium" },
+    intents: [{ type: "defend", fromSquad, toFront: "front_center", urgency: "medium" }],
+  } as AdvisorOption);
+
+  const bucketOf = (opt: AdvisorOption, text: string, voiceTurn: boolean, heardPresent: boolean) => {
+    const gate = canAutoExecute(opt, text, state, [], false, refs);
+    return {
+      gate,
+      bucket: decideBucket({ gate, hasOption: true, staleRefCount: 0, voiceTurn, heardPresent }),
+    };
+  };
+  const movedIds = (opt: AdvisorOption): number[] =>
+    resolveIntent(opt.intent, state, state.style).assignedUnitIds;
+
+  // ── ④ 点名不符：长官说 Aiden，模型返回 Blake ──
+  const SAID_AIDEN = "Aiden 去中央战线";
+  {
+    const wired = bucketOf(optFrom("I2"), SAID_AIDEN, true, true);
+    check(
+      "V1 ★点名不符 + heard 在场 → 问一句（bucket B）★",
+      wired.bucket === "B" && wired.gate.reason === "anchor_mismatch" && wired.gate.playerNamedSquad === true,
+      `bucket=${wired.bucket} reason=${wired.gate.reason} named=${wired.gate.playerNamedSquad}`,
+    );
+
+    // 摘刀：ChatPanel 没把 heard 传进来（= 步 3 的接线缺席 / 被人删掉）
+    const cut = bucketOf(optFrom("I2"), "", true, true);
+    const spilled = movedIds(optFrom("I2"));
+    check(
+      "V2 ★摘刀（不传 heard 文本）→ 静默进 A，且实际开动的是长官没点的那支★",
+      cut.bucket === "A" && cut.gate.playerNamedSquad === false &&
+        spilled.length > 0 && spilled.every((id) => blakeIds.includes(id)),
+      `bucket=${cut.bucket} 动了 ${spilled.length} 人，全在 Blake 队=${spilled.every((id) => blakeIds.includes(id))}`,
+    );
+
+    // 正对照：点名相符不许被闸拧死（本刀不许把好命令也变成问句）
+    const match = bucketOf(optFrom("I1"), SAID_AIDEN, true, true);
+    check(
+      "V3 ★点名相符 → auto（闸没被拧死）★",
+      match.bucket === "auto" && match.gate.auto === true,
+      `bucket=${match.bucket}`,
+    );
+  }
+
+  // ── P0-1：语音回合 heard 缺席 ⇒ 禁入 bucket A ──
+  {
+    const noAnchor = optFrom("");  // 无 fromSquad ⇒ no_anchor
+    noAnchor.intent = { type: "defend", toFront: "front_center", urgency: "medium" };
+    noAnchor.intents = [noAnchor.intent];
+
+    const voiceNoHeard = bucketOf(noAnchor, "", true, false);
+    check(
+      "V4 ★语音回合 + heard 缺席 → 禁入 A，落 B 问一句★",
+      voiceNoHeard.bucket === "B" && voiceNoHeard.gate.reason === "no_anchor",
+      `bucket=${voiceNoHeard.bucket} reason=${voiceNoHeard.gate.reason}`,
+    );
+
+    // 摘刀：把「这是语音回合」这个事实拿掉 = 步 3 的接线没接上
+    const cut = bucketOf(noAnchor, "", false, false);
+    const moved = movedIds(noAnchor);
+    check(
+      "V5 ★摘刀（voiceTurn 没接上）→ 掉回 A 自动执行，且真的会动兵★",
+      cut.bucket === "A" && moved.length > 0,
+      `bucket=${cut.bucket} 会动 ${moved.length} 人`,
+    );
+
+    // 零行为变化守卫：打字回合永远没有 heard，绝不能被这条新判定误伤
+    check(
+      "V6 ★打字回合 no_anchor 仍进 A（新判定不许误伤砍卡法）★",
+      bucketOf(noAnchor, "把部队调到中央战线", false, false).bucket === "A",
+    );
+    check(
+      "V7 语音回合 heard 在场时，桶判定与打字回合逐字相同（新判定只在缺席时生效）",
+      bucketOf(noAnchor, "把部队调到中央战线", true, true).bucket ===
+        bucketOf(noAnchor, "把部队调到中央战线", false, false).bucket,
+    );
+  }
+
+  // ── 通讯故障那一格：兜底方案带着可执行 intent，且天生没有 heard ──
+  {
+    const fb = createFallbackResponse().options[0];
+    const voice = bucketOf(fb, "", true, false);
+    const cut = bucketOf(fb, "", false, false);
+    const moved = resolveIntent(fb.intent, state, state.style).assignedUnitIds;
+    check(
+      "V8 ★语音回合的通讯兜底被同一条判定拦住（不需要单独分支）★",
+      voice.bucket === "B",
+      `bucket=${voice.bucket}`,
+    );
+    check(
+      "V9 ★摘刀后它会自动执行「A: 稳守阵地」，且真的动兵——这就是 N1 那笔账★",
+      cut.bucket === "A" && moved.length > 0,
+      `bucket=${cut.bucket} 会动 ${moved.length} 人`,
+    );
+  }
 }
 
 console.log(bad === 0 ? "\nALL SYNTHETIC PASS" : `\n${bad} 条不过`);
