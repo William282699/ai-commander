@@ -2,9 +2,10 @@
 // AI Commander — 语音输入 V1 台架
 //
 // Modes:
-//   --synthetic  确定性断言（不调模型、不起服务器）。默认。
-//   --negctl     PRE-FIX 期望：★ 断言在摘刀后必须真 FAIL（家法⑤）。
-//                步 2 尚无可摘的刀，本模式在步 2.5 随 decideBucket 一起长出来。
+//   --synthetic   确定性断言（不调模型、不起服务器）。默认。
+//   --live [N]    真模型：把入库的 wav 直接喂 callAdvisorStream，量 heard 合规
+//                 与地名命中。N 默认 20（收口口径）；免费档 ~8 RPM 自带配速。
+//                 **要花配额，不进全家扫描**，只在收口与改 prompt 后手动跑。
 //
 // Run（worktree 根）：
 //   npx tsx scripts/ab-voice-input.ts --synthetic
@@ -13,9 +14,15 @@
 //   步 1  通道与入场校验（本文件起点，28 条）
 //   步 2  heard 合同：schema 两条 return 路径 + 打字回合零多余（本次 +14）
 //   步 2.5 decideBucket：★点名不符负对照 + heard 缺席禁入 bucket A（RED 先行）
-//   步 5  --live：真模型 heard 合规 + 地名命中
+//   步 5  --live：真模型 heard 合规 + 地名命中（本次落地）
 //
 // 家法：判据要测效果不测措辞。会动兵的断言数 assignedUnitIds（步 2.5 起）。
+//
+// 没有 --negctl 模式是有意的：本刀的负对照**成对写在断言里**（接线臂与摘刀臂
+// 并排跑——V1/V2、V4/V5、V8/V9、V10/V11），一次跑完两边的差直接可见。
+// 另有几次一次性摘刀（schema 两条 return 路径 / SPEECH_RULE_SITES 登记 /
+// decideBucket 的 fail-closed / CONFIRM_WORD_SITES 登记）要改源码才摘得掉，
+// 留痕在各步 commit message 里，不做成常驻模式。
 // ============================================================
 
 import { readFileSync } from "node:fs";
@@ -28,6 +35,8 @@ import { rejectCommandBody, MAX_AUDIO_B64 } from "../apps/server/src/voiceInput"
 import { withVoiceReinforcement } from "../apps/server/src/ai";
 import { canAutoExecute, decideBucket } from "../apps/web/src/autoExecuteGate";
 import { encodeWavBase64 } from "../apps/web/src/voiceRecorder";
+
+const MODE = process.argv[2] ?? "--synthetic";
 
 let bad = 0;
 const check = (label: string, ok: boolean, detail = ""): void => {
@@ -389,5 +398,121 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     Buffer.from(big, "base64").length === 44 + (0x8000 * 2 + 123) * 2);
 }
 
-console.log(bad === 0 ? "\nALL SYNTHETIC PASS" : `\n${bad} 条不过`);
-process.exit(bad === 0 ? 0 : 1);
+if (MODE === "--live") {
+  void runLive(Number(process.argv[3] ?? 20));
+} else {
+  console.log(bad === 0 ? "\nALL SYNTHETIC PASS" : `\n${bad} 条不过`);
+  process.exit(bad === 0 ? 0 : 1);
+}
+
+// ============================================================
+// --live：真模型。把**入库的那两段 wav** 直接喂进生产的 callAdvisorStream，
+// 量三件事——heard 在不在、有没有被复读进正文、地名有没有听对。
+//
+// ★夹具先自证（Fable 2026-08-09 立规，起因是步 3 冒烟那组作废的假对照）：
+//   开跑之前先证明夹具自己没问题——sha256 钉死 + WAV 头断言（16kHz/单声道/16bit）。
+//   任何人在中间悄悄重编码过，这一步就红，后面的 heard 数字一个字都不许用。
+// ============================================================
+
+interface LiveFixture {
+  file: string;
+  sha256: string;
+  /** 原句（人念的那一句），只作记录 */
+  spoken: string;
+  /** 判据：这些词必须出现在 heard 里 */
+  mustHear: string[];
+}
+
+const LIVE_FIXTURES: LiveFixture[] = [
+  {
+    file: "scripts/fixtures/voice/cmd1.wav",
+    sha256: "0d69ae3688c68c22a6a1f0bd412f0c992a0446b17b6a461a43f7d5a8b16f7b90",
+    spoken: "战狼点附近的闲置部队，去增援南线前哨",
+    // 战狼点＝玩家自造标记名，只活在信封的 ---TAGS--- 里：本刀红利的最短证明
+    mustHear: ["战狼点", "南线前哨"],
+  },
+  {
+    file: "scripts/fixtures/voice/cmd2.wav",
+    sha256: "7adc8a240b7633ac2146782fd0f1ba699d31c9bfd3a002eb1f8fd5d2fc3ca906",
+    spoken: "派两个步兵班去 El Alamein，剩下的守住烽火台",
+    // 只钉「烽火台」：El Alamein 这一段是已登记的脏样本（I2 账根），不设硬线
+    mustHear: ["烽火台"],
+  },
+];
+
+const LIVE_DIGEST = `---FRONTS---
+1. 北部战线: EnemyEngaged=无 EnemyMassing=3辆重甲+8步兵 power=1200
+4. 南部战线: EnemyEngaged=4辆重甲+1步兵 EnemyMassing=无 power=400
+---SQUADS--- (loc= 是唯一已证位置，缺席=未证；目的地≠位置)
+  I1(Aiden) parent:chen 5units(4×infantry,1×light_tank) @(258,120) morale=0.9 mission=idle task=无任务 hp=100% loc=战狼点附近
+---FACILITIES---
+南线前哨@(280,130) 北线前哨@(250,40) 烽火台@(230,70) 我军总部@(420,80)
+---TAGS---
+战狼点=(260,125)`;
+
+async function runLive(n: number): Promise<void> {
+  const { createHash } = await import("node:crypto");
+  const { config } = await import("dotenv");
+  config({ path: "apps/server/.env" });
+  const { callAdvisorStream } = await import("../apps/server/src/ai");
+
+  console.log(`\n== --live N=${n}（免费档 ~8 RPM，自带配速）==\n`);
+
+  // ── 夹具自证：字节没被人动过，格式就是我们以为的那个 ──
+  for (const f of LIVE_FIXTURES) {
+    const bytes = readFileSync(f.file);
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    check(`L0 夹具自证 ${f.file} sha256 与入库一致`, sha === f.sha256, sha.slice(0, 16));
+    check(`L0 夹具自证 ${f.file} 是 16kHz / 单声道 / 16bit`,
+      dv.getUint32(24, true) === 16000 && dv.getUint16(22, true) === 1 && dv.getUint16(34, true) === 16,
+      `${dv.getUint32(24, true)}Hz ch=${dv.getUint16(22, true)} bits=${dv.getUint16(34, true)}`);
+  }
+  if (bad > 0) {
+    console.log("\n★夹具没过自证——后面的 heard 数字一个字都不许用。停。");
+    process.exit(1);
+  }
+
+  const rows: { fx: string; heard: string; prose: string; ok: boolean }[] = [];
+  for (let i = 0; i < n; i++) {
+    const fx = LIVE_FIXTURES[i % LIVE_FIXTURES.length];
+    const audio = { data: readFileSync(fx.file).toString("base64"), format: "wav" as const };
+    let prose = "";
+    let heard = "";
+    try {
+      for await (const ev of callAdvisorStream(LIVE_DIGEST, "", "risk=0.50 focus=0.50 obj=0.50 cas=0.50", "combat", audio)) {
+        if (ev.type === "text") prose += ev.content;
+        else if (ev.type === "options") heard = typeof ev.content?.heard === "string" ? ev.content.heard : "";
+      }
+    } catch (e) {
+      console.log(`  #${i} 调用失败: ${String(e).slice(0, 80)}`);
+    }
+    const hit = fx.mustHear.filter((w) => heard.includes(w));
+    rows.push({ fx: fx.file.slice(-8), heard, prose, ok: hit.length === fx.mustHear.length });
+    console.log(`  #${String(i).padStart(2)} ${fx.file.slice(-8)} 地名 ${hit.length}/${fx.mustHear.length}  heard=${heard || "(缺席)"}`);
+    if (i < n - 1) await new Promise((r) => setTimeout(r, 8000)); // 免费档配速
+  }
+
+  // ── 三条判据 ──
+  const present = rows.filter((r) => r.heard.length > 0).length;
+  check(`L1 ★heard 在场 ${present}/${n}（收口线 ≥19/20，即 ≥95%）★`,
+    present >= Math.ceil(n * 0.95), `${present}/${n}`);
+
+  // 转写复读进正文＝TTS 会把长官自己的话念回给他
+  const polluted = rows.filter((r) => r.heard.length > 4 && r.prose.includes(r.heard));
+  check(`L2 ★转写没有被复读进正文（TTS 污染）${n - polluted.length}/${n}★`, polluted.length === 0,
+    polluted.length ? `${polluted.length} 条` : "");
+  // 红了要看得见现场：把整段正文打出来，好分辨"真复读"与"brief 恰好跟命令重合"。
+  for (const p of polluted) {
+    console.log(`   ↳ heard: ${p.heard}`);
+    console.log(`   ↳ prose: ${p.prose.replace(/\n/g, "⏎")}`);
+  }
+
+  // 地名命中：本刀存在的理由。不设百分比硬线以外的花样，逐条可读。
+  const nameOk = rows.filter((r) => r.ok).length;
+  check(`L3 ★地名命中 ${nameOk}/${n}——「战狼点」这种只活在信封里的名字听不出来，这一刀就白做★`,
+    nameOk >= Math.ceil(n * 0.9), `${nameOk}/${n}`);
+
+  console.log(bad === 0 ? "\nALL LIVE PASS" : `\n${bad} 条不过`);
+  process.exit(bad === 0 ? 0 : 1);
+}
