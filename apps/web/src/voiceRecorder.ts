@@ -35,6 +35,8 @@
 
 const TARGET_RATE = 16000;
 const MAX_SECONDS = 30;
+/** 松手后再多听一会儿，等管线里在途的音频流完（Fable 裁定 2026-08-09：300ms）。 */
+const TAIL_GRACE_MS = 300;
 
 export interface VoiceRecording {
   /** base64 WAV（不带 data: 前缀），直接进请求体 */
@@ -108,6 +110,13 @@ export async function startVoiceRecording(): Promise<VoiceRecorderHandle> {
       teardown();
     },
     async stop(): Promise<VoiceRecording | null> {
+      // 松手 ≠ 声音已经到齐：getUserMedia 开着 AEC/降噪，管线本身有延迟，
+      // 加上 ScriptProcessor 4096 帧一批，最后一段还在路上。立刻拆线就把尾巴切了
+      // ——一句「…现在怎么办」到手成「…现在怎么」，问句变陈述句，陈于是把话
+      // 复述回来当回答（用户 2026-08-09 手测实录）。宽限一下再拆。
+      // ⚠ 这段宽限**测不出来于合成假麦**（假 getUserMedia 没有 AEC 管线，
+      //   夹具里尾损只有 ~13ms）——真机效果的裁决权在手测。
+      await new Promise((r) => setTimeout(r, TAIL_GRACE_MS));
       const rate = ctx.sampleRate;
       teardown();
       if (frames === 0) return null;
