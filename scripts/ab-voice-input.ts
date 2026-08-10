@@ -539,19 +539,42 @@ if (MODE === "--live") {
 //   任何人在中间悄悄重编码过，这一步就红，后面的 heard 数字一个字都不许用。
 // ============================================================
 
+// ── 净臂 / 脏臂（分臂重组 2026-08-09）──
+//
+// 为什么分臂：Fable 的实验已经证伪了"复读跟信封走"（真信封 N=8 复读 0/8），
+// 剩下的假设是**复读与归一化都跟输入质量走**。一个混着好样本和坏样本的
+// 平均数说不清任何事——20 条里 3 条复读，是"偶发"还是"坏输入必中"？分臂之后
+// 这个问句才有答案。
+//
+//   净臂：cmd1.wav —— 完整、清楚、每个地名都真的在音频里
+//   脏臂：cmd2.wav（中文里夹一个英文地名）
+//         cmd1_cut600.wav（机器切尾 600ms 语音——用户手测那个病的复制品）
+//
+// 脏臂的价值在**基准真值由构造保证**：cmd1_cut600 的音频里物理上不存在「前哨」
+// 那两个音，而信封的 ---FACILITIES--- 里明明白白写着「南线前哨」。heard 里出现
+// 「前哨」＝模型拿信封里现成的名字补了它没听见的音——这正是 A-1 要治的那笔账
+// （手测「骂人→中央战线」是同一个机制的另一个方向）。
 interface LiveFixture {
   file: string;
   sha256: string;
+  /** 净臂＝clean，脏臂＝dirty */
+  arm: "clean" | "dirty";
   /** 原句（人念的那一句），只作记录 */
   spoken: string;
   /** 判据：这些词必须出现在 heard 里 */
   mustHear: string[];
+  /** 归一化标记：这些词出现在 heard 里＝模型补了音频里没有的东西。
+   *  只有基准真值靠构造保证的夹具才配有这一栏。 */
+  inventedIf?: string[];
+  /** 由 cmd1.wav 截断而来 ⇒ --live 现场重算、断言它是原始样本的逐字节前缀 */
+  cutFrom?: { file: string; cutMs: number };
 }
 
 const LIVE_FIXTURES: LiveFixture[] = [
   {
     file: "scripts/fixtures/voice/cmd1.wav",
     sha256: "0d69ae3688c68c22a6a1f0bd412f0c992a0446b17b6a461a43f7d5a8b16f7b90",
+    arm: "clean",
     spoken: "战狼点附近的闲置部队，去增援南线前哨",
     // 战狼点＝玩家自造标记名，只活在信封的 ---TAGS--- 里：本刀红利的最短证明
     mustHear: ["战狼点", "南线前哨"],
@@ -559,9 +582,23 @@ const LIVE_FIXTURES: LiveFixture[] = [
   {
     file: "scripts/fixtures/voice/cmd2.wav",
     sha256: "7adc8a240b7633ac2146782fd0f1ba699d31c9bfd3a002eb1f8fd5d2fc3ca906",
+    arm: "dirty",
     spoken: "派两个步兵班去 El Alamein，剩下的守住烽火台",
     // 只钉「烽火台」：El Alamein 这一段是已登记的脏样本（I2 账根），不设硬线
     mustHear: ["烽火台"],
+    // 原句里没有"前哨"两个字。heard 里冒出来 ⇒ 英文地名被换成了信封里的名字
+    // （首跑实测：10 条 cmd2 里 4 条把 El Alamein 说成「北线前哨」）。
+    inventedIf: ["前哨"],
+  },
+  {
+    file: "scripts/fixtures/voice/cmd1_cut600.wav",
+    sha256: "e90956061103d7abb26e0df7abf52443922b537ba53687086b8b54d24932f7d8",
+    arm: "dirty",
+    spoken: "战狼点附近的闲置部队，去增援南…（尾部 600ms 语音被机器切掉）",
+    // 「战狼点」在保留的那一段里，仍是硬要求；"前哨"已被切掉，不能要求听到
+    mustHear: ["战狼点"],
+    inventedIf: ["前哨"],
+    cutFrom: { file: "scripts/fixtures/voice/cmd1.wav", cutMs: 600 },
   },
 ];
 
@@ -584,21 +621,50 @@ async function runLive(n: number): Promise<void> {
   console.log(`\n== --live N=${n}（免费档 ~8 RPM，自带配速）==\n`);
 
   // ── 夹具自证：字节没被人动过，格式就是我们以为的那个 ──
+  // 切法与自证共用同一份代码：台架现场重算切点，与生成脚本用的是同一个函数，
+  // 所以"生成时这么切、验收时那么算"这种漂移在结构上不可能发生。
+  const { readWav, rmsWindows, speechEndSample, cutPointSample } = await import("./make-voice-cut-fixture");
   for (const f of LIVE_FIXTURES) {
     const bytes = readFileSync(f.file);
     const sha = createHash("sha256").update(bytes).digest("hex");
-    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const w = readWav(f.file);
     check(`L0 夹具自证 ${f.file} sha256 与入库一致`, sha === f.sha256, sha.slice(0, 16));
     check(`L0 夹具自证 ${f.file} 是 16kHz / 单声道 / 16bit`,
-      dv.getUint32(24, true) === 16000 && dv.getUint16(22, true) === 1 && dv.getUint16(34, true) === 16,
-      `${dv.getUint32(24, true)}Hz ch=${dv.getUint16(22, true)} bits=${dv.getUint16(34, true)}`);
+      w.rate === 16000 && w.channels === 1 && w.bits === 16,
+      `${w.rate}Hz ch=${w.channels} bits=${w.bits}`);
+
+    // ★截断夹具的自证比 sha 更重一层：sha 只证"没人动过这个文件"，
+    //   证不了"这个文件确实是那段原始音频的纯截断"。所以现场拿原件重算：
+    //   ① 保留的每一个样本与原件逐字节相同（纯截断，没重编码、没重采样）
+    //   ② 切点就是脚本算出来的那个（切法可复现，不是某次会话里手切的）
+    //   ③ 被切掉的那 600ms 是**语音**不是尾部静音——否则这个夹具什么都证明不了
+    //      （cmd1 尾部有 0.513s 数字静音，直接砍 600ms 只砍掉 87ms 语音）
+    if (f.cutFrom) {
+      const src = readWav(f.cutFrom.file);
+      const keep = cutPointSample(src.samples, src.rate);
+      let identical = w.samples.length === keep;
+      if (identical) {
+        for (let i = 0; i < keep; i++) {
+          if (w.samples[i] !== src.samples[i]) { identical = false; break; }
+        }
+      }
+      check(`L0 ★截断自证 ${f.file} 是 ${f.cutFrom.file} 的逐样本前缀（纯截断，没重编码）★`,
+        identical, `保留 ${w.samples.length} / 应为 ${keep}`);
+      const end = speechEndSample(src.samples, src.rate);
+      const removed = src.samples.subarray(keep, end);
+      const removedPeak = removed.length > 0 ? Math.max(...rmsWindows(removed, src.rate)) : 0;
+      const wholePeak = Math.max(...rmsWindows(src.samples, src.rate));
+      check(`L0 ★截断自证 被切掉的 ${(removed.length / src.rate).toFixed(2)}s 是语音不是静音（峰值 RMS ${removedPeak.toFixed(0)} vs 全曲 ${wholePeak.toFixed(0)}）★`,
+        removed.length > 0 && removedPeak > wholePeak * 0.2,
+        `切掉 ${(removed.length / src.rate).toFixed(3)}s`);
+    }
   }
   if (bad > 0) {
     console.log("\n★夹具没过自证——后面的 heard 数字一个字都不许用。停。");
     process.exit(1);
   }
 
-  const rows: { fx: string; heard: string; spoken: string; prose: string; ok: boolean }[] = [];
+  const rows: { fx: string; arm: "clean" | "dirty"; invented: string[]; heard: string; spoken: string; prose: string; ok: boolean }[] = [];
   for (let i = 0; i < n; i++) {
     const fx = LIVE_FIXTURES[i % LIVE_FIXTURES.length];
     const audio = { data: readFileSync(fx.file).toString("base64"), format: "wav" as const };
@@ -617,8 +683,14 @@ async function runLive(n: number): Promise<void> {
       console.log(`  #${i} 调用失败: ${String(e).slice(0, 80)}`);
     }
     const hit = fx.mustHear.filter((w) => heard.includes(w));
-    rows.push({ fx: fx.file.slice(-8), heard, spoken, prose, ok: hit.length === fx.mustHear.length });
-    console.log(`  #${String(i).padStart(2)} ${fx.file.slice(-8)} 地名 ${hit.length}/${fx.mustHear.length}  heard=${heard || "(缺席)"}`);
+    // 归一化命中：音频里物理上没有的词出现在 heard 里（基准真值靠构造保证）
+    const invented = (fx.inventedIf ?? []).filter((w) => heard.includes(w));
+    rows.push({
+      fx: fx.file.split("/").pop() ?? fx.file, arm: fx.arm, invented,
+      heard, spoken, prose, ok: hit.length === fx.mustHear.length,
+    });
+    console.log(`  #${String(i).padStart(2)} ${(fx.file.split("/").pop() ?? "").padEnd(16)} [${fx.arm === "clean" ? "净" : "脏"}] 地名 ${hit.length}/${fx.mustHear.length}${invented.length ? `  ★归一化「${invented.join("/")}」` : ""}`);
+    console.log(`      heard =${heard || "(缺席)"}`);
     console.log(`      spoken=${spoken || "(缺席)"}`);
     // 正文也印出来：L2 记录行、R1「从属正文」这两笔都得拿正文对着看才判得了，
     // 而这数据每跑一次要花一次配额——不留下来等于白跑。
@@ -646,11 +718,31 @@ async function runLive(n: number): Promise<void> {
   //   ⚠ 这是一条**有意的判据松动**，不是漏网：写在这里而不是只写在 commit 里，
   //     因为下一个看见 L2 印红却全绿的人，得在同一屏上读到理由。
   const polluted = rows.filter((r) => r.heard.length > 4 && r.prose.includes(r.heard));
+  const clean = rows.filter((r) => r.arm === "clean");
+  const dirty = rows.filter((r) => r.arm === "dirty");
+  const pollutedIn = (rs: typeof rows) => rs.filter((r) => r.heard.length > 4 && r.prose.includes(r.heard)).length;
   console.log(`记录行 L2（不 FAIL）转写复读进正文 ${polluted.length}/${n}——分层后耳朵听不见它，只剩屏上难看`);
+  console.log(`   ↳ 分臂：净臂 ${pollutedIn(clean)}/${clean.length}   脏臂 ${pollutedIn(dirty)}/${dirty.length}` +
+    `   ← 假设「复读跟输入质量走、不跟信封走」在这两个数上见分晓`);
   for (const p of polluted) {
-    console.log(`   ↳ heard: ${p.heard}`);
-    console.log(`   ↳ prose: ${p.prose.replace(/\n/g, "⏎")}`);
+    console.log(`   ↳ [${p.fx}] heard: ${p.heard}`);
+    console.log(`   ↳ [${p.fx}] prose: ${p.prose.replace(/\n/g, "⏎")}`);
   }
+
+  // ── 记录行：归一化（A-1 的量尺；本轮是**修前基线**）──
+  // 判的是"音频里物理上没有的词，heard 里有没有"——基准真值由夹具构造保证，
+  // 不靠我判断模型听得对不对。先记不设线：A-1 只有一轮止损，得先有基线。
+  const invRows = rows.filter((r) => r.invented.length > 0);
+  const byFixture = new Map<string, { n: number; hit: number }>();
+  for (const r of rows) {
+    if (!LIVE_FIXTURES.find((f) => f.file.endsWith(r.fx))?.inventedIf) continue;
+    const e = byFixture.get(r.fx) ?? { n: 0, hit: 0 };
+    e.n++; if (r.invented.length > 0) e.hit++;
+    byFixture.set(r.fx, e);
+  }
+  console.log(`记录行 归一化（拿信封里的名字补没听见的音）${invRows.length}/${dirty.length} 条脏样本`);
+  for (const [fx, e] of byFixture) console.log(`   ↳ ${fx}: ${e.hit}/${e.n}`);
+  for (const r of invRows.slice(0, 4)) console.log(`   ↳ 「${r.invented.join("/")}」← ${r.heard}`);
 
   // 地名命中：本刀存在的理由。不设百分比硬线以外的花样，逐条可读。
   const nameOk = rows.filter((r) => r.ok).length;
