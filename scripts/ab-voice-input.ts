@@ -164,6 +164,27 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     "N37 ★而它带着可执行 intent——这正是「兜底不能自动执行」的理由，不是空壳★",
     createFallbackResponse().options.length > 0 && !!createFallbackResponse().options[0].intent,
   );
+
+  // ── ④b spoken 合同：同一张白名单上的第二个新字段（spoken 层 步1）──
+  // 与 heard 并排写，因为病同源：白名单重建是唯一入口，只补一条 return 路径
+  // 的话，NOOP 那一轮的 spoken 会静静消失、客户端悄悄退回念正文——**没有任何
+  // 现象**。地基二的 pendingDecision 当年就是这么丢的。
+  check("N53 ★路径一（options 非空）spoken 透传★", withOptions({ spoken: "G13那队这就过去。" })?.spoken === "G13那队这就过去。");
+  check("N54 ★路径二（options 为空 / NOOP）spoken 透传★", emptyOptions({ spoken: "北线还稳，先不动。" })?.spoken === "北线还稳，先不动。");
+  check("N55 两条路径 spoken 缺席 → undefined（缺席即退回念正文的地基）",
+    withOptions({})?.spoken === undefined && emptyOptions({})?.spoken === undefined);
+  check("N56 空串/纯空白按缺席算（不造一个「有 spoken 但没内容」的假在场——那会念出一片安静）",
+    withOptions({ spoken: "   " })?.spoken === undefined && emptyOptions({ spoken: "" })?.spoken === undefined);
+  check("N57 非字符串 spoken 被丢弃（白名单重建，不是照抄）",
+    withOptions({ spoken: 42 })?.spoken === undefined && emptyOptions({ spoken: ["x"] })?.spoken === undefined);
+  check("N58 spoken 与 heard 互不干扰（同一轮两个新字段一起在）", (() => {
+    const r = withOptions({ heard: "让G13去中央", spoken: "这就让他们过去。" });
+    return r?.heard === "让G13去中央" && r?.spoken === "这就让他们过去。" && r?.brief === "b" && r?.options.length === 1;
+  })());
+  check(
+    "N59 ★createFallbackResponse() 也没有 spoken——「通讯中断」那一格自动落进「缺席→念正文」，不需要单独分支★",
+    createFallbackResponse().spoken === undefined,
+  );
 }
 
 // ── ⑤ 打字回合零多余：两段语音 prompt 只在带音频那一轮出现 ──

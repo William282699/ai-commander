@@ -312,6 +312,13 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
   const heardRaw = typeof obj.heard === "string" ? obj.heard.trim() : "";
   const heard = heardRaw.length > 0 ? heardRaw : undefined;
 
+  // spoken 层：只给耳朵的那一两句。与 heard 同族、同规范化、同两条 return 路径
+  // ——理由一模一样（白名单重建之外没有第二个入口），所以病也会一模一样：
+  // 只补一条路径的话，NOOP/空 options 那一轮的 spoken 会静静消失，客户端退回
+  // 念正文，谁都不会红。空串按缺席算，让"缺席即念正文"这条兜底只有一种形状。
+  const spokenRaw = typeof obj.spoken === "string" ? obj.spoken.trim() : "";
+  const spoken = spokenRaw.length > 0 ? spokenRaw : undefined;
+
   // Day 13 Layer B: LLM may return empty options[] to reject invalid commands.
   // Phase 2: NOOP responseType with options:[] is a valid conversational response.
   if (obj.options.length === 0) {
@@ -328,6 +335,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
       cancelDoctrine: cancelDoctrineId,
       pendingDecision,
       heard,
+      spoken,
     };
   }
 
@@ -396,6 +404,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
     cancelDoctrine: cancelDoctrineId,
     pendingDecision,
     heard,
+    spoken,
   };
 }
 

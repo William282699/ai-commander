@@ -774,6 +774,21 @@ export interface AdvisorResponse {
    *  与 pendingDecision 同族：白名单重建会静默吃掉没登记的根级字段，
    *  schema 的**两条 return 路径**都必须带。 */
   heard?: string;
+  /** spoken 层：这一轮**只说给耳朵**的那一两句（只有语音回合才有）。
+   *
+   *  病根＝同一份正文要同时伺候眼睛和耳朵：屏上要番号 `[临时编队G13]`、
+   *  精确数字、英文代号，同一段话念出来就是播报员。分层之后正文照旧写给
+   *  眼睛，spoken 是同一件事的口语版，语音回合的 TTS 只念它。
+   *
+   *  **它从属于正文**（审定 R1）：不得携带正文与单子里没有的事实、不得与
+   *  它们相左，有出入以屏上为准——spoken 是"说给你听的那一版"，不是第二
+   *  张嘴（否则又开一个「嘴与账本」缺口）。
+   *
+   *  与 heard/pendingDecision 同族：白名单重建会静默吃掉没登记的根级字段，
+   *  schema 的**两条 return 路径**都必须带。**缺席一律退回念正文**（现状
+   *  行为），绝不静默哑掉——一条规则覆盖四种缺席：模型忘写 / 白名单吃掉 /
+   *  JSON 解析失败走兜底 / 通讯中断。 */
+  spoken?: string;
   standingOrder?: {
     type: string;
     locationTag: string;
