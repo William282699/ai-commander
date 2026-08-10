@@ -194,7 +194,13 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
   const withVoice = withVoiceReinforcement(P, true);
   check("N39 带音频时才追加，且原文在前", withVoice.startsWith(P) && withVoice.length > P.length);
   check("N40 【本次强制】里钉的是 heard 的义务", /【本次强制】/.test(withVoice) && /根级 "heard"/.test(withVoice));
-  check("N41 转写不许进正文（正文会被 TTS 念出来）", /正文里不要复述/.test(withVoice));
+  check("N41 转写不许进正文（理由已改：正文写的是要对长官说的话——分层后正文不再被念，旧理由为假）", /正文里不要复述/.test(withVoice));
+  check("N60 ★同一段里还钉了 spoken 的义务（只给耳朵的那一两句）★", /根级 "spoken"/.test(withVoice) && /耳朵听的那一两句/.test(withVoice));
+  check("N61 ★spoken 从属正文那条原则在（不许带正文和单子没有的事实）★", /从属于正文/.test(withVoice));
+  check(
+    "N62 ★旧理由「正文会被念出来给他听」已从合同里撤掉（分层后它是假的，共享面上不许挂假话）★",
+    !/正文会被念出来给他听/.test(withVoice),
+  );
 
   // 源码级：VOICE_COMMAND_NOTE 的每一处使用都必须挂在 audio 三元上。
   // 有人哪天把它无条件拼进 userContent，打字回合的信封就变了——那是本刀的红线。
@@ -212,6 +218,14 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
   check(
     "N43 ★两条命令路都调了 withVoiceReinforcement（一条漏掉＝那条路的 heard 义务没钉）★",
     aiSrc.split("withVoiceReinforcement(").length - 1 === 3, // 1 声明 + 2 调用
+  );
+  // spoken 的义务只许活在这一个开关后面。有人哪天把它抄进 SYSTEM_PROMPT 或
+  // 人格块，打字回合就会开始产 spoken——而打字回合的 TTS 念的是正文，
+  // 那一份 spoken 谁也不会听见，只是白烧 token 并把打字信封改了（本刀红线）。
+  check(
+    "N63 ★spoken 的义务全仓只有一处（在 withVoiceReinforcement 里），没漏进打字回合的信封★",
+    aiSrc.split('根级 "spoken"').length - 1 === 1,
+    `出现 ${aiSrc.split('根级 "spoken"').length - 1} 次`,
   );
 }
 

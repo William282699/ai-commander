@@ -769,7 +769,8 @@ type RuleTag =
   | "mood_register" // mood 行只定语气不定战况
   | "handle_addressing" // 番号是地址不是推荐 / 群名不是 fromSquad
   | "speech_contract" // G 刀：说话合同（替换掉三条死口号的那份）
-  | "voice_transcript"; // 语音输入 V1：heard 的义务 +「不要顺句」那条原则
+  | "voice_transcript" // 语音输入 V1：heard 的义务 +「不要顺句」那条原则
+  | "voice_spoken"; // spoken 层：只给耳朵那一两句的义务 +「从属正文」那条原则
 
 type SiteKind =
   | "chen_command" // 陈的命令解析面 ← 本刀合同的落点
@@ -1008,9 +1009,9 @@ const SPEECH_RULE_SITES: SpeechRuleSite[] = [
     file: AI_TS,
     symbol: "withVoiceReinforcement",
     kind: "shared_face",
-    rules: ["voice_transcript"],
+    rules: ["voice_transcript", "voice_spoken"],
     disposition: "voice_input_v1",
-    note: "语音回合的【本次强制】：JSON 根级必须含 heard=逐字转写 + 一条语义原则「不要顺句、不要拿信封里的名字补没听清的音」+ 转写不进正文（正文会被 TTS 念出来）。位置照抄 withPendingReinforcement（同一个位置把 pendingDecision 的 MISSING 从 45/45 钉成 0）。★那条原则是 N2 的对症药：探针两次独立复算都拍到「音频含糊 → 模型交付顺过的意思而非逐字原话」，而 heard 会被当原话去找锚点。共享面（combat+logistics 同读），已进 REGISTERED_SHARED_SURFACE_RULINGS。",
+    note: "语音回合的【本次强制】，两项义务：① heard=逐字转写 + 一条语义原则「不要顺句、不要拿信封里的名字补没听清的音」+ 转写不进正文；② **spoken**（spoken 层 2026-08-09 新增）=只说给耳朵的那一两句 + 一条语义原则「从属正文，不带正文与单子没有的事实」。位置照抄 withPendingReinforcement（同一个位置把 pendingDecision 的 MISSING 从 45/45 钉成 0）。★①那条原则是 N2 的对症药：探针两次独立复算都拍到「音频含糊 → 模型交付顺过的意思而非逐字原话」，而 heard 会被当原话去找锚点。★②这一面同 commit 改了 ① 里一句**理由**：原文写「正文里不要复述它（正文会被念出来给他听）」——分层后语音回合的正文不再被念，该理由为假 ⇒ 换成真理由（正文写的是你要对长官说的话），规则本身未撤。共享面（combat+logistics 同读），两次变更都已进 REGISTERED_SHARED_SURFACE_RULINGS。",
   },
 ];
 
@@ -1055,6 +1056,9 @@ const RULE_FINGERPRINTS: Record<RuleTag, RegExp[]> = {
   // 原则（逐字，不许顺句）。故意不写 /heard/ 这种宽指纹：它会把注释里
   // 顺口提到 heard 的面也钓上来，B 断言就成了噪音源。
   voice_transcript: [/逐字转写/, /根级 "heard"/],
+  // spoken 层：同上两条写法——义务（spoken 必须在）与原则（从属正文）。
+  // 同样避开宽指纹 /spoken/：那三个字母在英文 prompt 里到处都是。
+  voice_spoken: [/根级 "spoken"/, /耳朵听的那一两句/],
 };
 
 interface Span {
@@ -1404,6 +1408,14 @@ const REGISTERED_SHARED_SURFACE_RULINGS: readonly string[] = [
     "★这不是 carve-out（没有旧行为假），是**新增**：Emily 也换耳朵是用户裁定（§V-4 Q2），" +
     "所以她的 prompt 在语音回合会多这两段。打字回合两段都不出现、共享面逐字节不变" +
     "——emily-guard 因此仍然全绿，但它扫不到 userContent 模板，登记不能靠它提醒（Opus 审 P1-9）。",
+  "2026-08-09 spoken 层 步2：共享面 `withVoiceReinforcement` 两笔——" +
+    "①【授权·新增】语音回合的【本次强制】多一段 spoken 义务（只给耳朵的一两句 + 从属正文），" +
+    "与 heard 同一段落、同样只在带音频那一轮出现，打字回合仍逐字节不变；" +
+    "②【carve-out·必须改】heard 那句「正文里不要复述它（**正文会被念出来给他听**）」——" +
+    "分层之后语音回合的正文不再被念，括号里那句理由当场为假 ⇒ 换成真理由" +
+    "（正文写的是你要对长官说的话，不是他刚说过的那句），规则本身一个字没撤。" +
+    "Emily 与陈同读这一面，所以她在语音回合也会拿到 spoken 的义务——那是 §V-4 Q2 " +
+    "「Emily 一起换耳朵」的既有裁定的延长线，不是新范围。",
   "2026-08-08 第 8 级 刀2：ai.ts 解析器 prompt 的番号 token 指称【授权·已改】——" +
     "旧文写 `any ---FRONT_JUDGMENT--- row's handle=G# token`，而刀2 后 `handle=` 全仓绝迹，" +
     "该句字面为假、把模型指向一个不存在的 token ⇒ 必须改。§O-4 原文授权 + Fable 裁定。" +
