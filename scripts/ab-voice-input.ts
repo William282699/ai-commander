@@ -34,6 +34,7 @@ import { buildContent, channelAcceptsAudio, voiceEnabledChannels } from "../apps
 import { rejectCommandBody, MAX_AUDIO_B64 } from "../apps/server/src/voiceInput";
 import { withVoiceReinforcement } from "../apps/server/src/ai";
 import { canAutoExecute, decideBucket } from "../apps/web/src/autoExecuteGate";
+import { planVoiceSpeech } from "../apps/web/src/voiceSpeech";
 import { encodeWavBase64 } from "../apps/web/src/voiceRecorder";
 
 const MODE = process.argv[2] ?? "--synthetic";
@@ -400,6 +401,95 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
       );
     }
   }
+}
+
+// ── ⑥b 听觉序列：一个回合里耳朵到底听见什么（spoken 层 步3）──
+//
+// 判据是**效果级**的：不看"改没改道"，看三件可听见的事——念的是哪一段文字、
+// 流式期间出不出声、回执出不出声。摘刀负对照就在同一组里：把 spoken 拿掉，
+// 断言念的当场变回正文（§8-4）。
+{
+  const PROSE = "东北方向第一未编组群[临时编队G13]17秒可达，建议增援中央战线。";
+  const SPOKEN = "让G13那队顶上去，十七秒到。";
+
+  const typed = planVoiceSpeech({ voiceTurn: false, spoken: SPOKEN, prose: PROSE });
+  check(
+    "S1 ★打字回合逐字等价于分层之前：边流边念正文、回执照旧出声、没有本地应答★",
+    typed.route === "typed" && typed.speakProseWhileStreaming === true &&
+      typed.finalUtterance === "" && typed.speakExecReceipt === true && typed.playLocalAck === false,
+    JSON.stringify(typed),
+  );
+  check(
+    "S2 ★打字回合连模型交回了 spoken 都不改道（用户钉死的边界：打字路径零改动）★",
+    JSON.stringify(planVoiceSpeech({ voiceTurn: false, spoken: SPOKEN, prose: PROSE })) ===
+      JSON.stringify(planVoiceSpeech({ voiceTurn: false, prose: PROSE })),
+  );
+
+  const voice = planVoiceSpeech({ voiceTurn: true, spoken: SPOKEN, prose: PROSE });
+  check(
+    "S3 ★语音回合念的是 spoken，不是正文（正文里的番号/精确秒数留给眼睛）★",
+    voice.route === "spoken" && voice.finalUtterance === SPOKEN,
+    voice.finalUtterance,
+  );
+  check(
+    "S4 ★语音回合流式期间不出声（正文不进耳朵）★",
+    voice.speakProseWhileStreaming === false,
+  );
+  check(
+    "S5 ★R2 定案：spoken 在场 ⇒ 执行回执并进 spoken，不再单独出声（耳朵只有本地应答+spoken 两声）★",
+    voice.speakExecReceipt === false && voice.playLocalAck === true,
+    JSON.stringify(voice),
+  );
+
+  // ★摘刀负对照（§8-4）：把 spoken 拿掉，别的一个字不动 —— 念的必须当场变回正文。
+  const cut = planVoiceSpeech({ voiceTurn: true, prose: PROSE });
+  check(
+    "S6 ★摘刀：spoken 缺席 → 念的当场变回正文（不是静默哑掉）★",
+    cut.route === "prose_fallback" && cut.finalUtterance === PROSE,
+    `${cut.route} / ${cut.finalUtterance.slice(0, 12)}…`,
+  );
+  check(
+    "S7 ★而且缺席路整条退回现状：回执照旧出声（这不是第三种堆叠，这是「退回现状」的定义）★",
+    cut.speakExecReceipt === true,
+  );
+  check(
+    "S8 空 spoken / 纯空白 spoken 与缺席同路（schema 之外再兜一层，防裸数据调用方）",
+    planVoiceSpeech({ voiceTurn: true, spoken: "", prose: PROSE }).route === "prose_fallback" &&
+      planVoiceSpeech({ voiceTurn: true, spoken: "   ", prose: PROSE }).route === "prose_fallback",
+  );
+  check(
+    "S9 ★兜底路正文也空 → 一声不出，但回执仍在（与今天「brief 为空」那格逐字同）★",
+    (() => {
+      const p = planVoiceSpeech({ voiceTurn: true, prose: "   " });
+      return p.finalUtterance === "" && p.speakExecReceipt === true;
+    })(),
+  );
+  check(
+    "S10 流式期间念不念只取决于「是不是语音回合」——spoken 在不在场都一样（send 时就判得出，不必等 JSON）",
+    planVoiceSpeech({ voiceTurn: true, spoken: SPOKEN, prose: PROSE }).speakProseWhileStreaming ===
+      planVoiceSpeech({ voiceTurn: true, prose: "" }).speakProseWhileStreaming,
+  );
+
+  // 源码级：ChatPanel 那四处出声点必须全部挂在计划上，没有一处裸 speak。
+  // （这一条防的是"函数写好了但某一处忘了接"——纯函数全绿而真机照旧念正文。）
+  const panelSrc = readFileSync("apps/web/src/ChatPanel.tsx", "utf8")
+    .split("\n")
+    .filter((l) => !l.trimStart().startsWith("//"))
+    .join("\n");
+  const streamGuarded = panelSrc.split("ttsEnabled && sendPlan.speakProseWhileStreaming").length - 1;
+  check(
+    "S11 ★流式两处 speak(正文) 都挂在计划上（一处漏接＝语音回合照旧念正文）★",
+    streamGuarded === 2,
+    `挂上的有 ${streamGuarded} 处`,
+  );
+  check(
+    "S12 ★执行回执那一处挂在 speakReceipt 上★",
+    panelSrc.includes("ttsEnabled && speakReceipt"),
+  );
+  check(
+    "S13 ★本地应答只出声不上屏（R6）：pickVoiceConfirm 的新调用点没跟着 addMessage★",
+    panelSrc.includes("sendPlan.playLocalAck && ttsEnabled) speak(pickVoiceConfirm"),
+  );
 }
 
 // ── ⑦ WAV 封装：采集链上唯一一段纯计算，也是最难在真机上看出错的一段 ──

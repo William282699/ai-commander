@@ -30,6 +30,8 @@ import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendin
 import type { PendingRequestTag } from "@ai-commander/shared";
 import { startVoiceRecording, isVoiceCaptureSupported, type VoiceRecording, type VoiceRecorderHandle } from "./voiceRecorder";
 import { probeVoiceChannels, channelUsesVoiceCapture } from "./voiceCapability";
+// spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
+import { planVoiceSpeech } from "./voiceSpeech";
 import {
   addMessage,
   updateLastPlayerMessage,
@@ -1149,6 +1151,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // is the locked persona used by every speak()/flush() call below.
     const ttsPersona: Persona = selectedCommanders[0];
 
+    // ── spoken 层：这一轮耳朵的安排 ──
+    // spoken 还没到（它在 JSON 里，随 options 事件才来），但**流式期间念不念
+    // 正文**这一件只取决于"这是不是语音回合"，此刻就判得出来。剩下两件
+    // （念哪一句、回执出不出声）在 processAdvisorData 里拿到 spoken 后再算。
+    const sendPlan = planVoiceSpeech({ voiceTurn: isVoiceTurn, prose: "" });
+    // 本地即时应答：录音一到手就出声，不等模型。占的是"我在听"那一槽——
+    // 今天这一槽是空的（陈的第一声要 1.5~2.3s）。**复用现有 VOICE_CONFIRMS 池，
+    // 一句不加**（R6），且只出声不上屏（上屏即死模板，违 07-22 家法）。
+    if (sendPlan.playLocalAck && ttsEnabled) speak(pickVoiceConfirm(selectedCommanders[0]), ttsPersona);
+
     // Phase 3: thread context (threads are dormant in 6a; kept as a safety net)
     const activeThreadOnChannel = activeThreads.find(t => t.channel === ch);
     const threadContext = activeThreadOnChannel
@@ -1261,6 +1273,28 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         }
       }
 
+      // ── spoken 层：这一轮说给耳朵的那一句（本轮只播一次）──
+      //
+      // prose 传的是**屏上真出现的那一段**，不是别的什么摘要：正常流是
+      // data.brief，合同判决那条路是它自己那句判词。spoken 缺席就念它——
+      // 一条规则覆盖四种缺席（模型忘写 / 白名单吃掉 / 兜底回执 / 通讯中断）。
+      //
+      // 调用点只有两处，且互斥（第一处走完就 return）：合同判决路一处、
+      // 其余全部分支合用一处。放在这里而不是更早，是因为 stale 那一格的规矩是
+      // 「displays NOTHING and writes NOTHING」——它也不该出声。
+      const sayToEar = (prose: string) => {
+        const plan = planVoiceSpeech({
+          voiceTurn: isVoiceTurn,
+          spoken: typeof data?.spoken === "string" ? data.spoken : undefined,
+          prose,
+        });
+        if (isVoiceTurn && ttsEnabled && plan.finalUtterance) {
+          speak(plan.finalUtterance, ttsPersona);
+          flush(ttsPersona); // 非流兜底路后面没有 flush，末句不许卡在句子缓冲里
+        }
+        return plan;
+      };
+
       // ── 地基二: pending semantic consumption, judged BEFORE anything else.
       // The verdict maps through pendingVerdictRoute — the ONE bench-testable
       // table of what may execute. stale (wrong id / cross-channel / expired /
@@ -1322,14 +1356,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           const line = (data.brief as string) || fallbackLine;
           addMessage(verdict === "protocol_failure" ? "warning" : "info", line, state.time, ch, undefined, "command_ack");
           pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
+          // 语音说「可以」批准就走这条路：耳朵拿到的是 spoken，缺席则是这句判词。
+          const decisionPlan = sayToEar(line);
           if (route.executeOldContract && pcSameEpoch) {
-            handleApprove(pcSameEpoch.opt, 0, "auto", pcSameEpoch.execCtx, pcSameEpoch.data);
+            handleApprove(pcSameEpoch.opt, 0, "auto", pcSameEpoch.execCtx, pcSameEpoch.data, decisionPlan.speakExecReceipt);
           }
           return;
         }
         // amend / unrelated / no_pending → normal flow below (amend's old
         // contract is already cleared: ONLY the new intents may execute).
       }
+      // 其余全部分支（error / NOOP / 空 options / 正常命令）合用这一处：它们
+      // 屏上显示的都是 data.brief（或它为空时各自的兜底行），所以耳朵听的也是它。
+      const speechPlan = sayToEar((data.brief as string) || "");
       if (data.error) {
         setError(data.error as string);
         setResponse(null);
@@ -1406,7 +1445,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
         if (gate.auto && (data.options as AdvisorOption[]).length >= 1) {
           const autoData = data as DisplayResponse;
-          setTimeout(() => handleApprove(autoData.options[0], 0, "auto", execCtx, autoData), 0);
+          setTimeout(() => handleApprove(autoData.options[0], 0, "auto", execCtx, autoData, speechPlan.speakExecReceipt), 0);
         } else {
           const reason = gate.reason;
           const opt0 = Array.isArray(data.options) ? (data.options as AdvisorOption[])[0] : undefined;
@@ -1459,7 +1498,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           // 语义上是重复的，不是第二道判定。
           if (bucket === "A" && opt0) {
             setClarification(null);
-            setTimeout(() => handleApprove(opt0, 0, "auto", execCtx, data as DisplayResponse), 0);
+            setTimeout(() => handleApprove(opt0, 0, "auto", execCtx, data as DisplayResponse, speechPlan.speakExecReceipt), 0);
           } else {
             // Bucket B (clarify) / C (confirm high_impact). Voice the concern/question.
             // high_impact → stash a LOCAL pending-confirm so the player's next confirm
@@ -1600,7 +1639,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       let gotOptions = false;
 
       setStreamingText("");
-      cancel(); // reset TTS for new stream
+      // 打字回合照旧：新流开始前清掉上一段 TTS。
+      // 语音回合**不清**——队列里此刻只有刚播的那声本地应答，一清就把"我在听"
+      // 掐掉了；而这条路上的 TTS 早在按下 🎤 的那一瞬间就 cancel() 过一次
+      // （startPTT:502，防陈的声音被录进长官的命令里），没有旧队列可清。
+      if (!isVoiceTurn) cancel(); // reset TTS for new stream
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1622,7 +1665,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             if (event.type === "text") {
               accumulatedText += event.content;
               setStreamingText(accumulatedText);
-              if (ttsEnabled) speak(event.content, ttsPersona);
+              // 语音回合正文不进耳朵（它是写给眼睛的那一版）——耳朵等 spoken。
+              if (ttsEnabled && sendPlan.speakProseWhileStreaming) speak(event.content, ttsPersona);
             } else if (event.type === "options") {
               gotOptions = true;
               setStreamingText(null);
@@ -1654,7 +1698,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
               if (event.type === "text") {
                 accumulatedText += event.content;
                 setStreamingText(accumulatedText);
-                if (ttsEnabled) speak(event.content, ttsPersona);
+                if (ttsEnabled && sendPlan.speakProseWhileStreaming) speak(event.content, ttsPersona);
               } else if (event.type === "options") {
                 gotOptions = true;
                 setStreamingText(null);
@@ -1709,7 +1753,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   sendVoiceRef.current = (v: VoiceRecording) => { void sendCommand(v); };
 
   // ── handleApprove (0.4: migrated from CommandPanel) ──
-  const handleApprove = (opt: AdvisorOption, idx: number, mode: "auto" | "manual" = "manual", ctx?: ExecContext, sourceResponse?: DisplayResponse) => {
+  /** spoken 层 R2：`speakReceipt=false` ⇒ 这一轮耳朵已经从 spoken 那儿听过这件事，
+   *  回执不再单独出声（屏上那行一个字不动）。默认 true＝分层之前的行为，
+   *  所以没被改过的调用点（手点批准、打字词表快路）逐字等价。 */
+  const handleApprove = (opt: AdvisorOption, idx: number, mode: "auto" | "manual" = "manual", ctx?: ExecContext, sourceResponse?: DisplayResponse, speakReceipt: boolean = true) => {
     const state = getState();
     if (!state) return;
 
@@ -1918,7 +1965,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       }
       // TTS readback of confirmation (its own short stream — speak()
       // detects persona switch from any prior stream and cancels cleanly).
-      if (ttsEnabled) {
+      // spoken 层 R2：spoken 在场的语音回合里这一声并进 spoken 了（见
+      // voiceSpeech.ts 的序列注释）——屏上那行照写，只是不再念第三遍。
+      if (ttsEnabled && speakReceipt) {
         speak(voiceConfirm, approveCommander);
       }
       // H1 (§8 手测 03:15): read BEFORE applyOrders — that call overwrites
