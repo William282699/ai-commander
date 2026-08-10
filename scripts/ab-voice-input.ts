@@ -598,36 +598,55 @@ async function runLive(n: number): Promise<void> {
     process.exit(1);
   }
 
-  const rows: { fx: string; heard: string; prose: string; ok: boolean }[] = [];
+  const rows: { fx: string; heard: string; spoken: string; prose: string; ok: boolean }[] = [];
   for (let i = 0; i < n; i++) {
     const fx = LIVE_FIXTURES[i % LIVE_FIXTURES.length];
     const audio = { data: readFileSync(fx.file).toString("base64"), format: "wav" as const };
     let prose = "";
     let heard = "";
+    let spoken = "";
     try {
       for await (const ev of callAdvisorStream(LIVE_DIGEST, "", "risk=0.50 focus=0.50 obj=0.50 cas=0.50", "combat", audio)) {
         if (ev.type === "text") prose += ev.content;
-        else if (ev.type === "options") heard = typeof ev.content?.heard === "string" ? ev.content.heard : "";
+        else if (ev.type === "options") {
+          heard = typeof ev.content?.heard === "string" ? ev.content.heard : "";
+          spoken = typeof ev.content?.spoken === "string" ? ev.content.spoken : "";
+        }
       }
     } catch (e) {
       console.log(`  #${i} 调用失败: ${String(e).slice(0, 80)}`);
     }
     const hit = fx.mustHear.filter((w) => heard.includes(w));
-    rows.push({ fx: fx.file.slice(-8), heard, prose, ok: hit.length === fx.mustHear.length });
+    rows.push({ fx: fx.file.slice(-8), heard, spoken, prose, ok: hit.length === fx.mustHear.length });
     console.log(`  #${String(i).padStart(2)} ${fx.file.slice(-8)} 地名 ${hit.length}/${fx.mustHear.length}  heard=${heard || "(缺席)"}`);
+    console.log(`      spoken=${spoken || "(缺席)"}`);
+    // 正文也印出来：L2 记录行、R1「从属正文」这两笔都得拿正文对着看才判得了，
+    // 而这数据每跑一次要花一次配额——不留下来等于白跑。
+    console.log(`      prose =${prose.trim().replace(/\n/g, "⏎").slice(0, 90) || "(空)"}`);
     if (i < n - 1) await new Promise((r) => setTimeout(r, 8000)); // 免费档配速
   }
 
-  // ── 三条判据 ──
+  // ── 判据 ──
+  //
+  // ★R5 义务稀释防线：spoken 上线后【本次强制】从一个义务变两个，老义务可能
+  //   被新义务挤掉。所以 L1（heard 在场）与 L4（spoken 在场）**必须同跑同看**，
+  //   且 L1 跌破即停——不许为了新字段牺牲老字段。
   const present = rows.filter((r) => r.heard.length > 0).length;
-  check(`L1 ★heard 在场 ${present}/${n}（收口线 ≥19/20，即 ≥95%）★`,
-    present >= Math.ceil(n * 0.95), `${present}/${n}`);
+  const l1Ok = present >= Math.ceil(n * 0.95);
+  check(`L1 ★heard 在场 ${present}/${n}（收口线 ≥19/20，即 ≥95%）★`, l1Ok, `${present}/${n}`);
+  if (!l1Ok) {
+    console.log("   ↳ ★R5 停线：新义务把老义务挤掉了。spoken 层不许在 L1 跌破的状态下往下走。");
+  }
 
-  // 转写复读进正文＝TTS 会把长官自己的话念回给他
+  // ★R3 判据归宿（T1j 式登记，2026-08-09）：
+  //   L2「正文含 heard」从**硬线降级为记录行**——分层之后语音回合的 TTS 不再念
+  //   正文，复读即使发生也**听不见**，只剩"屏上难看"。降级不是放弃：它照旧每跑
+  //   必算、红了打印全文，只是不再 FAIL。
+  //   接任的新硬线是 L7（spoken 不含 heard 整句）——那一格才真的会被念出来。
+  //   ⚠ 这是一条**有意的判据松动**，不是漏网：写在这里而不是只写在 commit 里，
+  //     因为下一个看见 L2 印红却全绿的人，得在同一屏上读到理由。
   const polluted = rows.filter((r) => r.heard.length > 4 && r.prose.includes(r.heard));
-  check(`L2 ★转写没有被复读进正文（TTS 污染）${n - polluted.length}/${n}★`, polluted.length === 0,
-    polluted.length ? `${polluted.length} 条` : "");
-  // 红了要看得见现场：把整段正文打出来，好分辨"真复读"与"brief 恰好跟命令重合"。
+  console.log(`记录行 L2（不 FAIL）转写复读进正文 ${polluted.length}/${n}——分层后耳朵听不见它，只剩屏上难看`);
   for (const p of polluted) {
     console.log(`   ↳ heard: ${p.heard}`);
     console.log(`   ↳ prose: ${p.prose.replace(/\n/g, "⏎")}`);
@@ -637,6 +656,69 @@ async function runLive(n: number): Promise<void> {
   const nameOk = rows.filter((r) => r.ok).length;
   check(`L3 ★地名命中 ${nameOk}/${n}——「战狼点」这种只活在信封里的名字听不出来，这一刀就白做★`,
     nameOk >= Math.ceil(n * 0.9), `${nameOk}/${n}`);
+
+  // ── spoken 层四条判据（§8）──
+  // 判据 4「缺席退回念正文」不在这儿：它是**客户端**行为，落在 --synthetic 的
+  // S6/S7（planVoiceSpeech 摘刀）+ 步3 浏览器冒烟臂2。这里只判模型这一侧。
+  const SPOKEN_MAX_CHARS = 60;
+  const spokenRows = rows.filter((r) => r.spoken.length > 0);
+  check(`L4 ★spoken 在场 ${spokenRows.length}/${n}（收口线 ≥19/20）——缺席就退回念正文，能跑但这一层等于没上★`,
+    spokenRows.length >= Math.ceil(n * 0.95), `${spokenRows.length}/${n}`);
+
+  // 长度：防它长成"正文的复制"。判的是字数这个结构量，不是措辞。
+  const tooLong = spokenRows.filter((r) => r.spoken.length > SPOKEN_MAX_CHARS);
+  check(`L5 ★spoken 都在 ${SPOKEN_MAX_CHARS} 字以内（一两句；超了就是把正文抄了一遍）★`,
+    tooLong.length === 0, tooLong.length ? `${tooLong.length} 条超长` : "");
+  for (const t of tooLong) console.log(`   ↳ ${t.spoken.length}字: ${t.spoken}`);
+
+  // 三条结构硬线（§8-3，审定核准：正则可判的**结构**特征，不是措辞词表）。
+  //   · G\d+     番号是给眼睛的地址，念出来是噪音
+  //   · ASCII 字母 中文 TTS 念 Aiden/Blake 本就别扭（用户手测原话）
+  //   · heard 整句 ★R3 的新硬线：L2 降级后，"把长官的话念回给他"这件事
+  //                 只可能从这一格发生——它是唯一会被念出来的那段文字
+  const withHandle = spokenRows.filter((r) => /G\d+/.test(r.spoken));
+  check(`L6a ★spoken 不含番号 G\\d+（番号留给眼睛）★`, withHandle.length === 0,
+    withHandle.length ? withHandle[0].spoken : "");
+  const withAscii = spokenRows.filter((r) => /[A-Za-z]/.test(r.spoken));
+  check(`L6b ★spoken 不含英文字母（中文 TTS 念 Aiden 别扭——用户手测原话）★`, withAscii.length === 0,
+    withAscii.length ? withAscii[0].spoken : "");
+  const echoed = spokenRows.filter((r) => r.heard.length > 4 && r.spoken.includes(r.heard));
+  check(`L7 ★spoken 不含 heard 整句（接任 L2 的新硬线：这一格是唯一还会被念出来的文字）★`,
+    echoed.length === 0, echoed.length ? `${echoed.length} 条` : "");
+  for (const e of echoed) {
+    console.log(`   ↳ heard : ${e.heard}`);
+    console.log(`   ↳ spoken: ${e.spoken}`);
+  }
+
+  // 记录行（不 FAIL）：合同里"不念小数位"那条与 spoken/正文的长度比。
+  // 不设硬线是有意的——§8 核准的硬线就三条，判据不许自己长胖。
+  const withDecimal = spokenRows.filter((r) => /\d+\.\d+/.test(r.spoken)).length;
+  const ratio = spokenRows.length
+    ? (spokenRows.reduce((a, r) => a + r.spoken.length / Math.max(1, r.prose.trim().length), 0) / spokenRows.length)
+    : 0;
+  console.log(`记录行 spoken 含小数 ${withDecimal}/${spokenRows.length}；spoken/正文 平均长度比 ${ratio.toFixed(2)}`);
+
+  // ── 记录行：R1「从属正文」的可判子集 ──
+  // R1 整条（不得携带正文与单子没有的事实）机器判不了；但它的**数量声明**那一
+  // 半判得了：spoken 里说"五分钟内到位"而正文里没有这个数，就是嘴替账本发明了
+  // 一个数。抽的是"数词+单位"这个结构，不是同义词表（同 /G\d+/、问号校验一族）。
+  // 首跑（2026-08-09 N=20）没有这一行，那一跑里 5/20 条 spoken 出现"预计五分钟
+  // 内到位"而无从对账——正是这条记录行被加出来的原因。**先记不设线**：n 小，
+  // 且要先分清"正文也这么说"与"spoken 自己发明的"。
+  const QTY = /(?:\d+|[零一二三四五六七八九十两百千半]+)\s*(?:分钟|秒|小时|个|支|辆|人|名|公里|米|%)/g;
+  let inventedRows = 0;
+  const inventedSamples: string[] = [];
+  for (const r of spokenRows) {
+    const inSpoken = r.spoken.match(QTY) ?? [];
+    const proseText = r.prose;
+    const missing = inSpoken.filter((q) => !proseText.includes(q));
+    if (missing.length > 0) {
+      inventedRows++;
+      if (inventedSamples.length < 3) inventedSamples.push(`${missing.join("/")} ← ${r.spoken}`);
+    }
+  }
+  console.log(`记录行 R1 数量声明：${inventedRows}/${spokenRows.length} 条 spoken 说了正文里没有的数`);
+  for (const s of inventedSamples) console.log(`   ↳ ${s}`);
 
   console.log(bad === 0 ? "\nALL LIVE PASS" : `\n${bad} 条不过`);
   process.exit(bad === 0 ? 0 : 1);
