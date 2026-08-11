@@ -94,9 +94,18 @@ function logEvent(o: Record<string, unknown>): void {
  * 现状只到 console / `fly logs`：JSONL 落盘属 O6，随 A5 记录仪缓办（§P 已裁），
  * 手测阶段的样本人工归档。
  */
-function logHeard(sessionId: unknown, channel: unknown, heard: unknown): void {
+function logHeard(sessionId: unknown, channel: unknown, heard: unknown, diag?: unknown): void {
   if (typeof heard !== "string" || heard.length === 0) return;
-  logEvent({ type: "voice_heard", sessionId, channel: channel || "", heard });
+  // 刀 C：客户端量到的设备开启耗时搭这趟顺风车回来（Fable 附加条件②）。
+  // ★为什么不让它只待在浏览器控制台：长官找不到那一行——而"要长官去 DevTools
+  // 里捞证据"正是提案 §8 记的那笔账（上一局的 voice_heard 落在没人够得到的地方，
+  // 一次真麦手测的原始证据就这么没了）。证据要自己跑到能被读到的地方去。
+  // 纯观测：不参与任何判定，形状不对就当没有。
+  const d = diag && typeof diag === "object" ? diag as Record<string, unknown> : null;
+  const open = d && typeof d.gumMs === "number"
+    ? { gumMs: d.gumMs, firstFrameMs: d.firstFrameMs, cold: d.cold, warmup: d.warm }
+    : undefined;
+  logEvent({ type: "voice_heard", sessionId, channel: channel || "", heard, open });
 }
 
 // Health check
@@ -134,7 +143,7 @@ app.post("/api/command", async (req, res) => {
 
   try {
     const result = await callAdvisor(digest, playerText, styleNote || "", channel || "", audio);
-    if (audio) logHeard(sessionId, channel, result.data.heard);
+    if (audio) logHeard(sessionId, channel, result.data.heard, req.body?.voiceDiag);
     // result always has data (fallback if LLM failed)
     if (result.warning) {
       res.json({ ...result.data, warning: result.warning });
@@ -176,7 +185,7 @@ app.post("/api/command-stream", async (req, res) => {
 
   try {
     for await (const event of callAdvisorStream(digest, playerText, styleNote || "", channel || "", audio)) {
-      if (audio && event.type === "options") logHeard(sessionId, channel, event.content?.heard);
+      if (audio && event.type === "options") logHeard(sessionId, channel, event.content?.heard, req.body?.voiceDiag);
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     }
     res.write("data: [DONE]\n\n");

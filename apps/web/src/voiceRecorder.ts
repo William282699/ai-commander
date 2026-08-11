@@ -102,6 +102,29 @@ export function isVoiceWarmEnabled(): boolean {
 let armCount = 0;
 
 /**
+ * 最近一次设备开启的耗时（Fable 附加条件②）。
+ *
+ * ★为什么不只打 console：长官找不到 DevTools 里的那一行——而"要长官去控制台里
+ * 捞证据"本身就是提案 §8 记的那笔账（`[EVENT] voice_heard` 落在没人够得到的
+ * 地方，一次真麦手测的原始证据就这么没了）。所以它搭命令请求的顺风车回服务端，
+ * 和 `voice_heard` 落在同一行日志里 —— 证据要自己跑到能被读到的地方去。
+ */
+export interface VoiceOpenDiag {
+  /** getUserMedia 解析耗时＝盲区本体（G1） */
+  gumMs: number;
+  /** 到第一帧真的流起来 */
+  firstFrameMs: number;
+  /** 本页面第一次开设备（冷）还是后续（热） */
+  cold: boolean;
+  /** 这一局预热开着没有——两臂对照时靠它认臂 */
+  warm: boolean;
+}
+let lastOpenDiag: VoiceOpenDiag | null = null;
+export function getVoiceOpenDiag(): VoiceOpenDiag | null {
+  return lastOpenDiag;
+}
+
+/**
  * 握住麦克风。**权限在这里弹**（调用点必须在一个用户手势里，浏览器才肯弹）。
  *
  * ★三个开关不是可选项：陈的 TTS 正从喇叭里出来，裸录音会把**他的声音**录进
@@ -155,11 +178,13 @@ export async function armVoiceCapture(): Promise<VoiceCaptureArm> {
   proc.onaudioprocess = (e) => {
     if (!loggedFirstFrame) {
       loggedFirstFrame = true;
-      // 一行把三段分开：申请到设备多久（G1）、到第一帧真的流起来多久。
+      // 一行把两段分开：申请到设备多久（G1）、到第一帧真的流起来多久。
       // 这就是"按下就喊会丢多少"的上界——盲区本体。
+      const firstFrameMs = Math.round(performance.now() - tArm);
+      lastOpenDiag = { gumMs: Math.round(tGum), firstFrameMs, cold, warm: isVoiceWarmEnabled() };
       console.log(
-        `[voice] device open: ${Math.round(performance.now() - tArm)}ms ` +
-        `(gum ${Math.round(tGum)}ms, first frame ${Math.round(performance.now() - tArm)}ms, ${cold ? "cold" : "warm"})`,
+        `[voice] device open: ${firstFrameMs}ms (gum ${Math.round(tGum)}ms, ${cold ? "cold" : "warm"}, ` +
+        `warmup ${lastOpenDiag.warm ? "on" : "OFF(负对照臂)"})`,
       );
     }
     const src = e.inputBuffer.getChannelData(0);

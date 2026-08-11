@@ -28,7 +28,7 @@ import { isKnownLocation, isValidTarget, detectStaleSquadRefs, canAutoExecute, d
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
 import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
-import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, type VoiceRecording, type VoiceCaptureArm } from "./voiceRecorder";
+import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, getVoiceOpenDiag, type VoiceRecording, type VoiceCaptureArm } from "./voiceRecorder";
 import { probeVoiceChannels, channelUsesVoiceCapture } from "./voiceCapability";
 // spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
 import { planVoiceSpeech } from "./voiceSpeech";
@@ -1673,7 +1673,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const streamRes = await fetch(`${API_URL}/api/command-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined }),
+        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined }),
       });
 
       if (!streamRes.ok || !streamRes.body) {
@@ -1781,7 +1781,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const res = await fetch(`${API_URL}/api/command`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined }),
+          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined }),
         });
         const data = await res.json();
         processAdvisorData(data);
