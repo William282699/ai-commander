@@ -34,10 +34,13 @@
 //     没有本地应答。
 // ============================================================
 
+import { echoesHeard } from "@ai-commander/shared";
+
 export type SpeechRoute =
-  | "typed"          // 打字回合＝现状
-  | "spoken"         // 语音回合，模型交回了 spoken
-  | "prose_fallback"; // 语音回合，spoken 缺席 → 退回念正文
+  | "typed"           // 打字回合＝现状
+  | "spoken"          // 语音回合，模型交回了 spoken
+  | "prose_fallback"  // 语音回合，spoken 缺席（或复读）→ 退回念正文
+  | "silent_echo";    // 语音回合，spoken 与正文**双层复读** → 这一段不出声
 
 export interface VoiceSpeechInput {
   /** 这一轮是不是语音回合。 */
@@ -47,6 +50,9 @@ export interface VoiceSpeechInput {
   spoken?: string;
   /** 屏上真出现的那段正文——缺席兜底念的就是它，不是别的什么摘要。 */
   prose: string;
+  /** 长官这一轮的原话（heard）。**引擎闸拿它当尺**：要念出去的那段若整句
+   *  复读了它，就等于把他的话念回给他——这一层存在的全部理由就是不干这件事。 */
+  heard?: string;
 }
 
 export interface VoiceSpeechPlan {
@@ -72,7 +78,11 @@ export function planVoiceSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
     };
   }
 
-  if (spoken.length > 0) {
+  // ★引擎闸（Fable 裁定 2026-08-10，替代改 prompt）：
+  //   spoken 整句复读了长官的原话 ⇒ **视同缺席**，走 R7 退回念正文。
+  //   理由见 speechEcho.ts：这一格跟输入质量走、措辞管不住，而 spoken 又是
+  //   唯一会被念出来的那段文字。真信封 N=20 实测 6/20 犯病。
+  if (spoken.length > 0 && !echoesHeard(spoken, input.heard)) {
     return {
       route: "spoken",
       speakProseWhileStreaming: false,
@@ -81,10 +91,26 @@ export function planVoiceSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
     };
   }
 
+  // 兜底之前拿同一把尺量正文：正文也是复读 ⇒ **双层复读**。
+  const prose = input.prose.trim();
+  if (prose.length > 0 && !echoesHeard(prose, input.heard)) {
+    return {
+      route: "prose_fallback",
+      speakProseWhileStreaming: false,
+      finalUtterance: prose,
+      speakExecReceipt: true,
+    };
+  }
+
+  // ★有意行为登记（T1j）：双层复读 ⇒ **这一段不出声**。
+  //   与「不许静默」那条不冲突——那条管的是**信息丢失**，而复读零信息：
+  //   把长官刚说的话念回给他，他没多知道一个字。执行回执照旧出声，
+  //   所以"到底办没办"这个信息一点没少。
+  //   犯病率由服务端 `voice_heard` 的 echo 标记计数（同一把尺），不靠这里。
   return {
-    route: "prose_fallback",
+    route: "silent_echo",
     speakProseWhileStreaming: false,
-    finalUtterance: input.prose.trim(),
+    finalUtterance: "",
     speakExecReceipt: true,
   };
 }

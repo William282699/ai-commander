@@ -9,3 +9,4 @@ export * from "./namePool";
 export * from "./squadHierarchy";
 export * from "./doctrine";
 export * from "./featureFlags";
+export * from "./speechEcho";

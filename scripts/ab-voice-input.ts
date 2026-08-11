@@ -35,6 +35,7 @@ import { rejectCommandBody, MAX_AUDIO_B64 } from "../apps/server/src/voiceInput"
 import { withVoiceReinforcement, backfillBriefFromPrelude } from "../apps/server/src/ai";
 import { canAutoExecute, decideBucket } from "../apps/web/src/autoExecuteGate";
 import { planVoiceSpeech } from "../apps/web/src/voiceSpeech";
+import { echoesHeard } from "@ai-commander/shared";
 import { encodeWavBase64 } from "../apps/web/src/voiceRecorder";
 import { buildDigestForChannel } from "../apps/web/src/digestHelper";
 import {
@@ -485,6 +486,48 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
       planVoiceSpeech({ voiceTurn: true, prose: "" }).speakProseWhileStreaming,
   );
 
+  // ── 运行时复读闸（Fable 裁定 2026-08-10：L7 从硬线改成引擎闸）──
+  //
+  // 判的是**效果**：闸装上之后，一段复读的 spoken 到底还会不会被念出去。
+  // 真信封 N=20 实测这一格犯病 6/20，而 spoken 正是唯一会被念出来的文字——
+  // 分层这一层的核心承诺（耳朵里不再出现你自己的话）就押在这条闸上。
+  {
+    const HEARD = "两个步兵去阿拉曼，剩下的守住烽火台";
+    const REAL_PROSE = "两个步兵已经出发，烽火台留了四个人守。";
+    // ★E1/E2 用的是真信封 N=20 里**实际犯病的那一条**（日志原文，非我编造）
+    const echoPlan = planVoiceSpeech({ voiceTurn: true, spoken: HEARD + "。", prose: REAL_PROSE, heard: HEARD });
+    check(
+      "E1 ★★spoken 整句复读长官原话 → 视同缺席，改念正文（耳朵里不再出现他自己的话）★★",
+      echoPlan.route === "prose_fallback" && echoPlan.finalUtterance === REAL_PROSE,
+      `route=${echoPlan.route}`,
+    );
+    check(
+      "E2 ★摘刀负对照：同一份输入不给 heard（闸没有尺）→ 复读照旧被念出去★",
+      planVoiceSpeech({ voiceTurn: true, spoken: HEARD + "。", prose: REAL_PROSE }).finalUtterance === HEARD + "。",
+    );
+    const both = planVoiceSpeech({ voiceTurn: true, spoken: HEARD + "。", prose: HEARD + "。", heard: HEARD });
+    check(
+      "E3 ★双层复读（spoken 与正文都是他的话）→ 这一段不出声，但执行回执照旧★",
+      both.route === "silent_echo" && both.finalUtterance === "" && both.speakExecReceipt === true,
+      `route=${both.route}`,
+    );
+    check(
+      "E4 正常 spoken 不被误伤（闸只拦整句复读，不拦「提到了同一个地名」）",
+      planVoiceSpeech({ voiceTurn: true, spoken: "阿拉曼那两个步兵已经在路上了。", prose: REAL_PROSE, heard: HEARD }).route === "spoken",
+    );
+    check(
+      "E5 短原话不判复读（「可以」的包含关系太容易巧合，沿用 4 字门槛）",
+      !echoesHeard("可以，这就办。", "可以") &&
+        planVoiceSpeech({ voiceTurn: true, spoken: "可以，这就办。", prose: "x", heard: "可以" }).route === "spoken",
+    );
+    check(
+      "E6 ★谓词全仓唯一一份：运行时闸、服务端日志、台架三处 import 同一个 echoesHeard★",
+      readFileSync("packages/shared/src/speechEcho.ts", "utf8").includes("export function echoesHeard") &&
+        readFileSync("apps/web/src/voiceSpeech.ts", "utf8").includes('echoesHeard } from "@ai-commander/shared"') &&
+        readFileSync("apps/server/src/index.ts", "utf8").includes('echoesHeard } from "@ai-commander/shared"'),
+    );
+  }
+
   // 源码级：ChatPanel 那四处出声点必须全部挂在计划上，没有一处裸 speak。
   // （这一条防的是"函数写好了但某一处忘了接"——纯函数全绿而真机照旧念正文。）
   const panelSrc = readFileSync("apps/web/src/ChatPanel.tsx", "utf8")
@@ -749,6 +792,27 @@ if (MODE === "--live") {
  *
  * 函数声明而非 const：上面的 --synthetic 段先执行，要靠提升拿到它。
  */
+/**
+ * 「十七辆」→ "17"，供"这个数在不在信封里"查证。
+ *
+ * 中文数字是**记数系统**不是同义词表——它跟 L6b 的信封白名单同族：
+ * 判的是"这个数有没有出处"，出处只认本轮信封。只覆盖 0-99（部队计数的量级），
+ * 认不出来就返回 null、当作"查无出处"最保守处理。
+ */
+function qtyToDigits(qty: string): string | null {
+  const m = /^(\d+)/.exec(qty.trim());
+  if (m) return m[1];
+  const D: Record<string, number> = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const cn = qty.replace(/[^零一二三四五六七八九十两]/g, "");
+  if (cn.length === 0) return null;
+  if (!cn.includes("十")) return cn.length === 1 && cn[0] in D ? String(D[cn[0]]) : null;
+  const [hi, lo] = cn.split("十");
+  const tens = hi === "" ? 1 : (hi in D ? D[hi] : NaN);
+  const ones = lo === "" ? 0 : (lo in D ? D[lo] : NaN);
+  if (Number.isNaN(tens) || Number.isNaN(ones)) return null;
+  return String(tens * 10 + ones);
+}
+
 function foreignTokensNotInEnvelope(spoken: string, envelope: string): string[] {
   const tokens = spoken.match(/[A-Za-z][A-Za-z0-9_]*/g) ?? [];
   const hay = envelope.toLowerCase();
@@ -1050,12 +1114,16 @@ async function runLive(n: number): Promise<void> {
   const envForeign = spokenRows.filter((r) => /[A-Za-z]/.test(r.spoken)).length;
   console.log(`记录行 spoken 含英文（含信封内专名如 Aiden/I1）${envForeign}/${spokenRows.length}——` +
     `信封里没有中文代称，这一格归引擎侧另一刀，不由 prompt 背`);
-  const echoed = spokenRows.filter((r) => r.heard.length > 4 && r.spoken.includes(r.heard));
-  check(`L7 ★spoken 不含 heard 整句（接任 L2 的新硬线：这一格是唯一还会被念出来的文字）★`,
-    echoed.length === 0, echoed.length ? `${echoed.length} 条` : "");
+  // ★L7 由硬线降为**记录行**（Fable 裁定 2026-08-10）：这一格改由**引擎闸**当场拦
+  //   （planVoiceSpeech：spoken 复读 ⇒ 视同缺席走 R7），不再指望模型改口。
+  //   台架这里只量**犯病率**——模型多久犯一次，是排下一刀的依据，不是合并的闸。
+  //   真拦没拦住由运行时断言 E1-E6 守（下方 --synthetic 段，含摘刀负对照）。
+  const echoed = spokenRows.filter((r) => echoesHeard(r.spoken, r.heard));
+  console.log(`记录行 L7（不 FAIL）spoken 复读长官原话 ${echoed.length}/${spokenRows.length}——引擎闸会当场拦下不出声，这里量的是犯病率`);
   for (const e of echoed) {
     console.log(`   ↳ heard : ${e.heard}`);
     console.log(`   ↳ spoken: ${e.spoken}`);
+    console.log(`   ↳ 闸判 : route=${planVoiceSpeech({ voiceTurn: true, spoken: e.spoken, prose: e.prose, heard: e.heard }).route}`);
   }
 
   // 记录行（不 FAIL）：合同里"不念小数位"那条与 spoken/正文的长度比。
@@ -1073,20 +1141,31 @@ async function runLive(n: number): Promise<void> {
   // 首跑（2026-08-09 N=20）没有这一行，那一跑里 5/20 条 spoken 出现"预计五分钟
   // 内到位"而无从对账——正是这条记录行被加出来的原因。**先记不设线**：n 小，
   // 且要先分清"正文也这么说"与"spoken 自己发明的"。
+  // ★分两臂（Fable 裁定 2026-08-10）：正文里没有的数，也分两种——
+  //   **信封里查得到** ⇒ 真话，只是没上屏（攒 n，看要不要让正文也说）；
+  //   **查无出处**   ⇒ 编造，**一例即升级**。
+  //   查法与 L6b 同族：白名单是本轮信封本身（数据驱动，不是我写的词表）。
+  //
+  // ⚠ **这条查法是宽的，如实标注**：信封里到处是数字（战力值 427/440、坐标、
+  //   资源数），所以"17 在信封里出现过"**不等于**"真有十七辆坦克"——数字没跟
+  //   它数的那个东西绑起来。方向上是**保守**的：宽查法只会把编造误放进"真话"
+  //   那一臂，不会反过来冤枉模型。于是「查无出处」这一臂是**下界**——
+  //   它报 1 例就一定是真编造（可以按"一例即升级"办），但它报 0 例
+  //   **不等于没有编造**。要收紧得把数字与它的名词绑定，那是另一件工程活。
   const QTY = /(?:\d+|[零一二三四五六七八九十两百千半]+)\s*(?:分钟|秒|小时|个|支|辆|人|名|公里|米|%)/g;
-  let inventedRows = 0;
-  const inventedSamples: string[] = [];
+  const inEnvelope: string[] = [];
+  const fabricated: string[] = [];
   for (const r of spokenRows) {
-    const inSpoken = r.spoken.match(QTY) ?? [];
-    const proseText = r.prose;
-    const missing = inSpoken.filter((q) => !proseText.includes(q));
-    if (missing.length > 0) {
-      inventedRows++;
-      if (inventedSamples.length < 3) inventedSamples.push(`${missing.join("/")} ← ${r.spoken}`);
+    for (const q of r.spoken.match(QTY) ?? []) {
+      if (r.prose.includes(q)) continue;                       // 正文说了，不算
+      const digits = qtyToDigits(q);
+      const hit = digits !== null && new RegExp(`\\b${digits}\\b`).test(LIVE_DIGEST);
+      (hit ? inEnvelope : fabricated).push(`${q} ← ${r.spoken.slice(0, 40)}`);
     }
   }
-  console.log(`记录行 R1 数量声明：${inventedRows}/${spokenRows.length} 条 spoken 说了正文里没有的数`);
-  for (const s of inventedSamples) console.log(`   ↳ ${s}`);
+  console.log(`记录行 R1 数量声明（正文没说的）：信封查得到 ${inEnvelope.length} 例（真话未上屏，攒 n）｜**查无出处 ${fabricated.length} 例（编造，一例即升级）**`);
+  for (const x of inEnvelope.slice(0, 3)) console.log(`   ↳ [信封有] ${x}`);
+  for (const x of fabricated.slice(0, 5)) console.log(`   ↳ ★[查无出处] ${x}`);
 
   console.log(bad === 0 ? "\nALL LIVE PASS" : `\n${bad} 条不过`);
   process.exit(bad === 0 ? 0 : 1);

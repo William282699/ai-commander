@@ -18,6 +18,7 @@ import cors from "cors";
 import { callAdvisor, callAdvisorStream, callGroupAdvisor, callLightBrief, isProviderConfigured, describeProviderConfig } from "./ai.js";
 import { voiceEnabledChannels } from "./providers.js";
 import { rejectCommandBody, audioOf } from "./voiceInput.js";
+import { echoesHeard } from "@ai-commander/shared";
 import { ttsRouter } from "./routes/tts.js";
 
 const app = express();
@@ -114,6 +115,10 @@ function logHeard(sessionId: unknown, channel: unknown, heard: unknown, diag?: u
   logEvent({
     type: "voice_heard", sessionId, channel: channel || "", heard, open,
     spoken: spokenText.length > 0 ? spokenText : null,   // null = 缺席 ⇒ 耳朵退回念正文
+    // ★复读计数器（Fable 裁定 2026-08-10）：客户端的引擎闸把这一格拦下来不出声，
+    //   拦掉之后从外面就再也看不见它犯过病——所以犯病率在这里记。
+    //   **与运行时闸共用同一个谓词**（packages/shared/speechEcho），不许两份。
+    echo: echoesHeard(spokenText, heard) || undefined,
   });
 }
 

@@ -1334,6 +1334,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           voiceTurn: isVoiceTurn,
           spoken: typeof data?.spoken === "string" ? data.spoken : undefined,
           prose,
+          heard,   // 引擎闸的尺：要念的那段若整句复读它，就不许念
         });
         if (isVoiceTurn && ttsEnabled && plan.finalUtterance) {
           speak(plan.finalUtterance, ttsPersona);
