@@ -33,6 +33,11 @@
 // 舒服地待在服务端 4mb 之内；同样 30 秒换 48kHz 就是 b64 3.84MB，贴死那条线。
 // ============================================================
 
+import {
+  IDLE_CAPTURE, onArmed, onDisarmed, onPress, onRelease, onCancel, onFrame, shouldMute,
+  type CaptureState,
+} from "./voiceCaptureState";
+
 const TARGET_RATE = 16000;
 const MAX_SECONDS = 30;
 /** 松手后再多听一会儿，等管线里在途的音频流完（Fable 裁定 2026-08-09：300ms）。 */
@@ -45,11 +50,27 @@ export interface VoiceRecording {
   durationSec: number;
 }
 
-export interface VoiceRecorderHandle {
-  /** 松手：停止采集并交出 wav。太短/无声/解码失败一律返回 null（不猜、不发空包）。 */
-  stop(): Promise<VoiceRecording | null>;
-  /** 放弃这次录音（切频道、组件卸载等），不产出。 */
+/**
+ * 常驻采集件（刀 C）：设备与音频图**开局一次拿到、整局握着不放**，
+ * 按下只翻一个标志位。
+ *
+ * 旧形状是 `startVoiceRecording()`——按下才开设备。它的代价是用户 2026-08-09
+ * 真麦手测挖出来的那个病：`getUserMedia` 解析、AEC/AGC 热身这几百毫秒里，
+ * 麦克风还没在收音，长官说的第一个词**物理上不存在**。危机中按下就喊必中，
+ * 平静中按下有停顿则躲过——「南线前哨守军」→「全套的收军」、「Emily」→「Amaly」，
+ * 跨频道同形，坏的永远是第一个词。
+ */
+export interface VoiceCaptureArm {
+  /** 按下：立刻开始收（零设备操作）。返回是否真的开始了（没 armed 就没开始）。 */
+  press(): boolean;
+  /** 松手：停止收集并交出 wav。太短/无声/解码失败一律返回 null（不猜、不发空包）。 */
+  release(): Promise<VoiceRecording | null>;
+  /** 放弃这次（切频道、手滑）：丢掉已收的，**设备照旧握着**。 */
   cancel(): void;
+  /** 真正撒手（组件卸载 / 切到不收音的频道）：关设备、关图。 */
+  dispose(): void;
+  /** 状态快照（🔴 指示灯读它——灯只许跟着 collecting 走，不许跟着"我打算开始"走）。 */
+  snapshot(): CaptureState;
 }
 
 export function isVoiceCaptureSupported(): boolean {
@@ -59,13 +80,47 @@ export function isVoiceCaptureSupported(): boolean {
 }
 
 /**
- * 开录。麦克风权限在这里第一次弹（按住 🎤 是用户手势，满足 getUserMedia 的要求）。
+ * 常驻预热的开关（Fable 附加条件①）。
+ *
+ * 关掉它＝退回**旧行为**：按下那一刻才开设备。这不是"另一条代码路"——
+ * 它只改**什么时候 arm**，采集件本身一个字节不变。所以它是 §6-5 那条必做负对照
+ * 的真麦版：同一次坐下、同一支麦、同一副嗓子，开着念 5 句、关掉念同样 5 句，
+ * 首词存活率一比就见分晓。两次分开测（今天旧的、明天新的）比不过这个。
+ *
+ * 关法二选一：网址加 `?novoicewarm`，或 localStorage 里 `voice.novoicewarm=1`。
+ */
+export function isVoiceWarmEnabled(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    if (new URLSearchParams(window.location.search).has("novoicewarm")) return false;
+    if (window.localStorage?.getItem("voice.novoicewarm") === "1") return false;
+  } catch { /* 隐私模式下 localStorage 会抛，按默认（预热开）走 */ }
+  return true;
+}
+
+/** 冷/热分档用：本页面生命周期内 arm 了几次。 */
+let armCount = 0;
+
+/**
+ * 握住麦克风。**权限在这里弹**（调用点必须在一个用户手势里，浏览器才肯弹）。
  *
  * ★三个开关不是可选项：陈的 TTS 正从喇叭里出来，裸录音会把**他的声音**录进
  * 长官的命令里。现状那条 Web Speech 走的是同一套带 AEC 的管线，所以今天不发作；
  * 换成自采集就必须自己开。（调用方另外还要在按下瞬间 cancel() 掉 TTS。）
+ *
+ * ★空闲静音：不在收集的时候 `track.enabled = false`，浏览器往图里送**数字静音**。
+ * 于是"不按的时候不留声音"从"我们的代码有良心"变成"根本没东西可留"。它是标志位
+ * 不是设备操作，翻回来是即时的 ⇒ 不牺牲零盲区。**橙点仍会整局亮着**——那是设备
+ * 开着的系统提示，用户 2026-08-10 明确接受了这个代价。
  */
-export async function startVoiceRecording(): Promise<VoiceRecorderHandle> {
+export async function armVoiceCapture(): Promise<VoiceCaptureArm> {
+  // ★设备开启耗时自己记（Fable 附加条件②）：提案 §4 缺的就是这个数，而它
+  //   只有真麦量得到。记在这里 ⇒ 长官正常玩的过程中自动采到，不必再贴控制台探针。
+  //   冷/热分档：第一次开设备与后续开设备可能差一个量级。
+  const tArm = performance.now();
+  const cold = armCount === 0;
+  armCount++;
+
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
@@ -74,6 +129,7 @@ export async function startVoiceRecording(): Promise<VoiceRecorderHandle> {
       channelCount: 1,
     },
   });
+  const tGum = performance.now() - tArm;
 
   const ctx = new AudioContext();
   const source = ctx.createMediaStreamSource(stream);
@@ -84,41 +140,73 @@ export async function startVoiceRecording(): Promise<VoiceRecorderHandle> {
   const mute = ctx.createGain();
   mute.gain.value = 0;
 
-  const chunks: Float32Array[] = [];
-  let frames = 0;
+  let state: CaptureState = onArmed(IDLE_CAPTURE);
+  let chunks: Float32Array[] = [];
   const maxFrames = MAX_SECONDS * ctx.sampleRate;
+
+  const applyMute = () => {
+    const m = shouldMute(state);
+    stream.getAudioTracks().forEach((t) => { t.enabled = !m; });
+  };
+
+  // ★图整局是热的：回调每秒响 ~21 次，一直在响。留不留由状态机说了算——
+  //   这条判定是全仓最热的一条路，答错一次的后果不是性能，是隐私。
+  let loggedFirstFrame = false;
   proc.onaudioprocess = (e) => {
-    if (frames >= maxFrames) return;
+    if (!loggedFirstFrame) {
+      loggedFirstFrame = true;
+      // 一行把三段分开：申请到设备多久（G1）、到第一帧真的流起来多久。
+      // 这就是"按下就喊会丢多少"的上界——盲区本体。
+      console.log(
+        `[voice] device open: ${Math.round(performance.now() - tArm)}ms ` +
+        `(gum ${Math.round(tGum)}ms, first frame ${Math.round(performance.now() - tArm)}ms, ${cold ? "cold" : "warm"})`,
+      );
+    }
     const src = e.inputBuffer.getChannelData(0);
-    chunks.push(new Float32Array(src)); // 必须拷贝：这块缓冲下一批会被复用
-    frames += src.length;
+    const { keep, next } = onFrame(state, src.length, maxFrames);
+    state = next;
+    if (keep) chunks.push(new Float32Array(src)); // 必须拷贝：这块缓冲下一批会被复用
   };
   source.connect(proc);
   proc.connect(mute);
   mute.connect(ctx.destination);
+  applyMute(); // 到手即静音：握住 ≠ 在录
 
-  const teardown = () => {
-    proc.onaudioprocess = null;
-    try { source.disconnect(); proc.disconnect(); mute.disconnect(); } catch { /* 已断开 */ }
-    stream.getTracks().forEach((t) => t.stop()); // 释放麦克风
-    void ctx.close();
-  };
+  const stopCollecting = () => { state = onRelease(state); applyMute(); };
 
   return {
-    cancel() {
-      chunks.length = 0;
-      teardown();
+    snapshot: () => state,
+
+    press(): boolean {
+      // 切后台会让 AudioContext 挂起（常驻件才有这个问题，旧的每次新建没有）。
+      // 不 await：resume 是异步的，等它就等于把盲区又请回来了；下一帧自然会来。
+      if (ctx.state === "suspended") void ctx.resume();
+      const next = onPress(state);
+      if (next === state) return false; // 没 armed ⇒ 没开始，调用方不许亮灯
+      state = next;
+      chunks = [];
+      applyMute(); // 解除静音——一个标志位，不是设备操作
+      return true;
     },
-    async stop(): Promise<VoiceRecording | null> {
-      // 松手 ≠ 声音已经到齐：getUserMedia 开着 AEC/降噪，管线本身有延迟，
-      // 加上 ScriptProcessor 4096 帧一批，最后一段还在路上。立刻拆线就把尾巴切了
-      // ——一句「…现在怎么办」到手成「…现在怎么」，问句变陈述句，陈于是把话
-      // 复述回来当回答（用户 2026-08-09 手测实录）。宽限一下再拆。
+
+    cancel() {
+      state = onCancel(state);
+      chunks = [];
+      applyMute();
+    },
+
+    async release(): Promise<VoiceRecording | null> {
+      // 松手 ≠ 声音已经到齐：AEC/降噪管线本身有延迟，加上 ScriptProcessor
+      // 4096 帧一批，最后一段还在路上。立刻停就把尾巴切了——一句「…现在怎么办」
+      // 到手成「…现在怎么」（刀 B，用户 2026-08-09 手测实录）。宽限一下再停。
       // ⚠ 这段宽限**测不出来于合成假麦**（假 getUserMedia 没有 AEC 管线，
       //   夹具里尾损只有 ~13ms）——真机效果的裁决权在手测。
       await new Promise((r) => setTimeout(r, TAIL_GRACE_MS));
+      const frames = state.frames;
       const rate = ctx.sampleRate;
-      teardown();
+      const collected = chunks;
+      stopCollecting();          // ★停的是收集，不是设备——下一次按下才没有盲区
+      chunks = [];
       if (frames === 0) return null;
       const durationSec = frames / rate;
       if (durationSec < 0.3) return null; // 手滑点一下，不算命令
@@ -126,12 +214,21 @@ export async function startVoiceRecording(): Promise<VoiceRecorderHandle> {
       try {
         const flat = new Float32Array(frames);
         let at = 0;
-        for (const c of chunks) { flat.set(c.subarray(0, Math.min(c.length, frames - at)), at); at += c.length; if (at >= frames) break; }
+        for (const c of collected) { flat.set(c.subarray(0, Math.min(c.length, frames - at)), at); at += c.length; if (at >= frames) break; }
         const base64 = await resampleToWav16k(flat, rate);
         return { data: base64, format: "wav", durationSec };
       } catch {
         return null; // 采集/重采样出问题＝没听到，交给上层 fail-closed，不发半个包
       }
+    },
+
+    dispose() {
+      state = onDisarmed(state);
+      chunks = [];
+      proc.onaudioprocess = null;
+      try { source.disconnect(); proc.disconnect(); mute.disconnect(); } catch { /* 已断开 */ }
+      stream.getTracks().forEach((t) => t.stop()); // 真正释放麦克风（橙点熄灭）
+      void ctx.close();
     },
   };
 }

@@ -36,6 +36,9 @@ import { withVoiceReinforcement } from "../apps/server/src/ai";
 import { canAutoExecute, decideBucket } from "../apps/web/src/autoExecuteGate";
 import { planVoiceSpeech } from "../apps/web/src/voiceSpeech";
 import { encodeWavBase64 } from "../apps/web/src/voiceRecorder";
+import {
+  IDLE_CAPTURE, onArmed, onDisarmed, onPress, onRelease, onCancel, onFrame, shouldMute,
+} from "../apps/web/src/voiceCaptureState";
 
 const MODE = process.argv[2] ?? "--synthetic";
 
@@ -490,6 +493,80 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     "S13 ★本地应答只出声不上屏（R6）：pickVoiceConfirm 的新调用点没跟着 addMessage★",
     panelSrc.includes("sendPlan.playLocalAck && ttsEnabled) speak(pickVoiceConfirm"),
   );
+}
+
+// ── ⑥c 采集状态机：常开之后，"不按就不留"这条不变量（刀 C）──
+//
+// 刀 C 的本体是**时序**（按下那一刻设备已经在收音），时序在浏览器里，node 够不到。
+// 够得到的是它背后那条不变量：**没按下 ⇒ 一个样本都不许留**。
+// 这条正是"麦克风一直开着"这个决定的全部安全边界——它要是被人改反了，游戏就变成
+// 一台常开的录音机。所以它必须被机器咬着。
+//
+// ★分账（提案 §6，Fable 审定）：这些是**结构断言，不冒充效果断言**。
+//   "首词有没有被吃掉"只有真麦判得了；合成假麦连设备开启那一段都没有。
+{
+  const FRAME = 4096;
+  const MAX = 30 * 48000;
+
+  const armed = onArmed(IDLE_CAPTURE);
+  check("C1 ★到手即握住，但不自动开录（握住 ≠ 在录，分开这两件事就是本刀全部的意思）★",
+    armed.armed === true && armed.collecting === false && armed.frames === 0);
+
+  // ★最要紧的一条：没按下的时候，热图每秒响 21 次，一帧都不许留。
+  const idleFrame = onFrame(armed, FRAME, MAX);
+  check("C2 ★★没按下 → 帧一律丢弃，且 frames 不涨（常开的全部安全边界就在这一条）★★",
+    idleFrame.keep === false && idleFrame.next.frames === 0);
+  let drifting = armed;
+  for (let i = 0; i < 200; i++) drifting = onFrame(drifting, FRAME, MAX).next;
+  check("C3 ★空转 200 帧（约 17 秒）后仍然一个样本没留——不是「第一帧没留」而是「一直没留」★",
+    drifting.frames === 0 && drifting.collecting === false);
+
+  const pressed = onPress(armed);
+  check("C4 按下 → 进入收集，计数从零起", pressed.collecting === true && pressed.frames === 0);
+  const collected = onFrame(pressed, FRAME, MAX);
+  check("C5 收集中 → 帧留下且计数累加", collected.keep === true && collected.next.frames === FRAME);
+
+  // ★指示灯不许撒谎的机器落点：没 armed 就按下，状态不许变成 collecting。
+  const pressedCold = onPress(IDLE_CAPTURE);
+  check("C6 ★没握住设备就按下 → 不进入收集（🔴 因此亮不起来；旧代码正是在这儿先亮灯后开设备）★",
+    pressedCold.collecting === false && pressedCold === IDLE_CAPTURE);
+
+  // ★本刀的本体：松手停的是收集，不是设备。
+  const released = onRelease(collected.next);
+  check("C7 ★★松手 → 停止收集，但 armed 仍为 true（不拆设备 = 下一次按下没有盲区）★★",
+    released.collecting === false && released.armed === true);
+  const afterRelease = onFrame(released, FRAME, MAX);
+  check("C8 松手之后回到「一帧不留」", afterRelease.keep === false && afterRelease.next.frames === released.frames);
+
+  const cancelled = onCancel(collected.next);
+  check("C9 放弃这次 → 已收的清零，设备照旧握着",
+    cancelled.frames === 0 && cancelled.collecting === false && cancelled.armed === true);
+
+  const disposed = onDisarmed(collected.next);
+  check("C10 ★真撒手（卸载/切频道）才 armed=false，且顺带停止收集★",
+    disposed.armed === false && disposed.collecting === false && disposed.frames === 0);
+
+  // 封顶语义沿用旧的 MAX_SECONDS，不许因为常开就无限收
+  const nearCap = { armed: true, collecting: true, frames: MAX };
+  check("C11 到达 30 秒封顶后不再留帧（常开不等于无限录）", onFrame(nearCap, FRAME, MAX).keep === false);
+
+  // 静音闸：不在收集就静音——"根本没东西可留"强过"收到了再扔"
+  check("C12 ★不在收集 ⇒ 音轨静音；收集中 ⇒ 放行（隐私保证从「代码有良心」升级成「物理上没有」）★",
+    shouldMute(armed) === true && shouldMute(released) === true &&
+    shouldMute(cancelled) === true && shouldMute(pressed) === false);
+
+  // 源码级：负对照开关与耗时日志（Fable 附加条件①②）必须真的在
+  const recSrc = readFileSync("apps/web/src/voiceRecorder.ts", "utf8");
+  check("C13 ★负对照开关在（novoicewarm）——摘刀臂靠它，没有它 §6-5 那条负对照就跑不了★",
+    recSrc.includes("novoicewarm") && recSrc.includes("isVoiceWarmEnabled"));
+  check("C14 ★设备开启耗时自己记（提案 §4 缺的那个数，长官正常玩就采到）★",
+    recSrc.includes("[voice] device open:") && recSrc.includes("cold") && recSrc.includes("gum"));
+  const panelSrc2 = readFileSync("apps/web/src/ChatPanel.tsx", "utf8")
+    .split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
+  check("C15 ★🔴 只跟着真的开始收音走（press() 返回真才亮，不再无条件亮）★",
+    panelSrc2.includes('if (arm.press()) setPttStatus("listening")'));
+  check("C16 ★松手不 dispose：只有预热关掉的负对照臂才撒手，正路留着设备★",
+    panelSrc2.includes("isVoiceWarmEnabled()) { voiceArmRef.current?.dispose()"));
 }
 
 // ── ⑦ WAV 封装：采集链上唯一一段纯计算，也是最难在真机上看出错的一段 ──

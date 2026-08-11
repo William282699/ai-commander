@@ -28,7 +28,7 @@ import { isKnownLocation, isValidTarget, detectStaleSquadRefs, canAutoExecute, d
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
 import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
-import { startVoiceRecording, isVoiceCaptureSupported, type VoiceRecording, type VoiceRecorderHandle } from "./voiceRecorder";
+import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, type VoiceRecording, type VoiceCaptureArm } from "./voiceRecorder";
 import { probeVoiceChannels, channelUsesVoiceCapture } from "./voiceCapability";
 // spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
 import { planVoiceSpeech } from "./voiceSpeech";
@@ -479,7 +479,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // ── 语音输入 V1：录音路（陈/Emily 的频道走这条，马克斯与群聊仍走 Web Speech）──
   // session 而不是裸 handle：长官可能在 getUserMedia 还没弹完权限就松手，
   // 那一下必须把还没到手的录音也取消掉，否则麦克风一直开着。
-  const voiceSessionRef = useRef<{ handle: VoiceRecorderHandle | null; aborted: boolean } | null>(null);
+  // 刀 C：整局握着的那一件。`pressWantedRef` 记"手指还按着没"——设备还在路上时
+  // 长官就松手的那一格，靠它把已经在飞的 arm 收回来。
+  const voiceArmRef = useRef<VoiceCaptureArm | null>(null);
+  const voiceArmingRef = useRef<Promise<VoiceCaptureArm | null> | null>(null);
+  const pressWantedRef = useRef(false);
   const sendVoiceRef = useRef<((v: VoiceRecording) => void) | null>(null);
 
   // 能力名单启动拉一次；拉不到就保持空名单＝全部走 Web Speech（fail-closed 回现状）。
@@ -492,6 +496,41 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   const hasTTS = typeof Audio !== "undefined" || (typeof window !== "undefined" && "speechSynthesis" in window);
   const [ttsEnabled, setTtsEnabled] = useState(false);
 
+  /**
+   * 刀 C：把麦克风握在手里。
+   *
+   * 预热开着（默认）＝开局第一个用户手势就握住，之后每次按下都是零启动；
+   * 预热关掉（`?novoicewarm`）＝退回旧行为，按下才开设备——那是负对照臂。
+   * 两条路共用同一个采集件，**只差 arm 的时点**。
+   */
+  const ensureVoiceArm = useCallback((): Promise<VoiceCaptureArm | null> => {
+    if (voiceArmRef.current) return Promise.resolve(voiceArmRef.current);
+    if (voiceArmingRef.current) return voiceArmingRef.current;
+    const p = armVoiceCapture().then(
+      (arm) => { voiceArmRef.current = arm; voiceArmingRef.current = null; return arm; },
+      () => { voiceArmingRef.current = null; setPttStatus("error"); return null; },
+    );
+    voiceArmingRef.current = p;
+    return p;
+  }, []);
+
+  // 开局预热（C2 并进 C1）：借第一个用户手势——浏览器只在手势里肯弹权限。
+  // 一次性，拿到就摘监听。频道不收音 / 浏览器不支持 → 不碰麦克风。
+  useEffect(() => {
+    if (!isVoiceWarmEnabled() || !isVoiceCaptureSupported()) return;
+    const warm = () => {
+      document.removeEventListener("pointerdown", warm, true);
+      if (isGroupChat) return;
+      if (!channelUsesVoiceCapture(COMMANDER_CHANNEL[selectedCommanders[0]])) return;
+      void ensureVoiceArm();
+    };
+    document.addEventListener("pointerdown", warm, true);
+    return () => document.removeEventListener("pointerdown", warm, true);
+  }, [ensureVoiceArm, isGroupChat, selectedCommanders]);
+
+  // 卸载才真撒手（松手不撒手是本刀的本体）。
+  useEffect(() => () => { voiceArmRef.current?.dispose(); voiceArmRef.current = null; }, []);
+
   const startPTT = useCallback(() => {
     if (loading) return;
 
@@ -502,13 +541,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // 按下即掐 TTS：陈的声音正从喇叭里出来，AEC 之外再加一道——
       // 让他的话被录进长官的命令里，是这条路独有的新病。
       cancel();
-      const session: { handle: VoiceRecorderHandle | null; aborted: boolean } = { handle: null, aborted: false };
-      voiceSessionRef.current = session;
-      setPttStatus("listening");
-      startVoiceRecording().then(
-        (h) => { if (session.aborted) h.cancel(); else session.handle = h; },
-        () => { voiceSessionRef.current = null; setPttStatus("error"); },
-      );
+      pressWantedRef.current = true;
+      void ensureVoiceArm().then((arm) => {
+        // 设备还在路上时长官就松手了 ⇒ 这一按作废（预热臂上这一格几乎不发生，
+        // 负对照臂上它就是常态——那正是这个病的形状）。
+        if (!arm || !pressWantedRef.current) return;
+        // ★C3 指示灯不许撒谎：只有 press() 真的进入 collecting 才亮 🔴。
+        //   旧代码在这里无条件 setPttStatus("listening")，而设备还没开——
+        //   长官看着红灯开口，说的话没人收。
+        if (arm.press()) setPttStatus("listening");
+      });
       return;
     }
 
@@ -558,20 +600,27 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   }, [SpeechRecCtor, loading, selectedCommanders, isGroupChat]);
 
   const stopPTT = useCallback(() => {
-    const session = voiceSessionRef.current;
-    if (session) {
-      voiceSessionRef.current = null;
-      if (!session.handle) {
-        // 权限还没弹完就松手了：把还没到手的那次录音也标记取消。
-        session.aborted = true;
-        setPttStatus("idle");
-        return;
+    if (pressWantedRef.current) {
+      pressWantedRef.current = false;
+      const arm = voiceArmRef.current;
+      const wasCollecting = !!arm?.snapshot().collecting;
+      setPttStatus("idle");
+      // 负对照臂（预热关掉）用完就撒手，下一次按下重新付设备开启的钱——
+      // 这样"关掉修复"才真的等于旧行为，而不是"第一次慢、后面照样快"。
+      const releaseDevice = () => {
+        if (!isVoiceWarmEnabled()) { voiceArmRef.current?.dispose(); voiceArmRef.current = null; }
+      };
+      if (arm && wasCollecting) {
+        void arm.release().then((rec) => {
+          releaseDevice();
+          // 太短/无声/解码失败 → rec 为 null，什么都不发（不猜、不发空包）。
+          if (rec) sendVoiceRef.current?.(rec);
+        });
+      } else {
+        // 设备还没到手就松手了：这一按作废，不产出、不发包。
+        arm?.cancel();
+        releaseDevice();
       }
-      void session.handle.stop().then((rec) => {
-        setPttStatus("idle");
-        // 太短/无声/解码失败 → rec 为 null，什么都不发（不猜、不发空包）。
-        if (rec) sendVoiceRef.current?.(rec);
-      });
       return;
     }
     if (pttRecRef.current) {
