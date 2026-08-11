@@ -32,7 +32,7 @@ import { createInitialGameState, resolveIntent } from "@ai-commander/core";
 import type { CommanderRef } from "@ai-commander/core";
 import { buildContent, channelAcceptsAudio, voiceEnabledChannels } from "../apps/server/src/providers";
 import { rejectCommandBody, MAX_AUDIO_B64 } from "../apps/server/src/voiceInput";
-import { withVoiceReinforcement } from "../apps/server/src/ai";
+import { withVoiceReinforcement, backfillBriefFromPrelude } from "../apps/server/src/ai";
 import { canAutoExecute, decideBucket } from "../apps/web/src/autoExecuteGate";
 import { planVoiceSpeech } from "../apps/web/src/voiceSpeech";
 import { encodeWavBase64 } from "../apps/web/src/voiceRecorder";
@@ -507,6 +507,65 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     "S13 ★松手瞬间不再有本地应答音——pickVoiceConfirm 全仓只剩 1 声明 + 1 处（执行回执）★",
     panelSrc.split("pickVoiceConfirm(").length - 1 === 2, // 照 N42/N43 先例：声明也计数
     `${panelSrc.split("pickVoiceConfirm(").length - 1} 处（应为 2＝声明+回执）`,
+  );
+}
+
+// ── ⑥e 答卷复活：JSON 没写 brief 时不许把整份判废（用户手测 2026-08-10 挖出）──
+//
+// 病灶链（日志实证，一局 15 个语音回合里中了 4 次）：
+//   spoken 层上线 → 模型把正文流在 ---JSON--- 之前、JSON 里写了 `spoken`
+//   → 它认为正文交过了，**不再写 brief**
+//   → schema 第一行 `typeof obj.brief !== "string" → return null` 判废
+//   → 服务端换成兜底 → 屏上「通讯干扰，无法解析参谋建议」
+//   → **heard 与 spoken 一起陪葬** → 客户端 fail-closed 进 bucket B、耳朵退回
+//     念正文 + 回执两段 ⇒ 用户报的"墨迹"。
+// 一条 prompt 都没错、一份答卷完全合法，全毁在一个缺席的字段上。
+{
+  // ★A1/A2 是**日志原文逐字照抄**（不是我造的例子）：这一条当时真的被判废了。
+  const realNoBrief = {
+    heard: "我看到中央前哨和野战修理厂附近中间有一个十单位的六坦克和四步兵的部队可以去吗",
+    spoken: "长官，中央前哨和野战修理厂中间的部队，是东北方向第一未编组群，有六辆主战坦克和四步兵。可以调动。",
+    responseType: "NOOP",
+    options: [],
+    urgency: 0.5,
+  };
+  const prelude = "长官，中央前哨和野战修理厂中间的部队是东北方向第一未编组群[临时编队G37]，有6辆主战坦克和4步兵。可以调动。";
+
+  check(
+    "A1 ★复现判废：合法答卷只因没写 brief 就被 schema 判 null（heard/spoken 一起陪葬）★",
+    validateAdvisorResponse(realNoBrief) === null,
+  );
+  check(
+    "A2 ★★补上流式正文后整份复活，且 heard 与 spoken 都还在★★",
+    (() => {
+      const r = validateAdvisorResponse(backfillBriefFromPrelude(realNoBrief, prelude));
+      return r?.brief === prelude && r?.heard === realNoBrief.heard && r?.spoken === realNoBrief.spoken;
+    })(),
+  );
+  check(
+    "A3 模型自己写了 brief 就不动它（补的是缺口，不是覆盖）",
+    backfillBriefFromPrelude({ brief: "模型自己的", options: [] }, prelude).brief === "模型自己的",
+  );
+  check(
+    "A4 前言为空时不编：补不出来就让它照旧判废，不许拿空串糊过去",
+    backfillBriefFromPrelude({ options: [] }, "   ").brief === undefined,
+  );
+  // 源码级：这条复活术不许再被 mode 关起来（原先只对 marcus_consult 开，
+  // 陈走的 execute 模式一直没有——这正是它咬到用户的原因）。
+  const aiSrc2 = readFileSync("apps/server/src/ai.ts", "utf8")
+    .split("\n").filter((l) => !l.trimStart().startsWith("//") && !l.trimStart().startsWith("*")).join("\n");
+  // 照 N42/N43 先例数调用点：1 声明 + 两条命令路各 1 处。
+  // ★两条都要：流式判废会退到非流式，非流式再判废一次，长官才看见「通讯干扰」
+  //   ——只补一条等于没补（A5 第一次跑就咬到了非流式那条漏网的副本）。
+  const revivals = aiSrc2.split("backfillBriefFromPrelude(").length - 1;
+  check(
+    "A5 ★复活术两条命令路都装上了（1 声明 + callAdvisor + callAdvisorStream）★",
+    revivals === 3,
+    `${revivals} 处（应为 3）`,
+  );
+  check(
+    'A6 ★brief 补位不再被 mode 关起来（原先只对 marcus_consult 开，陈的 execute 模式一直没有）★',
+    !aiSrc2.includes('!validated && mode === "marcus_consult") {'),
   );
 }
 

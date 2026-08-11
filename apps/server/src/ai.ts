@@ -826,15 +826,15 @@ ${styleNote}
         jsonPart = jsonPart.slice(firstBrace, lastBrace + 1);
       }
       validated = sanitize(jsonPart);
-      if (!validated && mode === "marcus_consult") {
+      // 与流式路同一条复活术（见 backfillBriefFromPrelude 的注释）。
+      // ★这一处尤其不能漏：它就是流式失败后的那条兜底路——流式那边判废、
+      //   退到这里再判废一次，长官才会看见「通讯干扰」。两条路要一起补。
+      if (!validated) {
         const parsed = safeParse(jsonPart);
         if (parsed && typeof parsed === "object") {
-          const obj = parsed as Record<string, unknown>;
-          const preludeText = raw.slice(0, delimIdx).trim();
-          if (typeof obj.brief !== "string" && preludeText.length > 0) {
-            obj.brief = preludeText;
-          }
-          validated = validateAdvisorResponse(obj);
+          validated = validateAdvisorResponse(
+            backfillBriefFromPrelude(parsed as Record<string, unknown>, raw.slice(0, delimIdx)),
+          );
         }
       }
     }
@@ -1045,6 +1045,25 @@ ${styleNote}
  * - type:"options" → full AdvisorResponse JSON (after ---JSON--- parsed & validated)
  * Falls back to non-streaming internally if provider doesn't support chatStream.
  */
+/**
+ * 流式答卷的复活术：JSON 没写 `brief` 时，把 `---JSON---` 之前那段**已经流给
+ * 长官看的正文**补进去。
+ *
+ * 抽成纯函数只为一件事：这一格是台架够得到的（不用起模型、不用起服务器），
+ * 而它承的重是"一份合法答卷会不会被判废"——判废的代价是 heard 和 spoken 一起
+ * 陪葬，屏上蹦出「通讯干扰」。这种东西不许只靠手测碰运气。
+ *
+ * 不覆盖已有的 brief（模型写了就以模型的为准），前言为空时也不编。
+ */
+export function backfillBriefFromPrelude(
+  parsed: Record<string, unknown>,
+  preludeText: string,
+): Record<string, unknown> {
+  const prelude = preludeText.trim();
+  if (typeof parsed.brief === "string" || prelude.length === 0) return parsed;
+  return { ...parsed, brief: prelude };
+}
+
 export async function* callAdvisorStream(
   digest: string,
   playerMessage: string,
@@ -1148,17 +1167,29 @@ ${styleNote}
       const lb = jsonText.lastIndexOf("}");
       if (fb >= 0 && lb > fb) jsonText = jsonText.slice(fb, lb + 1);
       validated = sanitize(jsonText);
-      // Backward compatibility for Marcus V2 streams: if JSON omitted "brief",
-      // inject the streamed pre-delimiter text and re-validate.
-      if (!validated && mode === "marcus_consult") {
+      // ★ JSON 里没写 brief 时，把**已经流给长官看的那段正文**补进去再验一次。
+      //
+      // 原先这一条只对 marcus_consult 开（"Marcus V2 向后兼容"）。用户手测
+      // 2026-08-10 拍到它对陈也必须开：spoken 层上线后，模型把正文流在
+      // ---JSON--- 之前、又在 JSON 里写了 `spoken`，于是**它认为正文已经交过了，
+      // 就不再写 brief**。而 schema 第一行就是 `typeof obj.brief !== "string"
+      // → return null` ⇒ 整份合法答卷被判废 ⇒ 兜底 ⇒ 屏上「通讯干扰，无法解析
+      // 参谋建议」，heard 和 spoken 一起陪葬（那一轮既听不清也没得念，
+      // 于是耳朵里退回"正文+回执"两段，用户报的"墨迹"就是这么来的）。
+      //
+      // 实测证据：一局 15 个语音回合里 4 次判废，其中 2 次的 JSON **完整且合法**，
+      // 唯一的毛病就是没有 brief（台架 A1-A4 拿日志原文逐字复现了这一格）。
+      //
+      // 补的不是编造：`preludeText` 就是**屏幕上已经显示的那段字**，客户端本来
+      // 也在做同一件事（`accumulatedText && !data.brief` → 补 brief），只是轮不到
+      // 它——服务端已经先把整份答卷换成兜底了。这里只是把同一条修补挪到
+      // 判废之前。
+      if (!validated) {
         const parsed = safeParse(jsonText);
         if (parsed && typeof parsed === "object") {
-          const obj = parsed as Record<string, unknown>;
-          const preludeText = fullText.split(JSON_DELIMITER)[0]?.trim() ?? "";
-          if (typeof obj.brief !== "string" && preludeText.length > 0) {
-            obj.brief = preludeText;
-          }
-          validated = validateAdvisorResponse(obj);
+          validated = validateAdvisorResponse(
+            backfillBriefFromPrelude(parsed as Record<string, unknown>, fullText.split(JSON_DELIMITER)[0] ?? ""),
+          );
         }
       }
     }
