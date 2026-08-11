@@ -189,6 +189,17 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     "N59 ★createFallbackResponse() 也没有 spoken——「通讯中断」那一格自动落进「缺席→念正文」，不需要单独分支★",
     createFallbackResponse().spoken === undefined,
   );
+  // 刀 C 顺手一刀：兜底句不许再指着一个屏上不存在的东西。
+  // 判的是**那半句在不在**（结构），不是措辞好不好（那归手感）。
+  check(
+    "N64 ★兜底句不再说「以下为默认方案」——砍卡法之后这条路一个方案都不展示，那半句是假话★",
+    !createFallbackResponse().brief.includes("默认方案"),
+    createFallbackResponse().brief,
+  );
+  check(
+    "N65 兜底句仍带可执行 options（它们是 decideBucket 负对照的料，不是给人看的，一个没删）",
+    createFallbackResponse().options.length === 3,
+  );
 }
 
 // ── ⑤ 打字回合零多余：两段语音 prompt 只在带音频那一轮出现 ──

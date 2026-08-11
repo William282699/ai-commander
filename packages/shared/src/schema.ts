@@ -443,10 +443,19 @@ export function isDay7SupportedIntentType(type: IntentType): boolean {
 
 /**
  * Create a default fallback response when LLM returns non-JSON or invalid data.
+ *
+ * ★2026-08-10 刀 C 顺手一刀（用户手测：他把这句话念成「通讯感染」报上来了）：
+ * 原文末尾是「以下为默认方案。」——**砍卡法之后这条路根本不展示 A/B/C 选项**，
+ * 那半句指着一个屏上不存在的东西。纯删除，不补一个字：这一格的下文由 bucket B
+ * 现成的问句机器接（`buildGateQuestion` 的 default 支给出「—— 请确认或重述。」），
+ * 不新造罐头（07-22 台词禁死模板）。
+ *
+ * ⚠ 下面的 options 一个没动：它们不是给人看的，是给 `decideBucket` 的负对照与
+ * 「兜底带着可执行 intent 所以不能自动执行」那条判定用的（台架 N37/V8/V9）。
  */
 export function createFallbackResponse(): AdvisorResponse {
   return {
-    brief: "通讯干扰，无法解析参谋建议。以下为默认方案。",
+    brief: "通讯干扰，无法解析参谋建议。",
     options: [
       {
         label: "A: 稳守阵地",
