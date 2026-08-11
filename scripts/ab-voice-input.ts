@@ -36,6 +36,7 @@ import { withVoiceReinforcement, backfillBriefFromPrelude } from "../apps/server
 import { canAutoExecute, decideBucket } from "../apps/web/src/autoExecuteGate";
 import { planVoiceSpeech } from "../apps/web/src/voiceSpeech";
 import { encodeWavBase64 } from "../apps/web/src/voiceRecorder";
+import { buildDigestForChannel } from "../apps/web/src/digestHelper";
 import {
   IDLE_CAPTURE, onArmed, onDisarmed, onPress, onRelease, onCancel, onFrame, shouldMute,
 } from "../apps/web/src/voiceCaptureState";
@@ -802,15 +803,40 @@ const LIVE_FIXTURES: LiveFixture[] = [
   },
 ];
 
-const LIVE_DIGEST = `---FRONTS---
-1. 北部战线: EnemyEngaged=无 EnemyMassing=3辆重甲+8步兵 power=1200
-4. 南部战线: EnemyEngaged=4辆重甲+1步兵 EnemyMassing=无 power=400
----SQUADS--- (loc= 是唯一已证位置，缺席=未证；目的地≠位置)
-  I1(Aiden) parent:chen 5units(4×infantry,1×light_tank) @(258,120) morale=0.9 mission=idle task=无任务 hp=100% loc=战狼点附近
----FACILITIES---
-南线前哨@(280,130) 北线前哨@(250,40) 烽火台@(230,70) 我军总部@(420,80)
----TAGS---
-战狼点=(260,125)`;
+/**
+ * ★真信封：由**生产代码**从造好的战局 state 生成（Fable 裁定 2026-08-10：
+ * 禁止手写玩具信封）。
+ *
+ * 为什么这条是判据的一部分而不是布景：上一版这里是十来行手写摘要，于是台架
+ * 22/22 全绿、真局判废率 27%——**同一天、同一份代码**。原因是信封一小，模型
+ * 回复就短、老老实实写满字段；信封一大它话多，就开始省 brief，而 schema 第一行
+ * 「没 brief 判废」把整份合法答卷连同 heard/spoken 一起扔掉。
+ * **玩具信封测不到只在真局出现的失败模式**——本刀最贵的一条方法教训。
+ *
+ * 造的是**战局**不是信封：插一个玩家标记（战狼点，本刀红利的最短证明，只活在
+ * ---TAGS--- 里）+ 一支有英文领队名的编队（Aiden，L6b 新口径的落点），其余全部
+ * 交给 `buildDigestForChannel`（客户端真路径同一个函数、同样 mintForceHandles=true）。
+ *
+ * ⚠ **如实标注的局限**：`tick()` 不驱动交战（那要 GameCanvas 那条循环），所以这份
+ * 信封是**开局静默局**——尺寸/节数/番号都是真的（3.4KB / 9 节 / 6 个番号，旧玩具
+ * 只有 0.4KB），但没有"快顶不住了"那种危机行。用户翻车正是在危机中，所以这份
+ * 机器档案是**下界不是充分条件**——活体那一半由长官的真局提供（Fable：两份都要）。
+ */
+function buildLiveDigest(): string {
+  const state = createInitialGameState("el_alamein");
+  state.tags.push({ id: "tag_1", name: "战狼点", position: { x: 260, y: 125 }, createdAt: 0 });
+  const ids: number[] = [];
+  state.units.forEach((u) => { if (u.team === "player" && ids.length < 5) ids.push(u.id); });
+  state.squads.push({
+    id: "I1", name: "Aiden squad", unitIds: ids,
+    leader: { name: "Aiden", rank: "sergeant", personality: "balanced" },
+    currentMission: null, missionTarget: null, morale: 0.9, formationStyle: "line",
+    ownerCommander: "chen", leaderName: "Aiden", role: "leader",
+  } as unknown as GameState["squads"][number]);
+  return buildDigestForChannel(state, "combat", undefined, [], undefined, undefined, true);
+}
+
+const LIVE_DIGEST = buildLiveDigest();
 
 async function runLive(n: number): Promise<void> {
   const { createHash } = await import("node:crypto");
@@ -864,19 +890,36 @@ async function runLive(n: number): Promise<void> {
     process.exit(1);
   }
 
-  const rows: { fx: string; arm: "clean" | "dirty"; invented: string[]; heard: string; spoken: string; prose: string; ok: boolean }[] = [];
+  // ★R5 扩容（Fable 自查 2026-08-10）：原来的"防挤出"哨只罩了 heard，没罩 brief
+  //   ——于是 brief 被新字段挤掉、整份答卷判废、heard 与 spoken 一起陪葬，而台架
+  //   全绿。**此后防挤出的哨必须罩住全部老义务字段，不是只罩最新那一个。**
+  //   `backfillBriefFromPrelude` 里那行 console.warn 是唯一能看见"模型漏写 brief"
+  //   的窗口——修法把症状盖住了，不数这一行就只能看见"一切正常"。
+  let briefRescued = 0;
+  const origWarn = console.warn;
+  console.warn = (...a: unknown[]) => {
+    if (String(a[0] ?? "").includes("brief backfilled")) briefRescued++;
+    origWarn(...(a as []));
+  };
+
+  const rows: { fx: string; arm: "clean" | "dirty"; invented: string[]; heard: string; spoken: string; prose: string; brief: string; fellBack: boolean; ok: boolean }[] = [];
   for (let i = 0; i < n; i++) {
     const fx = LIVE_FIXTURES[i % LIVE_FIXTURES.length];
     const audio = { data: readFileSync(fx.file).toString("base64"), format: "wav" as const };
     let prose = "";
     let heard = "";
     let spoken = "";
+    let brief = "";
+    let fellBack = false;
     try {
       for await (const ev of callAdvisorStream(LIVE_DIGEST, "", "risk=0.50 focus=0.50 obj=0.50 cas=0.50", "combat", audio)) {
         if (ev.type === "text") prose += ev.content;
         else if (ev.type === "options") {
           heard = typeof ev.content?.heard === "string" ? ev.content.heard : "";
           spoken = typeof ev.content?.spoken === "string" ? ev.content.spoken : "";
+          brief = typeof ev.content?.brief === "string" ? ev.content.brief : "";
+          // 服务端只在**判废换兜底**时挂 warning（格式异常 / 通讯中断两处）
+          fellBack = typeof ev.content?.warning === "string" && ev.content.warning.length > 0;
         }
       }
     } catch (e) {
@@ -887,14 +930,14 @@ async function runLive(n: number): Promise<void> {
     const invented = (fx.inventedIf ?? []).filter((w) => heard.includes(w));
     rows.push({
       fx: fx.file.split("/").pop() ?? fx.file, arm: fx.arm, invented,
-      heard, spoken, prose, ok: hit.length === fx.mustHear.length,
+      heard, spoken, prose, brief, fellBack, ok: hit.length === fx.mustHear.length,
     });
     console.log(`  #${String(i).padStart(2)} ${(fx.file.split("/").pop() ?? "").padEnd(16)} [${fx.arm === "clean" ? "净" : "脏"}] 地名 ${hit.length}/${fx.mustHear.length}${invented.length ? `  ★归一化「${invented.join("/")}」` : ""}`);
     console.log(`      heard =${heard || "(缺席)"}`);
     console.log(`      spoken=${spoken || "(缺席)"}`);
     // 正文也印出来：L2 记录行、R1「从属正文」这两笔都得拿正文对着看才判得了，
     // 而这数据每跑一次要花一次配额——不留下来等于白跑。
-    console.log(`      prose =${prose.trim().replace(/\n/g, "⏎").slice(0, 90) || "(空)"}`);
+    console.log(`      prose =${prose.trim().replace(/\n/g, "⏎").slice(0, 90) || "(空)"}${fellBack ? "   ★判废兜底" : ""}`);
     if (i < n - 1) await new Promise((r) => setTimeout(r, 8000)); // 免费档配速
   }
 
@@ -903,6 +946,20 @@ async function runLive(n: number): Promise<void> {
   // ★R5 义务稀释防线：spoken 上线后【本次强制】从一个义务变两个，老义务可能
   //   被新义务挤掉。所以 L1（heard 在场）与 L4（spoken 在场）**必须同跑同看**，
   //   且 L1 跌破即停——不许为了新字段牺牲老字段。
+  // ★★两行常驻哨（Fable 裁定 2026-08-10，永久）★★
+  //   L0b 判废计数：一份合法答卷被扔掉的代价是 heard+spoken 一起陪葬，屏上蹦出
+  //   「通讯干扰」。真局实测过 4/15，台架当时 0/21——因为那时的信封是玩具。
+  //   L0c brief 在场：老义务字段的防挤出哨。修法会把漏写的 brief 补上，所以
+  //   **同时报"被救了几次"**——只看在场率会永远是满分。
+  console.warn = origWarn;
+  const fallbacks = rows.filter((r) => r.fellBack).length;
+  check(`L0b ★判废计数 ${fallbacks}/${n}（一次判废＝heard 与 spoken 一起陪葬 + 屏上「通讯干扰」）★`,
+    fallbacks === 0, fallbacks ? `${fallbacks} 次` : "");
+  const briefPresent = rows.filter((r) => r.brief.trim().length > 0).length;
+  check(`L0c ★brief 在场 ${briefPresent}/${n}（防挤出哨罩全部老义务字段，不是只罩最新那个）★`,
+    briefPresent === n, `${briefPresent}/${n}`);
+  console.log(`记录行 brief 被复活 ${briefRescued}/${n} 次——模型漏写 brief 的真实频率（0 ⇒ 根因未发作，仍烧才按 G 刀止损线动 prompt）`);
+
   const present = rows.filter((r) => r.heard.length > 0).length;
   const l1Ok = present >= Math.ceil(n * 0.95);
   check(`L1 ★heard 在场 ${present}/${n}（收口线 ≥19/20，即 ≥95%）★`, l1Ok, `${present}/${n}`);

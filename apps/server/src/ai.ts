@@ -1061,6 +1061,10 @@ export function backfillBriefFromPrelude(
 ): Record<string, unknown> {
   const prelude = preludeText.trim();
   if (typeof parsed.brief === "string" || prelude.length === 0) return parsed;
+  // ★出声一次：修法把症状盖住了（补完之后从外面看 brief 永远在场），
+  //   而"模型漏写 brief 的频率"正是这一刀要盯的那个量。不打这一行，
+  //   台架与日志都只能看见"一切正常"。
+  console.warn("[voice] brief backfilled from prelude");
   return { ...parsed, brief: prelude };
 }
 
