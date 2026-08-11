@@ -580,6 +580,38 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     panelSrc2.includes("isVoiceWarmEnabled()) { voiceArmRef.current?.dispose()"));
 }
 
+// ── ⑥d L6b 新口径：英文 token 的白名单＝本轮信封本身（数据驱动，非词表）──
+//
+// 判据本体是纯函数 ⇒ 负对照不必花 --live 的配额，在这儿就能摘刀。
+{
+  const ENV = `---SQUADS---
+  I1(Aiden) parent:chen 5units @(258,120) loc=战狼点附近
+---FACILITIES---
+南线前哨@(280,130) 烽火台@(230,70)
+---TAGS---
+战狼点=(260,125)`;
+
+  check("F1 纯中文 spoken → 无违规", foreignTokensNotInEnvelope("战狼点那队顶上去，十七秒到。", ENV).length === 0);
+  check(
+    "F2 ★信封里有的专名（Aiden / I1）念出来不算错——信封没给中文代称，这一格归引擎侧另一刀★",
+    foreignTokensNotInEnvelope("Aiden 那队去南线前哨，I1 留守。", ENV).length === 0,
+  );
+  check(
+    "F3 ★★摘刀负对照：信封查无的英文（El Alamein）出现在 spoken 里 → 判红★★",
+    JSON.stringify(foreignTokensNotInEnvelope("两个步兵去 El Alamein，剩下的守烽火台。", ENV)) === '["El","Alamein"]',
+    JSON.stringify(foreignTokensNotInEnvelope("两个步兵去 El Alamein，剩下的守烽火台。", ENV)),
+  );
+  check(
+    "F4 大小写不影响归属判定（信封里写 Aiden，spoken 写 AIDEN 仍算信封内）",
+    foreignTokensNotInEnvelope("AIDEN 那队顶上去。", ENV).length === 0,
+  );
+  check(
+    "F5 ★新旧口径确实不同：旧口径「一个字母都不许有」会把 F2 判红，新口径不会★",
+    /[A-Za-z]/.test("Aiden 那队去南线前哨，I1 留守。") &&
+      foreignTokensNotInEnvelope("Aiden 那队去南线前哨，I1 留守。", ENV).length === 0,
+  );
+}
+
 // ── ⑦ WAV 封装：采集链上唯一一段纯计算，也是最难在真机上看出错的一段 ──
 // 头写错了服务端不会报错、模型也不会抱怨，只会"听不清"——这种错必须由台架抓。
 {
@@ -642,6 +674,23 @@ if (MODE === "--live") {
 // 那两个音，而信封的 ---FACILITIES--- 里明明白白写着「南线前哨」。heard 里出现
 // 「前哨」＝模型拿信封里现成的名字补了它没听见的音——这正是 A-1 要治的那笔账
 // （手测「骂人→中央战线」是同一个机制的另一个方向）。
+/**
+ * spoken 里出现的英文 token，哪些在本轮信封文本里查无此名。
+ *
+ * ★白名单是**信封本身**，不是我写的词表——这是红线二那条"数据驱动可以、
+ * 同义词表不行"的同一形状（保守案的实体名清单先例）。
+ * 判的是**编造**不是**语种**：信封里有 `I1(Aiden)` ⇒ 念 Aiden 是没办法
+ * （信封没给中文代称，那一格归引擎侧另一刀）；信封里没有 El Alamein
+ * ⇒ 它出现在 spoken 里就是模型自己塞进耳朵的洋文。
+ *
+ * 函数声明而非 const：上面的 --synthetic 段先执行，要靠提升拿到它。
+ */
+function foreignTokensNotInEnvelope(spoken: string, envelope: string): string[] {
+  const tokens = spoken.match(/[A-Za-z][A-Za-z0-9_]*/g) ?? [];
+  const hay = envelope.toLowerCase();
+  return [...new Set(tokens)].filter((t) => !hay.includes(t.toLowerCase()));
+}
+
 interface LiveFixture {
   file: string;
   sha256: string;
@@ -859,9 +908,28 @@ async function runLive(n: number): Promise<void> {
   const withHandle = spokenRows.filter((r) => /G\d+/.test(r.spoken));
   check(`L6a ★spoken 不含番号 G\\d+（番号留给眼睛）★`, withHandle.length === 0,
     withHandle.length ? withHandle[0].spoken : "");
-  const withAscii = spokenRows.filter((r) => /[A-Za-z]/.test(r.spoken));
-  check(`L6b ★spoken 不含英文字母（中文 TTS 念 Aiden 别扭——用户手测原话）★`, withAscii.length === 0,
-    withAscii.length ? withAscii[0].spoken : "");
+  // ★T1j 判据变更登记（2026-08-10，Fable 裁定）：L6b 从「spoken 一个英文字母都不许有」
+  //   改为「spoken 里的英文 token **必须出现在本轮信封文本里**」。
+  //
+  //   为什么改：旧口径实测 18/20 → 17/21 红着不动，而**根因不在措辞**——信封里那支
+  //   部队的唯一身份就是 `I1(Aiden)`，中文名不存在，模型要提它没有第二条路。
+  //   对照证据：同一批里 El Alamein 被译成了「阿拉曼」⇒ **能译的它译了，译不了的
+  //   它照念**。拿一条模型无法满足的硬线红着，只会训练人忽略红色。
+  //
+  //   新口径判的是**编造**而不是**语种**：信封里有的专名（Aiden/I1）念出来是没办法，
+  //   engine 给中文代称是另一级的活（已进 LEDGER）；信封里没有的英文（El Alamein
+  //   在本轮信封里查无此名）出现在 spoken 里，那就是模型自己塞进耳朵的洋文，照旧红。
+  //   白名单是**本轮信封文本本身**——数据驱动，不是我写的词表（红线二）。
+  const foreignBad = spokenRows
+    .map((r) => ({ r, bad: foreignTokensNotInEnvelope(r.spoken, LIVE_DIGEST) }))
+    .filter((x) => x.bad.length > 0);
+  check(`L6b ★spoken 里的英文 token 必须来自本轮信封（编造的洋文才算错，信封里有的专名不算）★`,
+    foreignBad.length === 0, foreignBad.length ? `${foreignBad.length} 条` : "");
+  for (const x of foreignBad) console.log(`   ↳ 信封查无「${x.bad.join("/")}」← ${x.r.spoken}`);
+  // 记录行：信封里有的英文专名念了多少次——engine 给中文代称那一级的账，量着不判
+  const envForeign = spokenRows.filter((r) => /[A-Za-z]/.test(r.spoken)).length;
+  console.log(`记录行 spoken 含英文（含信封内专名如 Aiden/I1）${envForeign}/${spokenRows.length}——` +
+    `信封里没有中文代称，这一格归引擎侧另一刀，不由 prompt 背`);
   const echoed = spokenRows.filter((r) => r.heard.length > 4 && r.spoken.includes(r.heard));
   check(`L7 ★spoken 不含 heard 整句（接任 L2 的新硬线：这一格是唯一还会被念出来的文字）★`,
     echoed.length === 0, echoed.length ? `${echoed.length} 条` : "");
