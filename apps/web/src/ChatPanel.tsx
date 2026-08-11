@@ -1205,10 +1205,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // 正文**这一件只取决于"这是不是语音回合"，此刻就判得出来。剩下两件
     // （念哪一句、回执出不出声）在 processAdvisorData 里拿到 spoken 后再算。
     const sendPlan = planVoiceSpeech({ voiceTurn: isVoiceTurn, prose: "" });
-    // 本地即时应答：录音一到手就出声，不等模型。占的是"我在听"那一槽——
-    // 今天这一槽是空的（陈的第一声要 1.5~2.3s）。**复用现有 VOICE_CONFIRMS 池，
-    // 一句不加**（R6），且只出声不上屏（上屏即死模板，违 07-22 家法）。
-    if (sendPlan.playLocalAck && ttsEnabled) speak(pickVoiceConfirm(selectedCommanders[0]), ttsPersona);
+    // ★本地即时应答音已砍（用户手测判退 2026-08-10，理由见 voiceSpeech.ts 顶部）：
+    //   墨迹 + 承诺早于理解（问句被回了一句「动手。」）。这一槽现在空着。
 
     // Phase 3: thread context (threads are dormant in 6a; kept as a safety net)
     const activeThreadOnChannel = activeThreads.find(t => t.channel === ch);

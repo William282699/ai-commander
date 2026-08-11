@@ -94,8 +94,13 @@ function logEvent(o: Record<string, unknown>): void {
  * 现状只到 console / `fly logs`：JSONL 落盘属 O6，随 A5 记录仪缓办（§P 已裁），
  * 手测阶段的样本人工归档。
  */
-function logHeard(sessionId: unknown, channel: unknown, heard: unknown, diag?: unknown): void {
+function logHeard(sessionId: unknown, channel: unknown, heard: unknown, diag?: unknown, spoken?: unknown): void {
   if (typeof heard !== "string" || heard.length === 0) return;
+  // spoken 层：**这一轮到底有没有交回 spoken**。
+  // ★起因＝用户手测 2026-08-10：一个命令回合耳朵里出了三段（应答→正文→回执），
+  //   而"三段"只可能是 spoken 缺席的兜底路（spoken 在场时回执不出声）。
+  //   台架用小信封量到 21/21 在场，真信封下是不是掉了——只有这一行答得了。
+  //   纯观测，不参与判定。
   // 刀 C：客户端量到的设备开启耗时搭这趟顺风车回来（Fable 附加条件②）。
   // ★为什么不让它只待在浏览器控制台：长官找不到那一行——而"要长官去 DevTools
   // 里捞证据"正是提案 §8 记的那笔账（上一局的 voice_heard 落在没人够得到的地方，
@@ -105,7 +110,11 @@ function logHeard(sessionId: unknown, channel: unknown, heard: unknown, diag?: u
   const open = d && typeof d.gumMs === "number"
     ? { gumMs: d.gumMs, firstFrameMs: d.firstFrameMs, cold: d.cold, warmup: d.warm }
     : undefined;
-  logEvent({ type: "voice_heard", sessionId, channel: channel || "", heard, open });
+  const spokenText = typeof spoken === "string" ? spoken.trim() : "";
+  logEvent({
+    type: "voice_heard", sessionId, channel: channel || "", heard, open,
+    spoken: spokenText.length > 0 ? spokenText : null,   // null = 缺席 ⇒ 耳朵退回念正文
+  });
 }
 
 // Health check
@@ -143,7 +152,7 @@ app.post("/api/command", async (req, res) => {
 
   try {
     const result = await callAdvisor(digest, playerText, styleNote || "", channel || "", audio);
-    if (audio) logHeard(sessionId, channel, result.data.heard, req.body?.voiceDiag);
+    if (audio) logHeard(sessionId, channel, result.data.heard, req.body?.voiceDiag, result.data.spoken);
     // result always has data (fallback if LLM failed)
     if (result.warning) {
       res.json({ ...result.data, warning: result.warning });
@@ -185,7 +194,7 @@ app.post("/api/command-stream", async (req, res) => {
 
   try {
     for await (const event of callAdvisorStream(digest, playerText, styleNote || "", channel || "", audio)) {
-      if (audio && event.type === "options") logHeard(sessionId, channel, event.content?.heard, req.body?.voiceDiag);
+      if (audio && event.type === "options") logHeard(sessionId, channel, event.content?.heard, req.body?.voiceDiag, event.content?.spoken);
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     }
     res.write("data: [DONE]\n\n");

@@ -9,17 +9,26 @@
 // ★ 审定 R2「听觉序列写死」的落点就是这个函数：一个语音命令回合的完整出声
 //   序列在这里一次算完，不许在别处再长出第三声。
 //
-//   语音回合 · spoken 在场（正路）：
-//     ① 本地应答（松手即播，不等模型）→ ② spoken 那一句。**就这两声。**
+//   语音回合 · spoken 在场（正路）：**只有 spoken 那一声。**
 //     执行回执的 speak 并进 spoken 不再单独出声——那 4 个字是 spoken 的真子集，
-//     排在它后面等于同一件事说三遍（「嗯。」→「G13那队这就过去。」→「照办，
-//     长官。」），正是本层要治的播报员感；而"我在听"这一槽已被 ① 占住。
+//     排在它后面等于同一件事说两遍，正是本层要治的播报员感。
 //
 //   语音回合 · spoken 缺席（兜底）：
-//     ① 本地应答 → ② 整段正文（options 到达后才起念，比今天晚 ~0.3s，R7 登记）
-//     → ③ 执行回执照旧出声。**②③ 就是今天的行为**——这不是第三种堆叠，
-//     这是"退回现状"的定义。一条规则覆盖四种缺席：模型忘写 / 白名单吃掉 /
-//     JSON 解析失败走兜底 / 通讯中断。
+//     ① 整段正文（options 到达后才起念，比分层前晚 ~0.3s，R7 登记）
+//     → ② 执行回执照旧出声。**这就是今天的行为**——"退回现状"的定义。
+//     一条规则覆盖四种缺席：模型忘写 / 白名单吃掉 / JSON 解析失败走兜底 / 通讯中断。
+//
+// ★★本地即时应答音已砍（用户手测判退 2026-08-10）★★
+//   原设计在松手瞬间从 VOICE_CONFIRMS 池里播一句（「收到。」「照办。」），
+//   用意是零模型延迟地占住"我在听"那一槽。用户实测原话：**「我刚说完话之后的
+//   『长官、照办』这些可以取消，太墨迹了」**。两条独立的理由支持砍掉：
+//     ① 墨迹——一个命令回合耳朵里出现三段（应答→正文→回执），用户明确判退；
+//     ② **承诺早于理解**（我在步 1 就挂账、当时请审的那一条）当场实锤：
+//        长官问「我军兵营附近有没有空闲的部队」——一个**问句**——而池子里抽中的
+//        是「动手。」。模型还没听懂，嘴已经先答应了要动手。
+//   这一槽现在空着：松手后到 spoken 起念之间没有声音。**若长官反过来嫌"死寂"，
+//   复活它只要把这一段接回去**（砍的是调用，不是池子——R6「池子 NEVER EXPAND」
+//   照旧成立，一句没加也一句没删）。
 //
 //   打字回合：一个字节不动（用户钉的边界）——正文边流边念、回执照旧出声、
 //     没有本地应答。
@@ -42,8 +51,6 @@ export interface VoiceSpeechInput {
 
 export interface VoiceSpeechPlan {
   route: SpeechRoute;
-  /** 录音一到手就播的那一声（走现有 VOICE_CONFIRMS 池，R6：一句不加、只出声不上屏）。 */
-  playLocalAck: boolean;
   /** 流式期间边流边念正文——语音回合恒 false（正文是写给眼睛的那一版）。 */
   speakProseWhileStreaming: boolean;
   /** 回复到齐时念的那一段；空串＝这一格不出声。 */
@@ -59,7 +66,6 @@ export function planVoiceSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
   if (!input.voiceTurn) {
     return {
       route: "typed",
-      playLocalAck: false,
       speakProseWhileStreaming: true,
       finalUtterance: "",
       speakExecReceipt: true,
@@ -69,7 +75,6 @@ export function planVoiceSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
   if (spoken.length > 0) {
     return {
       route: "spoken",
-      playLocalAck: true,
       speakProseWhileStreaming: false,
       finalUtterance: spoken,
       speakExecReceipt: false,
@@ -78,7 +83,6 @@ export function planVoiceSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
 
   return {
     route: "prose_fallback",
-    playLocalAck: true,
     speakProseWhileStreaming: false,
     finalUtterance: input.prose.trim(),
     speakExecReceipt: true,

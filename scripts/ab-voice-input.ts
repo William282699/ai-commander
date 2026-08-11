@@ -428,9 +428,9 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
 
   const typed = planVoiceSpeech({ voiceTurn: false, spoken: SPOKEN, prose: PROSE });
   check(
-    "S1 ★打字回合逐字等价于分层之前：边流边念正文、回执照旧出声、没有本地应答★",
+    "S1 ★打字回合逐字等价于分层之前：边流边念正文、回执照旧出声★",
     typed.route === "typed" && typed.speakProseWhileStreaming === true &&
-      typed.finalUtterance === "" && typed.speakExecReceipt === true && typed.playLocalAck === false,
+      typed.finalUtterance === "" && typed.speakExecReceipt === true,
     JSON.stringify(typed),
   );
   check(
@@ -450,8 +450,8 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     voice.speakProseWhileStreaming === false,
   );
   check(
-    "S5 ★R2 定案：spoken 在场 ⇒ 执行回执并进 spoken，不再单独出声（耳朵只有本地应答+spoken 两声）★",
-    voice.speakExecReceipt === false && voice.playLocalAck === true,
+    "S5 ★R2 定案：spoken 在场 ⇒ 执行回执并进 spoken，不再单独出声（耳朵里只剩 spoken 一声）★",
+    voice.speakExecReceipt === false,
     JSON.stringify(voice),
   );
 
@@ -500,9 +500,13 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     "S12 ★执行回执那一处挂在 speakReceipt 上★",
     panelSrc.includes("ttsEnabled && speakReceipt"),
   );
+  // ★本地应答音已砍（用户手测判退 2026-08-10）：墨迹 + 承诺早于理解
+  //   （长官问「有没有空闲部队」，池子里抽中的是「动手。」——模型还没听懂，
+  //   嘴已经答应要动手了）。这条断言守的是"砍掉了就别悄悄回来"。
   check(
-    "S13 ★本地应答只出声不上屏（R6）：pickVoiceConfirm 的新调用点没跟着 addMessage★",
-    panelSrc.includes("sendPlan.playLocalAck && ttsEnabled) speak(pickVoiceConfirm"),
+    "S13 ★松手瞬间不再有本地应答音——pickVoiceConfirm 全仓只剩 1 声明 + 1 处（执行回执）★",
+    panelSrc.split("pickVoiceConfirm(").length - 1 === 2, // 照 N42/N43 先例：声明也计数
+    `${panelSrc.split("pickVoiceConfirm(").length - 1} 处（应为 2＝声明+回执）`,
   );
 }
 
