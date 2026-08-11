@@ -88,6 +88,21 @@ function logEvent(o: Record<string, unknown>): void {
 }
 
 /**
+ * 延迟 A/B：客户端量到的「松手 → 耳朵真听见」，搭下一条命令的顺风车回来。
+ *
+ * ★两臂靠 `baseline` 分开：`?webspeech` 的那一局走现状 Web Speech，其余走本刀。
+ * **同一份构建、同一处计时**，所以两边的数直接可比；长官一行控制台都不用碰
+ * （他的原话：「我真的不会去 f12 做这些，每次都整错」——要长官去捞证据本身
+ * 就是设计缺陷，§8 那笔账的同一形状）。纯观测，不参与任何判定。
+ */
+function speechDiagOf(body: unknown): Record<string, unknown> | undefined {
+  const b = body && typeof body === "object" ? (body as Record<string, unknown>).speechDiag : null;
+  const d = b && typeof b === "object" ? b as Record<string, unknown> : null;
+  if (!d || typeof d.firstSoundMs !== "number") return undefined;
+  return { firstSoundMs: d.firstSoundMs, baseline: d.baseline === true, text: d.text };
+}
+
+/**
  * 语音输入 V1：把陈听到的原话落一行。
  *
  * 这就是 I2「必须基于真 STT log，禁脑内枚举」等的那份样本——第一次有了长官
@@ -153,7 +168,7 @@ app.post("/api/command", async (req, res) => {
   // Step 6a: escalateId (when present) ties this reply back to the crisis
   // escalation the player is responding to. JSON.stringify drops it when absent.
   // voice: 语音回合 message 为空，这一行会是空的——heard 日志在步 2 补。
-  logEvent({ type: "command", route: "command", sessionId, escalateId, channel: channel || "", message: playerText, voice: audio ? true : undefined });
+  logEvent({ type: "command", route: "command", sessionId, escalateId, channel: channel || "", message: playerText, voice: audio ? true : undefined, prevSpeech: speechDiagOf(req.body) });
 
   try {
     const result = await callAdvisor(digest, playerText, styleNote || "", channel || "", audio);
@@ -189,7 +204,7 @@ app.post("/api/command-stream", async (req, res) => {
 
   // Step 6a: escalateId (when present) ties this reply back to the crisis
   // escalation the player is responding to. JSON.stringify drops it when absent.
-  logEvent({ type: "command", route: "command-stream", sessionId, escalateId, channel: channel || "", message: playerText, voice: audio ? true : undefined });
+  logEvent({ type: "command", route: "command-stream", sessionId, escalateId, channel: channel || "", message: playerText, voice: audio ? true : undefined, prevSpeech: speechDiagOf(req.body) });
 
   // SSE headers
   res.setHeader("Content-Type", "text/event-stream");

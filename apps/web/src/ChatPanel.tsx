@@ -29,9 +29,10 @@ import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-com
 import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
 import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, getVoiceOpenDiag, type VoiceRecording, type VoiceCaptureArm } from "./voiceRecorder";
-import { probeVoiceChannels, channelUsesVoiceCapture } from "./voiceCapability";
+import { probeVoiceChannels, channelUsesVoiceCapture, isBaselineArm } from "./voiceCapability";
 // spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
 import { planVoiceSpeech } from "./voiceSpeech";
+import { setPlaybackObserver } from "./tts";
 import {
   addMessage,
   updateLastPlayerMessage,
@@ -484,6 +485,25 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   const voiceArmRef = useRef<VoiceCaptureArm | null>(null);
   const voiceArmingRef = useRef<Promise<VoiceCaptureArm | null> | null>(null);
   const pressWantedRef = useRef(false);
+  // ── 延迟 A/B：松手 → 耳朵真听见（客户端自己量，搭下一次命令回服务端）──
+  // 判据是"松手到出声"，而出声那一刻只有 TTS 模块知道。长官原话：「我真的不会去
+  // f12 做这些，每次都整错」——**要长官去捞证据本身就是设计缺陷**（§8 那笔账的
+  // 同一形状），所以这里自己量。两臂共用同一份构建 ⇒ 基线臂也照样自报。
+  const releaseAtRef = useRef<number | null>(null);
+  const speechDiagRef = useRef<{ firstSoundMs: number; text: string; baseline: boolean } | null>(null);
+  useEffect(() => {
+    setPlaybackObserver((text) => {
+      const t0 = releaseAtRef.current;
+      if (t0 == null) return;            // 打字回合/主动播报不计
+      releaseAtRef.current = null;       // 一轮只记第一声
+      speechDiagRef.current = {
+        firstSoundMs: Math.round(performance.now() - t0),
+        text: text.slice(0, 40),
+        baseline: isBaselineArm(),
+      };
+    });
+    return () => setPlaybackObserver(null);
+  }, []);
   const sendVoiceRef = useRef<((v: VoiceRecording) => void) | null>(null);
 
   // 能力名单启动拉一次；拉不到就保持空名单＝全部走 Web Speech（fail-closed 回现状）。
@@ -600,6 +620,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   }, [SpeechRecCtor, loading, selectedCommanders, isGroupChat]);
 
   const stopPTT = useCallback(() => {
+    releaseAtRef.current = performance.now();   // 松手：计时起点（两臂同一处）
     if (pressWantedRef.current) {
       pressWantedRef.current = false;
       const arm = voiceArmRef.current;
@@ -1672,7 +1693,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const streamRes = await fetch(`${API_URL}/api/command-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined }),
+        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: speechDiagRef.current ?? undefined }),
       });
 
       if (!streamRes.ok || !streamRes.body) {
@@ -1780,7 +1801,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const res = await fetch(`${API_URL}/api/command`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined }),
+          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: speechDiagRef.current ?? undefined }),
         });
         const data = await res.json();
         processAdvisorData(data);

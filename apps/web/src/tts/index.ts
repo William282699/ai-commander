@@ -139,6 +139,7 @@ function enqueue(text: string, persona: Persona): void {
   //   "native" → all remaining audio via browserNative
   if (streamEngine === "silent") return;
   if (streamEngine === "native") {
+    try { playbackObserver?.(text); } catch { /* noop */ }
     nativeSpeak(text, persona);
     return;
   }
@@ -259,8 +260,22 @@ function drainSameGen(gen: number): void {
   queue = survivors;
 }
 
+/**
+ * 出声观察点（延迟 A/B 用）：真正开始播那一刻叫一次。
+ *
+ * ★为什么要有这个钩子：判据是"松手→耳朵真听见"，而这个时刻只有 TTS 模块知道。
+ * 以前的办法是让长官往控制台贴一段探针——他的原话是「我真的不会去 f12 做这些，
+ * 每次都整错」。**要长官去捞证据本身就是设计缺陷**（同 §8 那笔账），所以改成
+ * 客户端自己量、搭下一次命令的顺风车回服务端。
+ */
+let playbackObserver: ((text: string) => void) | null = null;
+export function setPlaybackObserver(fn: ((text: string) => void) | null): void {
+  playbackObserver = fn;
+}
+
 function playAudio(audio: HTMLAudioElement): Promise<void> {
   currentAudio = audio;
+  try { playbackObserver?.(currentJob?.text ?? ""); } catch { /* 观察点不许影响播放 */ }
   return new Promise<void>((resolve, reject) => {
     const cleanup = () => {
       audio.removeEventListener("ended", onEnded);

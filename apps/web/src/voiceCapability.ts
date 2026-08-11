@@ -31,8 +31,27 @@ export async function probeVoiceChannels(): Promise<void> {
   }
 }
 
+/**
+ * 延迟 A/B 的**基线臂开关**：`?webspeech` ⇒ 一律当作不支持 ⇒ 走现状 Web Speech。
+ *
+ * 为什么用同一份构建做两臂，而不是另起主仓库的前端：Web Speech 那条路在本
+ * worktree 里**一个字节没改**（startPTT 的 SpeechRecCtor 分支原样），而两臂共用
+ * 同一份构建就意味着**两边的计时探针也是同一份**——基线臂因此同样会自己上报，
+ * 长官不必碰控制台。差的只有"耳朵"这一件。
+ */
+function webSpeechForced(): boolean {
+  if (typeof window === "undefined") return false;
+  try { return new URLSearchParams(window.location.search).has("webspeech"); } catch { return false; }
+}
+
 export function channelUsesVoiceCapture(ch: Channel): boolean {
+  if (webSpeechForced()) return false;
   return voiceChannels.includes(ch);
+}
+
+/** 这一局是不是基线臂（进日志，两臂靠它分开）。 */
+export function isBaselineArm(): boolean {
+  return webSpeechForced();
 }
 
 /** 只给诊断/手测用：现在到底认为哪些频道能录音。 */
