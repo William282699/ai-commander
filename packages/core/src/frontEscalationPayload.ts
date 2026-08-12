@@ -231,27 +231,50 @@ function etaOf(state: GameState, memberIds: number[], anchor: Position | null): 
  *
  *  标记零雾风险：tag 是玩家自己插的，不含任何敌情读数。 */
 export function nearestPlaceWithin(state: GameState, p: Position): string | null {
-  let bestTag: { name: string; d: number } | null = null;
+  return nearestPlaceScan(state, p, NAME_RADIUS_TILES)?.name ?? null;
+}
+
+/** 一个够得着的地名，连它站在哪。 */
+export interface NearestPlace {
+  name: string;
+  position: Position;
+  /** 到查询点的格数。 */
+  d: number;
+}
+
+/**
+ * 「离这个点最近、且够得着的地名是谁」——**唯一一套扫描纪律**（刀② ②）。
+ *
+ * 半径是参数，规则不是：标记优先、并列先入者赢（strict `<`）、设施要活着、
+ * 战线用中心点——四条对 12 格（取地名）与 36 格（取方位原点）**是同一套**。
+ * 抽成一份的理由不是省行数：**两套扫描各带各的优先级，就是本刀要杀的
+ * 参照系分裂在代码层重生。**
+ *
+ * `radius === NAME_RADIUS_TILES` 时与抽取前逐字节等价（`ab-commander-presence`
+ * 的 K4-3 别名断言是现成的闸）。
+ */
+function nearestPlaceScan(state: GameState, p: Position, radius: number): NearestPlace | null {
+  let bestTag: NearestPlace | null = null;
   for (const t of state.tags ?? []) {
     const d = dist(p, t.position);
-    if (!bestTag || d < bestTag.d) bestTag = { name: t.name, d };
+    if (!bestTag || d < bestTag.d) bestTag = { name: t.name, position: t.position, d };
   }
-  if (bestTag !== null && bestTag.d <= NAME_RADIUS_TILES) return bestTag.name;
+  if (bestTag !== null && bestTag.d <= radius) return bestTag;
 
-  let best: { name: string; d: number } | null = null;
+  let best: NearestPlace | null = null;
   state.facilities.forEach((f) => {
     if (f.hp <= 0) return;
     const d = dist(p, f.position);
-    if (!best || d < best.d) best = { name: f.name, d };
+    if (!best || d < best.d) best = { name: f.name, position: f.position, d };
   });
   for (const fr of state.fronts) {
     const c = frontCenterPos(state, fr);
     if (!c) continue;
     const d = dist(p, c);
-    if (!best || d < best.d) best = { name: fr.name, d };
+    if (!best || d < best.d) best = { name: fr.name, position: c, d };
   }
-  const b = best as { name: string; d: number } | null;
-  return b !== null && b.d <= NAME_RADIUS_TILES ? b.name : null;
+  const b = best as NearestPlace | null;
+  return b !== null && b.d <= radius ? b : null;
 }
 
 function centroidOf(points: Position[]): Position {
@@ -330,8 +353,26 @@ export interface BearingName {
   origin: string | null;
 }
 
+/**
+ * 方位原点够得着的最远距离 ＝ **派生自现有常数** `3 × NAME_RADIUS_TILES`。
+ * 超出它就没有可说的原点，退回罗盘——**罗盘兜底分支因此保持活着、可测**。
+ * 换张图（地标密度不同）必须重量这个倍数。
+ */
+export const BEARING_ORIGIN_MAX_TILES = 3 * NAME_RADIUS_TILES;
+
+/**
+ * 刀② ②：方位以**长官看得见的那个地名**为原点，不以地图中心。
+ *
+ * 原点集合与取地名**同一套扫描纪律**（`nearestPlaceScan`，只换半径）——
+ * 洞二裁定：两套集合＝第三个参照系，正是本刀要杀的病。
+ *
+ * 前提：本函数只在「12 格内取不到地名」时被调用，所以找到的原点必然 >12 格，
+ * 不存在"原点就在脚下、方位角无意义"那一格。
+ */
 export function bearingNameFor(state: GameState, p: Position): BearingName {
-  return { word: compassOctant(state, p), origin: null };
+  const origin = nearestPlaceScan(state, p, BEARING_ORIGIN_MAX_TILES);
+  if (origin === null) return { word: compassOctant(state, p), origin: null };
+  return { word: octantWord(p.x - origin.position.x, p.y - origin.position.y), origin: origin.name };
 }
 
 /** 组装成可念的短语：有原点 ⇒「兵营西北」；无原点 ⇒「东北方向」。
@@ -341,16 +382,29 @@ export function bearingPhrase(b: BearingName): string {
   return b.origin === null ? `${b.word}方向` : `${b.origin}${b.word}`;
 }
 
+/**
+ * 「一个位移该叫哪个八向词」——**唯一一份角度数学**（刀② ②，Fable 裁定 2）。
+ *
+ * 只做几何，不含任何"原点是谁"的知识：`compassOctant` 的**地图中心 + 10 格
+ * 「中央」死区**留在它自己那儿，**不许跟着抄进来**——那条死区是"离地图正中
+ * 太近时八向是噪声"，而从一个 12-36 格外的地名量方位时方位并不含糊，
+ * 死区语义不成立。
+ *
+ * 屏幕坐标 y 向南增，故北＝-dy；0 rad ＝ 东。
+ */
+export function octantWord(dx: number, dy: number): string {
+  const ang = Math.atan2(-dy, dx);
+  const idx = ((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8;
+  return OCTANT_NAMES[idx];
+}
+
 export function compassOctant(state: GameState, p: Position): string {
   const cx = state.mapWidth / 2;
   const cy = state.mapHeight / 2;
   const dx = p.x - cx;
   const dy = p.y - cy;
   if (Math.sqrt(dx * dx + dy * dy) <= CENTER_DEADZONE_TILES) return "中央";
-  // Screen coordinates: y grows southward, so north = -dy. 0 rad = east.
-  const ang = Math.atan2(-dy, dx);
-  const idx = ((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8;
-  return OCTANT_NAMES[idx];
+  return octantWord(dx, dy);
 }
 
 // ── Candidate collection ──
