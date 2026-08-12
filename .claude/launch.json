@@ -128,6 +128,38 @@
         ".claude/start-voice-web.sh"
       ],
       "port": 3019
+    },
+    {
+      "name": "baseline-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-baseline-api.sh"
+      ],
+      "port": 3020
+    },
+    {
+      "name": "baseline-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-baseline-web.sh"
+      ],
+      "port": 3021
+    },
+    {
+      "name": "knifec-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-knifec-api.sh"
+      ],
+      "port": 3022
+    },
+    {
+      "name": "knifec-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-knifec-web.sh"
+      ],
+      "port": 3023
     }
   ]
 }
