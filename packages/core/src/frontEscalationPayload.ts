@@ -310,6 +310,37 @@ const CN_ORDINALS = ["一", "二", "三", "四", "五", "六", "七", "八", "�
  *  read 东) — such groups are named 中央 instead (Codex polish round-2 #3). */
 const CENTER_DEADZONE_TILES = 10;
 
+/**
+ * 「这个点该叫什么方位」——**唯一命名内核**（刀② ①，2026-08-12）。
+ *
+ * 在此之前，"没地名就报方位"这套组合在两处各写了一份：本文件的候选标签
+ * （带 第一/第二 序数去重）与 `commandPreflight` 的来源清单（按名聚合计数）。
+ * 两处的**聚合与去重语义不同、各自都对**，收敛它们是错的；真正重复的只是
+ * 内核这一问：**这个点的方位词是什么、以谁为原点**。
+ *
+ * `origin` ＝ 方位的参照原点名。**今天恒为 null**：今天的方位以**地图中心**
+ * 为原点，而地图中心不是战场上的东西、说不出口，所以名字里不带它。
+ * ② 要换的就是这一个函数——让 origin 变成长官看得见的那个地名
+ * （`兵营西北`），两个调用点一个字都不用改。
+ */
+export interface BearingName {
+  /** 八向方位词（或近中心时的「中央」）。 */
+  word: string;
+  /** 方位相对谁而言；null ＝ 相对地图中心，不说出口。 */
+  origin: string | null;
+}
+
+export function bearingNameFor(state: GameState, p: Position): BearingName {
+  return { word: compassOctant(state, p), origin: null };
+}
+
+/** 组装成可念的短语：有原点 ⇒「兵营西北」；无原点 ⇒「东北方向」。
+ *  ★ 它也是**同名碰撞的判定键**——序数去重按这个短语数，不按裸方位词，
+ *  否则 ② 之后「兵营西北」与「机场西北」会被算成同一个名字。 */
+export function bearingPhrase(b: BearingName): string {
+  return b.origin === null ? `${b.word}方向` : `${b.origin}${b.word}`;
+}
+
 export function compassOctant(state: GameState, p: Position): string {
   const cx = state.mapWidth / 2;
   const cy = state.mapHeight / 2;
@@ -415,10 +446,15 @@ export function buildReinforceOptions(
   );
   const groups = spatialGroups(unassigned);
   const phrases = groups.map((g) => locationPhraseFor(state, g));
-  // Unresolvable-place groups fall back to compass octants; count per octant
-  // first so same-direction groups get 第一/第二… (deterministic, no duplicates).
+  // Unresolvable-place groups fall back to the bearing kernel; count per bearing
+  // PHRASE first so same-direction groups get 第一/第二… (deterministic, no
+  // duplicates). ★键是短语不是裸方位词——② 之后「兵营西北」与「机场西北」
+  // 是两个名字，按裸词数会把它们并成一个。今天短语＝`${词}方向`，两者一一对应，
+  // 所以这一步改键**不改任何输出**。
   const octants = groups.map((g, i) =>
-    phrases[i] === null ? compassOctant(state, centroidOf(g.map((u) => u.position))) : null,
+    phrases[i] === null
+      ? bearingPhrase(bearingNameFor(state, centroidOf(g.map((u) => u.position))))
+      : null,
   );
   const octantTotals = new Map<string, number>();
   for (const o of octants) if (o !== null) octantTotals.set(o, (octantTotals.get(o) ?? 0) + 1);
@@ -432,16 +468,16 @@ export function buildReinforceOptions(
     if (phrase !== null) {
       label = phrase.startsWith("向") ? `${phrase}的未编组群` : `${phrase}未编组群`;
     } else {
-      const o = octants[i]!;
+      const o = octants[i]!;   // 已是短语（今天＝「东北方向」）
       if ((octantTotals.get(o) ?? 0) <= 1) {
-        label = `${o}方向未编组群`;
+        label = `${o}未编组群`;
       } else {
         const k = (octantSeen.get(o) ?? 0) + 1;
         octantSeen.set(o, k);
         // 1-10 use Chinese ordinals; beyond that, real numbers — labels must
         // stay ABSOLUTELY unique, never saturate at 第十 (round-2 #3).
         const ord = k <= CN_ORDINALS.length ? CN_ORDINALS[k - 1] : String(k);
-        label = `${o}方向第${ord}未编组群`;
+        label = `${o}第${ord}未编组群`;
       }
     }
     options.push({

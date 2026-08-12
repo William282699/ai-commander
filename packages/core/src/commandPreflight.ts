@@ -26,7 +26,7 @@
 import type { GameState, Unit, Front, Position } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
 import type { HighImpactPreview } from "./tacticalPlanner";
-import { spatialGroups, nearestPlaceWithin, compassOctant } from "./frontEscalationPayload";
+import { spatialGroups, nearestPlaceWithin, bearingNameFor, bearingPhrase } from "./frontEscalationPayload";
 
 export type PreflightFrontStatus = "emptied" | "drained" | "reduced";
 
@@ -88,7 +88,9 @@ export function buildPreflightConcernFacts(
   const placeCounts = new Map<string, number>();
   for (const group of spatialGroups(mobilizedUnits)) {
     const c = centroidOf(group);
-    const place = nearestPlaceWithin(state, c) ?? `${compassOctant(state, c)}方向`;
+    // 刀② ①：方位走唯一命名内核。**按名聚合留在原地**——它的语义是
+    // 「从这个地方走了几个人」，同名求和对它是对的，不是缺序数去重。
+    const place = nearestPlaceWithin(state, c) ?? bearingPhrase(bearingNameFor(state, c));
     placeCounts.set(place, (placeCounts.get(place) ?? 0) + group.length);
   }
   const sources = Array.from(placeCounts.entries())
