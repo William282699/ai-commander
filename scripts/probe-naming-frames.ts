@@ -1,4 +1,15 @@
-/** 刀② 提案取证：真现场里未编组群到底叫什么名字，以及离长官会用的地标多远。 */
+/**
+ * 刀② 提案取证：真现场里未编组群到底叫什么名字，以及离长官会用的地标多远。
+ *
+ * ⚠ 本档是**取证附件，不是验收臂**（Fable P0-2）：与生产路径差三处——
+ * 池 85 vs 74、群 12 vs 11、标签自己拼的（丢「附近」、跳 locationPhraseFor
+ * 的行进中分支、滤单人群）。验收一律从 buildReinforceOptions(...).options
+ * 与 preflight 生产路径读标签。
+ *
+ * ⚠ 距离一律印两位小数：首版 toFixed(0) 把 36.47 印成「36」，
+ * 于是"封顶 36 恰好收住全部 6 群"这个假结论被两个人先后写进提案。
+ * **判据不许读格式化后的数。**
+ */
 import { createInitialGameState } from "@ai-commander/core";
 import { NAME_RADIUS_TILES, nearestPlaceWithin, compassOctant } from "../packages/core/src/frontEscalationPayload";
 import { spatialGroups } from "../packages/core/src/frontDestination";
@@ -41,7 +52,7 @@ for (const g of groups) {
   console.log(
     `  ${String(g.length).padStart(2)}人 @(${c.x.toFixed(0)},${c.y.toFixed(0)})  ` +
     `引擎叫「${place ?? `${oct}方向`}未编组群」  ` +
-    `｜最近玩家地标=${near.name} ${near.d.toFixed(0)}格  ` +
+    `｜最近玩家地标=${near.name} ${near.d.toFixed(2)}格  ` +
     `｜以中心为参照=${oct} / 以${near.name}为参照=${fromLandmark}` +
     `${oct !== fromLandmark ? "  ★参照系不一致" : ""}`,
   );
