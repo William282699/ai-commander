@@ -34,6 +34,7 @@ CHECKS=(
   "commander-presence            |npx tsx scripts/ab-commander-presence.ts --synthetic"
   "dispatch-scope                |npx tsx scripts/ab-dispatch-scope.ts --synthetic"
   "emily-production              |npx tsx scripts/ab-emily-production.ts --synthetic"
+  "facility-target               |npx tsx scripts/ab-facility-target.ts --synthetic"
   "front-escalation              |npx tsx scripts/ab-front-escalation.ts --synthetic"
   "g-knife-sites                 |npx tsx scripts/ab-g-knife.ts --sites"
   "g-knife-emily-guard           |npx tsx scripts/ab-g-knife.ts --emily-guard cb02c2b ${OUT:-/tmp}/emily-guard.md"
