@@ -366,8 +366,18 @@ export const BEARING_ORIGIN_MAX_TILES = 3 * NAME_RADIUS_TILES;
  * 原点集合与取地名**同一套扫描纪律**（`nearestPlaceScan`，只换半径）——
  * 洞二裁定：两套集合＝第三个参照系，正是本刀要杀的病。
  *
- * 前提：本函数只在「12 格内取不到地名」时被调用，所以找到的原点必然 >12 格，
- * 不存在"原点就在脚下、方位角无意义"那一格。
+ * ⚠ **原点可以很近——别把"必然 >12 格"当不变量**（本注释首版就写错了这一条，
+ *   Fable 复核抓出，2026-08-12）。它只对 **preflight 面**成立：那里是
+ *   `nearestPlaceWithin(...) ?? bearingPhrase(...)`，`??` 保证取得到地名就不走这儿。
+ *   **对 escalation 标签面不成立**——`locationPhraseFor` 有两个**与距离无关**的
+ *   null 出口，走到它们的群可以就站在设施 1-2 格内：
+ *     ① 混合运动（一部分在走、一部分没走）；
+ *     ② 全员在走、但有成员的 target 解析不出来。
+ *   `origin.d` 很小时八向词对位移**超敏感**，比观察账里那 8% 的那批更坏。
+ *
+ *   **暂不设护栏是有意的**：没量过这两个入口的真实发作率就上护栏，
+ *   等于按猜测改行为，撞家法「判据要测效果」。已进观察账清单，
+ *   等台架那把翻转率量具攒出数再裁。
  */
 export function bearingNameFor(state: GameState, p: Position): BearingName {
   const origin = nearestPlaceScan(state, p, BEARING_ORIGIN_MAX_TILES);

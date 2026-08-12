@@ -64,6 +64,10 @@ const OCTANTS = ["东北", "西北", "西南", "东南", "东", "北", "西", "�
  * 方位式 ＝ 裸罗盘（`东北方向…`）**或** 真实地名 + 八向词（`我军兵营西北…`）。
  * ★ 前缀必须是**这一局真实存在的地名**，所以它咬得住"编个地方出来"这件事
  *   ——不是把断言改成恒真。
+ *
+ * ⚠ 松紧账（Fable 记，2026-08-12，不设闸）：真地名校验**只罩住原点形**。
+ *   裸罗盘分支只判 `八向词+方向$`，所以「假地名北方向」这种编造形它放得过去。
+ *   要收紧就得连罗盘形也判前缀为空——现无实例，先记账不动手。
  */
 function isBearingLabel(state: GameState, label: string): boolean {
   if (!label.endsWith("未编组群")) return false;
@@ -528,6 +532,8 @@ function runSynthetic(): void {
     const s = createInitialGameState("el_alamein");
     const base = buildReinforceOptions(s, null as never).options;
     let flips = 0, trials = 0;
+    const detail: string[] = [];
+    const kinds = { cliff: 0, swap: 0, angle: 0 };
     for (const o of base) {
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
         const s2 = createInitialGameState("el_alamein");
@@ -538,13 +544,29 @@ function runSynthetic(): void {
         const after = buildReinforceOptions(s2, null as never).options
           .find((x) => x.memberIds.join(",") === o.memberIds.join(","));
         trials++;
-        if (after && after.label !== o.label) flips++;
+        if (after && after.label !== o.label) {
+          flips++;
+          detail.push(`${o.label} → ${after.label}  (平移 ${dx},${dy})`);
+          const originOf = (l: string): string | null => {
+            const core = l.slice(0, -"未编组群".length).replace(/第[一二三四五六七八九十]$|第\d+$/, "");
+            if (/方向$/.test(core)) return null;              // 无原点（裸罗盘）
+            for (const oc of OCTANTS) if (core.endsWith(oc)) return core.slice(0, -oc.length);
+            return core.replace(/附近$/, "");                  // 地名形
+          };
+          const a = originOf(o.label), b = originOf(after.label);
+          if (a === null || b === null) kinds.cliff++;         // 够着/够不着原点，翻过 36 格悬崖
+          else if (a !== b) kinds.swap++;                      // 原点换人（两地标近乎等距）
+          else kinds.angle++;                                  // 同一个原点，纯方位角翻转
+        }
       }
     }
     console.log(`观察账（不判红）· 同群平移 1 格的名字翻转率：${flips}/${trials} = ${(flips / trials * 100).toFixed(1)}%`);
     console.log(`   ↳ 对照：② **之前**同一把量具量出来是 0/88 = 0.0%（拿 660226c 的核跑的）。`);
-    console.log(`     原点从"地图中心"（几百格外）搬到"最近地标"（12-36 格）⇒ 角度对位移敏感得多。`);
+    console.log(`   ↳ 机制明细：**悬崖 ${kinds.cliff}（够着/够不着 36 格原点）｜原点换人 ${kinds.swap}（两地标近乎等距，`
+      + `strict < 先入者赢被 1 格打翻）｜纯方位角 ${kinds.angle}**`);
+    console.log(`     ★主力病灶是**原点身份不稳**，不是角度敏感——按错误病因去做角度平滑会打空。`);
     console.log(`     **这是 ② 的真实代价，不是噪声**：名字一翻，模型抄上一轮的旧名就落空（撞 B3）。`);
+    for (const d of detail) console.log(`       · ${d}`);
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);
