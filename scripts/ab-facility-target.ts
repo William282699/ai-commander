@@ -22,6 +22,21 @@
 //   那一刻「战线落点」= 那坨兵（35 格外），长官要的增援一个都没到前哨。
 //   而这正是长官会说「支援南线前哨」的那一刻——满编无战事的前哨没人去增援。
 //   ⇒ 判据必须在增援态上量；开局态那条也留着（当"代价近零"的如实记录）。
+//
+// ★★ 第二条更贵的发现（2026-08-12 全部活体跑完之后）：**触发器是句型，
+//    不是模态，也不是 defend 合同漏写 targetFacility。** 三组数（同一现场、
+//    同一信封、同一模型）：
+//      光杆目的地句（「调三辆坦克去支援南线前哨」，文字）  降格  2/66 ≈ 3%
+//      带来源从句（「战狼点附近的闲置部队，去增援南线前哨」，文字） 4/16 = 25%
+//      同一句走语音（cmd1.wav 录音直发）                    6/24 = 25%
+//    句型对比 p=9e-4（真变量）；模态对比 p=1.00（**不是**变量）。
+//    降格那些行长这样：defend(front=front_south,from=G1)+defend(front=…,from=G2)
+//    ——来源从句一出现，模型忙着给"战狼点附近那些人"找把手，目的地就被
+//    粗化成那批人所在的战线。这正是已知账 **F2**（「某地附近的部队」没有
+//    来源字段 ⇒ 就近抓已知把手）的形状，归 provenance 族，不归本刀。
+//    修法①+② 落地后同臂 2/16=13%，与修前 6/24=25% 比 **p=0.44（无可测效果）**；
+//    两条对照臂 8/8 + 8/8 不退步（无害）。⇒ prompt 一轮止损已用完，
+//    真解在引擎侧/provenance，别再加第二轮措辞。
 // ============================================================
 
 import { createInitialGameState, resolveIntent, resolveTicketReference,
@@ -308,6 +323,10 @@ const PROBES: Probe[] = [
   { id: "B4", kind: "bait", cmd: "增援北线前哨", wantFacility: "ea_player_coastal_post" },
   { id: "B5", kind: "bait", cmd: "南线前哨快顶不住了，赶紧派人过去", wantFacility: SOUTH_POST },
   { id: "B6", kind: "bait", cmd: "分一队人去中央前哨设防", wantFacility: "ea_player_central_post" },
+  // ★T1 = V1 的**同一句话，走打字**。分离混淆项：语音臂那句自带一个来源从句
+  //   （「战狼点附近的闲置部队」＝已知账 F2 的形状），而 B1-B6 是光杆目的地句。
+  //   不跑这一条，"语音臂 25% vs 文字臂 3%" 说不清是**模态**还是**句型**。
+  { id: "T1", kind: "bait", cmd: "战狼点附近的闲置部队，去增援南线前哨", wantFacility: SOUTH_POST },
   { id: "F1", kind: "front", cmd: "调四个人去南部战线", wantFront: "front_south" },
   { id: "F2", kind: "front", cmd: "北部战线需要加强，调点部队过去", wantFront: "front_coastal" },
   { id: "G1", kind: "guard", cmd: "把烽火台占了", wantFacility: "ea_observation_post" },

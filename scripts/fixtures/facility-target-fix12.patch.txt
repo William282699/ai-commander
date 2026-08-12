@@ -1,0 +1,22 @@
+diff --git a/apps/server/src/ai.ts b/apps/server/src/ai.ts
+index f0a4f79..a85c060 100644
+--- a/apps/server/src/ai.ts
++++ b/apps/server/src/ai.ts
+@@ -237,7 +237,7 @@ NEGATION HANDLING — 先判断**否定/禁止语义的作用域**：被否定
+ 
+ COMPOUND COMMANDS — when the commander gives multi-part orders (e.g. "move to the north and set up defenses", "send scouts ahead then attack"), split into multiple intents in ONE option. Each intent is one atomic action. The engine executes them in sequence and prevents unit double-assignment.
+ 
+-DEFEND WITH DESTINATION — A "defend" intent with toFront/targetRegion MOVES units TO that location AND sets them to defensive posture. You do NOT need a separate "attack" or "move" intent first. A single defend intent handles both movement and posture. Example: "派兵去金三角防守" →
++DEFEND WITH DESTINATION — A "defend" intent with toFront/targetRegion/targetFacility MOVES units TO that location AND sets them to defensive posture. You do NOT need a separate "attack" or "move" intent first. A single defend intent handles both movement and posture. Example: "派兵去金三角防守" →
+   intents: [{ "type": "defend", "targetRegion": "tag_1", "quantity": 4 }]
+ 
+ UNIT QUANTITY CONSTRAINT — Every attack/defend/hold/patrol intent MUST specify "fromSquad" (an existing squad ID from the SQUADS section) or "quantity" (number of units). Never leave both empty — that causes ALL available units to be assigned, which is almost never the player's intent. If the player doesn't specify a number, use reasonable judgment (e.g. 3-6 units for a defensive position, not the entire army).
+@@ -299,7 +299,7 @@ RULES:
+   2. ---FACILITIES--- (by ID, name, or tags) → use toFront (engine auto-resolves facility names to positions) or targetFacility
+   3. ---FRONTS--- (by ID or name) → use toFront/fromFront
+   The engine does fuzzy matching on facility names/tags, so "El Alamein" matches facility "ea_alamein_town" (name: "El Alamein"). You can put a facility name directly in toFront — the engine will resolve it. Do NOT return options:[] just because a place name doesn't exactly match a front ID. Always check FACILITIES names and tags too.
+-- When commander mentions buildings/facilities explicitly (destroy, sabotage, capture), use targetFacility with the facility ID.
++- 长官点名的是**哪一级**的地方，单子就填**哪一级**：他说的是 ---FACILITIES--- 里的东西，就填 targetFacility（facility ID）；他说的是 ---FRONTS--- 里的战线，才填 toFront。**不要替他把一个据点归到它所在的那条战线上**——点名一个据点、和点名它所在的那条战线，是两条不同的命令，兵会去两个不同的地方。
+ - ROUTES: If ---ROUTES--- section exists, you may specify routeId to control which road/path units take. Use routeIds (array) for multi-leg journeys (e.g. desert_track then front_line_road). If omitted, engine auto-selects a route. If commander says "go via the coast" or "走沙漠小道", match to the closest route ID.
+ - Commander can mark custom map points — see ---TAGS---. Match tag names first, then FACILITIES, then FRONTS. Use targetRegion for matched tag id (e.g. "tag_1"). If no match in any category, target doesn't exist → return options:[].
+ 
