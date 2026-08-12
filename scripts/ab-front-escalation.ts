@@ -16,7 +16,8 @@
 //     scripts/ab-front-escalation.ts --synthetic
 // ============================================================
 
-import { createInitialGameState, frontEscalationFacts } from "@ai-commander/core";
+import { createInitialGameState, frontEscalationFacts, previewHighImpactIntent } from "@ai-commander/core";
+import { buildPreflightConcernFacts } from "../packages/core/src/commandPreflight";
 // Bench-only symbols come from the module FILE directly — core/index.ts stays
 // builder-only for production (Codex round-4 P1-4). Same source file as prod,
 // so "same builder" still holds.
@@ -54,6 +55,28 @@ function emptyBattlefield(): GameState {
   state.squads = [];
   state.missions = [];
   return state;
+}
+
+const OCTANTS = ["东北", "西北", "西南", "东南", "东", "北", "西", "南", "中央"]; // 先长后短，防「东」吃掉「东北」
+
+/**
+ * 「这个 label 是方位式的吗」——刀② 之后判"退回方位"不能再写死「方向」两个字。
+ * 方位式 ＝ 裸罗盘（`东北方向…`）**或** 真实地名 + 八向词（`我军兵营西北…`）。
+ * ★ 前缀必须是**这一局真实存在的地名**，所以它咬得住"编个地方出来"这件事
+ *   ——不是把断言改成恒真。
+ */
+function isBearingLabel(state: GameState, label: string): boolean {
+  if (!label.endsWith("未编组群")) return false;
+  const core = label.slice(0, -"未编组群".length).replace(/第[一二三四五六七八九十]|第\d+/g, "");
+  if (/(?:东北|西北|西南|东南|东|南|西|北|中央)方向$/.test(core)) return true;
+  const places = new Set<string>();
+  for (const t of state.tags ?? []) places.add(t.name);
+  state.facilities.forEach((f) => { if (f.hp > 0) places.add(f.name); });
+  for (const fr of state.fronts) places.add(fr.name);
+  for (const o of OCTANTS) {
+    if (core.endsWith(o) && places.has(core.slice(0, -o.length))) return true;
+  }
+  return false;
 }
 
 let templateUnit: Unit | null = null;
@@ -333,9 +356,13 @@ function runSynthetic(): void {
     addUnit(s2c, fp2c.x + 41, fp2c.y + 40, { state: "moving", target: null });
     const r2c = buildReinforceOptions(s2c, null);
     const labelC = r2c.options[0]?.label ?? "";
+    // 刀②：退回的不再是裸罗盘词，而是「地名+方位」（够得着原点时）。
+    // **这一条要守的东西没变**：短语省略时不许编出"贴着某地"或"正在去某地"，
+    // 只许给方位。两条禁令原样保留，只把"长什么样"从写死的「方向」
+    // 换成 isBearingLabel（方位式 ＝ 裸罗盘方向 或 真实地名+八向词）。
     check(
-      "all-moving one target=null: phrase omitted (compass fallback)",
-      labelC.includes("方向") && labelC.endsWith("未编组群") && !labelC.includes("附近") && !labelC.includes("行进中"),
+      "all-moving one target=null: 短语省略 ⇒ 退回方位式命名（不许 附近／行进中）",
+      isBearingLabel(s2c, labelC) && !labelC.includes("附近") && !labelC.includes("行进中"),
       labelC,
     );
 
@@ -370,14 +397,35 @@ function runSynthetic(): void {
     );
 
     // Round-2 #3b: dead-center group must read 中央, not a spurious octant.
-    const s2f = emptyBattlefield();
-    addUnit(s2f, Math.round(s2f.mapWidth / 2), Math.round(s2f.mapHeight / 2), { state: "moving", target: null });
-    const r2f = buildReinforceOptions(s2f, null);
-    check(
-      "dead-center group: 中央方向 label",
-      (r2f.options[0]?.label ?? "").startsWith("中央方向"),
-      r2f.options[0]?.label ?? "",
-    );
+    // ★刀②：死区**只在够不着任何原点时**才该出场（36 格内有地名就该报地名+方位，
+    //   那比「中央」有用得多）。所以这条一分为二，两个分支都钉住——
+    //   否则死区会变成一条永不执行、悄悄烂掉的死路。
+    {
+      // (a) 死区仍然活着：把设施清空，图心 36 格内再无任何地名
+      //     （最近的是 front_center 中心，52 格 > 36）。
+      const s2f = emptyBattlefield();
+      s2f.facilities.clear();
+      addUnit(s2f, Math.round(s2f.mapWidth / 2), Math.round(s2f.mapHeight / 2), { state: "moving", target: null });
+      const r2f = buildReinforceOptions(s2f, null);
+      check(
+        "dead-center 群 · 够不着任何原点：仍报 中央方向（死区分支还活着）",
+        (r2f.options[0]?.label ?? "").startsWith("中央方向"),
+        r2f.options[0]?.label ?? "",
+      );
+    }
+    {
+      // (b) 有原点就不该退死区：图心插一面旗，名字必须变成「旗名+方位」。
+      const s2g = emptyBattlefield();
+      const cx = Math.round(s2g.mapWidth / 2), cy = Math.round(s2g.mapHeight / 2);
+      s2g.tags.push({ id: "tag_1", name: "观察哨", position: { x: cx - 20, y: cy }, createdAt: 0 });
+      addUnit(s2g, cx, cy, { state: "moving", target: null });
+      const label2g = buildReinforceOptions(s2g, null).options[0]?.label ?? "";
+      check(
+        "dead-center 群 · 20 格外有标记：报「观察哨东」而不是「中央方向」（原点优先于死区）",
+        label2g.startsWith("观察哨东") && !label2g.includes("中央方向"),
+        label2g,
+      );
+    }
 
     // Squads carry the phrase as a separate location token
     const s3 = emptyBattlefield();
@@ -436,6 +484,67 @@ function runSynthetic(): void {
     const legacy = buildLegacyPayload(s, makeCrisis(front));
     const shared = (p: string) => p.split("\n").filter((l) => !l.startsWith("- ") && !l.startsWith("reinforcement_options") && !l.startsWith("idle_reinforcement_available")).join("\n");
     check("A/B precondition: shared five lines identical", shared(legacy) === shared(payload));
+  }
+
+  // ── 刀② 判据 2：跨面同名一致性（Fable 裁定 3 的操作定义）──
+  //
+  // 比的是**命名核**（origin+方位词，或裸地名），**不是表面字符串**：
+  // 「南线前哨」（preflight）与「南线前哨附近未编组群」（escalation）的包装差
+  // 是两面各自的语法，不在本刀改动权内；核相同即算一致。
+  // 只在**静止、成员集相同**的场景断言——preflight 命名的是被动员子集的质心、
+  // escalation 命名整群，行进中的群两面本就该说不同的话。
+  //
+  // ★这条的长期价值是**绊索**：谁再引入第二条命名路，它咬谁。
+  {
+    const s = createInitialGameState("el_alamein");   // 开局全体静止
+    const escCores = new Set(
+      buildReinforceOptions(s, null as never).options
+        .filter((o) => o.label.endsWith("未编组群"))
+        .map((o) => o.label
+          .slice(0, -"未编组群".length)
+          .replace(/第[一二三四五六七八九十]$|第\d+$/, "")
+          .replace(/附近$/, "")),
+    );
+    // 全军开赴最远那条战线 ⇒ 动员子集＝全体，与 escalation 的成员集对齐
+    const pv = previewHighImpactIntent(
+      { type: "attack", toFront: "front_axis_rear", quantity: "all" } as never, s, s.style,
+    );
+    const pfCores = new Set((pv ? buildPreflightConcernFacts(s, pv as never).sources : []).map((x) => x.place));
+    const onlyEsc = [...escCores].filter((c) => !pfCores.has(c));
+    const onlyPf = [...pfCores].filter((c) => !escCores.has(c));
+    check(
+      `跨面同名一致性：escalation 与 preflight 的命名核逐个相同（各 ${escCores.size}/${pfCores.size} 个）`,
+      escCores.size > 0 && onlyEsc.length === 0 && onlyPf.length === 0,
+      onlyEsc.length || onlyPf.length ? `只在 esc: ${onlyEsc.join(",")} | 只在 pf: ${onlyPf.join(",")}` : "",
+    );
+  }
+
+  // ── 刀② 观察账：同群跨 tick 名字翻转率（Fable 裁定 4：记数不判红）──
+  //
+  // 原点变近 ⇒ 角度对位移更敏感 ⇒ 名字更容易翻，与 B3（模型抄旧名）互动。
+  // 这里用**确定性扰动**代替真 tick：把每个群整体平移 1 格（八个方向），
+  // 数名字变了几次。不设线，只记数——给第 9 级和 B3 攒证据。
+  {
+    const s = createInitialGameState("el_alamein");
+    const base = buildReinforceOptions(s, null as never).options;
+    let flips = 0, trials = 0;
+    for (const o of base) {
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+        const s2 = createInitialGameState("el_alamein");
+        for (const id of o.memberIds) {
+          const u = s2.units.get(id);
+          if (u) u.position = { x: u.position.x + dx, y: u.position.y + dy };
+        }
+        const after = buildReinforceOptions(s2, null as never).options
+          .find((x) => x.memberIds.join(",") === o.memberIds.join(","));
+        trials++;
+        if (after && after.label !== o.label) flips++;
+      }
+    }
+    console.log(`观察账（不判红）· 同群平移 1 格的名字翻转率：${flips}/${trials} = ${(flips / trials * 100).toFixed(1)}%`);
+    console.log(`   ↳ 对照：② **之前**同一把量具量出来是 0/88 = 0.0%（拿 660226c 的核跑的）。`);
+    console.log(`     原点从"地图中心"（几百格外）搬到"最近地标"（12-36 格）⇒ 角度对位移敏感得多。`);
+    console.log(`     **这是 ② 的真实代价，不是噪声**：名字一翻，模型抄上一轮的旧名就落空（撞 B3）。`);
   }
 
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);

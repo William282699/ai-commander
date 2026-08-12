@@ -42,7 +42,7 @@ import {
   buildPlayerViewLines,
   type ViewportGeometry,
 } from "../packages/core/src/commanderPresence";
-import { buildReinforceOptions, filterLateCandidates, nearestPlaceWithin } from "../packages/core/src/frontEscalationPayload";
+import { buildReinforceOptions, filterLateCandidates, nearestPlaceWithin, BEARING_ORIGIN_MAX_TILES } from "../packages/core/src/frontEscalationPayload";
 import { resolveIntent } from "../packages/core/src/tacticalPlanner";
 import { canUnitEnterTile } from "../packages/core/src/movementRules";
 import type { GameState, Unit, Squad, Intent } from "@ai-commander/shared";
@@ -867,18 +867,31 @@ function runSynthetic(): void {
       }
       return groupLabel(s);
     };
+    // ★刀② 之后这里是**两道悬崖**，不是一道（断言随之从"两头"改成"三段"）：
+    //   ≤12 格   → 取地名：`远标记附近…`
+    //   13-36 格 → 够不着地名，但够得着当**方位原点**：`远标记<方位>…`
+    //   >36 格   → 两道都够不着，与无标记时逐字节相同
+    // 旧断言写的是「13 格外 label 不变」——那是只有一道悬崖时的事实，
+    // 现在 13 格正落在 origin 半径内。**这不是把负对照放宽，是把它重新指向
+    // 新的那道悬崖**：三段都钉，边界比改之前钉得更死。
     const none = mk(null);
     const inside = mk(12);
-    const outside = mk(13);
+    const originBand = mk(13);
+    const outside = mk(BEARING_ORIGIN_MAX_TILES + 1);
     check(
-      "K4-6 ★负对照★ 标记在质心 13 格外：群 label 与无标记时逐字节相同",
+      "K4-6 ★负对照★ 标记在质心 37 格外（两道悬崖都够不着）：群 label 与无标记时逐字节相同",
       outside === none,
-      `无标记=${none} 13格=${outside}`,
+      `无标记=${none} 37格=${outside}`,
     );
     check(
-      "K4-6b 边界对照：12 格内确实改名（证明 13 格是「刚好够不着」，不是「哪儿都不生效」）",
-      inside !== none && inside.includes("远标记"),
+      "K4-6b 边界对照：12 格内取地名（证明 37 格是「刚好够不着」，不是「哪儿都不生效」）",
+      inside !== none && inside.includes("远标记") && inside.includes("附近"),
       `无标记=${none} 12格=${inside}`,
+    );
+    check(
+      "K4-6c ★新悬崖★ 13 格：够不着地名、够得着当方位原点（「远标记<方位>」而非「远标记附近」）",
+      originBand !== none && originBand.includes("远标记") && !originBand.includes("附近"),
+      `无标记=${none} 13格=${originBand}`,
     );
   }
 
