@@ -78,6 +78,10 @@ const SOUTH_POST = "ea_player_south_post";
  */
 function reinforcementScene(): GameState {
   const s = createInitialGameState("el_alamein");
+  // 「战狼点」——语音夹具 cmd1.wav 的句子里点了这个玩家标记（"战狼点附近的
+  // 闲置部队"）。位置与 ab-voice-input 的现场逐字相同，好让两支台架的语音臂
+  // 说的是同一个战场。它离南线前哨 100+ 格，不参与本刀任何落点判据。
+  s.tags.push({ id: "tag_1", name: "战狼点", position: { x: 260, y: 125 }, createdAt: 0 });
   const post = s.facilities.get(SOUTH_POST)!;
   const near: Unit[] = [];
   s.units.forEach((u) => {
@@ -248,14 +252,26 @@ function runSynthetic(): void {
  */
 interface Probe {
   id: string;
-  kind: "bait" | "front" | "guard" | "ctx" | "esc";
+  kind: "bait" | "front" | "guard" | "ctx" | "esc" | "voice";
   cmd: string;
   /** bait/guard：兵该落在这个设施上。front：兵该落在这条战线的 §8 落点上。 */
   wantFacility?: string;
   wantFront?: string;
   /** 挂在信封尾巴上的 ---CONTEXT---（ChatPanel:1277 同一个位置）。 */
   ctx?: string;
+  /** voice 臂：录音附件走 callAdvisorStream 的 audio 参数（打字回合零字节）。 */
+  audio?: string;
 }
+
+/** 入库夹具的 sha256（README 立的家法：夹具先自证，不然 heard 数字一个字不许用）。 */
+const FIXTURE_SHA: Record<string, string> = {
+  // 两个值与 ab-voice-input.ts:841/860 登记的**逐字符相同**（同一批字节，
+  // 两支台架共用；对不上就是有人动过夹具，跑前即停）。
+  "scripts/fixtures/voice/cmd1.wav":
+    "0d69ae3688c68c22a6a1f0bd412f0c992a0446b17b6a461a43f7d5a8b16f7b90",
+  "scripts/fixtures/voice/cmd1_cut600.wav":
+    "e90956061103d7abb26e0df7abf52443922b537ba53687086b8b54d24932f7d8",
+};
 
 /**
  * ★ctx 臂的来历（修前 RED 第二轮，2026-08-12）：
@@ -306,6 +322,13 @@ const PROBES: Probe[] = [
   { id: "E2", kind: "esc", cmd: "去支援南线前哨", wantFacility: SOUTH_POST, ctx: CTX_ESCALATION },
   { id: "E3", kind: "esc", cmd: "南线前哨快顶不住了，赶紧派人过去", wantFacility: SOUTH_POST, ctx: CTX_ESCALATION },
   { id: "E4", kind: "esc", cmd: "好，派他们去南线前哨", wantFacility: SOUTH_POST, ctx: CTX_ESCALATION },
+  // ── voice 臂（用户裁定 2026-08-12：真机 7 例几乎全是语音回合，
+  //    文字臂的 3% 证伪不了语音臂）。用**已入库**的夹具，不新合成：
+  //    cmd1.wav 的句子本身就是一条点名南线前哨的增援命令。
+  { id: "V1", kind: "voice", cmd: "", wantFacility: SOUTH_POST, audio: "scripts/fixtures/voice/cmd1.wav" },
+  // 截断载体对照：同一句，「前哨」两个音在物理上被切掉（刀C 之前那个病的复制品）。
+  // 它测的是用户问的第二件事——降格是不是骑在脏输入上。
+  { id: "V2", kind: "voice", cmd: "", wantFacility: SOUTH_POST, audio: "scripts/fixtures/voice/cmd1_cut600.wav" },
 ];
 // 探针作者 bug 两处，第一轮就被数据抓出来，如实留痕（不是调措辞调到过为止）：
 //   F1 原句「把预备队调去南部战线」——信封里没有"预备队"这个东西，模型只能反问，
@@ -319,8 +342,28 @@ async function runLive(n: number, only: string): Promise<void> {
   config({ path: "apps/server/.env" });
   const { callAdvisorStream } = await import("../apps/server/src/ai");
 
-  const pool = only === "all" ? PROBES : PROBES.filter((p) => p.kind === only);
-  if (pool.length === 0) { console.log(`没有 kind=${only} 的探针`); process.exit(1); }
+  // only 可以是 kind（bait/ctx/esc/voice/front/guard/all）也可以是单条探针 id（如 V1）
+  // ——修后复核要单跑净音频那一条，不能被截断那条稀释掉一半样本。
+  const pool = only === "all"
+    ? PROBES
+    : PROBES.filter((p) => p.kind === only || p.id.toUpperCase() === only.toUpperCase());
+  if (pool.length === 0) { console.log(`没有 kind/id=${only} 的探针`); process.exit(1); }
+
+  // ── 夹具先自证（fixtures/README 立的家法）：字节没被人动过，
+  //    否则后面的 heard 与落点一个数都不许用。
+  if (pool.some((p) => p.audio)) {
+    const { createHash } = await import("node:crypto");
+    const { readFileSync } = await import("node:fs");
+    let ok = true;
+    for (const f of new Set(pool.map((p) => p.audio).filter((x): x is string => !!x))) {
+      const sha = createHash("sha256").update(readFileSync(f)).digest("hex");
+      const want = FIXTURE_SHA[f];
+      const good = sha === want;
+      if (!good) ok = false;
+      console.log(`  ${good ? "PASS" : "FAIL"} 夹具自证 ${f} sha256 ${sha.slice(0, 16)}`);
+    }
+    if (!ok) { console.log("\n★夹具没过自证——停。"); process.exit(1); }
+  }
 
   console.log(`\n== --live N=${n} kind=${only}（增援态信封 ${LIVE_DIGEST.length}B；免费档 ~8 RPM 自带配速）==`);
   console.log(`   现场：南线前哨 hp=${CANON.facilities.get(SOUTH_POST)!.hp}/350，驻军剩 2 个残兵\n`);
@@ -333,7 +376,11 @@ async function runLive(n: number, only: string): Promise<void> {
     let opts: Record<string, unknown> | null = null;
     try {
       const envelope = LIVE_DIGEST + (p.ctx ?? "");
-      for await (const ev of callAdvisorStream(envelope, p.cmd, "risk=0.50 focus=0.50 obj=0.50 cas=0.50", "combat")) {
+      // 语音回合：命令走录音附件，playerMessage 留空——与真路径同形。
+      const audio = p.audio
+        ? { data: (await import("node:fs")).readFileSync(p.audio).toString("base64"), format: "wav" as const }
+        : undefined;
+      for await (const ev of callAdvisorStream(envelope, p.cmd, "risk=0.50 focus=0.50 obj=0.50 cas=0.50", "combat", audio)) {
         if (ev.type === "options") opts = ev.content;
       }
     } catch (e) {
@@ -371,20 +418,25 @@ async function runLive(n: number, only: string): Promise<void> {
     const landed = Number.isFinite(best) && best <= ARRIVED_TILES;
     rows.push({ p, d: best, units, landed, fields: fieldsArr.join(" + ") || "(无 intent)", log });
     const mark = landed ? "到位" : Number.isFinite(best) ? "★落点偏" : "★零执行";
+    // 语音回合把 heard 一起印出来：落点错的时候，第一件要分清的是
+    // "没听清"还是"听清了填错格"——两个病，两条账。
+    const heard = typeof opts?.heard === "string" ? opts.heard : "";
     console.log(`  #${String(i).padStart(2)} ${p.id} [${p.kind}] ${mark}  ` +
-      `d=${Number.isFinite(best) ? best.toFixed(1) + "格" : "—"} 派${units}  「${p.cmd}」`);
+      `d=${Number.isFinite(best) ? best.toFixed(1) + "格" : "—"} 派${units}  ` +
+      (p.audio ? `🎤 heard=「${heard || "(缺席)"}」` : `「${p.cmd}」`));
     console.log(`      ${fieldsArr.join(" + ") || "(无 intent)"}   ${log}`);
   }
 
   // ── 判据：三类分开算，一类一行 ──
   console.log("\n── 判据（数落点坐标与实派单位，不看台词）──");
-  for (const kind of ["bait", "ctx", "esc", "front", "guard"] as const) {
+  for (const kind of ["bait", "ctx", "esc", "voice", "front", "guard"] as const) {
     const rs = rows.filter((r) => r.p.kind === kind);
     if (rs.length === 0) continue;
     const ok = rs.filter((r) => r.landed).length;
     const label = kind === "bait" ? "点名前哨·无上文（本刀要治的）"
       : kind === "ctx" ? "★点名前哨·上文刚说过战线（真触发器候选）"
         : kind === "esc" ? "★点名前哨·悬着战线增援提案（F2 劫持形状）"
+          : kind === "voice" ? "★★语音臂·录音直发（真机 7 例的那条路）"
         : kind === "front" ? "★点名战线（正对照，修后必须仍走战线）"
           : "★capture/sabotage（零溢出，本来就对）";
     const dists = rs.map((r) => (Number.isFinite(r.d) ? r.d.toFixed(0) : "∞")).join("/");
@@ -392,7 +444,7 @@ async function runLive(n: number, only: string): Promise<void> {
   }
   // ★ 降格与零执行必须分开数（第一轮混着数差点把"没开单"读成"降格"）：
   //   降格 = 开了单、兵动了、落在别处；零执行 = 一个兵都没派。两个病，两条账。
-  const baits = rows.filter((r) => r.p.kind === "bait" || r.p.kind === "ctx" || r.p.kind === "esc");
+  const baits = rows.filter((r) => r.p.kind === "bait" || r.p.kind === "ctx" || r.p.kind === "esc" || r.p.kind === "voice");
   const arrived = baits.filter((r) => r.landed).length;
   const misplaced = baits.filter((r) => !r.landed && Number.isFinite(r.d)).length;
   const zero = baits.filter((r) => !Number.isFinite(r.d)).length;
