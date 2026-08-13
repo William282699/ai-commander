@@ -359,6 +359,66 @@ LLM 主动查询引擎（工具调用）。**触发条件**：V1a 验证发现 C
 2. **`isBearingLabel` 松紧账**（台架侧，不设闸）：真地名校验只罩原点形，
    裸罗盘分支放得过「假地名北方向」这类编造形。现无实例。
 
+## ✅ B3 号复用（同一批人别每回合换号）【收口 2026-08-12，tag `b3-handle-reuse-v1-done`】
+
+分支 `b3-handle-reuse-v1`（自 main `726ce16`），提案＝分支内
+`B3_HANDLE_REUSE_V1_MINIPROPOSAL_20260812.md`（含 ②④ 修正案 + 三条 rider）。
+全家 **24/24**。**prompt 面零字节。**
+
+**一句话**：`mintSpokenForce` 每条命令被调用一次（digest 重建），旧实现无条件
+铸新票 ⇒ 同一支部队每回合换一个号。现在**名单没变就复用原来那个号**。
+
+| | 改前 | 改后 |
+|---|---|---|
+| 同一批人连印两次 | G1-G6 → **G7-G12 全换** | **同号** |
+| 五回合后最大号 | **G30**（6 群 × 5 回合，线性涨） | **G6**（＝群数） |
+
+### 五步（实现与断言分 commit）
+
+`bdcef08` RED（知情留红 23/24）→ `9135687` B3b 补索引 → `4bc711a` 三字段纯增
+→ `a747cbc` 复用谓词 + TTL origin-gated（唯一动行为的一步）→ `84f89fc` glued
++ 说话点 8 处 → `ee98f29` 收官断言 20 条。
+
+- **谓词 fail-closed 五项全同**：`origin==="spoken"` + 名单逐字节同 +
+  `targetFrontId` 同 + `targetFacilityId` 同 + 未 burn 未过期。差任何一样都新铸。
+  ★名单**不做防御性重排**——两个调用点的 memberIds 都来自 `buildReinforceOptions`
+  （`:497/:549` 都 `.sort`）已排序，加 sort 反而会把"顺序不同"也算成同一支＝放宽谓词。
+- **命中只做三件事**：`printedLabels` 追加去重 / `lastPrintedAt` 前移 / 返回旧号。
+  `label`/`etaSec`/`anchor`/`mintedAt` 一字节不动（首铸那句承诺的 provenance）。
+- **TTL 两族分岔就 `ttlBasisOf` 一行**：spoken 从 `lastPrintedAt` 起算
+  （否则复用重印一个 119 秒龄的号、1 秒后就死＝"屏上可见却不可执行"）；
+  **escalation 仍从 `mintedAt` 起算，⇄ `messageStore.ESCALATION_WINDOW_SEC` 一字未动**。
+- **`glued` 改判「前缀 ∈ 这张票自己的 `printedLabels`」**（不是全局名字池），
+  说票名的 **8 处**统一走 `spokenNameOf`（念长官最后看到的那个名）。
+
+### 两笔挂账（都不是漏网，是有意）
+
+1. **B3b 同信封双号仍在，且故意不治。** 板子行铸 `targetFrontId=""`、判读行铸
+   `front.id`，谓词**故意不跨这两个子形**——跨了就是 ② 要防的错绑
+   （判读行票面与同线 escalation 票同形，跨族复用会让
+   `ticketDestinationVerdict` 拿到别人的 anchor/provenance）。
+   **别把它当漏网，更别为它放宽谓词。** 断言 X2 把这条钉住。
+2. **复用票回执 ETA 会陈旧（≤120s）**（rider 2）。判读行的票带 `etaSec`；
+   复用后回执念的是**首铸时**的估算，可能与长官刚在行上看到的数字对不上。
+   v1 接受。**退路已想好**：手测若膈应，把复用收窄到板子行
+   （`targetFrontId=""`、`etaSec` 恒 null），这笔账自动消失。
+
+### 方法资产两条
+
+1. **一条"防将来出错"的断言，本身也要被证明会响。** 对象投影 negctl 用**手钉
+   字段清单**而不是"动态取 keys 再剔除"（后者恒真）。**绊索自证**：往票上塞一个
+   假字段，R1-3/R1-3b 当场双红，还原后全绿——证明它兼任「新字段必须报备」。
+2. **台架取样必须照生产的筛法取。** `rosterOf` 首版按 id 取前 n，取到的是
+   commander/elite_guard（manual-only，生产池会剔），于是「圈成编队」那格在真
+   信封里根本不出现——**夹具挑错了人，差点被读成产品缺陷**。同族第三例：
+   步 1 的 R3（不开 `mintForceHandles` 就是在测一条不铸票的死路）、
+   ⑤③c 首版按 `Zed(I9)` 精确匹配而信封印的是 `Zed(I9,leader)`。
+   **台架自己得先是真的。**
+
+### 手测（用户预授权，下局顺手看）
+
+重点两样：①连问几句，同一批人的号还变不变；②抄上一轮的旧名去点名，还灵不灵。
+
 ## 归档与资产
 
 - 冻结资料库：worktree `AI Commander-battlefield-facts-v1` @ `4298505`（生产抓包 fixtures 不可再生 + 事实层研究）。
