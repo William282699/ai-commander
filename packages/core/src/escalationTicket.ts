@@ -8,8 +8,18 @@
 // translation layer resolves it to the frozen roster — never to a live
 // re-scan, never through the global pool.
 //
-// Why the ticket is minted on the ESCALATION candidate and NOT on the board
-// row (user ruling 2026-08-02, B 案):
+// ⚠ 下面这段"NOT on the board row"**已经不是现状**（B3 步2 更正，2026-08-12）：
+//   B 刀之后 `mintSpokenForce` 就是在给板子行与判读行铸票（`intelDigest:89/96`），
+//   理由写在那个函数上——不给号，模型只能把 label 写进 fromSquad，而 label
+//   从来不是合法引用，闸必拦（live hand-test 02:42）。
+//   **原文的两条理由本身仍然成立，且比结论更值钱，所以整段留着**：
+//     · 理由一（名同人不同）正是票据要冻结 memberIds 的原因——今天仍然是；
+//     · 理由二（板子行每帧重算 ⇒ 稳定的板子号需要跨帧的"群身份"）正是
+//       **B3 这一刀要解的题**。B3 的答法是把"群身份"取到最窄：
+//       **名单逐字节相同才算同一支**，不做任何跨帧追踪、不做模糊匹配。
+//
+// Why the ticket was ORIGINALLY minted on the ESCALATION candidate and NOT on
+// the board row (user ruling 2026-08-02, B 案):
 //   battleBoard calls buildReinforceOptions(state, null) while the escalation
 //   calls it with the front. The two produce IDENTICALLY LABELLED groups with
 //   DIFFERENT membership (measured: board 10 units vs escalation 5 units for
@@ -88,7 +98,35 @@ export interface EscalationTicket {
   etaSec: number | null;
   mintedAt: number;
   burned: boolean;
+  /** 哪一族铸的（B3 ②修正案，2026-08-12）。**复用只在 `"spoken"` 内部查。**
+   *
+   *  为什么必须有这一维：判读行那条路铸票时 `targetFrontId = front.id`，
+   *  与**同一条战线的 escalation 票面完全同形**，而危机线上那支队两边都会点到。
+   *  只按 `memberIds + targetFrontId + targetFacilityId` 做谓词，板子会
+   *  **复用掉一张升级票** ⇒ `ticketDestinationVerdict` 拿到别人的
+   *  anchor/targetFacilityId provenance，正是 v4 刀1 消灭过的"一句承诺两个来源"。
+   *  加这一维不是放宽谓词，是让「escalation 票永不参与复用」从约定变成结构保证。 */
+  origin: TicketOrigin;
+  /** 这张票**印出去过**的所有名字（append-only，去重，含铸造名）。
+   *
+   *  为什么不是覆写 `label`：号被复用之后会印在**新名字**旁边，而 `glued()`
+   *  判的是"剥掉尾号后的前缀 == 票面 label"——覆写会让**自家刚印出去的组合**
+   *  被自己拒掉（H1 复活）。改成"前缀 ∈ 印过的组合"，是自家打印记账，
+   *  不是模糊匹配（红线二不违）：没印过的名字 + 真号，照旧拒。 */
+  printedLabels: string[];
+  /** 最近一次把这个号印给长官看的时刻。
+   *
+   *  TTL 从这里起算（**只对 spoken 族**，B3 ④修正案）：TTL 的本义是
+   *  "刚印给你看的号 120s 内有效"；复用重印一个 119 秒龄的号、1 秒后就死，
+   *  正是 `TICKET_TTL_SEC` 注释里点名的"屏上可见却不可执行"。
+   *  **escalation 族仍从 `mintedAt` 起算**——提案问句不会重印，
+   *  它的 120s 本就该从提问算起，⇄ `ESCALATION_WINDOW_SEC` 那条对仗一字不动。 */
+  lastPrintedAt: number;
 }
+
+/** 票据家族。`spoken`＝板子行/判读行随信封重印的地址；
+ *  `escalation`＝一案一号的提案把手。 */
+export type TicketOrigin = "spoken" | "escalation";
 
 export type TicketLookup =
   | { ok: true; ticket: EscalationTicket }
@@ -140,18 +178,22 @@ export function mintEscalationTickets(
     : (front ? battleAnchorFor(state, front) : null);
   const out: EscalationTicket[] = [];
   for (const opt of result.shown) {
-    const t = mintOne(state, front, opt, anchor, override?.targetFacilityId);
+    const t = mintOne(state, front, opt, anchor, "escalation", override?.targetFacilityId);
     if (t) out.push(t);
   }
   return out;
 }
 
-/** The one place a ticket is actually created. Roster frozen at this instant. */
+/** The one place a ticket is actually created. Roster frozen at this instant.
+ *
+ *  `origin` 是**必填**（不给默认值）：新的调用点必须当场想清楚自己属于哪一族，
+ *  漏了编译就红。默认值会让第三条铸票路悄悄混进 spoken 族、被复用谓词吃掉。 */
 function mintOne(
   state: GameState,
   front: Front | null,
   opt: { label: string; memberIds: number[]; etaSec: number | null },
   anchor: Position | null,
+  origin: TicketOrigin,
   targetFacilityId?: string,
 ): EscalationTicket | null {
   if (opt.memberIds.length === 0) return null;
@@ -168,6 +210,12 @@ function mintOne(
     etaSec: opt.etaSec,
     mintedAt: state.time,
     burned: false,
+    origin,
+    // 铸造名就是第一条印出去的组合。append-only，去重（名字只在位移到
+    // 悬崖/等距点时才变，实测 8%，去重后每票撑死两三条）。
+    printedLabels: [opt.label],
+    // 起点＝铸造时刻；步 3 起每次复用重印时前移（**只对 spoken 族**）。
+    lastPrintedAt: state.time,
   };
   tickets.set(t.gNumber, t);
   return t;
@@ -209,8 +257,8 @@ export function mintSpokenForce(
   // model can only write the LABEL into fromSquad — which the gate then refuses
   // as a squad that was never in the order of battle (live hand-test 02:42).
   const t = front
-    ? mintOne(state, front, opt, battleAnchorFor(state, front))
-    : mintOne(state, null, opt, null);
+    ? mintOne(state, front, opt, battleAnchorFor(state, front), "spoken")
+    : mintOne(state, null, opt, null, "spoken");
   return t ? t.gNumber : null;
 }
 
