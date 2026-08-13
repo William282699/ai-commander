@@ -38,6 +38,7 @@ CHECKS=(
   "front-escalation              |npx tsx scripts/ab-front-escalation.ts --synthetic"
   "g-knife-sites                 |npx tsx scripts/ab-g-knife.ts --sites"
   "g-knife-emily-guard           |npx tsx scripts/ab-g-knife.ts --emily-guard cb02c2b ${OUT:-/tmp}/emily-guard.md"
+  "handle-reuse                  |npx tsx scripts/ab-handle-reuse.ts --synthetic"
   "handtest-authority-synthetic  |npx tsx scripts/ab-handtest-authority.ts --synthetic"
   "handtest-authority-negctl     |npx tsx scripts/ab-handtest-authority.ts --negctl"
   "handtest-route-synthetic      |npx tsx scripts/ab-handtest-route.ts --synthetic"
