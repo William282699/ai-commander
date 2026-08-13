@@ -256,10 +256,69 @@ export function mintSpokenForce(
   // board when the commander asks 「附近有空闲部队吗」, and without a number the
   // model can only write the LABEL into fromSquad — which the gate then refuses
   // as a squad that was never in the order of battle (live hand-test 02:42).
+  // ── B3：同一批人再被点名，复用原来那个号 ──
+  //
+  // 病：本函数每条命令被调用一次（digest 重建），旧实现无条件 mintOne ⇒
+  // 同一支部队每回合换一个号（实测连印两次 G1-G6 → G7-G12，五回合 seq 到 G30）。
+  // 号一直换 ⇒ 对话史堆死号 ⇒ 模型抄到旧号 ⇒ 绊索拦下白费一轮（LEDGER B3）。
+  const reused = findReusableSpokenTicket(state, front, opt);
+  if (reused) {
+    // ★命中时**只做三件事**（裁定 2026-08-12）：
+    //   ① printedLabels 追加去重  ② lastPrintedAt 前移  ③ 返回旧号
+    // label / etaSec / anchor / mintedAt **一个字节不许动**——它们是这张票的
+    // provenance（首铸时那句承诺是对着它们说的）。回执改念"最新印出的名"
+    // 归步 4，与 glued 一起落。
+    if (!reused.printedLabels.includes(opt.label)) reused.printedLabels.push(opt.label);
+    reused.lastPrintedAt = state.time;
+    return reused.gNumber;
+  }
   const t = front
     ? mintOne(state, front, opt, battleAnchorFor(state, front), "spoken")
     : mintOne(state, null, opt, null, "spoken");
   return t ? t.gNumber : null;
+}
+
+/** 名单逐字节同。两个调用点喂进来的 memberIds 都直接来自
+ *  `buildReinforceOptions`（`:497`/`:549` 都 `.sort((a,b)=>a-b)`），**已排序**，
+ *  所以逐元素比就是真正的"同一批人"，不需要防御性重排——重排会把
+ *  "顺序不同"悄悄也算成同一支，那是放宽谓词。 */
+function sameRoster(a: readonly number[], b: readonly number[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * 可复用的那张票——**fail-closed，宁窄勿宽**（用户明确怕"错绑"）。
+ *
+ * 五项全同才算同一支，差任何一样都新铸：
+ *   ① `origin === "spoken"` —— escalation 票**永不参与复用**。判读行铸票时
+ *      `targetFrontId = front.id`，与同线 escalation 票面完全同形，只按名单+战线
+ *      比会让板子**吃掉一张升级票**，`ticketDestinationVerdict` 就会拿到别人的
+ *      anchor/provenance（v4 刀1 消灭过的"一句承诺两个来源"）。
+ *   ②③ 名单逐字节同、`targetFrontId` 同 —— 板子行(`""`)与判读行(`front.id`)
+ *      是**两个子形，故意不跨**：跨了就是错绑。代价是"同信封双号"仍在（B3b），
+ *      那是另一笔账，不许为它放宽这里。
+ *   ④ `targetFacilityId` 同（spoken 路恒不带，两边都 undefined 才算同）。
+ *   ⑤ 未 burn、未过期 —— burn 过的票roster 已经花掉，复用它等于把同一批人
+ *      派两次；过期的票长官已经看不见了。
+ */
+function findReusableSpokenTicket(
+  state: GameState,
+  front: Front | null,
+  opt: { label: string; memberIds: number[] },
+): EscalationTicket | null {
+  const wantFrontId = front?.id ?? "";
+  for (const t of tickets.values()) {
+    if (t.origin !== "spoken") continue;
+    if (t.burned) continue;
+    if (state.time - ttlBasisOf(t) > TICKET_TTL_SEC) continue;
+    if (t.targetFrontId !== wantFrontId) continue;
+    if (t.targetFacilityId !== undefined) continue; // spoken 路恒不带设施
+    if (!sameRoster(t.unitIds, opt.memberIds)) continue;
+    return t;
+  }
+  return null;
 }
 
 export interface EscalationWithTickets {
@@ -361,8 +420,22 @@ export function lookupEscalationTicket(raw: string, now: number): TicketLookup {
   const t = key === null ? undefined : tickets.get(key);
   if (!t) return { ok: false, reason: "unknown" };
   if (t.burned) return { ok: false, reason: "burned", ticket: t };
-  if (now - t.mintedAt > TICKET_TTL_SEC) return { ok: false, reason: "expired", ticket: t };
+  if (now - ttlBasisOf(t) > TICKET_TTL_SEC) return { ok: false, reason: "expired", ticket: t };
   return { ok: true, ticket: t };
+}
+
+/**
+ * TTL 从哪一刻起算——**这是两族唯一分岔的地方**（B3 ④修正案）。
+ *
+ * `spoken`（板子行/判读行）：从**最近一次印给长官看**起算。TTL 的本义是
+ *   "刚印给你看的号 120s 内有效"；板子每条命令重印一次，复用重印一个 119 秒龄
+ *   的号、1 秒后就死，正是 `TICKET_TTL_SEC` 注释点名的"屏上可见却不可执行"。
+ * `escalation`（提案把手）：仍从 `mintedAt` 起算，**一字不动**。提案问句不会
+ *   重印，它的 120s 本就该从提问算起——⇄ `messageStore.ESCALATION_WINDOW_SEC`
+ *   那条对仗靠这一行守住。approval-v4 那 23 格是它的看门狗。
+ */
+function ttlBasisOf(t: EscalationTicket): number {
+  return t.origin === "spoken" ? t.lastPrintedAt : t.mintedAt;
 }
 
 // ── 号怎么印、怎么认（第 8 级 刀2）──
