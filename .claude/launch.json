@@ -160,6 +160,22 @@
         ".claude/start-knifec-web.sh"
       ],
       "port": 3023
+    },
+    {
+      "name": "frame-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-frame-api.sh"
+      ],
+      "port": 3024
+    },
+    {
+      "name": "frame-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-frame-web.sh"
+      ],
+      "port": 3025
     }
   ]
 }
