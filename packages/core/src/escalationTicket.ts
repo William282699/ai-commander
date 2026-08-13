@@ -128,6 +128,21 @@ export interface EscalationTicket {
  *  `escalation`＝一案一号的提案把手。 */
 export type TicketOrigin = "spoken" | "escalation";
 
+/**
+ * 把这张票说出口时该用的名字 ＝ **长官最后看到的那个**（`printedLabels` 末位）。
+ *
+ * 为什么要有唯一访问器而不是各处 `t.label`：号被复用之后，票面 `label` 是
+ * **首铸时**的名字，而长官刚在屏上看到的是最新那个。任何一处漏改，
+ * 陈就会用一个长官两分钟前才见过的旧名去称呼眼前这支部队。
+ * 全仓把票名说出口的有 8 处（含 ChatPanel 的权限拒绝），一律走这里。
+ *
+ * ★对 escalation 族恒等于 `label`（它们从不重印，`printedLabels` 只有一条）
+ * ——所以 `ticketPromptLine` 的输出逐字节不变（rider R1 第一件）。
+ */
+export function spokenNameOf(t: EscalationTicket): string {
+  return t.printedLabels[t.printedLabels.length - 1] ?? t.label;
+}
+
 export type TicketLookup =
   | { ok: true; ticket: EscalationTicket }
   | { ok: false; reason: "unknown" | "expired" | "burned"; ticket?: EscalationTicket };
@@ -539,7 +554,13 @@ function glued(s: string): string | null {
   const key = m[2].toUpperCase();
   const t = tickets.get(key);
   if (!t) return null;                            // 号都不认识，谈不上前缀匹配
-  return t.label.trim() === prefix ? key : null;  // 前缀必须逐字等于这张票的 label
+  // B3 步4：改判「前缀 ∈ **这张票自己**印出去过的组合」。
+  // ★是 `t.printedLabels`，**不是全局印过的名字池**——一张票没印过的名字
+  //   配上它的真号，照旧拒（⑤② 负对照真咬这一格）。
+  //   为什么非改不可：号被复用后印在**新名字**旁，旧判法拿首铸 label 比，
+  //   会把**自家刚印出去的那个组合**判成不存在（H1 复活）。
+  //   这是对自家打印格式的解析闭环，不是模糊匹配（红线二不违）。
+  return t.printedLabels.some((l) => l.trim() === prefix) ? key : null;
 }
 
 /** True iff the string looks like a force reference at all (G + digits,
@@ -623,8 +644,8 @@ export function ticketPromptLine(state: GameState, minted: EscalationTicket[]): 
   // R6 修订 v2：整支编制队报它自己的名与号，不冠「临时编队」。
   const list = minted
     .map((t) => (wholeSquadOf(state, t.unitIds)
-      ? `${t.label}(${t.unitCount}units)`
-      : `${HANDLE_PREFIX}${t.gNumber}=${t.label}(${t.unitCount}units)`))
+      ? `${spokenNameOf(t)}(${t.unitCount}units)`
+      : `${HANDLE_PREFIX}${t.gNumber}=${spokenNameOf(t)}(${t.unitCount}units)`))
     .join("｜");
   return `本案候选编号：${list}\nfromSquad="${HANDLE_PREFIX}G编号" 即调陈所述那批（编号是合法把手，群名仍然不是）。`;
 }
@@ -665,7 +686,7 @@ export function resolveTicketReference(
       look.reason === "expired"
         ? `那个增援案已经过时了——现在还要动兵的话，您说一声，我按当下的情况重新点人。`
         : look.reason === "burned"
-          ? `${look.ticket?.label ?? g} 已经派出去了，不重复下令。`
+          ? `${look.ticket ? spokenNameOf(look.ticket) : g} 已经派出去了，不重复下令。`
           : `我这儿没有编号 ${g} 的方案——您说「派谁去哪」我就动。`;
     return { kind: "refuse", reason: look.reason, line };
   }
@@ -675,7 +696,7 @@ export function resolveTicketReference(
     return {
       kind: "refuse",
       reason: "all_gone",
-      line: `${look.ticket.label} 已经没人能动了——要增援得另外点人。`,
+      line: `${spokenNameOf(look.ticket)} 已经没人能动了——要增援得另外点人。`,
     };
   }
   return { kind: "dispatch", ticket: look.ticket, unitIds: live };
@@ -797,7 +818,7 @@ export function ticketDestinationVerdict(
     return {
       kind: "refuse",
       reason: "unknown_place",
-      line: `${ticket.label} 还在原地——您说的那个地方我在图上找不着。换个地名，或者说「原地守住」，我立刻办。`,
+      line: `${spokenNameOf(ticket)} 还在原地——您说的那个地方我在图上找不着。换个地名，或者说「原地守住」，我立刻办。`,
     };
   }
 
@@ -826,7 +847,7 @@ export function ticketDestinationVerdict(
   return {
     kind: "refuse",
     reason: "no_destination",
-    line: `${ticket.label}（${ticket.gNumber}）去哪？您给个地名或据点，我这就派。`,
+    line: `${spokenNameOf(ticket)}（${ticket.gNumber}）去哪？您给个地名或据点，我这就派。`,
   };
 }
 
@@ -848,13 +869,13 @@ export function ticketDispatchReceipt(
 ): string {
   if (mode === "in_place") {
     return dispatched === ticket.unitCount
-      ? `${ticket.label} ${dispatched}个单位就地设防。`
-      : `${ticket.label} 实际能动的 ${dispatched} 个已就地设防（原报 ${ticket.unitCount} 个，其余已不在编）。`;
+      ? `${spokenNameOf(ticket)} ${dispatched}个单位就地设防。`
+      : `${spokenNameOf(ticket)} 实际能动的 ${dispatched} 个已就地设防（原报 ${ticket.unitCount} 个，其余已不在编）。`;
   }
   const eta = ticket.etaSec !== null ? `，按估算约 ${ticket.etaSec} 秒到位` : "";
   return dispatched === ticket.unitCount
-    ? `${ticket.label} ${dispatched}个单位出发了${eta}。`
-    : `${ticket.label} 实际能走的 ${dispatched} 个已经出发${eta}（原报 ${ticket.unitCount} 个，其余已不在编）。`;
+    ? `${spokenNameOf(ticket)} ${dispatched}个单位出发了${eta}。`
+    : `${spokenNameOf(ticket)} 实际能走的 ${dispatched} 个已经出发${eta}（原报 ${ticket.unitCount} 个，其余已不在编）。`;
 }
 
 /** Bench-only view of the registry. */

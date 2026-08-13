@@ -56,7 +56,7 @@ export { buildFrontJudgmentLines, commanderMood, buildCommanderMoodLine, viewpor
 // approval-contract-v4 刀2 — escalation tickets (the machine handle for "那批兵")
 export {
   buildFrontEscalationWithTickets, buildFacilityEscalationWithTickets, resolveTicketReference, ticketDispatchReceipt,
-  retargetIntentForTicket, ticketDestinationVerdict, mintSpokenForce,
+  retargetIntentForTicket, ticketDestinationVerdict, mintSpokenForce, spokenNameOf,
   burnEscalationTicket, isTicketRef, isKnownForceRef, resetEscalationTickets,
   TICKET_TTL_SEC, NO_PROPOSAL_GUIDANCE,
 } from "./escalationTicket";
