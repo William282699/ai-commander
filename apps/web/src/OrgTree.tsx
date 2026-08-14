@@ -48,6 +48,10 @@ const ROOT_COMMANDERS: RootCommanderConfig[] = [
   { key: "emily",  label: "Emily",  role: "LOGISTICS", avatar: "📦", accent: "#00e070", accentSoft: "rgba(0, 224, 112, 0.14)",  accentLine: "rgba(0, 224, 112, 0.35)" },
 ];
 
+// 编制功能目前只给陈做了（马克斯/艾米莉旗下永远 (empty)），故只渲染陈这一列。
+// 隐藏≠删除：round 2 把 "marcus", "emily" 加回本数组即整体恢复。
+const VISIBLE_ROOT_COMMANDERS: CommanderKey[] = ["chen"];
+
 // Circular portrait avatars (PNG in apps/web/public/avatars/).
 const AVATAR_IMG: Record<string, string> = {
   chen: "/avatars/chen.png",
@@ -127,7 +131,7 @@ export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRe
     <div style={treeContainerStyle}>
       {/* Three columns side by side */}
       <div style={columnsRowStyle}>
-        {ROOT_COMMANDERS.map((cmd) => {
+        {ROOT_COMMANDERS.filter((c) => VISIBLE_ROOT_COMMANDERS.includes(c.key)).map((cmd) => {
           const cmdSquads = squads.filter((s) => s.ownerCommander === cmd.key);
           const allRootSquads = cmdSquads.filter(s => !s.parentSquadId);
           const rootSquads = allRootSquads.filter(s => !isSquadWiped(s, squads, units));
