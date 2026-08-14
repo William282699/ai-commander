@@ -43,6 +43,7 @@ CHECKS=(
   "handtest-authority-negctl     |npx tsx scripts/ab-handtest-authority.ts --negctl"
   "handtest-route-synthetic      |npx tsx scripts/ab-handtest-route.ts --synthetic"
   "handtest-route-negctl         |npx tsx scripts/ab-handtest-route.ts --negctl"
+  "marcus-brain                  |npx tsx scripts/ab-marcus-brain.ts --synthetic"
   "mapdata-audit                 |npx tsx scripts/ab-mapdata-audit.ts"
   "mapdata-audit-negctl          |npx tsx scripts/ab-mapdata-audit.ts --negctl"
   "pretest-polish                |npx tsx scripts/ab-pretest-polish.ts"

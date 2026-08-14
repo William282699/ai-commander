@@ -436,8 +436,11 @@ export function getProviderConfig(channel?: string): ProviderConfig {
 // 双条件，缺一不可：
 //   ① 显式白名单＝**语义闸**。.env 只设了 LLM_PROFILE 与 LLM_PROFILE_OPS，
 //      所以 group 的 provider 同样是 gemini——单靠 provider 推导会把群聊圈进来，
-//      而 GROUP_SYSTEM_PROMPT 是冻结面（D2）；ops 用的是 deepseek 那颗脑子，
-//      换耳朵归 V1.5 的转写中继，不归这条通道。
+//      而 GROUP_SYSTEM_PROMPT 是冻结面（D2）。
+//      ★ops 为什么仍不在名单里（Marcus 换脑 2026-08-13 更正）：原文写的理由是
+//      「ops 用的是 deepseek 那颗脑子」——**换脑之后这句为假**，ops 现在也是
+//      gemini，配置闸会放行。真正的理由变成：**给 Marcus 开语音是新能力，
+//      不在换脑这一刀的范围内**，且他的嘴还没上说话合同（D1）。要开是另一刀。
 //   ② provider==="gemini"＝**配置闸**。将来 .env 换 profile，能力自动收回，
 //      不会留下"白名单说可以、模型其实听不了"的洞。
 const VOICE_INPUT_CHANNELS: readonly string[] = ["combat", "logistics"];
