@@ -529,6 +529,50 @@ WIDE scale/字号与修前逐位同＝零代价，帧测持平）→ 步7 `7ade2
 `UI_ANIMATION_ROUND2_HANDOFF_20260815.md`（刀A 无线电呼叫动画＋滑开/Esc
 取消＋PTT 加大；刀B 电报机打字/发报动画；真状态驱动手搓 SVG）。
 
+## UI 动画 Round 2 收口（2026-08-15，tag `ui-anim-round2-done`）
+
+分支 `ui-anim-round2`（worktree `AI Commander-voice-input`，从 main `1de78eb` 切），
+六步七 commit：`78866e6` 步1 PTT 加大 → `9c67128` 步2 无线电呼叫行 →
+`8ccf5ab` 步2b 砍📻 → `a38ec7d` 步3 滑开取消＋Esc → `d91767d` 步4 电报机 →
+`b2be369` 步5 发报＋来源分流 → `aab5e21` 步6 图标年代化。
+每步 typecheck＋台架 25/25＋新断言＋绊索自证 FAIL-first＋截图报审；刀 A／刀 B
+各自真麦手测由用户判过。**纯 web 层：引擎/prompt/信封/messageStore 零字节，
+ChatPanel 未重构（新逻辑进 3 个新组件文件，ChatPanel 只加挂点）。**
+
+**做成的事**：按住说话时对话流出现电台呼叫行（载波弧＋莫尔斯纸带，挂
+`pttStatus==="listening"` ＝与红灯同源）；**说一半可以不发**——滑出按钮外扩 12px
+＝取消态（行与键一起翻红「松手取消」，滑回可反悔）、Esc 同效、pointercancel／
+切窗同语义；输入框旁一台电报机，真打字才敲键、回车才发报；语音永远敲不响电报机
+（隐喻分区两向各有断言）；🎤/🔇/🔊/🔴 四个 emoji 换手搓 SVG 吃 HUD 色板。
+
+**治好的病**：两处 PTT 的 `onPointerLeave → stopPTT`＝滑出即发送——说到一半手一歪
+错令直接出门。删它是必要不是顺手：释放 pointer capture 时浏览器会向 capture 目标
+补发 pointerout/leave，旧 handler 若在会在 cancelPTT 之后再补一发 stopPTT。
+
+**方法资产两条（本轮新得）**：
+① ★**合成事件碰不到 pointer capture**——`dispatchEvent` 造的 PointerEvent 其
+pointerId 不是活动指针 ⇒ `setPointerCapture` 抛 NotFoundError ⇒
+capture／lostpointercapture 整条路不执行。凡测这类语义必须真鼠标 `page.mouse`。
+实测真序列＝`pointerdown → gotpointercapture → pointerup → lostpointercapture`，
+**每次正常松手都补发**——这正是 cancelPTT 真首行闸的承重理由（无闸则马克斯每次
+正常语音发送都被自己的兜底网静默取消并回滚）。
+② **负对照的"起算点"要对齐病的发生时刻**，不是操作的结束时刻。发包计数原从
+"松手前"起算，而基线的病是**滑出那一刻**就发包 ⇒ 绊索跑基线是绿的＝恒真假绿；
+改成从按下前起算覆盖整段才红。是「判据要测效果」的时间轴版本。
+
+**判据迁移（步 6）**：换 SVG 后按钮无文本，旧断言认 🎤/🔴 的锚全迁到
+`data-ptt-state`／`data-tts-state`；新锚按家法先证会咬（临时钉死 `"idle"` 跑一遍，
+红的正是 listening/cancel 那几条）。五套重跑＋新增步 6，合计 83 条断言绿。
+
+**刀 A 审核记录**＝`UI_ANIMATION_ROUND2_KNIFE_A_REVIEW_20260815.md`（8 条偏差
+D1-D8；Fable 裁 D5 等价且更强、其余追认、放行刀 B）。
+**新账五笔入 LEDGER §N**（行高 co-move／12px 阈值／inline `: undefined` 顶掉基样式
+两笔／陈现编频道身份 N4／STT 乱码当寒暄 N5）；**LEDGER §M 的 M3 数字跟色已划**。
+**下一把刀＝N4/N5 的 prompt 刀**：陈在自己频道里把频道说成「艾米丽的私人频道」
+——prompt 没串（两份人格各走各的），真凶是共享 SYSTEM_PROMPT 里那张花名册写着
+「闲聊归 Emily」而全套上下文从不陈述"你在哪个频道"；修法＝信封补频道身份行＋
+合同禁止断言频道归属。
+
 ## 归档与资产
 
 - 冻结资料库：worktree `AI Commander-battlefield-facts-v1` @ `4298505`（生产抓包 fixtures 不可再生 + 事实层研究）。
