@@ -1906,6 +1906,24 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
   border-top: 1px solid rgba(240, 160, 48, 0.08);
 }
 
+/* 账本式底部总计行。
+   ★不许自带 border-top：上一条 `.dp-unit-row + .dp-unit-row` 已经给它画了
+   相邻顶线，这里再声明一条就是双线。只把那条既有线的颜色加重，
+   用 border-top-color 改色而非新增边框，结构上不可能变成两条。 */
+.dp-unit-row + .dp-unit-row--total {
+  border-top-color: rgba(240, 160, 48, 0.35);
+}
+
+.dp-unit-row--total .dp-unit-row__type {
+  color: var(--hud-accent-amber);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.dp-unit-row--total .dp-unit-row__count {
+  font-weight: 700;
+}
+
 .dp-unit-row__type {
   color: var(--hud-text-secondary);
 }

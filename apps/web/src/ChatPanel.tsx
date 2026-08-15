@@ -2628,6 +2628,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                     </div>
                   ))
                 }
+                {unitCounts.size > 0 && (
+                  <div className="dp-unit-row dp-unit-row--total">
+                    <span className="dp-unit-row__type">Total Units</span>
+                    <span className="dp-unit-row__count">{Array.from(unitCounts.values()).reduce((a, b) => a + b, 0)}</span>
+                  </div>
+                )}
               </div>
             </div>
           </div>
