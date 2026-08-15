@@ -129,7 +129,7 @@ export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRe
 
   return (
     <div style={treeContainerStyle}>
-      {/* Three columns side by side */}
+      {/* Visible commander columns side by side */}
       <div style={columnsRowStyle}>
         {ROOT_COMMANDERS.filter((c) => VISIBLE_ROOT_COMMANDERS.includes(c.key)).map((cmd) => {
           const cmdSquads = squads.filter((s) => s.ownerCommander === cmd.key);
