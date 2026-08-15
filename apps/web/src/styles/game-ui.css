@@ -2393,3 +2393,34 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
   0%   { opacity: 0; transform: translateX(-3px); }
   100% { opacity: 1; transform: translateX(0); }
 }
+
+/* 步 5 · 发报：一串长划打出去（~600ms 一次性，非循环——事件驱动，铁律 1） */
+
+.tk-burst__shock {
+  opacity: 0;
+  transform-box: view-box;
+  transform-origin: 6.5px 11px;
+  animation: tk-shock 320ms ease-out;
+}
+
+@keyframes tk-shock {
+  0%   { opacity: 0.9; transform: scale(0.4); }
+  100% { opacity: 0;   transform: scale(1.6); }
+}
+
+.tk-burst__dash {
+  opacity: 0;
+  animation: tk-dash-out 600ms ease-out;
+}
+
+/* 四根长划依次窜出去，读起来是"一串"而不是"一下" */
+.tk-burst__dash--0 { animation-delay: 0ms; }
+.tk-burst__dash--1 { animation-delay: 70ms; }
+.tk-burst__dash--2 { animation-delay: 140ms; }
+.tk-burst__dash--3 { animation-delay: 210ms; }
+
+@keyframes tk-dash-out {
+  0%   { opacity: 0;   transform: translateX(-6px); }
+  25%  { opacity: 1;   transform: translateX(0); }
+  100% { opacity: 0;   transform: translateX(14px); }
+}

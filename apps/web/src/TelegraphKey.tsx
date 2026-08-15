@@ -21,7 +21,7 @@ const VISIBLE_MARKS = 5;
 /** 每个记号占的槽宽（viewBox 单位）。 */
 const SLOT = 5;
 
-export function TelegraphKey({ pulses = 0 }: { pulses?: number }) {
+export function TelegraphKey({ pulses = 0, transmits = 0 }: { pulses?: number; transmits?: number }) {
   // 最新的记号贴着机器，越老越往右——纸带从机器里吐出来往外走。
   const marks: { n: number; dash: boolean }[] = [];
   for (let i = 0; i < VISIBLE_MARKS; i++) {
@@ -31,7 +31,13 @@ export function TelegraphKey({ pulses = 0 }: { pulses?: number }) {
   }
 
   return (
-    <span className="tk-wrap" data-telegraph data-telegraph-pulses={pulses} title="电报机">
+    <span
+      className="tk-wrap"
+      data-telegraph
+      data-telegraph-pulses={pulses}
+      data-telegraph-transmits={transmits}
+      title="电报机"
+    >
       <svg className="tk-svg" viewBox="0 0 56 28" width="56" height="28" aria-hidden="true">
         {/* 底座 */}
         <rect x="2" y="21" width="22" height="4" rx="1" fill="currentColor" opacity="0.5" />
@@ -39,8 +45,10 @@ export function TelegraphKey({ pulses = 0 }: { pulses?: number }) {
         <path d="M18 21 L18 13" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" opacity="0.8" />
         <rect x="4" y="17.5" width="5" height="2" rx="0.8" fill="currentColor" opacity="0.6" />
 
-        {/* 发报键杠杆：key={pulses} 让它重新挂载，一次性敲击动画因此每次都重放 */}
-        <g key={pulses} className={`tk-lever${pulses > 0 ? " tk-lever--strike" : ""}`}>
+        {/* 发报键杠杆：key 变了就重新挂载，一次性敲击动画因此每次都重放。
+            key 同时吃 pulses 与 transmits——回车不改输入框内容（不过 onChange），
+            只吃 pulses 的话发报那一下杠杆不会动。 */}
+        <g key={`p${pulses}t${transmits}`} className={`tk-lever${pulses > 0 || transmits > 0 ? " tk-lever--strike" : ""}`}>
           <path d="M6 11 L20 11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
           <circle cx="6.5" cy="11" r="2.6" fill="currentColor" />
         </g>
@@ -59,6 +67,20 @@ export function TelegraphKey({ pulses = 0 }: { pulses?: number }) {
             fill="currentColor"
           />
         ))}
+
+        {/* 发报：一串长划打出去。key={transmits} ⇒ 每次发送重挂载重放，
+            ~600ms 一次性、非循环（事件驱动，铁律 1）。transmits 为 0 时不渲染，
+            所以开局静止。 */}
+        {transmits > 0 && (
+          <g key={`tx${transmits}`} className="tk-burst">
+            <circle className="tk-burst__shock" cx="6.5" cy="11" r="5" fill="none"
+                    stroke="currentColor" strokeWidth="1.2" />
+            {[0, 1, 2, 3].map((i) => (
+              <rect key={i} className={`tk-burst__dash tk-burst__dash--${i}`}
+                    x={28 + i * 7} y="10" width="5.5" height="3" rx="1" fill="currentColor" />
+            ))}
+          </g>
+        )}
       </svg>
     </span>
   );

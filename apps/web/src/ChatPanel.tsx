@@ -512,6 +512,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // 不回滚＝半句错令留在框里等着被下一次回车误发。
   const pttCancelledRef = useRef(false);
   const messageSnapshotRef = useRef<string | null>(null);
+  // 步 5 · B3：马克斯的语音识别完是**模拟点击发送键**发出去的，与打字发送共用
+  // 同一颗键。这个标记就是"这一发的来源"——电报机只认打字的那一发，语音的收尾
+  // 归电台隐喻（呼叫行消失），两套隐喻不许串。
+  const voiceAutoSendRef = useRef(false);
   // ── 延迟 A/B：松手 → 耳朵真听见（客户端自己量，搭下一次命令回服务端）──
   // 判据是"松手到出声"，而出声那一刻只有 TTS 模块知道。长官原话：「我真的不会去
   // f12 做这些，每次都整错」——**要长官去捞证据本身就是设计缺陷**（§8 那笔账的
@@ -650,7 +654,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         if (clean.trim()) {
           setTimeout(() => {
             const sendBtn = document.querySelector("[data-send-btn]") as HTMLButtonElement | null;
-            sendBtn?.click();
+            // ★步 5 · B3 来源分流：标记必须钉在**这里**——setTimeout 回调体内、
+            //   紧贴 click()。外头裹着两层（setMessage 的 state updater ＋ 这个
+            //   50ms setTimeout）；写在 onend 函数体或 updater 里，标记会在 click
+            //   真正发生前 50ms 就被清掉，分流直接失效。
+            //   click() → onClick → sendCommand 首段同步跑完，所以 finally 里同步
+            //   清掉就够（按钮 disabled 空点也不留残值）。
+            voiceAutoSendRef.current = true;
+            try { sendBtn?.click(); } finally { voiceAutoSendRef.current = false; }
           }, 50);
         }
         return clean;
@@ -826,6 +837,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // ★onChange 只被**真实 DOM 输入**触发；rec.onresult 那种 setMessage 是程序写入，
   //   走不到这里——「语音写字不敲电报键」的隔离是免费的（仍有断言盯着，隐喻不许串）。
   const [telegraphPulses, setTelegraphPulses] = useState(0);
+  // 步 5：发报动画计数（B2）。一次真发送 +1，组件据此放一次性动画。
+  const [telegraphTransmits, setTelegraphTransmits] = useState(0);
+  const fireTransmit = useCallback(() => setTelegraphTransmits(t => t + 1), []);
   const handleTypedChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const next = e.target.value;
     // 旧值取闭包里的 message；长度差＝敲几下，至少 1 下（等长替换也算敲），
@@ -1341,6 +1355,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     const state = getState();
     if (state) syncGameEpoch(state); // synchronous — closes the poll race before the fast path
     if (!state || (!voice && !message.trim())) return;
+
+    // ── 步 5 · B2 发报动画（挂点必须在整条守卫之后）──
+    // 空输入回车被上面 `!message.trim()` 弹回 ⇒ 天然不响；`!state` 那项同样承重，
+    // 状态没起来时不许放空炮。loading 中 input/按钮双 disabled，事件根本进不来。
+    // `voice` 参数在 ⇒ 陈/Emily 的语音回合不响（语音归电台隐喻，不许串）；
+    // voiceAutoSendRef 在 ⇒ 马克斯的语音自动发送不响（B3 来源分流）。四格全封。
+    if (!voice && !voiceAutoSendRef.current) fireTransmit();
 
     const isVoiceTurn = !!voice;
     const userMsg = voice ? "" : message.trim();
@@ -2956,7 +2977,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                     disabled={loading}
                   />
                   {/* 步 4：电报机钉在输入框右侧、PTT 键左侧（不进对话流，铁律 3）。 */}
-                  <TelegraphKey pulses={telegraphPulses} />
+                  <TelegraphKey pulses={telegraphPulses} transmits={telegraphTransmits} />
                   {/* 步 3：onPointerLeave 的 stopPTT 已删——它就是「说到一半手一歪、
                       错令直接发出去」的病本体。删它还是必要的而不是顺手：释放
                       pointer capture 时浏览器会向 capture 目标补发 pointerout/leave，
@@ -3214,7 +3235,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         <button onClick={() => handleProduce("light_tank")} disabled={playerMoney < 200 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 200 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产轻坦 ($200)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+坦$200</button>
         </>)}
         <input ref={inputRef} type="text" value={message} onChange={handleTypedChange} onKeyDown={handleKeyDown} placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`} disabled={loading} style={inputStyle} />
-        <TelegraphKey pulses={telegraphPulses} />
+        <TelegraphKey pulses={telegraphPulses} transmits={telegraphTransmits} />
         {/* 步 3：onPointerLeave 的 stopPTT 已删（理由同弹窗态那处注释：它既是
             "滑出即发送"的病本体，又会在 capture 释放时补发一脚踩掉 cancelPTT）。 */}
         <button data-ptt-btn className={pttCancelArmed ? "ptt-cancel-armed" : undefined} onPointerDown={onPttPointerDown} onPointerMove={onPttPointerMove} onPointerUp={onPttPointerUp} onPointerCancel={onPttPointerCancel} onLostPointerCapture={onPttLostCapture} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttCancelArmed ? "var(--hud-accent-red-dim)" : pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined, borderColor: pttCancelArmed ? "var(--hud-accent-red)" : undefined, color: pttCancelArmed ? "var(--hud-accent-red)" : undefined, opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttCancelArmed ? "松手取消" : pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttCancelArmed ? "✕" : pttStatus === "listening" ? "🔴" : "🎤"}</button>
