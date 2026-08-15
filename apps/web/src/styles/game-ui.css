@@ -38,6 +38,10 @@
   --hud-accent-green-dim: rgba(0, 224, 112, 0.12);
   --hud-accent-green-glow: rgba(0, 224, 112, 0.4);
 
+  /* Accent: Purple / Yellow — 步 7 新增，目前只服务页底风格条五色（additive） */
+  --hud-accent-purple:  #8b5cf6;
+  --hud-accent-yellow:  #fbbf24;
+
   /* Commander colors */
   --hud-cmd-chen:    #ef4444;
   --hud-cmd-marcus:  #60a5fa;
@@ -2105,6 +2109,15 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
   border-top: 1px solid rgba(6, 182, 212, 0.2);
 }
 
+/* 排头标签：不参与五条均分（flex:0 0 auto），只占自己的字宽。 */
+.dp-style-bar__title {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--hud-text-secondary);
+  white-space: nowrap;
+}
+
 .dp-style-bar__item {
   flex: 1;
   min-width: 0;
@@ -2133,6 +2146,22 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
   display: block;
   height: 100%;
   background: var(--hud-accent-cyan);
+  /* 闪红退回靠它：--changed 移除后底色淡回来，不用 animation。 */
+  transition: background 0.6s ease;
+}
+
+/* 五条底色按下标钉死（顺序 r/f/o/c/s = 冒险/集火/目标/惜兵/侦察）。
+   红 #ff3040 不入底色，专职"刚变过"。 */
+.dp-style-bar__fill--cyan   { background: var(--hud-accent-cyan); }
+.dp-style-bar__fill--amber  { background: var(--hud-accent-amber); }
+.dp-style-bar__fill--green  { background: var(--hud-accent-green); }
+.dp-style-bar__fill--purple { background: var(--hud-accent-purple); }
+.dp-style-bar__fill--yellow { background: var(--hud-accent-yellow); }
+
+/* 刚变过 = 红。两个类同选择器 (0,2,0) 压过上面单类底色 (0,1,0)，
+   不靠源序取胜（步 4b 教训：特异性输掉会静默失效）。 */
+.dp-style-bar__fill.dp-style-bar__fill--changed {
+  background: var(--hud-accent-red);
 }
 
 .dp-style-bar__val {

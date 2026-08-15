@@ -300,6 +300,13 @@ function formatTime(sec: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+// 步 7 · 页底风格条（弹窗态独有）。顺序钉死 r/f/o/c/s，与 styleRows 同序。
+// ★ 底色按下标映射，不按中文 label：label 是显示文字，绑措辞则将来改一个字
+//   颜色就静默串位，而五条底色没有断言能发现串位。
+const STYLE_KEYS = ["r", "f", "o", "c", "s"] as const;
+const STYLE_BAR_COLORS = ["cyan", "amber", "green", "purple", "yellow"] as const;
+const STYLE_FLASH_MS = 1200;
+
 const FROM_LABELS: Record<string, string> = {
   chen: "陈军士",
   marcus: "马克斯",
@@ -760,6 +767,45 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     }, 1000);
     return () => clearInterval(id);
   }, [getState]);
+
+  // 步 7: 值变闪红。玩家真实看到的一次风格变化是 ±STYLE_LEARNING_RATE=0.03
+  // （50→53），3 个百分点的条宽肉眼不可见 —— 闪红是它被看见的唯一手段。
+  // ★ prevRef 存的是"上一拍的五个数值"，比值不比对象：1Hz 轮询每拍都
+  //   setStyleSnapshot({...}) 新建对象，比 identity 会变成每秒全条闪红。
+  const stylePrevRef = useRef<{ r: number; f: number; o: number; c: number; s: number } | null>(null);
+  const [styleFlash, setStyleFlash] = useState<Record<string, boolean>>({});
+  const styleFlashTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  useEffect(() => {
+    // 只服务弹窗态页底风格条（嵌入态折叠条不碰）。
+    if (!isDetached || !styleSnapshot) return;
+    const prev = stylePrevRef.current;
+    stylePrevRef.current = styleSnapshot;
+    if (!prev) return; // 首拍不闪：没有"上一拍"就谈不上变过
+    const changed = STYLE_KEYS.filter((k) => prev[k] !== styleSnapshot[k]);
+    if (changed.length === 0) return;
+    setStyleFlash((f) => {
+      const next = { ...f };
+      for (const k of changed) next[k] = true;
+      return next;
+    });
+    // 每条自己的计时器：轮询每秒重跑本 effect，若把 timeout 挂在 effect
+    // cleanup 上会被下一拍清掉，红色再也不退。
+    for (const k of changed) {
+      clearTimeout(styleFlashTimersRef.current[k]);
+      styleFlashTimersRef.current[k] = setTimeout(() => {
+        delete styleFlashTimersRef.current[k];
+        setStyleFlash((f) => {
+          const next = { ...f };
+          delete next[k];
+          return next;
+        });
+      }, STYLE_FLASH_MS);
+    }
+  }, [styleSnapshot, isDetached]);
+  useEffect(() => {
+    const timers = styleFlashTimersRef.current;
+    return () => { for (const k of Object.keys(timers)) clearTimeout(timers[k]); };
+  }, []);
 
   // Production button state
   const [playerMoney, setPlayerMoney] = useState(0);
@@ -2805,15 +2851,22 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         {/* Style Bar — 步 5 中栏对掉：风格五条常显横排，占原 dock 的位置 */}
         {styleSnapshot && (
           <div className="dp-style-bar">
-            {styleRows.map(([label, val]) => (
-              <div key={label} className="dp-style-bar__item">
-                <span className="dp-style-bar__label">{label}</span>
-                <span className="dp-style-bar__track">
-                  <span className="dp-style-bar__fill" style={{ width: `${val * 100}%` }} />
-                </span>
-                <span className="dp-style-bar__val">{(val * 100).toFixed(0)}</span>
-              </div>
-            ))}
+            <span className="dp-style-bar__title">领导风格：</span>
+            {styleRows.map(([label, val], i) => {
+              const key = STYLE_KEYS[i];
+              const fillClass =
+                `dp-style-bar__fill dp-style-bar__fill--${STYLE_BAR_COLORS[i]}` +
+                (styleFlash[key] ? " dp-style-bar__fill--changed" : "");
+              return (
+                <div key={label} className="dp-style-bar__item">
+                  <span className="dp-style-bar__label">{label}</span>
+                  <span className="dp-style-bar__track">
+                    <span className={fillClass} style={{ width: `${val * 100}%` }} />
+                  </span>
+                  <span className="dp-style-bar__val">{(val * 100).toFixed(0)}</span>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
