@@ -2507,6 +2507,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       artillery: "Artillery", patrol_boat: "Patrol Boat", destroyer: "Destroyer",
       cruiser: "Cruiser", carrier: "Carrier", fighter: "Fighter",
       bomber: "Bomber", recon_plane: "Recon Plane",
+      elite_guard: "Elite Guard", commander: "Commander",
     };
     const CMD_LABELS_SHORT: Record<string, string> = { combat: "Chen", ops: "Marcus", logistics: "Emily" };
     const MISSION_STATUS_COLOR: Record<string, string> = { active: "var(--hud-accent-cyan)", completed: "var(--hud-accent-green)", failed: "var(--hud-accent-red)", cancelled: "var(--hud-text-dim)" };
