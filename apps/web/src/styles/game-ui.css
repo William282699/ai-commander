@@ -2276,3 +2276,74 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 .dp-col-left::-webkit-scrollbar { width: 3px; }
 .dp-col-left::-webkit-scrollbar-track { background: transparent; }
 .dp-col-left::-webkit-scrollbar-thumb { background: var(--hud-border-bright); border-radius: 2px; }
+
+/* ── 动画R2 步 2 · 无线电呼叫行（A1，RadioCallRow.tsx） ──
+   行的"存在"由 pttStatus === "listening" 控（与 🔴 红灯同源）；这里的循环动画
+   只负责"载波正在发"这层隐喻，不代表任何状态——铁律 1 的分界线在这。
+   颜色一律走 currentColor：.rc-row 换个 color 就整条翻色（取消态即如此）。 */
+
+.rc-row {
+  display: flex;
+  justify-content: flex-end;   /* 玩家侧＝右对齐，与 isPlayer 气泡同侧 */
+  padding: 2px 0;
+  color: var(--hud-accent-cyan);
+}
+
+.rc-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(0, 212, 255, 0.06);
+  border: 1px solid var(--hud-accent-cyan-glow);
+  border-right: 2px solid var(--hud-accent-cyan);
+  clip-path: var(--hud-chamfer-sm);
+  animation: rc-card-breathe 1.8s ease-in-out infinite;
+}
+
+.rc-svg { display: block; flex-shrink: 0; }
+
+.rc-label {
+  font-family: var(--hud-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* 三层弧线错开延迟＝一圈圈往外推 */
+.rc-arc { animation: rc-arc-pulse 1.35s ease-in-out infinite; }
+.rc-arc--1 { animation-delay: 0s; }
+.rc-arc--2 { animation-delay: 0.18s; }
+.rc-arc--3 { animation-delay: 0.36s; }
+
+/* 纸带匀速左行一个循环节(26px)，窗口裁边＝无缝 */
+.rc-tape { animation: rc-tape-run 1.1s linear infinite; }
+
+@keyframes rc-arc-pulse {
+  0%, 100% { opacity: 0.12; }
+  45%      { opacity: 1; }
+}
+
+@keyframes rc-tape-run {
+  from { transform: translate(52px, 0); }
+  to   { transform: translate(26px, 0); }
+}
+
+@keyframes rc-card-breathe {
+  0%, 100% { box-shadow: 0 0 8px rgba(0, 212, 255, 0.10); }
+  50%      { box-shadow: 0 0 16px rgba(0, 212, 255, 0.28); }
+}
+
+/* 取消态：步 3 接上 cancelIntent 才可达（步 2 这条分支进不去，只源码点名不做 DOM 断言）。 */
+.rc-row--cancel { color: var(--hud-accent-red); }
+.rc-row--cancel .rc-card {
+  background: var(--hud-accent-red-dim);
+  border-color: var(--hud-accent-red-glow);
+  border-right-color: var(--hud-accent-red);
+  animation: rc-card-alarm 0.5s steps(1, end) infinite;
+}
+
+@keyframes rc-card-alarm {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}

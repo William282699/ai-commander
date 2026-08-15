@@ -30,6 +30,7 @@ import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendin
 import type { PendingRequestTag } from "@ai-commander/shared";
 import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, getVoiceOpenDiag, type VoiceRecording, type VoiceCaptureArm } from "./voiceRecorder";
 import { probeVoiceChannels, channelUsesVoiceCapture, isBaselineArm } from "./voiceCapability";
+import { RadioCallRow } from "./RadioCallRow";
 // spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
 import { planVoiceSpeech } from "./voiceSpeech";
 import { setPlaybackObserver } from "./tts";
@@ -740,6 +741,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [displayMessages.length]);
+
+  // 动画R2 步 2：呼叫行是渲染态插进流末尾的，displayMessages.length 不变 →
+  // 上面那个滚底 effect 不会为它触发，长会话里行会落在视野外。复用同一句滚底，
+  // 不用 scrollIntoView（它会连带滚动祖先容器，嵌入态在 HUD 里有位移风险）。
+  useEffect(() => {
+    if (pttStatus === "listening" && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [pttStatus]);
 
   // P2: poll canCreateSquad every 200ms
   const [squadBtnEnabled, setSquadBtnEnabled] = useState(false);
@@ -2369,6 +2379,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             </div>
           );
         })}
+
+        {/* 动画R2 步 2：无线电呼叫行。挂 pttStatus === "listening" ＝ 与 🔴 红灯同源
+            （录音臂只有 arm.press() 真返回 true 才置 listening），两态共用本 fragment
+            故弹窗/嵌入都有。纯渲染态，不进 messageStore。 */}
+        {pttStatus === "listening" && <RadioCallRow />}
 
         {/* Inline staff threads */}
         {activeThreads.length > 0 && !response && activeThreads.map((thread) => (
