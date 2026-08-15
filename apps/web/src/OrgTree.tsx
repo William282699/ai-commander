@@ -205,10 +205,10 @@ export function OrgTree({ squads, units, state, onSelectUnits, onMoveSquad, onRe
                       />
                     ) : (
                       <>
-                        <HorizontalBar count={rootSquads.length} />
                         <div style={childrenRowStyle}>
-                          {rootSquads.map(sq => (
-                            <div key={sq.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1, minWidth: 0 }}>
+                          {rootSquads.map((sq, idx, arr) => (
+                            <div key={sq.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "0 0 auto" }}>
+                              <SiblingConnector first={idx === 0} last={idx === arr.length - 1} />
                               <div style={{ width: 1, height: VERT_GAP / 2, background: LINE_COLOR }} />
                               <TreeNode
                                 squad={sq}
@@ -489,11 +489,11 @@ function TreeNode({
 
       {/* Children below */}
       {children.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "max-content" }}>
           <div style={{ width: 1, height: VERT_GAP / 2, background: LINE_COLOR }} />
 
           {children.length === 1 ? (
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "max-content" }}>
               <div style={{ width: 1, height: VERT_GAP / 2, background: LINE_COLOR }} />
               <TreeNode
                 squad={children[0]} squads={squads} units={units} state={state}
@@ -504,11 +504,11 @@ function TreeNode({
               />
             </div>
           ) : (
-            <div style={{ width: "100%" }}>
-              <HorizontalBar count={children.length} />
+            <div style={{ width: "max-content" }}>
               <div style={childrenRowStyle}>
-                {children.map(child => (
-                  <div key={child.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1, minWidth: 0 }}>
+                {children.map((child, idx, arr) => (
+                  <div key={child.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "0 0 auto" }}>
+                    <SiblingConnector first={idx === 0} last={idx === arr.length - 1} />
                     <div style={{ width: 1, height: VERT_GAP / 2, background: LINE_COLOR }} />
                     <TreeNode
                       squad={child} squads={squads} units={units} state={state}
@@ -580,19 +580,21 @@ function AutoScaleColumn({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ── HorizontalBar ──
-
-function HorizontalBar({ count }: { count: number }) {
-  const halfChild = 100 / (2 * count);
+// ── SiblingConnector ──
+//
+// 兄弟横线。★步 6 换法：原 HorizontalBar 用 left/right 百分比（100/(2*count)）
+// 画一条整线，那算法只在"每格等宽"时成立；步 6 把格子改成按内容取宽后格宽
+// 不再相等，端点就错位——实测根行右端够不到最后一格的竖线（Hayes 那格断了），
+// 左端又空悬出去一截。
+//
+// 现在每格自己画头顶那一截：首格不画左半、末格不画右半，于是整条线恰好从
+// 「第一格中心」连到「最后一格中心」，且每格中心都有线经过。不需要量宽，
+// 与各格实际宽度无关，永远对得上竖线。
+function SiblingConnector({ first, last }: { first: boolean; last: boolean }) {
   return (
-    <div style={{ position: "relative", width: "100%", height: 1 }}>
-      <div style={{
-        position: "absolute",
-        left: `${halfChild}%`,
-        right: `${halfChild}%`,
-        height: 1,
-        background: LINE_COLOR,
-      }} />
+    <div style={{ display: "flex", width: "100%", height: 1 }}>
+      <div style={{ flex: 1, height: 1, background: first ? "transparent" : LINE_COLOR }} />
+      <div style={{ flex: 1, height: 1, background: last ? "transparent" : LINE_COLOR }} />
     </div>
   );
 }
@@ -646,7 +648,10 @@ const columnHeaderStyle: React.CSSProperties = {
 const childrenRowStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "center",
-  width: "100%",
+  // ★步 6：原为 width:100%，配合子树 cell 的 flex:1 等分父宽——嵌套深的那支
+  // 摊到的格子塞不下就叠字，且自然宽恒等于容器宽，AutoScaleColumn 永远量不到
+  // 溢出、从不触发。改 max-content 让"按内容要多宽就多宽"逐层传上去。
+  width: "max-content",
 };
 
 const treeNodeContainerStyle: React.CSSProperties = {
