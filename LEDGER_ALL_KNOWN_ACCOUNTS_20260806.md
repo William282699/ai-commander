@@ -137,6 +137,22 @@
    （删掉半句假话）销掉，没人问那条兜底为什么会烧——它当时已经在烧 27%。
    撞 `feedback_treat_root_cause`，Opus 与 Fable 各记一笔。
 
+## M. UI 简化 V1 族新账（2026-08-15 收口入档，出处＝UI_SIMPLIFY_V1_PLAN §3.5 台账）
+
+- **M1 停靠态风格条自始未生效**：GameCanvas.tsx:2374 `getState={() => stateRef.current}`
+  内联箭头每 render 换引用 × ChatPanel `[getState]` 依赖 → 1Hz 轮询 effect
+  反复重建跑不满一拍 → 嵌入态 styleSnapshot 恒 null（弹窗走 bridge.getState
+  引用稳定所以正常）。修＝useCallback 一行，**但修完停靠态会"凭空出现"
+  风格条＝可见变化，须过用户眼睛**，勿顺手修。
+- **M2 同级平铺阈值账**：同级 ≥8 个平铺时整树 scale＜0.8、有效字号＜8px
+  （11 个＝0.75/7.1px 实测）；非步 6 引入（修前逐位相同）；真实玩法走
+  嵌套编组不触发；若真游玩撞到，处置方向＝**横向滚动取代缩放**（改
+  AutoScaleColumn 行为、牵连大，单独立刀）。
+- **M3 风格条数字文本五条同色 cyan**（待用户一句话裁）：跟不跟各条底色，
+  一行改动，挂 round 2 顺手办。
+- （销账记录：round1 交接档 §1.4"名字看得清"已由用户真实玩法结账；PTT
+  真麦克风 08-15 PASS；OrgTree 旧注释 `e97b8e9` 改准。）
+
 ## 用户对局收集清单
 
 见 `LEVEL8_ENVELOPE_PRECISION_PROPOSAL_20260806.md` 末节（五样人眼盯的：商量被抢跑/
