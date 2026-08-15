@@ -31,6 +31,7 @@ import type { PendingRequestTag } from "@ai-commander/shared";
 import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, getVoiceOpenDiag, type VoiceRecording, type VoiceCaptureArm } from "./voiceRecorder";
 import { probeVoiceChannels, channelUsesVoiceCapture, isBaselineArm } from "./voiceCapability";
 import { RadioCallRow } from "./RadioCallRow";
+import { TelegraphKey } from "./TelegraphKey";
 // spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
 import { planVoiceSpeech } from "./voiceSpeech";
 import { setPlaybackObserver } from "./tts";
@@ -819,6 +820,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
   // 取消态视觉的统一判据：按住中 ＋ 已滑出。两态同一个开关。
   const pttCancelArmed = pttPressed && pttCancelIntent;
+
+  // ── 步 4 · 电报机敲键 ──
+  // 挂 onChange 不挂裸 keydown：Shift/方向键不该响，粘贴一段字该响一串。
+  // ★onChange 只被**真实 DOM 输入**触发；rec.onresult 那种 setMessage 是程序写入，
+  //   走不到这里——「语音写字不敲电报键」的隔离是免费的（仍有断言盯着，隐喻不许串）。
+  const [telegraphPulses, setTelegraphPulses] = useState(0);
+  const handleTypedChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = e.target.value;
+    // 旧值取闭包里的 message；长度差＝敲几下，至少 1 下（等长替换也算敲），
+    // 上限 8（粘一整段响一串，但别响到天荒地老）。
+    const delta = Math.abs(next.length - message.length);
+    setTelegraphPulses(p => p + Math.min(Math.max(delta, 1), 8));
+    setMessage(next);
+  }, [message]);
 
   // P1: snapshot selected unit IDs at sendCommand time
   const selectedIdsSnapshotRef = useRef<number[] | undefined>(undefined);
@@ -2935,11 +2950,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                     type="text"
                     className="dp-dock-input"
                     value={message}
-                    onChange={(e) => setMessage(e.target.value)}
+                    onChange={handleTypedChange}
                     onKeyDown={handleKeyDown}
                     placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`}
                     disabled={loading}
                   />
+                  {/* 步 4：电报机钉在输入框右侧、PTT 键左侧（不进对话流，铁律 3）。 */}
+                  <TelegraphKey pulses={telegraphPulses} />
                   {/* 步 3：onPointerLeave 的 stopPTT 已删——它就是「说到一半手一歪、
                       错令直接发出去」的病本体。删它还是必要的而不是顺手：释放
                       pointer capture 时浏览器会向 capture 目标补发 pointerout/leave，
@@ -3196,7 +3213,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         <button onClick={() => handleProduce("infantry")} disabled={playerMoney < 80 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 80 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产步兵 ($80)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+兵$80</button>
         <button onClick={() => handleProduce("light_tank")} disabled={playerMoney < 200 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 200 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产轻坦 ($200)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+坦$200</button>
         </>)}
-        <input ref={inputRef} type="text" value={message} onChange={(e) => setMessage(e.target.value)} onKeyDown={handleKeyDown} placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`} disabled={loading} style={inputStyle} />
+        <input ref={inputRef} type="text" value={message} onChange={handleTypedChange} onKeyDown={handleKeyDown} placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`} disabled={loading} style={inputStyle} />
+        <TelegraphKey pulses={telegraphPulses} />
         {/* 步 3：onPointerLeave 的 stopPTT 已删（理由同弹窗态那处注释：它既是
             "滑出即发送"的病本体，又会在 capture 释放时补发一脚踩掉 cancelPTT）。 */}
         <button data-ptt-btn className={pttCancelArmed ? "ptt-cancel-armed" : undefined} onPointerDown={onPttPointerDown} onPointerMove={onPttPointerMove} onPointerUp={onPttPointerUp} onPointerCancel={onPttPointerCancel} onLostPointerCapture={onPttLostCapture} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttCancelArmed ? "var(--hud-accent-red-dim)" : pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined, borderColor: pttCancelArmed ? "var(--hud-accent-red)" : undefined, color: pttCancelArmed ? "var(--hud-accent-red)" : undefined, opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttCancelArmed ? "松手取消" : pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttCancelArmed ? "✕" : pttStatus === "listening" ? "🔴" : "🎤"}</button>

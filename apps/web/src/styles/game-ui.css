@@ -2357,3 +2357,39 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.5; }
 }
+
+/* ── 动画R2 步 4 · 电报机（B1，TelegraphKey.tsx） ──
+   琥珀色＝文字侧，与电台的 cyan 分区（铁律 3）。★这里没有任何 infinite 动画：
+   键头只在 pulses 变化时敲一下，不打字就一动不动（铁律 1）。 */
+
+.tk-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--hud-accent-amber);
+  opacity: 0.85;
+}
+
+.tk-svg { display: block; }
+
+/* 杠杆绕支柱顶端(18,13)转。transform-box: view-box ⇒ transform-origin 用 viewBox 坐标。 */
+.tk-lever {
+  transform-box: view-box;
+  transform-origin: 18px 13px;
+}
+
+.tk-lever--strike { animation: tk-strike 150ms ease-out; }
+
+@keyframes tk-strike {
+  0%   { transform: rotate(0deg); }
+  40%  { transform: rotate(9deg); }
+  100% { transform: rotate(0deg); }
+}
+
+/* 新记号出现：一次性淡入＋轻微右移，读起来像纸带往外走 */
+.tk-mark { animation: tk-mark-in 180ms ease-out; }
+
+@keyframes tk-mark-in {
+  0%   { opacity: 0; transform: translateX(-3px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
