@@ -74,7 +74,10 @@ export function RadioCallRow({ cancelIntent = false }: { cancelIntent?: boolean 
           </g>
         </svg>
 
-        <span className="rc-label">{cancelIntent ? "✕ 松手取消" : "📻 电台呼叫中…"}</span>
+        {/* 天线塔已经手搓在左边了，文案里再挂一个 📻 既重复、又是整行唯一不吃
+            cyan 色板的东西（其余全走 currentColor）——步 2b 砍掉。
+            断言锚是「电台呼叫中」四个字，砍 emoji 不伤它。 */}
+        <span className="rc-label">{cancelIntent ? "✕ 松手取消" : "电台呼叫中…"}</span>
       </div>
     </div>
   );
