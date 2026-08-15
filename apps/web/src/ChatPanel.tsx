@@ -32,6 +32,7 @@ import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, getVoiceO
 import { probeVoiceChannels, channelUsesVoiceCapture, isBaselineArm } from "./voiceCapability";
 import { RadioCallRow } from "./RadioCallRow";
 import { TelegraphKey } from "./TelegraphKey";
+import { MicIcon, HornIcon } from "./InputRailIcons";
 // spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
 import { planVoiceSpeech } from "./voiceSpeech";
 import { setPlaybackObserver } from "./tts";
@@ -831,6 +832,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
   // 取消态视觉的统一判据：按住中 ＋ 已滑出。两态同一个开关。
   const pttCancelArmed = pttPressed && pttCancelIntent;
+
+  // 步 6：断言锚从"按钮文本"迁到这里。换皮之后按钮里是 SVG 没有文字，
+  // 判据必须挂在**与皮无关的状态派生值**上。取消态优先，其余直接沿用 pttStatus
+  // （于是 error/unsupported 也如实报出来，不被糊成 idle——超集，比规格更诚实）。
+  const pttStateAttr = pttCancelArmed ? "cancel" : pttStatus;
 
   // ── 步 4 · 电报机敲键 ──
   // 挂 onChange 不挂裸 keydown：Shift/方向键不该响，粘贴一段字该响一串。
@@ -2985,6 +2991,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                       cancelPTT 之后再补一发 stopPTT，把刚取消的话发出去。 */}
                   <button
                     data-ptt-btn
+                    data-ptt-state={pttStateAttr}
                     className={`dp-dock-btn dp-dock-btn--ptt-main${pttCancelArmed ? " ptt-cancel-armed" : ""}`}
                     onPointerDown={onPttPointerDown}
                     onPointerMove={onPttPointerMove}
@@ -3005,14 +3012,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                       : pttStatus === "listening" ? "松开结束录音并发送"
                       : "按住说话"
                     }
-                  >{pttCancelArmed ? "✕" : pttStatus === "listening" ? "🔴" : "🎤"}</button>
+                  >{pttCancelArmed ? "✕" : <MicIcon listening={pttStatus === "listening"} />}</button>
                   {hasTTS && (
                     <button
+                      data-tts-btn
+                      data-tts-state={ttsEnabled ? "on" : "off"}
                       className="dp-dock-btn dp-dock-btn--ptt"
                       onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }}
                       style={{ background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined }}
                       title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}
-                    >{ttsEnabled ? "🔊" : "🔇"}</button>
+                    ><HornIcon on={ttsEnabled} /></button>
                   )}
                   {onCreateSquad && isChenChannel && (
                     <button
@@ -3238,8 +3247,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         <TelegraphKey pulses={telegraphPulses} transmits={telegraphTransmits} />
         {/* 步 3：onPointerLeave 的 stopPTT 已删（理由同弹窗态那处注释：它既是
             "滑出即发送"的病本体，又会在 capture 释放时补发一脚踩掉 cancelPTT）。 */}
-        <button data-ptt-btn className={pttCancelArmed ? "ptt-cancel-armed" : undefined} onPointerDown={onPttPointerDown} onPointerMove={onPttPointerMove} onPointerUp={onPttPointerUp} onPointerCancel={onPttPointerCancel} onLostPointerCapture={onPttLostCapture} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttCancelArmed ? "var(--hud-accent-red-dim)" : pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined, borderColor: pttCancelArmed ? "var(--hud-accent-red)" : undefined, color: pttCancelArmed ? "var(--hud-accent-red)" : undefined, opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttCancelArmed ? "松手取消" : pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttCancelArmed ? "✕" : pttStatus === "listening" ? "🔴" : "🎤"}</button>
-        {hasTTS && (<button onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}>{ttsEnabled ? "🔊" : "🔇"}</button>)}
+        <button data-ptt-btn data-ptt-state={pttStateAttr} className={pttCancelArmed ? "ptt-cancel-armed" : undefined} onPointerDown={onPttPointerDown} onPointerMove={onPttPointerMove} onPointerUp={onPttPointerUp} onPointerCancel={onPttPointerCancel} onLostPointerCapture={onPttLostCapture} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttCancelArmed ? "var(--hud-accent-red-dim)" : pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : pttBtnStyle.background, borderColor: pttCancelArmed ? "var(--hud-accent-red)" : "var(--hud-border-bright)", color: pttCancelArmed ? "var(--hud-accent-red)" : "var(--hud-text-primary)", opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttCancelArmed ? "松手取消" : pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttCancelArmed ? "✕" : <MicIcon listening={pttStatus === "listening"} />}</button>
+        {hasTTS && (<button data-tts-btn data-tts-state={ttsEnabled ? "on" : "off"} onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : pttBtnStyle.background, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}><HornIcon on={ttsEnabled} /></button>)}
         {onCreateSquad && isChenChannel && (<button onClick={() => onCreateSquad(selectedCommanders[0])} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
         {onDeclareWar && canDeclareWar && (<button onClick={onDeclareWar} style={warBtnStyle} title="向敌方宣战">宣战</button>)}
         <button data-send-btn onClick={() => void sendCommand()} disabled={loading || !message.trim()} style={{ ...sendBtnStyle, opacity: loading || !message.trim() ? 0.5 : 1 }}>{loading ? "..." : "发送"}</button>

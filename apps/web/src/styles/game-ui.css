@@ -2424,3 +2424,33 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
   25%  { opacity: 1;   transform: translateX(0); }
   100% { opacity: 0;   transform: translateX(14px); }
 }
+
+/* ── 动画R2 步 6 · 输入排图标（InputRailIcons.tsx） ──
+   emoji 是系统字形，管不住颜色也不吃 HUD 色板；换成手搓 SVG 后一律 currentColor，
+   按钮的 color 给什么就画什么——状态色仍由 ChatPanel 那套状态机决定，这里只换皮。 */
+
+.ir-icon {
+  display: block;
+  color: inherit;
+}
+
+/* PTT 默认 cyan 勾线；listening 时按钮 color 被 inline style 改成红，图标跟着翻。 */
+.ir-mic { color: var(--hud-accent-cyan); }
+[data-ptt-state="listening"] .ir-mic,
+[data-ptt-state="cancel"] .ir-mic { color: inherit; }
+
+/* 呼吸环只在 listening 时渲染（存在与否由状态控，铁律 1）；环本身的呼吸是隐喻。 */
+.ir-mic__ring {
+  transform-box: view-box;
+  transform-origin: 12px 9.5px;
+  animation: ir-mic-breathe 1.4s ease-in-out infinite;
+}
+
+@keyframes ir-mic-breathe {
+  0%, 100% { opacity: 0.25; transform: scale(0.92); }
+  50%      { opacity: 0.9;  transform: scale(1.06); }
+}
+
+/* 喇叭：开＝cyan，关＝调暗（斜杠由组件画） */
+.ir-horn { color: var(--hud-accent-cyan); }
+.ir-horn--off { color: var(--hud-text-dim); opacity: 0.85; }
