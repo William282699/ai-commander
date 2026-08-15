@@ -2238,12 +2238,25 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 }
 .dp-dock-btn--war:hover { box-shadow: 0 0 8px var(--hud-accent-red-glow); }
 
-.dp-dock-btn--ptt {
+/* --ptt 原本 PTT 与 TTS 喇叭键共用。动画R2 步 1 只给 PTT 加量，故拆成
+   「共享外观」＋「PTT 独有尺寸」两块：喇叭键仍走 --ptt，外观值原样照抄、零 diff。 */
+.dp-dock-btn--ptt,
+.dp-dock-btn--ptt-main {
   background: var(--hud-bg-elevated);
   border-color: var(--hud-border-bright);
   color: var(--hud-text-primary);
   font-size: 14px;
   padding: 5px 8px;
+}
+
+/* PTT 独有加量：滑开取消（步 3）需要更大的落点。44 = 触屏 a11y 触点下限，
+   桌面首版起点，终值等截图目测再调。两块同为单类特异性 (0,1,0)，靠源序取胜——
+   本块必须留在上面那块之后。 */
+.dp-dock-btn--ptt-main {
+  font-size: 16px;
+  padding: 8px 12px;
+  min-width: 44px;
+  min-height: 44px;
 }
 
 .dp-dock-btn--send {

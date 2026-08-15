@@ -2768,7 +2768,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                     disabled={loading}
                   />
                   <button
-                    className="dp-dock-btn dp-dock-btn--ptt"
+                    data-ptt-btn
+                    className="dp-dock-btn dp-dock-btn--ptt-main"
                     onPointerDown={(e) => { e.preventDefault(); startPTT(); }}
                     onPointerUp={stopPTT}
                     onPointerCancel={stopPTT}
@@ -3014,7 +3015,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         <button onClick={() => handleProduce("light_tank")} disabled={playerMoney < 200 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 200 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产轻坦 ($200)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+坦$200</button>
         </>)}
         <input ref={inputRef} type="text" value={message} onChange={(e) => setMessage(e.target.value)} onKeyDown={handleKeyDown} placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`} disabled={loading} style={inputStyle} />
-        <button onPointerDown={(e) => { e.preventDefault(); startPTT(); }} onPointerUp={stopPTT} onPointerCancel={stopPTT} onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined, opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttStatus === "listening" ? "🔴" : "🎤"}</button>
+        <button data-ptt-btn onPointerDown={(e) => { e.preventDefault(); startPTT(); }} onPointerUp={stopPTT} onPointerCancel={stopPTT} onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined, opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttStatus === "listening" ? "🔴" : "🎤"}</button>
         {hasTTS && (<button onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}>{ttsEnabled ? "🔊" : "🔇"}</button>)}
         {onCreateSquad && isChenChannel && (<button onClick={() => onCreateSquad(selectedCommanders[0])} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
         {onDeclareWar && canDeclareWar && (<button onClick={onDeclareWar} style={warBtnStyle} title="向敌方宣战">宣战</button>)}
@@ -3435,6 +3436,16 @@ const pttBtnStyle: React.CSSProperties = {
   userSelect: "none",
   touchAction: "none",
   transition: "background 0.15s, border-color 0.15s",
+};
+
+/* 动画R2 步 1：PTT 单独加量。pttBtnStyle 被 TTS 喇叭键复用，动它喇叭会跟着长个，
+   故加量走这层覆盖、只贴 PTT 一处。44 = 触屏 a11y 触点下限，桌面鼠标场景只当首版
+   起点（滑开取消要更大的落点，终值等截图目测再调）。 */
+const pttBigStyle: React.CSSProperties = {
+  padding: "10px 14px",
+  fontSize: 16,
+  minWidth: 44,
+  minHeight: 44,
 };
 
 const sendBtnStyle: React.CSSProperties = {
