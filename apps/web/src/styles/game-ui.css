@@ -2347,3 +2347,13 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.45; }
 }
+
+/* 步 3 取消态的按钮闪烁。颜色不写在这儿——两态的 PTT 都有 inline style 管背景，
+   inline 压得过任何 class，颜色统一走 inline，这里只出"闪"这一件事，
+   免掉 !important。 */
+.ptt-cancel-armed { animation: ptt-cancel-blink 0.5s steps(1, end) infinite; }
+
+@keyframes ptt-cancel-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}

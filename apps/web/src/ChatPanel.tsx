@@ -498,6 +498,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   const voiceArmRef = useRef<VoiceCaptureArm | null>(null);
   const voiceArmingRef = useRef<Promise<VoiceCaptureArm | null> | null>(null);
   const pressWantedRef = useRef(false);
+  // ── 动画R2 步 3：滑开取消 ──
+  // pttPressed 只用来驱动"按住期间"的临时监听（Esc / window blur）；一切**判闸**
+  // 走 ref——同 tick 内 setState 还没生效，用 state 判会放行不该放行的那一发。
+  const [pttPressed, setPttPressed] = useState(false);
+  const pttPressedRef = useRef(false);
+  const [pttCancelIntent, setPttCancelIntent] = useState(false);
+  const pttCancelIntentRef = useRef(false);
+  const setPressed = useCallback((v: boolean) => { pttPressedRef.current = v; setPttPressed(v); }, []);
+  const setCancelIntent = useCallback((v: boolean) => { pttCancelIntentRef.current = v; setPttCancelIntent(v); }, []);
+  // Web Speech 臂取消时把输入框回滚到按下前那一刻：识别文字是边听边实时写进框里的，
+  // 不回滚＝半句错令留在框里等着被下一次回车误发。
+  const pttCancelledRef = useRef(false);
+  const messageSnapshotRef = useRef<string | null>(null);
   // ── 延迟 A/B：松手 → 耳朵真听见（客户端自己量，搭下一次命令回服务端）──
   // 判据是"松手到出声"，而出声那一刻只有 TTS 模块知道。长官原话：「我真的不会去
   // f12 做这些，每次都整错」——**要长官去捞证据本身就是设计缺陷**（§8 那笔账的
@@ -575,6 +588,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // 让他的话被录进长官的命令里，是这条路独有的新病。
       cancel();
       pressWantedRef.current = true;
+      // 步 3：置"按住中"必须在本臂的早退之后（上面的 if (loading) return），
+      // 否则 loading 边界会留下一副永远摘不掉的 Esc/blur 监听。
+      setPressed(true);
       void ensureVoiceArm().then((arm) => {
         // 设备还在路上时长官就松手了 ⇒ 这一按作废（预热臂上这一格几乎不发生，
         // 负对照臂上它就是常态——那正是这个病的形状）。
@@ -588,6 +604,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     }
 
     if (!SpeechRecCtor) return;
+    // 步 3：同上，置位在本臂早退（上一行 unsupported）之后。
+    setPressed(true);
     const rec = new SpeechRecCtor();
     rec.lang = "zh-CN";
     rec.interimResults = true;
@@ -613,6 +631,18 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       if (e.error !== "aborted") console.warn("[PTT] error:", e.error);
     };
     rec.onend = () => {
+      // ★步 3 封口：abort() 之后 onend 照样 fire，且已 final 的文字可能非空——
+      //   不在这里拦住，下面那段会把长官取消掉的半句话自动发出去。
+      if (pttCancelledRef.current) {
+        pttCancelledRef.current = false;
+        const snap = messageSnapshotRef.current;
+        if (snap !== null) setMessage(snap);   // 回滚到按下前那一刻，不是清空
+        messageSnapshotRef.current = null;
+        setPttStatus(s => (s === "error" ? s : "idle"));
+        pttRecRef.current = null;
+        return;                                 // 不自动发送、不点 [data-send-btn]
+      }
+      messageSnapshotRef.current = null;         // 正常收尾也把快照清掉，别留残值
       setMessage(prev => {
         const clean = prev.replace(/\u200B.*$/, "");
         // Auto-send if we got final text
@@ -629,10 +659,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     };
     pttRecRef.current = rec;
     setPttStatus("listening");
+    // 步 3 快照点：必须在 rec.start() 之前抓——识别文字是边听边实时写进框里的。
+    // startPTT 的闭包里没有新鲜的 message，用函数式 set 拿真值（React 对同值更新
+    // 有 bail-out，不产生副作用）。
+    setMessage(prev => { messageSnapshotRef.current = prev; return prev; });
     rec.start();
-  }, [SpeechRecCtor, loading, selectedCommanders, isGroupChat]);
+  }, [SpeechRecCtor, loading, selectedCommanders, isGroupChat, setPressed]);
 
   const stopPTT = useCallback(() => {
+    setPressed(false);                          // 步 3：发送路径也必须落闸，否则
+                                                // Esc/blur 监听留在身上不摘
     releaseAtRef.current = performance.now();   // 松手：计时起点（两臂同一处）
     if (pressWantedRef.current) {
       pressWantedRef.current = false;
@@ -660,7 +696,129 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     if (pttRecRef.current) {
       pttRecRef.current.stop();
     }
-  }, []);
+  }, [setPressed]);
+
+  /**
+   * 步 3 · 取消这一按（两臂一函数）。滑出按钮范围松手 / Esc / pointercancel /
+   * 切窗都走这里：**什么都不发**。
+   *
+   * ★真首行闸不许挪位、不许省。lostpointercapture 不是异常路径——规范规定
+   *   pointerup 派发完浏览器隐式释放 capture 并补发它，**每次正常松手都响**。
+   *   没有这道闸，cancelPTT 会紧跟着 stopPTT 再跑一遍：
+   *     ① 清掉 stopPTT 刚写的 releaseAtRef（延迟 A/B 探针对每个语音回合永久哑）；
+   *     ② 落进 Web Speech 分支 abort 掉 pending 的 onend——马克斯每一次正常语音
+   *        发送都会被自己的兜底网静默取消并回滚。
+   *   修错位置（顺手删 lostpointercapture 兜底行）会把"异常丢 capture 时麦克风
+   *   保持 unmuted"那个隐私逃生口一起删掉，所以闸钉在这里，兜底行不许删。
+   */
+  const cancelPTT = useCallback(() => {
+    if (!pttPressedRef.current) return;         // ★真首行闸
+    setPressed(false);
+    setCancelIntent(false);
+    // cancelPTT 不写计时起点，但残值也要清：stopPTT 首行那句 performance.now()
+    // 是发送回合专属，取消回合不参与延迟 A/B，否则假 firstSoundMs 会搭下一次
+    // 顺风车回服务端。
+    releaseAtRef.current = null;
+
+    // 录音臂（含"设备还在路上"那一格：pressWantedRef 为真就算）
+    if (pressWantedRef.current) {
+      pressWantedRef.current = false;
+      voiceArmRef.current?.cancel();            // 真丢弃 chunks，不产出、不发包
+      // 与 stopPTT 的 releaseDevice 完全对齐：预热关掉就撒手，不然两条路
+      // 对"下一次按下要不要重新付开设备的钱"给出不同答案。
+      if (!isVoiceWarmEnabled()) { voiceArmRef.current?.dispose(); voiceArmRef.current = null; }
+      setPttStatus(s => (s === "error" ? s : "idle"));
+      return;
+    }
+
+    // Web Speech 臂：abort 后 onend 仍会 fire，回滚在那儿做（见 onend 头部封口）
+    if (pttRecRef.current) {
+      pttCancelledRef.current = true;
+      pttRecRef.current.abort();
+      return;
+    }
+
+    // 两臂都没挂上（按下与 arm 赋值之间的极窄同步窗口）：至少把灯收回来。
+    setPttStatus(s => (s === "error" ? s : "idle"));
+  }, [setPressed, setCancelIntent]);
+
+  /**
+   * 步 3 · 按住期间才挂的两副临时监听。
+   *
+   * Esc 走 **document capture 相 ＋ stopImmediatePropagation**：主窗 input.ts 的
+   * Escape（释放选区）挂在 window 冒泡相（已核 `window.addEventListener("keydown",
+   * onKeyDown)` 无 capture 参数），capture 相在它之前截断，长官取消录音时地图选区
+   * 不会跟着被释放。弹窗态没有 GameCanvas，本就无此冲突。
+   * 只在按住期间挂载，松手即摘——不留常驻监听。
+   */
+  useEffect(() => {
+    if (!pttPressed) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      cancelPTT();
+    };
+    // 切窗＝系统打断，与 pointercancel 同语义：取消，不发送。
+    const onBlur = () => cancelPTT();
+    document.addEventListener("keydown", onKey, true);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [pttPressed, cancelPTT]);
+
+  // ── 步 3 · 两处 PTT 按钮共用的一套指针 handler（弹窗态/嵌入态对称）──
+  const onPttPointerDown = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    // 抓 capture：滑出按钮之后 move/up 仍然回到这颗键上，否则一出界就收不到事件、
+    // 取消态永远判不出来。pointerId 已失效时会抛 NotFoundError——包起来，
+    // 不许连累 startPTT（拿不到 capture 最多退化成不跟手，功能不塌）。
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 拿不到就算了 */ }
+    setCancelIntent(false);
+    startPTT();
+  }, [setCancelIntent, startPTT]);
+
+  const onPttPointerMove = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    if (!pttPressedRef.current) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    // 微信手感：滑出去是"要取消"，滑回来可以反悔。
+    const outside =
+      e.clientX < r.left - PTT_CANCEL_SLOP || e.clientX > r.right + PTT_CANCEL_SLOP ||
+      e.clientY < r.top - PTT_CANCEL_SLOP || e.clientY > r.bottom + PTT_CANCEL_SLOP;
+    setCancelIntent(outside);
+  }, [setCancelIntent]);
+
+  const onPttPointerUp = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    // ★这道闸是 pointerup 自己的，不能只靠 cancelPTT 里那道——这里要挡的是 stopPTT：
+    //   Esc 取消后长官的手指还按在键上，随后必然来一发 pointerup。放行的话
+    //   ① releaseAtRef 被钉上假的计时起点，之后任何一次 TTS 出声都会被算成
+    //      "这次已取消按下"的 firstSoundMs 送回服务端；
+    //   ② Web Speech 臂会对已经 abort 掉的 recognition 再 stop() 一次。
+    if (!pttPressedRef.current) return;
+    // 早退跳过 release 无害：pointerup 之后浏览器本就隐式释放 capture。
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* 已释放 */ }
+    if (pttCancelIntentRef.current) cancelPTT(); else stopPTT();
+  }, [cancelPTT, stopPTT]);
+
+  const onPttPointerCancel = useCallback(() => {
+    if (!pttPressedRef.current) return;
+    // 系统夺走指针 ≠ 长官下令。旧行为是 stopPTT＝照发，半句错令直接出门，
+    // 那正是本刀要治的病（有意手感变更，用户 2026-08-15 拍板）。
+    cancelPTT();
+  }, [cancelPTT]);
+
+  const onPttLostCapture = useCallback(() => {
+    // 每次正常松手浏览器都会补发这一发（pointerup 后隐式释放 capture），
+    // 空转由 cancelPTT 的真首行闸挡住，不靠运气。异常丢 capture 时它才真咬：
+    // 不兜则 collecting 卡在真、麦克风轨道保持 unmuted，踩 voiceCaptureState
+    // 的隐私不变量「没按下 ⇒ 一个样本都不许留」。★此行不许删。
+    cancelPTT();
+  }, [cancelPTT]);
+
+  // 取消态视觉的统一判据：按住中 ＋ 已滑出。两态同一个开关。
+  const pttCancelArmed = pttPressed && pttCancelIntent;
 
   // P1: snapshot selected unit IDs at sendCommand time
   const selectedIdsSnapshotRef = useRef<number[] | undefined>(undefined);
@@ -2383,7 +2541,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         {/* 动画R2 步 2：无线电呼叫行。挂 pttStatus === "listening" ＝ 与 🔴 红灯同源
             （录音臂只有 arm.press() 真返回 true 才置 listening），两态共用本 fragment
             故弹窗/嵌入都有。纯渲染态，不进 messageStore。 */}
-        {pttStatus === "listening" && <RadioCallRow />}
+        {pttStatus === "listening" && <RadioCallRow cancelIntent={pttCancelIntent} />}
 
         {/* Inline staff threads */}
         {activeThreads.length > 0 && !response && activeThreads.map((thread) => (
@@ -2782,25 +2940,34 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                     placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`}
                     disabled={loading}
                   />
+                  {/* 步 3：onPointerLeave 的 stopPTT 已删——它就是「说到一半手一歪、
+                      错令直接发出去」的病本体。删它还是必要的而不是顺手：释放
+                      pointer capture 时浏览器会向 capture 目标补发 pointerout/leave，
+                      旧 handler 若还在、同 tick 里 pttStatus 仍是 listening，就会在
+                      cancelPTT 之后再补一发 stopPTT，把刚取消的话发出去。 */}
                   <button
                     data-ptt-btn
-                    className="dp-dock-btn dp-dock-btn--ptt-main"
-                    onPointerDown={(e) => { e.preventDefault(); startPTT(); }}
-                    onPointerUp={stopPTT}
-                    onPointerCancel={stopPTT}
-                    onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }}
+                    className={`dp-dock-btn dp-dock-btn--ptt-main${pttCancelArmed ? " ptt-cancel-armed" : ""}`}
+                    onPointerDown={onPttPointerDown}
+                    onPointerMove={onPttPointerMove}
+                    onPointerUp={onPttPointerUp}
+                    onPointerCancel={onPttPointerCancel}
+                    onLostPointerCapture={onPttLostCapture}
                     disabled={pttStatus === "unsupported" || loading}
                     style={{
-                      background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined,
+                      background: pttCancelArmed ? "var(--hud-accent-red-dim)" : pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined,
+                      borderColor: pttCancelArmed ? "var(--hud-accent-red)" : undefined,
+                      color: pttCancelArmed ? "var(--hud-accent-red)" : undefined,
                       opacity: pttStatus === "unsupported" || loading ? 0.35 : 1,
                     }}
                     title={
-                      pttStatus === "unsupported" ? "浏览器不支持语音识别"
+                      pttCancelArmed ? "松手取消"
+                      : pttStatus === "unsupported" ? "浏览器不支持语音识别"
                       : pttStatus === "error" ? "麦克风权限被拒绝，请在浏览器设置中允许"
                       : pttStatus === "listening" ? "松开结束录音并发送"
                       : "按住说话"
                     }
-                  >{pttStatus === "listening" ? "🔴" : "🎤"}</button>
+                  >{pttCancelArmed ? "✕" : pttStatus === "listening" ? "🔴" : "🎤"}</button>
                   {hasTTS && (
                     <button
                       className="dp-dock-btn dp-dock-btn--ptt"
@@ -3030,7 +3197,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         <button onClick={() => handleProduce("light_tank")} disabled={playerMoney < 200 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 200 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产轻坦 ($200)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+坦$200</button>
         </>)}
         <input ref={inputRef} type="text" value={message} onChange={(e) => setMessage(e.target.value)} onKeyDown={handleKeyDown} placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`} disabled={loading} style={inputStyle} />
-        <button data-ptt-btn onPointerDown={(e) => { e.preventDefault(); startPTT(); }} onPointerUp={stopPTT} onPointerCancel={stopPTT} onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined, opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttStatus === "listening" ? "🔴" : "🎤"}</button>
+        {/* 步 3：onPointerLeave 的 stopPTT 已删（理由同弹窗态那处注释：它既是
+            "滑出即发送"的病本体，又会在 capture 释放时补发一脚踩掉 cancelPTT）。 */}
+        <button data-ptt-btn className={pttCancelArmed ? "ptt-cancel-armed" : undefined} onPointerDown={onPttPointerDown} onPointerMove={onPttPointerMove} onPointerUp={onPttPointerUp} onPointerCancel={onPttPointerCancel} onLostPointerCapture={onPttLostCapture} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttCancelArmed ? "var(--hud-accent-red-dim)" : pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined, borderColor: pttCancelArmed ? "var(--hud-accent-red)" : undefined, color: pttCancelArmed ? "var(--hud-accent-red)" : undefined, opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttCancelArmed ? "松手取消" : pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttCancelArmed ? "✕" : pttStatus === "listening" ? "🔴" : "🎤"}</button>
         {hasTTS && (<button onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}>{ttsEnabled ? "🔊" : "🔇"}</button>)}
         {onCreateSquad && isChenChannel && (<button onClick={() => onCreateSquad(selectedCommanders[0])} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
         {onDeclareWar && canDeclareWar && (<button onClick={onDeclareWar} style={warBtnStyle} title="向敌方宣战">宣战</button>)}
@@ -3456,6 +3625,9 @@ const pttBtnStyle: React.CSSProperties = {
 /* 动画R2 步 1：PTT 单独加量。pttBtnStyle 被 TTS 喇叭键复用，动它喇叭会跟着长个，
    故加量走这层覆盖、只贴 PTT 一处。44 = 触屏 a11y 触点下限，桌面鼠标场景只当首版
    起点（滑开取消要更大的落点，终值等截图目测再调）。 */
+/** 步 3：滑出按钮边界多远算「要取消」。鼠标尺度的手感参数，首版 12px。 */
+const PTT_CANCEL_SLOP = 12;
+
 const pttBigStyle: React.CSSProperties = {
   padding: "10px 14px",
   fontSize: 16,
