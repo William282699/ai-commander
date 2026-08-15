@@ -2271,6 +2271,18 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   const conversationMessages = isDetached
     ? displayMessages.filter((m) => !isReportMessage(m))
     : displayMessages;
+  // 风格五元组只在这里定义一次：嵌入态的折叠风格条与弹窗态页底 dp-style-bar
+  // 都读它。抄成两份必然漂移（改了一处忘另一处），故禁止复制。
+  const styleRows: [string, number][] = styleSnapshot
+    ? [
+        ["冒险", styleSnapshot.r],
+        ["集火", styleSnapshot.f],
+        ["目标", styleSnapshot.o],
+        ["惜兵", styleSnapshot.c],
+        ["侦察", styleSnapshot.s],
+      ]
+    : [];
+
   const chatContentFragment = (
     <>
       <div ref={scrollRef} className={isDetached ? "dp-chat-scroll" : undefined} style={isDetached ? undefined : chatFlowStyle}>
@@ -2456,21 +2468,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         {clarification && <div style={clarificationStyle}>{clarification}</div>}
       </div>
 
-      {/* Style indicator */}
-      {styleSnapshot && (
+      {/* Style indicator — 仅嵌入态。弹窗态的风格五条挪到了页底 dp-style-bar
+          （步 5 中栏对掉），这里加 !isDetached 守卫免得两处重复出现。 */}
+      {!isDetached && styleSnapshot && (
         <div style={styleRowStyle}>
           <button onClick={() => setShowStyle(!showStyle)} style={styleToggleBtn}>
             {showStyle ? "▾ 风格" : "▸ 风格"}
           </button>
           {showStyle && (
             <div style={styleBarContainer}>
-              {([
-                ["冒险", styleSnapshot.r],
-                ["集火", styleSnapshot.f],
-                ["目标", styleSnapshot.o],
-                ["惜兵", styleSnapshot.c],
-                ["侦察", styleSnapshot.s],
-              ] as [string, number][]).map(([label, val]) => (
+              {styleRows.map(([label, val]) => (
                 <div key={label} style={styleBarItem}>
                   <span style={styleLabel}>{label}</span>
                   <span style={barBg}>
@@ -2686,6 +2693,80 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                   {isGroupChat && <span style={{ fontSize: 9, color: "var(--hud-text-dim)", marginLeft: "auto" }}>COMMS ONLY</span>}
                 </div>
                 {chatContentFragment}
+                {/* Conversation Dock — 步 5 从页底搬进对话栏正下方，handler/props 未动 */}
+                <div className="dp-conv-dock">
+                  {SHOW_QUICK_BUY && (<>
+                  <button
+                    className="dp-dock-btn dp-dock-btn--prod"
+                    onClick={() => handleProduce("infantry")}
+                    disabled={playerMoney < 80 || playerQueueLen >= 3}
+                    style={{ opacity: playerMoney >= 80 && playerQueueLen < 3 ? 1 : 0.35 }}
+                    title={`生产步兵 ($80)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
+                  >+兵$80</button>
+                  <button
+                    className="dp-dock-btn dp-dock-btn--prod"
+                    onClick={() => handleProduce("light_tank")}
+                    disabled={playerMoney < 200 || playerQueueLen >= 3}
+                    style={{ opacity: playerMoney >= 200 && playerQueueLen < 3 ? 1 : 0.35 }}
+                    title={`生产轻坦 ($200)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
+                  >+坦$200</button>
+                  </>)}
+                  <input
+                    ref={inputRef}
+                    type="text"
+                    className="dp-dock-input"
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`}
+                    disabled={loading}
+                  />
+                  <button
+                    className="dp-dock-btn dp-dock-btn--ptt"
+                    onPointerDown={(e) => { e.preventDefault(); startPTT(); }}
+                    onPointerUp={stopPTT}
+                    onPointerCancel={stopPTT}
+                    onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }}
+                    disabled={pttStatus === "unsupported" || loading}
+                    style={{
+                      background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined,
+                      opacity: pttStatus === "unsupported" || loading ? 0.35 : 1,
+                    }}
+                    title={
+                      pttStatus === "unsupported" ? "浏览器不支持语音识别"
+                      : pttStatus === "error" ? "麦克风权限被拒绝，请在浏览器设置中允许"
+                      : pttStatus === "listening" ? "松开结束录音并发送"
+                      : "按住说话"
+                    }
+                  >{pttStatus === "listening" ? "🔴" : "🎤"}</button>
+                  {hasTTS && (
+                    <button
+                      className="dp-dock-btn dp-dock-btn--ptt"
+                      onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }}
+                      style={{ background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined }}
+                      title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}
+                    >{ttsEnabled ? "🔊" : "🔇"}</button>
+                  )}
+                  {onCreateSquad && isChenChannel && (
+                    <button
+                      className="dp-dock-btn dp-dock-btn--action"
+                      onClick={() => onCreateSquad(selectedCommanders[0])}
+                      disabled={!squadBtnEnabled}
+                      style={{ opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }}
+                      title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}
+                    >编队</button>
+                  )}
+                  {onDeclareWar && canDeclareWar && (
+                    <button className="dp-dock-btn dp-dock-btn--war" onClick={onDeclareWar} title="向敌方宣战">宣战</button>
+                  )}
+                  <button
+                    data-send-btn
+                    className="dp-dock-btn dp-dock-btn--send"
+                    onClick={() => void sendCommand()}
+                    disabled={loading || !message.trim()}
+                    style={{ opacity: loading || !message.trim() ? 0.5 : 1 }}
+                  >{loading ? "..." : "发送"}</button>
+                </div>
               </div>
             </div>
           </div>
@@ -2721,80 +2802,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           </div>
         </div>
 
-        {/* Bottom Dock */}
-        <div className="dp-bottom-dock">
-          {SHOW_QUICK_BUY && (<>
-          <button
-            className="dp-dock-btn dp-dock-btn--prod"
-            onClick={() => handleProduce("infantry")}
-            disabled={playerMoney < 80 || playerQueueLen >= 3}
-            style={{ opacity: playerMoney >= 80 && playerQueueLen < 3 ? 1 : 0.35 }}
-            title={`生产步兵 ($80)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
-          >+兵$80</button>
-          <button
-            className="dp-dock-btn dp-dock-btn--prod"
-            onClick={() => handleProduce("light_tank")}
-            disabled={playerMoney < 200 || playerQueueLen >= 3}
-            style={{ opacity: playerMoney >= 200 && playerQueueLen < 3 ? 1 : 0.35 }}
-            title={`生产轻坦 ($200)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}
-          >+坦$200</button>
-          </>)}
-          <input
-            ref={inputRef}
-            type="text"
-            className="dp-dock-input"
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`}
-            disabled={loading}
-          />
-          <button
-            className="dp-dock-btn dp-dock-btn--ptt"
-            onPointerDown={(e) => { e.preventDefault(); startPTT(); }}
-            onPointerUp={stopPTT}
-            onPointerCancel={stopPTT}
-            onPointerLeave={() => { if (pttStatus === "listening") stopPTT(); }}
-            disabled={pttStatus === "unsupported" || loading}
-            style={{
-              background: pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : undefined,
-              opacity: pttStatus === "unsupported" || loading ? 0.35 : 1,
-            }}
-            title={
-              pttStatus === "unsupported" ? "浏览器不支持语音识别"
-              : pttStatus === "error" ? "麦克风权限被拒绝，请在浏览器设置中允许"
-              : pttStatus === "listening" ? "松开结束录音并发送"
-              : "按住说话"
-            }
-          >{pttStatus === "listening" ? "🔴" : "🎤"}</button>
-          {hasTTS && (
-            <button
-              className="dp-dock-btn dp-dock-btn--ptt"
-              onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }}
-              style={{ background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined }}
-              title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}
-            >{ttsEnabled ? "🔊" : "🔇"}</button>
-          )}
-          {onCreateSquad && isChenChannel && (
-            <button
-              className="dp-dock-btn dp-dock-btn--action"
-              onClick={() => onCreateSquad(selectedCommanders[0])}
-              disabled={!squadBtnEnabled}
-              style={{ opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }}
-              title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}
-            >编队</button>
-          )}
-          {onDeclareWar && canDeclareWar && (
-            <button className="dp-dock-btn dp-dock-btn--war" onClick={onDeclareWar} title="向敌方宣战">宣战</button>
-          )}
-          <button
-            data-send-btn
-            className="dp-dock-btn dp-dock-btn--send"
-            onClick={() => void sendCommand()}
-            disabled={loading || !message.trim()}
-            style={{ opacity: loading || !message.trim() ? 0.5 : 1 }}
-          >{loading ? "..." : "发送"}</button>
-        </div>
+        {/* Style Bar — 步 5 中栏对掉：风格五条常显横排，占原 dock 的位置 */}
+        {styleSnapshot && (
+          <div className="dp-style-bar">
+            {styleRows.map(([label, val]) => (
+              <div key={label} className="dp-style-bar__item">
+                <span className="dp-style-bar__label">{label}</span>
+                <span className="dp-style-bar__track">
+                  <span className="dp-style-bar__fill" style={{ width: `${val * 100}%` }} />
+                </span>
+                <span className="dp-style-bar__val">{(val * 100).toFixed(0)}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   }

@@ -2070,6 +2070,8 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 
 /* ── Bottom Dock ── */
 
+/* 步 5 之后弹窗态已不再使用 .dp-bottom-dock（dock 搬进了 .dp-conv-pane）。
+   规则保留不删：round 2 若要把 dock 放回页底，一行类名即可切回。 */
 .dp-bottom-dock {
   height: 72px;
   flex-shrink: 0;
@@ -2079,6 +2081,66 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
   padding: 0 16px;
   background: linear-gradient(0deg, rgba(26, 36, 56, 0.8) 0%, transparent 100%);
   border-top: 1px solid rgba(6, 182, 212, 0.2);
+}
+
+/* 对话栏正下方的输入 dock（步 5 落点 a：.dp-conv-pane 最后一个子节点）。
+   与 .dp-bottom-dock 的区别：不定死 height:72、不铺全宽渐变——它现在活在
+   中栏里，高度由内容撑。flex-shrink:0 保证 .dp-chat-scroll(flex:1) 压不扁它。 */
+.dp-conv-dock {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid rgba(6, 182, 212, 0.2);
+}
+
+/* 页底风格条：五项常显横排，占原 dock 的位置。 */
+.dp-style-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 16px;
+  border-top: 1px solid rgba(6, 182, 212, 0.2);
+}
+
+.dp-style-bar__item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dp-style-bar__label {
+  font-size: 10px;
+  color: var(--hud-text-dim);
+  white-space: nowrap;
+}
+
+.dp-style-bar__track {
+  flex: 1;
+  min-width: 0;
+  display: block;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.dp-style-bar__fill {
+  display: block;
+  height: 100%;
+  background: var(--hud-accent-cyan);
+}
+
+.dp-style-bar__val {
+  font-size: 10px;
+  color: var(--hud-accent-cyan);
+  font-variant-numeric: tabular-nums;
+  min-width: 2ch;
+  text-align: right;
 }
 
 .dp-dock-group {
