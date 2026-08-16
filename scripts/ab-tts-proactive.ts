@@ -30,7 +30,10 @@ import {
   shouldSpeakMessage,
   spokenKey,
   personaOf,
+  isDeferrable,
+  UTTERANCE_MAX_AGE_SEC,
   type SpeakCandidate,
+  type SpeakContext,
 } from "../apps/web/src/proactiveSpeech";
 
 let passCount = 0;
@@ -216,6 +219,92 @@ function personaNarrowing(): void {
   check("personaOf 收窄：三个人全过", (["chen", "marcus", "emily"] as const).every((p) => personaOf(p) === p));
 }
 
+// ============================================================
+// 步 3（闸口）：闸④新鲜度/请示存活 ＋ 闸⑤收音窗
+// 起算点同样是"功能开着，摘掉对应那道闸"。
+// ============================================================
+
+const NOW = 500; // 游戏钟当下（秒）
+
+/** 摘闸④：不查新鲜度、也不查活单（等价于把 ctx 的那两格喂成永远合格）。 */
+function gate4Removed(m: SpeakCandidate): boolean {
+  return shouldSpeakMessage(m, { nowGameTime: m.time ?? 0, escalationAlive: true, capturing: false }).speak;
+}
+/** 摘闸⑤：不查收音窗。 */
+function gate5Removed(m: SpeakCandidate, ctx: SpeakContext): boolean {
+  return shouldSpeakMessage(m, { ...ctx, capturing: false }).speak;
+}
+
+function freshEscalation(time = NOW): SpeakCandidate {
+  return { id: 31, from: "chen", time, utterance: { persona: "chen", kind: "escalation" } };
+}
+
+function gate4Freshness(): void {
+  const stale = freshEscalation(NOW - UTTERANCE_MAX_AGE_SEC - 1);
+  const after = shouldSpeakMessage(stale, { nowGameTime: NOW, escalationAlive: true, capturing: false }).speak === false;
+  checkKnife("闸④新鲜度：超窗的陈年台词不念（回灌/暂存释放都靠它）", after, gate4Removed(stale) === false);
+
+  check(
+    `恰好 ${UTTERANCE_MAX_AGE_SEC}s 仍念（边界不许滑）`,
+    shouldSpeakMessage(freshEscalation(NOW - UTTERANCE_MAX_AGE_SEC), { nowGameTime: NOW, escalationAlive: true, capturing: false }).speak === true,
+  );
+  check(
+    "msg.time 缺席＝无从判断，fail-closed",
+    shouldSpeakMessage({ id: 32, from: "chen", utterance: { persona: "chen", kind: "proactive" } }, { nowGameTime: NOW, capturing: false }).speak === false,
+  );
+}
+
+function gate4NegativeAge(): void {
+  // 勘察档：llm_advice 那条异步 post 没有重开守卫，上一局的台词会带着上一局的
+  // 时钟落进新局（新局钟从 0 起）⇒ age 是大负数。只写 `age > MAX` 会放行。
+  const fromLastGame: SpeakCandidate = {
+    id: 33, from: "marcus", time: 900, utterance: { persona: "marcus", kind: "advice" },
+  };
+  const after = shouldSpeakMessage(fromLastGame, { nowGameTime: 12, capturing: false }).speak === false;
+  const before = 12 - 900 > UTTERANCE_MAX_AGE_SEC; // 只查上限的旧写法＝放行
+  checkKnife("闸④负龄：上一局的台词落进新局不念（只查上限会放行）", after, before);
+}
+
+function gate4EscalationAliveOnlyForEscalation(): void {
+  // 请示：活单没了就不念（长官已经答过/已经过期）。
+  const dead = freshEscalation();
+  const after = shouldSpeakMessage(dead, { nowGameTime: NOW, escalationAlive: false, capturing: false }).speak === false;
+  checkKnife("闸④请示存活：活单没了的请示不念", after, gate4Removed(dead) === false);
+
+  // ★P1-13 负对照：其余 kind **压根没有活单这回事**，不许拿同一把尺去量。
+  //   这一条防的是把闸④写成「所有 kind 都要有活单」——那样 proactive/retrospect/
+  //   advice 会全体永久静音，而且不会有任何别的断言抓得到。
+  for (const kind of ["proactive", "retrospect", "advice"] as const) {
+    const m: SpeakCandidate = { id: 34, from: "marcus", time: NOW, utterance: { persona: "marcus", kind } };
+    check(
+      `★P1-13 负对照：${kind} 无 escalation 登记也必须出声`,
+      shouldSpeakMessage(m, { nowGameTime: NOW, capturing: false }).speak === true,
+    );
+    check(
+      `${kind} 即使 escalationAlive=false 也照念（不查这一格）`,
+      shouldSpeakMessage(m, { nowGameTime: NOW, escalationAlive: false, capturing: false }).speak === true,
+    );
+  }
+}
+
+function gate5Capturing(): void {
+  const m = freshEscalation();
+  const ctx: SpeakContext = { nowGameTime: NOW, escalationAlive: true, capturing: true };
+  const v = shouldSpeakMessage(m, ctx);
+  checkKnife("闸⑤收音窗：按住说话时到达不开口（否则被录进长官的命令）",
+    v.speak === false, gate5Removed(m, ctx) === false);
+  check("闸⑤的 deny 是**可延后**的（松手后补播，不是丢弃）",
+    !v.speak && v.reason === "capturing" && isDeferrable(v.reason));
+  check("其余 deny 都是终局的（不许被当成待补播挂着）",
+    (["no_utterance", "from_not_persona", "persona_mismatch", "group_chat", "stale", "escalation_dead"] as const)
+      .every((r) => !isDeferrable(r)));
+  // 顺序：又旧又在收音 ⇒ 先判 capturing（可延后），松手后再按 stale 终局。
+  const old = freshEscalation(NOW - 999);
+  const v2 = shouldSpeakMessage(old, ctx);
+  check("闸⑤排在闸④之前：又旧又在收音时先判 capturing（不提前钉成终局）",
+    !v2.speak && v2.reason === "capturing");
+}
+
 function runAll(): void {
   normalVoiceTurn();
   staleAcrossTurns();
@@ -231,6 +320,10 @@ function runAll(): void {
   gatePlayer();
   epochKey();
   personaNarrowing();
+  gate4Freshness();
+  gate4NegativeAge();
+  gate4EscalationAliveOnlyForEscalation();
+  gate5Capturing();
 }
 
 function main(): void {

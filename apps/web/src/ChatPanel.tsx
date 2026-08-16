@@ -58,7 +58,7 @@ import {
   type StaffThread,
 } from "./messageStore";
 import { speak, flush, cancel, speakUtterance, type Persona } from "./tts";
-import { shouldSpeakMessage, spokenKey } from "./proactiveSpeech";
+import { shouldSpeakMessage, spokenKey, isDeferrable } from "./proactiveSpeech";
 import { API_URL } from "./api";
 import { SESSION_ID } from "./session";
 
@@ -987,17 +987,45 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       spokenPrimedRef.current = false;
     }
     const primed = spokenPrimedRef.current;
+    const nowGameTime = s?.time ?? 0;
+    /**
+     * 闸⑤ 收音窗——**三段真名，一个都不许少，也不许去复刻那个 300ms**：
+     *   · `pttPressedRef.current`      手指还按着（两臂通吃的那一个）
+     *   · `snapshot().collecting`      录音臂的采集态。release() 里那 300ms 尾窗
+     *                                  （TAIL_GRACE_MS，voiceRecorder 模块私有）
+     *                                  排在 stopCollecting() **之前**，所以尾窗内
+     *                                  它仍为 true＝天然超集。读真状态，不抄常量。
+     *   · `pttRecRef.current !== null` Web Speech 臂：onend 两个分支才置 null。
+     * ★ `pttStatus` 不能用：stopPTT 在 arm.release() **之前**就把它打回 idle。
+     */
+    const capturing =
+      pttPressedRef.current ||
+      voiceArmRef.current?.snapshot().collecting === true ||
+      pttRecRef.current !== null;
     // 全频道读（plan §4 裁定）：声音管"听得见"，闪烁管"看得见是哪个频道"——
     // 只读当前频道的话，长官在马克斯频道时陈的请示照样零声＝病只治一半。
     for (const m of getMessages()) {
       const key = spokenKey(epoch, m.id);
       if (spokenRef.current.has(key)) continue;
-      spokenRef.current.add(key);
       // 首跑只打底：挂载/换局那一刻店里已有的消息一律视为"已播"，否则一挂载
       // 就把整个 backlog 从头念一遍。
-      if (!primed) continue;
-      const verdict = shouldSpeakMessage(m);
-      if (!verdict.speak) continue;
+      if (!primed) { spokenRef.current.add(key); continue; }
+      const verdict = shouldSpeakMessage(m, {
+        nowGameTime,
+        // 只有请示才查活单；其余 kind 传 undefined，闸④压根不读它。
+        escalationAlive:
+          m.utterance?.kind === "escalation"
+            ? getActiveEscalation(m.channel, nowGameTime) !== null
+            : undefined,
+        capturing,
+      });
+      if (!verdict.speak) {
+        // ★可延后的 deny **不进已播集合**：麦克风一松这句话仍然值得说
+        //   （手测 6 的补播）。其余 deny 是终局的，记下来不再回头看。
+        if (!isDeferrable(verdict.reason)) spokenRef.current.add(key);
+        continue;
+      }
+      spokenRef.current.add(key);
       if (!ttsEnabledRef.current) continue;
       speakUtterance(m.text, verdict.persona);
     }

@@ -58,7 +58,33 @@ export interface SpeakCandidate {
   from?: string;
   groupChat?: boolean;
   utterance?: Utterance;
+  /** 游戏钟上的落流时刻（闸④量新鲜度用同一把尺）。 */
+  time?: number;
 }
+
+/** 闸④⑤要吃的当下世界状态。取值在 ChatPanel，判定在这里（纯函数才测得动）。 */
+export interface SpeakContext {
+  /** 当前游戏钟。 */
+  nowGameTime: number;
+  /**
+   * 这条消息所在频道的升级请示还活着没有。
+   * **只有 kind==="escalation" 时才会被读**——其余 kind 压根没有"活单"这回事，
+   * 拿同一把尺去量会把 proactive/retrospect/advice 全判死（P1-13 的负对照就是
+   * 钉这个：无 escalation 登记的 proactive 必须照样出声）。
+   */
+  escalationAlive?: boolean;
+  /** 收音窗：麦克风正在（或刚刚还在）收音。真名三段见 ChatPanel 的取值处。 */
+  capturing: boolean;
+}
+
+/**
+ * 新鲜度上限（游戏秒，全 kind 通用）。
+ *
+ * 与引擎的 ESCALATION_WINDOW_SEC(120) 是两码事：那个是"请示还算不算数"，
+ * 这个是"这句话还值不值得念"。回灌/暂存释放时一条三分钟前的话被念出来，
+ * 比不念更伤——所以两把尺都要过。
+ */
+export const UTTERANCE_MAX_AGE_SEC = 30;
 
 export type SpeakVerdict =
   | { speak: true; persona: Persona; kind: UtteranceKind }
@@ -68,13 +94,26 @@ export type SpeakDenyReason =
   | "no_utterance"      // 闸① 没标记＝不出声（fail-closed 地基）
   | "from_not_persona"  // 闸② from 不在白名单（system/player）
   | "persona_mismatch"  // 闸② 标记里的 persona 与 from 对不上（伪造/串台）
-  | "group_chat";       // 闸③ 群聊回复不念（三个人 2.2-4.0s 依次落，会连珠炮）
+  | "group_chat"        // 闸③ 群聊回复不念（三个人 2.2-4.0s 依次落，会连珠炮）
+  | "stale"             // 闸④ 太旧（回灌/暂存释放时的陈年台词）
+  | "escalation_dead"   // 闸④ 请示已经不在了（只对 kind==="escalation"）
+  | "capturing";        // 闸⑤ 正在收音——**可延后**，不是丢弃（见下）
 
 /**
- * 步 2 的三道闸。闸④（新鲜度/escalation 存活）与闸⑤（收音窗）在步 3 接上，
- * 那两道要吃当下的世界状态，这一层只判消息**自身**够不够格。
+ * 这条 deny 是不是"等会儿还能再念"。
+ *
+ * ★只有收音窗是可延后的：麦克风一松，这句话仍然值得说（手测 6：按住时到达 →
+ * 录音期不开口 → 松手未过期则补播）。其余 deny 都是终局的，调用方可以直接
+ * 记进已播集合不再回头看。步 4 的暂存队列就靠这条分岔。
  */
-export function shouldSpeakMessage(msg: SpeakCandidate): SpeakVerdict {
+export function isDeferrable(reason: SpeakDenyReason): boolean {
+  return reason === "capturing";
+}
+
+/**
+ * 五道闸。①②③判消息**自身**够不够格（步 2），④⑤吃当下的世界状态（步 3）。
+ */
+export function shouldSpeakMessage(msg: SpeakCandidate, ctx?: SpeakContext): SpeakVerdict {
   // 闸①：fail-closed。发射侧没有显式声明可配音性，一律不出声。
   const u = msg.utterance;
   if (!u) return { speak: false, reason: "no_utterance" };
@@ -90,6 +129,26 @@ export function shouldSpeakMessage(msg: SpeakCandidate): SpeakVerdict {
 
   // 闸③：群聊不念。ALL 频道里三个人的回复是 2.2-4.0s 依次落下的，念出来是连珠炮。
   if (msg.groupChat) return { speak: false, reason: "group_chat" };
+
+  if (ctx) {
+    // 闸⑤：收音窗。**排在闸④之前**——正在收音时这句话该被"押后"而不是"判旧"，
+    //      顺序反了会把一条本可以补播的话提前钉成终局 deny。
+    if (ctx.capturing) return { speak: false, reason: "capturing" };
+
+    // 闸④之一：新鲜度（全 kind 通用）。msg.time 缺席＝无从判断，按 fail-closed 走。
+    if (msg.time == null) return { speak: false, reason: "stale" };
+    const age = ctx.nowGameTime - msg.time;
+    // ★负龄也算不新鲜。勘察档记过：llm_advice 那条异步 post **没有重开守卫**
+    //   （代码里自带认罪注释），上一局的台词会带着上一局的时钟落进新局——新局
+    //   钟从 0 起，age 于是是个大负数，只写 `age > MAX` 的话它会被**放行**，
+    //   正好把一句上一局的话念出来。
+    if (age < 0 || age > UTTERANCE_MAX_AGE_SEC) return { speak: false, reason: "stale" };
+
+    // 闸④之二：**只有请示**才查活单。其余 kind 没有活单这回事，不查。
+    if (u.kind === "escalation" && ctx.escalationAlive !== true) {
+      return { speak: false, reason: "escalation_dead" };
+    }
+  }
 
   return { speak: true, persona: fromPersona, kind: u.kind };
 }
