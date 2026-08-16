@@ -84,6 +84,19 @@ function resetStreamState(): void {
   streamHasPlayedEdge = false;
 }
 
+/**
+ * 喇叭这会儿还有没有活（只读，**零行为变更**）。
+ *
+ * ★为什么必须有这个出口：仲裁原本只看 `loading`，而 `setLoading(false)` 落在
+ * 流结束处，与音频队列毫无关系——一次应答的朗读通常还有好几句在队列里。主动
+ * 台词一到 loading=false 就释放、还要先走 cancel 协议，等于**把长官正在听的
+ * 回答从中间掐断**。那是 T1「互相绞杀」换个方向复发，而队列/播放态全是模块私有，
+ * 外面没有任何办法知道"还在播"。
+ */
+export function isBusy(): boolean {
+  return playingPromise !== null || queue.length > 0 || currentAudio !== null;
+}
+
 export function cancel(): void {
   generation++;
   activePersona = null;

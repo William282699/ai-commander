@@ -57,8 +57,8 @@ import {
   type MessageFrom,
   type StaffThread,
 } from "./messageStore";
-import { speak, flush, cancel, speakUtterance, type Persona } from "./tts";
-import { shouldSpeakMessage, spokenKey, isDeferrable } from "./proactiveSpeech";
+import { speak, flush, cancel, speakUtterance, isBusy, type Persona } from "./tts";
+import { shouldSpeakMessage, spokenKey, isDeferrable, type SpeakContext } from "./proactiveSpeech";
 import { API_URL } from "./api";
 import { SESSION_ID } from "./session";
 
@@ -976,17 +976,18 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // 而重跑不该补播任何已经过去的话。
   const ttsEnabledRef = useRef(false);
   ttsEnabledRef.current = ttsEnabled;
-  useEffect(() => {
+  const loadingRef = useRef(false);
+  loadingRef.current = loading;
+  /**
+   * 暂存队列。★**建在 tts 模块之外**：模块内的 queue 会被 cancel() 清空，而
+   * cancel 恰恰在按下 PTT、打字回合起流、关喇叭这三处被调用——押后的话正好死在
+   * 这些时刻。押在组件这边，cancel 碰不到。
+   */
+  const stashRef = useRef<FeedMessage[]>([]);
+
+  /** 闸④⑤ 要吃的当下世界状态。主判定与释放前的重判共用同一处取值。 */
+  const buildSpeakCtx = useCallback((m: FeedMessage): SpeakContext => {
     const s = getState();
-    const epoch = s ? syncGameEpoch(s) : gameEpochRef.current;
-    // 换局＝集合作废重打底。旧局的键留着也只是浪费内存（前缀不同不会误判），
-    // 但重开一局本就该重新打底：那一刻店里只剩「等待指令...」一条。
-    if (spokenEpochRef.current !== epoch) {
-      spokenRef.current.clear();
-      spokenEpochRef.current = epoch;
-      spokenPrimedRef.current = false;
-    }
-    const primed = spokenPrimedRef.current;
     const nowGameTime = s?.time ?? 0;
     /**
      * 闸⑤ 收音窗——**三段真名，一个都不许少，也不许去复刻那个 300ms**：
@@ -1002,6 +1003,40 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       pttPressedRef.current ||
       voiceArmRef.current?.snapshot().collecting === true ||
       pttRecRef.current !== null;
+    return {
+      nowGameTime,
+      // 只有请示才查活单；其余 kind 传 undefined，闸④压根不读它。
+      escalationAlive:
+        m.utterance?.kind === "escalation"
+          ? getActiveEscalation(m.channel, nowGameTime) !== null
+          : undefined,
+      capturing,
+    };
+  }, [getState]);
+
+  /**
+   * 放一段出去。★每段先走 cancel 协议（T2 解毒）：streamEngine 是模块级单变量、
+   * 只在 cancel 里归零，一次 Edge 503 / autoplay 拒之后，**同一个人接着说的**
+   * 下一段会被钉在 native 或 silent 上。释放条件里有 !isBusy()，所以这一下
+   * cancel 不会掐到任何正在播的东西。
+   */
+  const releaseOne = useCallback((m: FeedMessage, persona: Persona) => {
+    cancel();
+    speakUtterance(m.text, persona);
+  }, []);
+
+  useEffect(() => {
+    const s = getState();
+    const epoch = s ? syncGameEpoch(s) : gameEpochRef.current;
+    // 换局＝集合作废重打底。旧局的键留着也只是浪费内存（前缀不同不会误判），
+    // 但重开一局本就该重新打底：那一刻店里只剩「等待指令...」一条。
+    if (spokenEpochRef.current !== epoch) {
+      spokenRef.current.clear();
+      stashRef.current.length = 0; // 换局：上一局押着的话不许带进新局
+      spokenEpochRef.current = epoch;
+      spokenPrimedRef.current = false;
+    }
+    const primed = spokenPrimedRef.current;
     // 全频道读（plan §4 裁定）：声音管"听得见"，闪烁管"看得见是哪个频道"——
     // 只读当前频道的话，长官在马克斯频道时陈的请示照样零声＝病只治一半。
     for (const m of getMessages()) {
@@ -1010,27 +1045,26 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // 首跑只打底：挂载/换局那一刻店里已有的消息一律视为"已播"，否则一挂载
       // 就把整个 backlog 从头念一遍。
       if (!primed) { spokenRef.current.add(key); continue; }
-      const verdict = shouldSpeakMessage(m, {
-        nowGameTime,
-        // 只有请示才查活单；其余 kind 传 undefined，闸④压根不读它。
-        escalationAlive:
-          m.utterance?.kind === "escalation"
-            ? getActiveEscalation(m.channel, nowGameTime) !== null
-            : undefined,
-        capturing,
-      });
+      const verdict = shouldSpeakMessage(m, buildSpeakCtx(m));
+      // 到这儿这条消息就算"处理过了"，无论结局如何——押后的那些由暂存队列接手，
+      // 不靠"留在集合外等下一次重扫"。
+      spokenRef.current.add(key);
       if (!verdict.speak) {
-        // ★可延后的 deny **不进已播集合**：麦克风一松这句话仍然值得说
-        //   （手测 6 的补播）。其余 deny 是终局的，记下来不再回头看。
-        if (!isDeferrable(verdict.reason)) spokenRef.current.add(key);
+        // ★可延后的 deny 进暂存队列（麦克风一松这句话仍然值得说，手测 6 的补播）；
+        //   其余 deny 是终局的，到此为止。
+        if (isDeferrable(verdict.reason) && ttsEnabledRef.current) stashRef.current.push(m);
         continue;
       }
-      spokenRef.current.add(key);
       if (!ttsEnabledRef.current) continue;
-      speakUtterance(m.text, verdict.persona);
+      // ★仲裁：回合还在跑（loading）或喇叭还有活（isBusy）⇒ 押后，不抢话。
+      //   isBusy 这一半是关键：setLoading(false) 落在流结束处，与音频队列毫无
+      //   关系——一次应答的朗读常常还有好几句在队列里，只看 loading 就释放，
+      //   等于把长官正在听的回答从中间掐断。
+      if (loadingRef.current || isBusy()) { stashRef.current.push(m); continue; }
+      releaseOne(m, verdict.persona);
     }
     spokenPrimedRef.current = true;
-  }, [feedTick, getState]);
+  }, [feedTick, getState, buildSpeakCtx, releaseOne]);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -1159,9 +1193,25 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         channelContextRef.current = createEmptyChannelContext();
       }
       if (s) lastSeenTimeRef.current = s.time;
+
+      // ── 主动台词暂存队列的释放（复用这口 200ms 轮询，不新开计时器、不忙等）──
+      // 一拍只放一段：释放条件里有 !isBusy()，所以下一段自然要等这一段播完的下一拍
+      // ——既把"每段一次 cancel 协议"做实（cancel 时确实没东西在播），也天然串行。
+      if (stashRef.current.length > 0 && ttsEnabledRef.current && !loadingRef.current && !isBusy()) {
+        const m = stashRef.current.shift()!;
+        // ★释放前逐条**重过闸④⑤**：排队期间世界变了——活单可能已经被答掉/过期，
+        //   长官可能又按住了麦克风，这条也可能已经太旧。押后不等于免检。
+        const verdict = shouldSpeakMessage(m, buildSpeakCtx(m));
+        if (verdict.speak) {
+          releaseOne(m, verdict.persona);
+        } else if (isDeferrable(verdict.reason)) {
+          stashRef.current.unshift(m); // 又在收音了：放回队头，下一拍再看
+        }
+        // 其余（过期/活单已死）＝就此作罢，不念也不再排队
+      }
     }, 200);
     return () => clearInterval(id);
-  }, [getState, response]);
+  }, [getState, response, buildSpeakCtx, releaseOne]);
 
   // ── Production handlers ──
   const handleProduce = (unitType: "infantry" | "light_tank") => {
