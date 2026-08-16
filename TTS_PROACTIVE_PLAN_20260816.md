@@ -53,6 +53,7 @@ MessageLevel）⑥板 1 落地 ⑦真现存 bug 卫生。
 | 2 | 出声地基（3a：让它出一次声） | `utterance?: { persona, kind }` 字段（kind ∈ escalation\|proactive\|retrospect\|advice\|nag\|expire，P1-13——闸④要靠它认请示）；四个发射点标记；addMessage 第 8 参数**同步改跨窗口委托＋MessageStoreShape**（P1-3：漏改＝弹窗有字无声且 typecheck 全绿）；最小 hook（闸①②③＋id+epoch 去重）；speakUtterance＝speak+flush 封装＋VOICE_CONFIG 解引用设防；降级开关（板 2，tts 模块内按 job origin 判定，落 handleEdgeFailure——审核决断点⑤） |
 | 3 | 闸口（3b：不抢话） | 闸④新鲜度/escalation 存活＋闸⑤收音窗（真名三段，§4）；频道作用域＝**全频道出声**（§4 裁定）＋打底按频道分桶 |
 | 4 | 仲裁（3c：不打架） | tts 加只读 `isBusy()`（P0-4）；释放条件 `!loading && !isBusy()`；模块外暂存队列＋释放重过闸④⑤＋每段 cancel 协议 |
+| **4b** | **修订（用户裁定 2026-08-16，实施窗提出）** | `isBusy()` **补第四项** `\|\| !!window.speechSynthesis?.speaking`。原三项只覆盖 Edge 路：Edge 挂掉、应答走 native 朗读时 isBusy 恒 false ⇒ 主动台词照常释放、`cancel()` 把 native 那段掐断，而它自己按板 2 又不落 native ⇒ **掐了长官的回复、自己一声没出**。修向 fail-safe（错也只错在多等一拍）。判据用 initScript 假 speechSynthesis（可控 speaking 旗；不依赖 headless 真合成器——无声环境不 fire 会 flaky）。★实测起算点：摘掉第四项 ⇒ `hit+=1` 且 `nativeCancel=1`，伤害组合复现 |
 | 5 | 复呼＋甩脸＋提示音 | 触发合同见 §5（P0-2/P0-3 全落）；roger.mp3 进 manifest；★ChatPanel 侧自调 `soundManager.init()`（幂等，P1-4——否则弹窗态提示音静默返 -1） |
 | 6 | 闪烁＋板 1 落地 | 频道键闪烁挂 escalation-pending **状态断言本身**（C3 先例，非 class 名）；ttsEnabled localStorage 持久化（`voice.` 前缀族＋读写 try/catch——隐私模式裸调会渲染期抛错白屏，P2）；首局陈请开电台台词＋喇叭键脉冲**绑台词生命周期**（断言：无该台词时 data 属性无脉冲态）；顺手账 P1-12：isBaselineArm 弹窗丢 query 的臂标签错位，此窗顺手治 |
 | 7 | 手测＋收口 | §9 清单；§10 记账；tag `tts-proactive-v1-done` |

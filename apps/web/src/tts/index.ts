@@ -94,7 +94,17 @@ function resetStreamState(): void {
  * 外面没有任何办法知道"还在播"。
  */
 export function isBusy(): boolean {
-  return playingPromise !== null || queue.length > 0 || currentAudio !== null;
+  return (
+    playingPromise !== null ||
+    queue.length > 0 ||
+    currentAudio !== null ||
+    // ★第四项（步 4b，用户裁定）：上面三项只覆盖 Edge 那条路。native 完全不经它们
+    //   ——Edge 挂掉时应答会走 speechSynthesis 朗读，而它一开口上面三项全是 false
+    //   ⇒ 主动台词判"可以释放"，cancel() 顺带把 native 那段掐断，自己又按板 2 不落
+    //   native ⇒ 净效果是**掐了长官的回复、自己一声没出**。补这一项后最坏也只是
+    //   多等一拍（fail-safe 方向）。
+    (typeof window !== "undefined" && window.speechSynthesis?.speaking === true)
+  );
 }
 
 export function cancel(): void {
