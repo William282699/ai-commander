@@ -37,6 +37,11 @@ export const SOUND_MANIFEST: SoundEntry[] = [
   { id: "order",           src: "/sfx/ui/order.mp3",               volume: 0.30, category: "ui", loop: false, maxInstances: 2 },
   { id: "deselect",        src: "/sfx/ui/deselect.mp3",            volume: 0.20, category: "ui", loop: false, maxInstances: 2 },
   { id: "warning",         src: "/sfx/ui/warning.mp3",             volume: 0.35, category: "ui", loop: false, maxInstances: 2 },
+  // 「请示要缠人」刀：参谋主动开口的到达提示音。素材本来就躺在 public/sfx/ui/
+  // 却从没进过 manifest。选 roger 不选 warning 是有理由的——warning 这个词已经
+  // 被 MessageLevel 占着（NO_FUEL 那一族真警告），同名两义日后拆音色得改两处；
+  // 而"参谋有话说"本来也不是警告。
+  { id: "roger",           src: "/sfx/ui/roger.mp3",               volume: 0.35, category: "ui", loop: false, maxInstances: 2 },
 ];
 
 // Unit type → attack sound ID mapping

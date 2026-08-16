@@ -35,6 +35,7 @@ import {
   type SpeakCandidate,
   type SpeakContext,
 } from "../apps/web/src/proactiveSpeech";
+import { decideEscalationFollowup, nagPoolSizes, type EscalationWatch } from "../apps/web/src/nagContract";
 
 let passCount = 0;
 let failCount = 0;
@@ -305,6 +306,77 @@ function gate5Capturing(): void {
     !v2.speak && v2.reason === "capturing");
 }
 
+// ============================================================
+// 步 5（复呼／甩脸）：触发合同四条
+// ============================================================
+
+const NAG_SEC = 30;
+const A = { actionId: "A", createdAt: 100 };
+const B = { actionId: "B", createdAt: 160 };
+const watchA = (nagged = false): EscalationWatch => ({ actionId: "A", createdAt: 100, nagged });
+
+/** 摘掉"已回话"这一条（把 lastPlayerMsgTime 当成从来没有）。 */
+function replyCheckRemoved(inp: Parameters<typeof decideEscalationFollowup>[0]) {
+  return decideEscalationFollowup({ ...inp, lastPlayerMsgTime: null }).action;
+}
+/** 摘掉 actionId 比对（把快照的号伪装成与 live 一致）。 */
+function idCheckRemoved(inp: Parameters<typeof decideEscalationFollowup>[0]) {
+  const w = inp.watch ? { ...inp.watch, actionId: inp.live?.actionId ?? inp.watch.actionId } : null;
+  return decideEscalationFollowup({ ...inp, watch: w }).action;
+}
+
+function contractNag(): void {
+  check("没到点不复呼",
+    decideEscalationFollowup({ now: 120, live: A, watch: watchA(), lastPlayerMsgTime: null, nagAfterSec: NAG_SEC }).action === "none");
+  check("到点复呼",
+    decideEscalationFollowup({ now: 130, live: A, watch: watchA(), lastPlayerMsgTime: null, nagAfterSec: NAG_SEC }).action === "nag");
+  check("复呼只一次（nagged 之后不再喊）",
+    decideEscalationFollowup({ now: 200, live: A, watch: watchA(true), lastPlayerMsgTime: null, nagAfterSec: NAG_SEC }).action === "none");
+  check("第一次见到这张单＝先钉快照，不说话",
+    decideEscalationFollowup({ now: 130, live: A, watch: null, lastPlayerMsgTime: null, nagAfterSec: NAG_SEC }).action === "track");
+}
+
+function contractPlayerReplied(): void {
+  // ★P0-3：NOOP/澄清分支**有意保活** escalation ⇒「活单还在」≠「长官没回话」。
+  //   长官反问一句「什么情况？」之后还去复呼/甩脸，比原来的静默失败更伤。
+  const inp = { now: 130, live: A, watch: watchA(), lastPlayerMsgTime: 110, nagAfterSec: NAG_SEC } as const;
+  checkKnife("★长官回过话就不复呼（反问也算回话——否则'你答了他还骂你'）",
+    decideEscalationFollowup(inp).action === "drop", replyCheckRemoved(inp) === "drop");
+
+  const inp2 = { now: 300, live: null, watch: watchA(), lastPlayerMsgTime: 110, nagAfterSec: NAG_SEC } as const;
+  checkKnife("★答掉的不是黄掉的：回过话之后活单消失＝drop，不甩脸",
+    decideEscalationFollowup(inp2).action === "drop", replyCheckRemoved(inp2) === "drop");
+
+  check("回话早于这张单登记＝不算回这张单",
+    decideEscalationFollowup({ now: 130, live: A, watch: watchA(), lastPlayerMsgTime: 90, nagAfterSec: NAG_SEC }).action === "nag");
+}
+
+function contractExpire(): void {
+  // ①过期的唯一真相源＝引擎 TTL：这里只看 live===null，不自数 120 秒。
+  check("曾发未答＋引擎说没了 ⇒ 甩脸",
+    decideEscalationFollowup({ now: 300, live: null, watch: watchA(), lastPlayerMsgTime: null, nagAfterSec: NAG_SEC }).action === "expire");
+  check("没盯着谁就不甩脸（本来就没发过请示）",
+    decideEscalationFollowup({ now: 300, live: null, watch: null, lastPlayerMsgTime: null, nagAfterSec: NAG_SEC }).action === "none");
+}
+
+function contractActionIdSnapshot(): void {
+  // ③ A 过期那一瞬 B 刚登记：必须整条放弃 A，且**不对着 B 喊 A 的话**。
+  const inp = { now: 300, live: B, watch: watchA(), lastPlayerMsgTime: null, nagAfterSec: NAG_SEC } as const;
+  const d = decideEscalationFollowup(inp);
+  checkKnife("★换单：号对不上 ⇒ 重钉快照（不对着 B 喊 A 的话、不拿 A 的账清 B）",
+    d.action === "track", idCheckRemoved(inp) === "track");
+  check("重钉的快照是 B 的号与 B 的登记时刻",
+    d.action === "track" && d.watch.actionId === "B" && d.watch.createdAt === 160 && d.watch.nagged === false);
+}
+
+function nagPoolFrozen(): void {
+  // ★NEVER EXPAND 的机器锁（照 VOICE_CONFIRMS 先例）。要更自然的措辞＝走 LLM，
+  //   不是往池子里加句子——固定句池一旦开始长，就是「台词禁死模板」判死的形态。
+  const sizes = nagPoolSizes();
+  check(`复呼池封箱：三人各 3 句（实得 ${sizes.join("/")}）`,
+    sizes.length === 3 && sizes.every((n) => n === 3));
+}
+
 function runAll(): void {
   normalVoiceTurn();
   staleAcrossTurns();
@@ -324,6 +396,11 @@ function runAll(): void {
   gate4NegativeAge();
   gate4EscalationAliveOnlyForEscalation();
   gate5Capturing();
+  contractNag();
+  contractPlayerReplied();
+  contractExpire();
+  contractActionIdSnapshot();
+  nagPoolFrozen();
 }
 
 function main(): void {

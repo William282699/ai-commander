@@ -43,6 +43,7 @@ import {
   getActiveChannel,
   setActiveChannel,
   getGroupChatMessages,
+  getLastMessageTimeBySource,
   getMessages,
   getMessagesByChannel,
   getActiveThreads,
@@ -58,7 +59,9 @@ import {
   type StaffThread,
 } from "./messageStore";
 import { speak, flush, cancel, speakUtterance, isBusy, type Persona } from "./tts";
-import { shouldSpeakMessage, spokenKey, isDeferrable, type SpeakContext } from "./proactiveSpeech";
+import { shouldSpeakMessage, spokenKey, isDeferrable, personaOf, type SpeakContext } from "./proactiveSpeech";
+import { decideEscalationFollowup, pickNagLine, EXPIRE_FALLBACK, type EscalationWatch } from "./nagContract";
+import { soundManager } from "./rendering/audio/soundManager";
 import { API_URL } from "./api";
 import { SESSION_ID } from "./session";
 
@@ -113,6 +116,27 @@ function pickVoiceConfirm(commander: Commander): string {
   const pool = VOICE_CONFIRMS[commander];
   return pool[Math.floor(Math.random() * pool.length)];
 }
+
+/**
+ * 复呼／甩脸的时值（游戏秒）。**可被 URL 覆写**，只为台架不真等两分钟：
+ *   ?nag=2&expire=5
+ * ★这两个是本刀自己的新常量，与引擎的 ESCALATION_WINDOW_SEC / TICKET_TTL_SEC
+ *   **是两码事，一个字节都不许碰那两个**（后者在 6b 禁改区）。
+ * ★expire 覆写只是"提前把这张单当作已过期看"的**台架捷径**：不写这个参数时，
+ *   过期的唯一真相源仍然是引擎 TTL（getActiveEscalation 返回 null），本刀不自数。
+ */
+function readSecParam(name: string, fallback: number | null): number | null {
+  try {
+    const raw = new URLSearchParams(window.location.search).get(name);
+    if (raw == null) return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  } catch {
+    return fallback;
+  }
+}
+const NAG_AFTER_SEC = readSecParam("nag", 30) ?? 30;
+const EXPIRE_OVERRIDE_SEC = readSecParam("expire", null);
 
 // ── Phase 1: Shared intent target validator (from CommandPanel) ──
 
@@ -1025,6 +1049,55 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     speakUtterance(m.text, persona);
   }, []);
 
+  // ── 步 5：复呼／甩脸 ───────────────────────────────────────────────
+  // 提示音在 ChatPanel 侧自己 init 一次（幂等）：soundManager 的唯一 init 点在
+  // GameCanvas，而弹出面板**不渲染 GameCanvas** ⇒ 弹窗态里 play() 会静默返回 -1、
+  // 零日志。不补这一句，弹窗态的提示音是个查不出来的哑巴。
+  useEffect(() => { try { soundManager.init(); } catch { /* 提示音不许影响主链 */ } }, []);
+
+  const escWatchRef = useRef<Record<Channel, (EscalationWatch & { question: string }) | null>>({
+    ops: null, logistics: null, combat: null,
+  });
+
+  /** 复呼／甩脸都由 ChatPanel 发射 ⇒ 弹窗态会真走跨窗口委托那行（第 8 参必须到得了）。*/
+  const postFollowup = useCallback((ch: Channel, persona: Persona, kind: "nag" | "expire", line: string) => {
+    const s = getState();
+    if (!s) return;
+    addMessage("warning", line, s.time, ch, undefined, "command_ack", undefined, { persona, kind });
+  }, [getState]);
+
+  /**
+   * 甩脸走 LLM（审核决断点①：它承载内容与情绪，固定句正撞「台词禁死模板」判死的
+   * 形态；而它只在 120s 空窗之后发生，多一次调用的延迟无所谓），拿不到就用兜底句。
+   * 复用既有的 /api/brief 那条路，**不新增服务端 mode**（本刀纯 web 层）。
+   */
+  const fireExpire = useCallback((ch: Channel, persona: Persona, question: string) => {
+    const fallback = EXPIRE_FALLBACK[persona];
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 6000);
+    const digest = [
+      "[未答请示已过期]",
+      `你刚才问过长官：「${question}」`,
+      "长官一直没有回应，这条请示到点作废了。",
+      "用一句话向长官交代这件事：你不再等了、这事先按兵不动。",
+      "只说一句，不要提问，不要重复原来的问句。",
+    ].join("\n");
+    fetch(`${API_URL}/api/brief`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ digest, channel: ch }),
+      signal: ac.signal,
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        clearTimeout(timer);
+        const b = typeof d?.brief === "string" ? d.brief.trim() : "";
+        // 问号校验同 proactive/retrospect：甩脸是**交代**，不是又抛一个问题。
+        postFollowup(ch, persona, "expire", b && !/[？?]/.test(b) ? b : fallback);
+      })
+      .catch(() => { clearTimeout(timer); postFollowup(ch, persona, "expire", fallback); });
+  }, [postFollowup]);
+
   useEffect(() => {
     const s = getState();
     const epoch = s ? syncGameEpoch(s) : gameEpochRef.current;
@@ -1049,6 +1122,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // 到这儿这条消息就算"处理过了"，无论结局如何——押后的那些由暂存队列接手，
       // 不靠"留在集合外等下一次重扫"。
       spokenRef.current.add(key);
+      // ★到达提示音：**与喇叭无关**（手测 9：TTS 关着时闪烁与提示音照常——
+      //   提醒链不许依赖喇叭）。只给"真参谋台词"响：过期/活单已死那些不响。
+      if (verdict.speak || isDeferrable(verdict.reason)) {
+        try { soundManager.play("roger"); } catch { /* 提示音不许影响主链 */ }
+      }
       if (!verdict.speak) {
         // ★可延后的 deny 进暂存队列（麦克风一松这句话仍然值得说，手测 6 的补播）；
         //   其余 deny 是终局的，到此为止。
@@ -1194,6 +1272,40 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       }
       if (s) lastSeenTimeRef.current = s.time;
 
+      // ── 复呼／甩脸（同一口轮询，游戏钟；四条合同全在 decideEscalationFollowup）──
+      if (s) {
+        const now = s.time;
+        for (const ch of ["ops", "logistics", "combat"] as Channel[]) {
+          const persona = personaOf(CHANNEL_PERSONA[ch]);
+          if (!persona) continue;
+          const raw = getActiveEscalation(ch, now); // ①引擎 TTL＝唯一真相源
+          // 台架捷径：带了 ?expire= 才提前把它当作已过期看；不带就完全由引擎说了算。
+          const live =
+            EXPIRE_OVERRIDE_SEC != null && raw && now - raw.createdAt >= EXPIRE_OVERRIDE_SEC
+              ? null
+              : raw;
+          const w = escWatchRef.current[ch];
+          const d = decideEscalationFollowup({
+            now,
+            live,
+            watch: w,
+            lastPlayerMsgTime: getLastMessageTimeBySource(ch, "player"), // ④反问也算回话
+            nagAfterSec: NAG_AFTER_SEC,
+          });
+          if (d.action === "track") {
+            escWatchRef.current[ch] = { ...d.watch, question: raw?.question ?? "" };
+          } else if (d.action === "drop") {
+            escWatchRef.current[ch] = null;
+          } else if (d.action === "nag" && w) {
+            escWatchRef.current[ch] = { ...w, nagged: true }; // 先记账再说话：复呼只一次
+            postFollowup(ch, persona, "nag", pickNagLine(persona));
+          } else if (d.action === "expire" && w) {
+            escWatchRef.current[ch] = null; // 同步清账，异步回来才发话，防重复
+            fireExpire(ch, persona, w.question);
+          }
+        }
+      }
+
       // ── 主动台词暂存队列的释放（复用这口 200ms 轮询，不新开计时器、不忙等）──
       // 一拍只放一段：释放条件里有 !isBusy()，所以下一段自然要等这一段播完的下一拍
       // ——既把"每段一次 cancel 协议"做实（cancel 时确实没东西在播），也天然串行。
@@ -1211,7 +1323,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       }
     }, 200);
     return () => clearInterval(id);
-  }, [getState, response, buildSpeakCtx, releaseOne]);
+  }, [getState, response, buildSpeakCtx, releaseOne, postFollowup, fireExpire]);
 
   // ── Production handlers ──
   const handleProduce = (unitType: "infantry" | "light_tank") => {
