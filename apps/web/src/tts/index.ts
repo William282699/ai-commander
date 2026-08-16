@@ -128,6 +128,20 @@ export function speak(text: string, persona: Persona, origin: SpeakOrigin = "rep
   for (const s of sentences) enqueue(s, persona, origin);
 }
 
+/**
+ * 一段**完整的话**一次说完（主动台词专用）。
+ *
+ * ★为什么必须封装（勘察档 T4）：切句只认句末标点（`SENTENCE_END_RE`），
+ * `speak()` 会把没有句末标点的整段留在句子缓冲里等下一次喂——「长官，请回话」
+ * 这种短句只调 speak 就是**永远不出声**，而且残句还会嫁接进下一段同 persona 的
+ * 语音。应答链是边流边喂、末尾另有 flush 兜底，所以从没暴露；主动台词是一次
+ * 给全的，必须自带收尾。
+ */
+export function speakUtterance(text: string, persona: Persona, origin: SpeakOrigin = "proactive"): void {
+  speak(text, persona, origin);
+  flush(persona, origin);
+}
+
 export function flush(persona: Persona, origin: SpeakOrigin = "reply"): void {
   if (activePersona !== null && persona !== activePersona) {
     cancel();
@@ -138,12 +152,32 @@ export function flush(persona: Persona, origin: SpeakOrigin = "reply"): void {
   if (tail) enqueue(tail, persona, origin);
 }
 
+/**
+ * VOICE_CONFIG 解引用设防（勘察档新 HIGH-5）：`MessageFrom` 有五个值而 `Persona`
+ * 只有三个，一旦有 "system" 之类漏进来，`VOICE_CONFIG[persona].edge` 就是对
+ * undefined 解引用＝同步 TypeError，而全仓没有 ErrorBoundary＝整个面板白屏。
+ * 消费侧（proactiveSpeech 的闸②）是第一道，这里是第二道：拿不到条目就不出声。
+ */
+function voiceEntryOf(persona: Persona): (typeof VOICE_CONFIG)[Persona] | null {
+  return VOICE_CONFIG[persona] ?? null;
+}
+
 function enqueue(text: string, persona: Persona, origin: SpeakOrigin): void {
   // Sticky terminal states for this generation:
   //   "silent" → no audio for the rest of this gen
   //   "native" → all remaining audio via browserNative
   if (streamEngine === "silent") return;
+  const entry = voiceEntryOf(persona);
+  if (!entry) return; // 设防：不认识的嗓子＝不出声，不崩
   if (streamEngine === "native") {
+    // ★板 2（用户裁定）：主动台词**不落 native**。三人 nativeLang 全是 zh-CN 且
+    //   代码里明写不挑 voice（"Apr 29 试过两次都失败"），降级到 native ＝三人同嗓；
+    //   而主动台词是没有上下文的一声，嗓子是"谁在说话"的唯一线索，丢了身份的
+    //   提醒不如不响——降级形态取 silent＋文字（文字照旧上屏，信息一个字不少）。
+    //   ★判定按 **job 的 origin** 而不是模块级开关：streamEngine 是单个模块级
+    //   变量，做成全局开关会把应答链的 native 兜底一起连累掉（板 2 双向判据的
+    //   后半格就是钉这个）。
+    if (origin === "proactive") return;
     // ★探针第二个调用点（勘察档新 HIGH-3 / plan 步1 P1-6）：原来这里在把话交给
     //   speechSynthesis **之前**就无条件报一声，与 playAudio 那处同病——修了一处
     //   不修这处，污染只是换个地方继续。改挂 utterance 的 onstart＝真开口那一刻。
@@ -151,7 +185,7 @@ function enqueue(text: string, persona: Persona, origin: SpeakOrigin): void {
     return;
   }
   const gen = generation;
-  const req = fetchEdgeMp3(text, VOICE_CONFIG[persona].edge);
+  const req = fetchEdgeMp3(text, entry.edge);
   // Swallow standalone rejection so it doesn't surface as
   // unhandledrejection — pump's await will re-throw and route it
   // through the proper fallback path.
@@ -259,7 +293,11 @@ function handleEdgeFailure(failed: Job): void {
   queue = survivors;
   // 兜底批原来完全绕过观察者（勘察档：降级后"零声零日志"的一半来源）——
   // 同样挂 onstart，真开口才报。
+  // ★板 2 同一条规矩：这一批里属于**主动台词**的，降级形态是 silent＋文字，
+  //   不落 native；应答链那些照旧走 native 兜底（两者在同一个批次里各走各的，
+  //   因为判定挂在 job.origin 上，不是挂在 streamEngine 这个模块级开关上）。
   for (const f of fallbackJobs) {
+    if (f.origin === "proactive") continue;
     nativeSpeak(f.text, failed.persona, () => playbackObserver?.(f.text, f.origin));
   }
 }

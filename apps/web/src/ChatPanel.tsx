@@ -43,6 +43,7 @@ import {
   getActiveChannel,
   setActiveChannel,
   getGroupChatMessages,
+  getMessages,
   getMessagesByChannel,
   getActiveThreads,
   resolveThread,
@@ -56,7 +57,8 @@ import {
   type MessageFrom,
   type StaffThread,
 } from "./messageStore";
-import { speak, flush, cancel, type Persona } from "./tts";
+import { speak, flush, cancel, speakUtterance, type Persona } from "./tts";
+import { shouldSpeakMessage, spokenKey } from "./proactiveSpeech";
 import { API_URL } from "./api";
 import { SESSION_ID } from "./session";
 
@@ -953,6 +955,54 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     update();
     return subscribe(update);
   }, [selectedCommanders]);
+
+  // ── 「请示要缠人」刀 · 主动台词出声（步 2 的心脏）──────────────────────
+  //
+  // 病：speak/flush 六个调用点全在 sendCommand 与 handleApprove 的闭包里，
+  // 消息侧零接线 ⇒ 参谋主动开口的台词结构上从不发声。这个 hook 就是那条线。
+  //
+  // ★判闸**必须**在 effect 里跑，不许写进 subscribe 回调体内同步执行：
+  //   GameCanvas 的发射点是 `addMessage(...)` 紧跟 `setActiveEscalation(...)`，
+  //   而 addMessage 的 listeners 是**同步 fire** 的——在订阅回调里当场判闸，
+  //   闸④（步 3 要查 escalation 还活着没）读到的必然是 null，陈的请示恒定不
+  //   出声＝本刀的病换个姿势原样复发。订阅只翻一个计数，判闸留给 effect。
+  const [feedTick, setFeedTick] = useState(0);
+  useEffect(() => subscribe(() => setFeedTick((t) => t + 1)), []);
+  /** 已播集合，键＝`${epoch}:${id}`（epoch 见 spokenKey 的注释：重开局 id 会从 1 复用）。 */
+  const spokenRef = useRef<Set<string>>(new Set());
+  const spokenPrimedRef = useRef(false);
+  const spokenEpochRef = useRef<number | null>(null);
+  // 出声闸读 ttsEnabled 走 ref：用依赖数组会让"开关喇叭"这个动作把 effect 重跑一遍，
+  // 而重跑不该补播任何已经过去的话。
+  const ttsEnabledRef = useRef(false);
+  ttsEnabledRef.current = ttsEnabled;
+  useEffect(() => {
+    const s = getState();
+    const epoch = s ? syncGameEpoch(s) : gameEpochRef.current;
+    // 换局＝集合作废重打底。旧局的键留着也只是浪费内存（前缀不同不会误判），
+    // 但重开一局本就该重新打底：那一刻店里只剩「等待指令...」一条。
+    if (spokenEpochRef.current !== epoch) {
+      spokenRef.current.clear();
+      spokenEpochRef.current = epoch;
+      spokenPrimedRef.current = false;
+    }
+    const primed = spokenPrimedRef.current;
+    // 全频道读（plan §4 裁定）：声音管"听得见"，闪烁管"看得见是哪个频道"——
+    // 只读当前频道的话，长官在马克斯频道时陈的请示照样零声＝病只治一半。
+    for (const m of getMessages()) {
+      const key = spokenKey(epoch, m.id);
+      if (spokenRef.current.has(key)) continue;
+      spokenRef.current.add(key);
+      // 首跑只打底：挂载/换局那一刻店里已有的消息一律视为"已播"，否则一挂载
+      // 就把整个 backlog 从头念一遍。
+      if (!primed) continue;
+      const verdict = shouldSpeakMessage(m);
+      if (!verdict.speak) continue;
+      if (!ttsEnabledRef.current) continue;
+      speakUtterance(m.text, verdict.persona);
+    }
+    spokenPrimedRef.current = true;
+  }, [feedTick, getState]);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {

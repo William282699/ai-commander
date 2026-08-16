@@ -96,8 +96,10 @@ import {
   getActiveEscalation,
   getLastMessageTimeBySource,
   setActiveEscalation,
+  CHANNEL_PERSONA,
   type MessageLevel,
 } from "./messageStore";
+import { personaOf, type Utterance, type UtteranceKind } from "./proactiveSpeech";
 import { API_URL } from "./api";
 import { SESSION_ID } from "./session";
 
@@ -125,6 +127,19 @@ const EVENT_CHANNEL_MAP: Record<ReportEventType, Channel> = {
   ECONOMY_SURPLUS: "logistics",
   ECONOMY_REPORT: "logistics",
 };
+
+/**
+ * 「请示要缠人」刀 · 发射侧标记（fail-closed）。
+ *
+ * 只有显式带上这个标记的消息才会被念出来。不按 source 猜：陈的升级请示 source 是
+ * `command_ack`，与执行回执**同源**，按 source 分流要么复读回执要么漏掉请示。
+ * 嗓子取该频道的人（与 addMessage 自动推导的 `from` 同源，闸②要求两者一致）；
+ * 收窄不到 Persona 就不标＝不出声。
+ */
+function utteranceFor(channel: Channel, kind: UtteranceKind): Utterance | undefined {
+  const persona = personaOf(CHANNEL_PERSONA[channel]);
+  return persona ? { persona, kind } : undefined;
+}
 
 /**
  * 第 8 级 刀1（R1/R10）：设施危机喊哪个频道，按**丢了会不会输**分，不按设施清单。
@@ -525,7 +540,8 @@ function escalateCrisisToConversation(
     if (state.gameOver) return;
     const t = state.time;
     // command_ack source → renders as the channel persona speaking, not a report.
-    addMessage("urgent", text, t, channel, undefined, "command_ack");
+    // ★发射点①（升级请示）：这就是内测账第 3 笔那条——陈主动提问，过去只有字。
+    addMessage("urgent", text, t, channel, undefined, "command_ack", undefined, utteranceFor(channel, "escalation"));
     setActiveEscalation(channel, {
       actionId,
       question: text,
@@ -1870,7 +1886,11 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           .then((r) => r.json())
           .then((data) => {
             if (data?.brief) {
-              addMessage("info", data.brief, capturedTime, ch, undefined, "event_report");
+              // ★发射点④（llm_advice 主动建议）：source 仍是 event_report——
+              //   **只出声、不迁渲染**（渲染迁移＝报告行变人物气泡，是可见手感
+              //   变更，按 plan §1 缓办立账）。utterance 是独立字段，正因如此这
+              //   两件事才解得开：不动 source 也能让它开口。
+              addMessage("info", data.brief, capturedTime, ch, undefined, "event_report", undefined, utteranceFor(ch, "advice"));
             }
           })
           .catch(() => {}); // advisor trigger brief failure is silent
@@ -1995,7 +2015,8 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
                   // layer is optional presence, not a must-say). source="proactive" renders
                   // as the persona speaking (conversation), NOT a report; no setActiveEscalation.
                   if (voiced && !/[？?]/.test(voiced)) {
-                    addMessage("info", voiced, state.time, ch, undefined, "proactive");
+                    // ★发射点②（导演层主动陈述 7c.2）
+                    addMessage("info", voiced, state.time, ch, undefined, "proactive", undefined, utteranceFor(ch, "proactive"));
                   }
                 })
                 .catch(() => {}) // network failure → silent, no fallback
@@ -2096,7 +2117,8 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
                 // Statement only — a question-shaped line is dropped (a retrospect
                 // never asks). Failure is silent: this layer is optional presence.
                 if (voiced && !/[？?]/.test(voiced)) {
-                  addMessage("info", voiced, state.time, ch, undefined, "retrospect");
+                  // ★发射点③（决策复盘 7e）
+                  addMessage("info", voiced, state.time, ch, undefined, "retrospect", undefined, utteranceFor(ch, "retrospect"));
                   // [EVENT] chain: reuse the escalation's actionId when this reviewed
                   // an escalation answer, so escalate → command(escalateId) →
                   // retrospect share one id; standalone decisions log their record id.

@@ -26,6 +26,12 @@ import {
   SPEECH_DIAG_MAX_AGE_MS,
   type ReleaseMark,
 } from "../apps/web/src/speechDiagGate";
+import {
+  shouldSpeakMessage,
+  spokenKey,
+  personaOf,
+  type SpeakCandidate,
+} from "../apps/web/src/proactiveSpeech";
 
 let passCount = 0;
 let failCount = 0;
@@ -114,6 +120,102 @@ function boundaries(): void {
   );
 }
 
+// ============================================================
+// 步 2（出声地基）：发射侧标记 + 消费侧三道闸
+//
+// 起算点照 plan 铁律 5：**功能开着，摘掉对应那道闸**——不是"没做功能"的基线
+// （那个基线上什么都不念，九条负对照会全绿，等于八个假阳性的"绊索已验"）。
+// 下面每个 ★ 的 before 就是那道闸被摘掉之后的判定。
+// ============================================================
+
+/** 摘闸①（fail-closed）：不看 utterance，只要 from 是三个人之一就念。 */
+function gate1Removed(m: SpeakCandidate): boolean {
+  return personaOf(m.from) !== null && !m.groupChat;
+}
+/** 摘闸②（白名单）：不查 from/persona，只看标记在不在。 */
+function gate2Removed(m: SpeakCandidate): boolean {
+  return !!m.utterance && !m.groupChat;
+}
+/** 摘闸③（群聊）：不查 groupChat。 */
+function gate3Removed(m: SpeakCandidate): boolean {
+  return !!m.utterance && personaOf(m.from) !== null;
+}
+
+const CHEN_ESCALATION: SpeakCandidate = {
+  id: 11,
+  from: "chen",
+  utterance: { persona: "chen", kind: "escalation" },
+};
+
+function speakGatesPositive(): void {
+  const v = shouldSpeakMessage(CHEN_ESCALATION);
+  check("正路：陈的升级请示过闸，嗓子＝chen", v.speak === true && v.speak && v.persona === "chen");
+  check(
+    "kind 透传（步 3 的闸④要靠它认请示）",
+    (() => { const r = shouldSpeakMessage(CHEN_ESCALATION); return r.speak && r.kind === "escalation"; })(),
+  );
+  for (const kind of ["proactive", "retrospect", "advice"] as const) {
+    const m: SpeakCandidate = { id: 12, from: "marcus", utterance: { persona: "marcus", kind } };
+    check(`正路：马克斯的 ${kind} 过闸`, shouldSpeakMessage(m).speak === true);
+  }
+}
+
+function gateFailClosed(): void {
+  // 没标记的消息（引擎回执/系统行/战报）一律不念——这是整层的地基。
+  const m: SpeakCandidate = { id: 21, from: "chen" }; // 无 utterance
+  const after = shouldSpeakMessage(m).speak === false;
+  checkKnife("闸①fail-closed：没标记不出声（引擎回执/战报不会被顺带念）", after, gate1Removed(m) === false);
+}
+
+function gateSystemWhitelist(): void {
+  // 勘察档新 HIGH-5：from:"system" 穿过黑名单式否决 → VOICE_CONFIG[persona] 解引用
+  // undefined → 同步 TypeError → 全仓无 ErrorBoundary → 整个面板白屏。
+  const m: SpeakCandidate = {
+    id: 22,
+    from: "system",
+    utterance: { persona: "system" as never, kind: "proactive" }, // 伪造的不可能态＝纵深防御
+  };
+  const after = shouldSpeakMessage(m).speak === false;
+  checkKnife("闸②白名单：from:\"system\" 挡在 VOICE_CONFIG 解引用之前（防白屏）", after, gate2Removed(m) === false);
+}
+
+function gatePersonaMismatch(): void {
+  // 标记里的嗓子与 from 对不上＝伪造/串台，两道必须互相印证。
+  const m: SpeakCandidate = { id: 23, from: "chen", utterance: { persona: "emily", kind: "proactive" } };
+  check("闸②：标记 persona 与 from 不一致 → 不出声", shouldSpeakMessage(m).speak === false);
+}
+
+function gateGroupChat(): void {
+  // ALL 频道三个人 2.2-4.0s 依次落，念出来是连珠炮。
+  const m: SpeakCandidate = {
+    id: 24, from: "chen", groupChat: true, utterance: { persona: "chen", kind: "proactive" },
+  };
+  const after = shouldSpeakMessage(m).speak === false;
+  checkKnife("闸③：群聊回复不念（否则三人连珠炮）", after, gate3Removed(m) === false);
+}
+
+function gatePlayer(): void {
+  // 长官自己那条气泡（含语音回填「🎤 …」原地改同 id 的那条）永不进耳朵。
+  const m: SpeakCandidate = { id: 25, from: "player", utterance: { persona: "chen", kind: "proactive" } };
+  check("闸②：长官自己的消息不念（回填复读的结构性堵死）", shouldSpeakMessage(m).speak === false);
+}
+
+function epochKey(): void {
+  // 勘察档新 HIGH-1：clearMessages 把 nextId 重置回 1，而 ChatPanel 不随重开重挂 ⇒
+  // 只按 id 去重的话，第一局的已播集合会把第二局同号的新台词全判成"已播"。
+  const after = spokenKey(0, 3) !== spokenKey(1, 3);
+  const before = String(3) !== String(3); // 摘掉 epoch＝键只有 id
+  checkKnife("已播键带 epoch：重开一局同号消息不被误判已播（第二局不哑）", after, before);
+  check("同局同号仍判已播", spokenKey(2, 7) === spokenKey(2, 7));
+}
+
+function personaNarrowing(): void {
+  check("personaOf 收窄：system → null", personaOf("system") === null);
+  check("personaOf 收窄：player → null", personaOf("player") === null);
+  check("personaOf 收窄：undefined → null", personaOf(undefined) === null);
+  check("personaOf 收窄：三个人全过", (["chen", "marcus", "emily"] as const).every((p) => personaOf(p) === p));
+}
+
 function runAll(): void {
   normalVoiceTurn();
   staleAcrossTurns();
@@ -121,6 +223,14 @@ function runAll(): void {
   expired();
   proactiveNotCounted();
   boundaries();
+  speakGatesPositive();
+  gateFailClosed();
+  gateSystemWhitelist();
+  gatePersonaMismatch();
+  gateGroupChat();
+  gatePlayer();
+  epochKey();
+  personaNarrowing();
 }
 
 function main(): void {

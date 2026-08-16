@@ -5,6 +5,7 @@
 // ============================================================
 
 import type { Channel, ReportEventType, AdvisorOption } from "@ai-commander/shared";
+import type { Utterance } from "./proactiveSpeech";
 
 export type MessageLevel = "info" | "warning" | "urgent";
 
@@ -34,6 +35,12 @@ export interface FeedMessage {
   from?: MessageFrom;
   source?: MessageSource;
   groupChat?: boolean; // true = sent via ALL group chat, hidden in individual channel views
+  /**
+   * 「请示要缠人」刀：发射侧显式声明的可配音性。**缺席＝不出声**（fail-closed）。
+   * 不按 source 猜——陈的请示 source 是 command_ack，与执行回执同源，按 source
+   * 分流要么复读要么漏。判闸在 proactiveSpeech.ts（纯函数，台架够得到）。
+   */
+  utterance?: Utterance;
 }
 
 const MAX_MESSAGES = 200;
@@ -118,12 +125,16 @@ export function addMessage(
   from?: MessageFrom,
   source?: MessageSource,
   groupChat?: boolean,
+  utterance?: Utterance,
 ): void {
   const p = getOpenerStore();
-  if (p) { p.addMessage(level, text, gameTime, channel, from, source, groupChat); return; }
+  // ★第 8 参必须一起手抄过去。这行是七个位置参数逐个转发的跨窗口委托，漏抄一个
+  //   的表现是：主窗一切正常，**只有弹出面板里**标记丢成 undefined ⇒ fail-closed
+  //   之下就是"有字无声"，而且 typecheck 全绿（尾部可选参数）、无日志。
+  if (p) { p.addMessage(level, text, gameTime, channel, from, source, groupChat, utterance); return; }
   // Auto-derive `from` from channel if not provided and source isn't player/system
   const resolvedFrom = from ?? (source === "player" ? "player" : source === "system" ? "system" : CHANNEL_PERSONA[channel]);
-  messages.push({ id: nextId++, level, text, time: gameTime, channel, from: resolvedFrom, source, ...(groupChat ? { groupChat: true } : {}) });
+  messages.push({ id: nextId++, level, text, time: gameTime, channel, from: resolvedFrom, source, ...(groupChat ? { groupChat: true } : {}), ...(utterance ? { utterance } : {}) });
 
   while (messages.length > MAX_MESSAGES) {
     messages.shift();
