@@ -23,13 +23,19 @@ function hasNative(): boolean {
   return typeof window !== "undefined" && "speechSynthesis" in window;
 }
 
-export function nativeSpeak(text: string, persona: Persona): void {
+/**
+ * `onStart` 在 utterance 真开口那一刻叫一次（原生这边没有 timeupdate，onstart
+ * 是唯一等价物）。被 autoplay 策略吞掉时它不会触发——这正是要的：播不出来就
+ * 不该记一声（勘察档新 HIGH-3 的原生半边）。
+ */
+export function nativeSpeak(text: string, persona: Persona, onStart?: () => void): void {
   if (!hasNative()) return;
   const trimmed = text.trim();
   if (!trimmed) return;
   const utt = new SpeechSynthesisUtterance(trimmed);
   utt.lang = VOICE_CONFIG[persona].nativeLang;
   utt.rate = NATIVE_RATE;
+  if (onStart) utt.onstart = () => { try { onStart(); } catch { /* 观察点不许影响播放 */ } };
   window.speechSynthesis.speak(utt);
 }
 

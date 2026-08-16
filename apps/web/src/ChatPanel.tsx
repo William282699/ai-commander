@@ -36,6 +36,7 @@ import { MicIcon, HornIcon } from "./InputRailIcons";
 // spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
 import { planVoiceSpeech } from "./voiceSpeech";
 import { setPlaybackObserver } from "./tts";
+import { shouldRecordSpeechDiag, type ReleaseMark } from "./speechDiagGate";
 import {
   addMessage,
   updateLastPlayerMessage,
@@ -521,15 +522,37 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // 判据是"松手到出声"，而出声那一刻只有 TTS 模块知道。长官原话：「我真的不会去
   // f12 做这些，每次都整错」——**要长官去捞证据本身就是设计缺陷**（§8 那笔账的
   // 同一形状），所以这里自己量。两臂共用同一份构建 ⇒ 基线臂也照样自报。
-  const releaseAtRef = useRef<number | null>(null);
+  // ★步1：起点从裸时间戳换成「带回合号的 mark」，判定搬去 speechDiagGate（纯函数，
+  //   node 台架够得到）。治的是 T3 那个真·现存 bug：无声回合的残值会被之后任意
+  //   一回合的首声吃掉。`turn: null`＝还没有回合认领它。
+  const releaseMarkRef = useRef<ReleaseMark | null>(null);
+  /** 回合序号：sendCommand 每进一次自增；语音回合会把当前的 mark 认领到自己名下。 */
+  const speechTurnRef = useRef(0);
   const speechDiagRef = useRef<{ firstSoundMs: number; text: string; baseline: boolean } | null>(null);
+  /**
+   * ★步1：取一次就清（原来只读不清）。原行为＝一次成功测量之后，**每一条命令**
+   * 都把同一份样本再发一次（打字回合也照带，body 里那个字段是无条件拼的），
+   * 直到下一次测量覆盖它；同一条命令走流式失败兜底时还会在一条命令里报两次。
+   * 后果是纯统计污染：服务端日志里同一个数被重复计数，两臂的样本量与均值都偏。
+   */
+  const takeSpeechDiag = () => {
+    const d = speechDiagRef.current;
+    speechDiagRef.current = null;
+    return d ?? undefined;
+  };
   useEffect(() => {
-    setPlaybackObserver((text) => {
-      const t0 = releaseAtRef.current;
-      if (t0 == null) return;            // 打字回合/主动播报不计
-      releaseAtRef.current = null;       // 一轮只记第一声
+    setPlaybackObserver((text, origin) => {
+      const now = performance.now();
+      if (!shouldRecordSpeechDiag({
+        mark: releaseMarkRef.current,
+        currentTurn: speechTurnRef.current,
+        nowMs: now,
+        origin,
+      })) return;
+      const t0 = releaseMarkRef.current!.at;
+      releaseMarkRef.current = null;     // 一轮只记第一声
       speechDiagRef.current = {
-        firstSoundMs: Math.round(performance.now() - t0),
+        firstSoundMs: Math.round(now - t0),
         text: text.slice(0, 40),
         baseline: isBaselineArm(),
       };
@@ -682,7 +705,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   const stopPTT = useCallback(() => {
     setPressed(false);                          // 步 3：发送路径也必须落闸，否则
                                                 // Esc/blur 监听留在身上不摘
-    releaseAtRef.current = performance.now();   // 松手：计时起点（两臂同一处）
+    // 松手：计时起点（两臂同一处）。turn 先留 null——要等 sendCommand 里那个
+    // **语音**回合把它认领走才算数；这一按若没发出去（太短/无声/解码失败），
+    // 它就永远无人认领，不会再搭任何一回合的顺风车。
+    releaseMarkRef.current = { at: performance.now(), turn: null };
     if (pressWantedRef.current) {
       pressWantedRef.current = false;
       const arm = voiceArmRef.current;
@@ -718,7 +744,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
    * ★真首行闸不许挪位、不许省。lostpointercapture 不是异常路径——规范规定
    *   pointerup 派发完浏览器隐式释放 capture 并补发它，**每次正常松手都响**。
    *   没有这道闸，cancelPTT 会紧跟着 stopPTT 再跑一遍：
-   *     ① 清掉 stopPTT 刚写的 releaseAtRef（延迟 A/B 探针对每个语音回合永久哑）；
+   *     ① 清掉 stopPTT 刚写的 releaseMarkRef（延迟 A/B 探针对每个语音回合永久哑）；
    *     ② 落进 Web Speech 分支 abort 掉 pending 的 onend——马克斯每一次正常语音
    *        发送都会被自己的兜底网静默取消并回滚。
    *   修错位置（顺手删 lostpointercapture 兜底行）会把"异常丢 capture 时麦克风
@@ -731,7 +757,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // cancelPTT 不写计时起点，但残值也要清：stopPTT 首行那句 performance.now()
     // 是发送回合专属，取消回合不参与延迟 A/B，否则假 firstSoundMs 会搭下一次
     // 顺风车回服务端。
-    releaseAtRef.current = null;
+    releaseMarkRef.current = null;
 
     // 录音臂（含"设备还在路上"那一格：pressWantedRef 为真就算）
     if (pressWantedRef.current) {
@@ -806,7 +832,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   const onPttPointerUp = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
     // ★这道闸是 pointerup 自己的，不能只靠 cancelPTT 里那道——这里要挡的是 stopPTT：
     //   Esc 取消后长官的手指还按在键上，随后必然来一发 pointerup。放行的话
-    //   ① releaseAtRef 被钉上假的计时起点，之后任何一次 TTS 出声都会被算成
+    //   ① releaseMarkRef 被钉上假的计时起点，之后任何一次 TTS 出声都会被算成
     //      "这次已取消按下"的 firstSoundMs 送回服务端；
     //   ② Web Speech 臂会对已经 abort 掉的 recognition 再 stop() 一次。
     if (!pttPressedRef.current) return;
@@ -1370,6 +1396,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     if (!voice && !voiceAutoSendRef.current) fireTransmit();
 
     const isVoiceTurn = !!voice;
+    // ★步1 探针绑回合：每进一次 sendCommand 开一个新回合号；**只有语音回合**
+    //   认领松手那颗起点。打字回合刻意不认领——它没有"松手"这件事，认了就正好
+    //   复现 T3 那个 bug（上一轮的残值被这一轮念正文的第一声吃掉）。
+    const speechTurn = ++speechTurnRef.current;
+    if (isVoiceTurn && releaseMarkRef.current) {
+      releaseMarkRef.current = { ...releaseMarkRef.current, turn: speechTurn };
+    }
     const userMsg = voice ? "" : message.trim();
     setLoading(true);
     setError(null);
@@ -1954,7 +1987,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const streamRes = await fetch(`${API_URL}/api/command-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: speechDiagRef.current ?? undefined }),
+        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: takeSpeechDiag() }),
       });
 
       if (!streamRes.ok || !streamRes.body) {
@@ -2062,7 +2095,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const res = await fetch(`${API_URL}/api/command`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: speechDiagRef.current ?? undefined }),
+          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: takeSpeechDiag() }),
         });
         const data = await res.json();
         processAdvisorData(data);

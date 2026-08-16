@@ -138,6 +138,12 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  // ★步1：把弹窗句柄存下来。原来它是 handlePopOut 里的一个闭包局部量，谁也拿不到，
+  //   于是「收回面板」只能翻 panelDetached 这个 flag——**弹窗从来没被关过**。
+  //   两下点完（弹出→收回）就有两个 ChatPanel 同时在线：嵌入版挂回来了、弹窗还活着，
+  //   两个 realm 各有一份 tts 模块，同一条主动台词会被念两遍且互相掐不掉
+  //   （勘察档新 HIGH-2，v2 的「单实例保证」作废）。接线之前先把这颗地雷拆了。
+  const panelWinRef = useRef<Window | null>(null);
   const handlePopOut = useCallback(() => {
     const panelWin = window.open(
       `${window.location.origin}?mode=panel`,
@@ -145,12 +151,24 @@ export default function App() {
       "width=1280,height=900",
     );
     if (panelWin) {
+      panelWinRef.current = panelWin;
       setPanelDetached(true);
       // Listen for child window close → re-attach panel
       const check = setInterval(() => {
-        if (panelWin.closed) { setPanelDetached(false); clearInterval(check); }
+        if (panelWin.closed) {
+          setPanelDetached(false);
+          if (panelWinRef.current === panelWin) panelWinRef.current = null;
+          clearInterval(check);
+        }
       }, 500);
     }
+  }, []);
+
+  /** 「收回面板」＝真把弹窗关掉，按钮从此名副其实。 */
+  const handleReattach = useCallback(() => {
+    try { panelWinRef.current?.close(); } catch { /* 已关/跨源，忽略 */ }
+    panelWinRef.current = null;
+    setPanelDetached(false);
   }, []);
 
   const rdPct = Math.round(topBar.readiness * 100);
@@ -206,7 +224,7 @@ export default function App() {
         {panelDetached && (
           <button
             className="hud-btn hud-btn-ghost hud-btn-sm"
-            onClick={() => setPanelDetached(false)}
+            onClick={handleReattach}
           >
             收回面板
           </button>

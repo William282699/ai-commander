@@ -29,12 +29,17 @@ import { VOICE_CONFIG, type Persona } from "./voiceConfig";
 
 export type { Persona };
 
+/** 这一段话是"应答长官"还是"参谋主动开口"。探针只认 reply（延迟 A/B 量的是
+ *  松手→耳朵，主动台词不在那条链上），板 2 的降级分流将来也读它。 */
+export type SpeakOrigin = "reply" | "proactive";
+
 const SENTENCE_END_RE = /(?<=[。！？；.!?;\n])\s*/;
 
 type Job = {
   gen: number;
   persona: Persona;
   text: string;
+  origin: SpeakOrigin;
   mp3: Promise<HTMLAudioElement>;
   abort: () => void;
 };
@@ -109,7 +114,7 @@ export function cancel(): void {
   nativeCancel();
 }
 
-export function speak(text: string, persona: Persona): void {
+export function speak(text: string, persona: Persona, origin: SpeakOrigin = "reply"): void {
   if (!text) return;
   if (activePersona !== null && persona !== activePersona) {
     cancel();
@@ -120,27 +125,29 @@ export function speak(text: string, persona: Persona): void {
   const { sentences, remainder } = pullSentences(buffer);
   buffer = remainder;
 
-  for (const s of sentences) enqueue(s, persona);
+  for (const s of sentences) enqueue(s, persona, origin);
 }
 
-export function flush(persona: Persona): void {
+export function flush(persona: Persona, origin: SpeakOrigin = "reply"): void {
   if (activePersona !== null && persona !== activePersona) {
     cancel();
     return;
   }
   const tail = buffer.trim();
   buffer = "";
-  if (tail) enqueue(tail, persona);
+  if (tail) enqueue(tail, persona, origin);
 }
 
-function enqueue(text: string, persona: Persona): void {
+function enqueue(text: string, persona: Persona, origin: SpeakOrigin): void {
   // Sticky terminal states for this generation:
   //   "silent" → no audio for the rest of this gen
   //   "native" → all remaining audio via browserNative
   if (streamEngine === "silent") return;
   if (streamEngine === "native") {
-    try { playbackObserver?.(text); } catch { /* noop */ }
-    nativeSpeak(text, persona);
+    // ★探针第二个调用点（勘察档新 HIGH-3 / plan 步1 P1-6）：原来这里在把话交给
+    //   speechSynthesis **之前**就无条件报一声，与 playAudio 那处同病——修了一处
+    //   不修这处，污染只是换个地方继续。改挂 utterance 的 onstart＝真开口那一刻。
+    nativeSpeak(text, persona, () => playbackObserver?.(text, origin));
     return;
   }
   const gen = generation;
@@ -149,7 +156,7 @@ function enqueue(text: string, persona: Persona): void {
   // unhandledrejection — pump's await will re-throw and route it
   // through the proper fallback path.
   req.promise.catch(() => { /* handled inside pump */ });
-  queue.push({ gen, persona, text, mp3: req.promise, abort: req.abort });
+  queue.push({ gen, persona, text, origin, mp3: req.promise, abort: req.abort });
   void pump();
 }
 
@@ -183,7 +190,7 @@ async function pump(): Promise<void> {
           }
 
           try {
-            await playAudio(audio);
+            await playAudio(audio, job);
           } catch {
             // play() rejected (e.g. NotAllowedError autoplay policy)
             handleEdgeFailure(job);
@@ -237,18 +244,24 @@ function handleEdgeFailure(failed: Job): void {
   // First failure with nothing played yet → fallback whole same-gen
   // stream (failed job + queued same-gen jobs) to native.
   streamEngine = "native";
-  const fallbackTexts: string[] = [failed.text];
+  const fallbackJobs: Array<{ text: string; origin: SpeakOrigin }> = [
+    { text: failed.text, origin: failed.origin },
+  ];
   const survivors: Job[] = [];
   for (const q of queue) {
     if (q.gen === failed.gen) {
-      fallbackTexts.push(q.text);
+      fallbackJobs.push({ text: q.text, origin: q.origin });
       revokeLater(q.mp3);
     } else {
       survivors.push(q);
     }
   }
   queue = survivors;
-  for (const t of fallbackTexts) nativeSpeak(t, failed.persona);
+  // 兜底批原来完全绕过观察者（勘察档：降级后"零声零日志"的一半来源）——
+  // 同样挂 onstart，真开口才报。
+  for (const f of fallbackJobs) {
+    nativeSpeak(f.text, failed.persona, () => playbackObserver?.(f.text, f.origin));
+  }
 }
 
 function drainSameGen(gen: number): void {
@@ -261,23 +274,37 @@ function drainSameGen(gen: number): void {
 }
 
 /**
- * 出声观察点（延迟 A/B 用）：真正开始播那一刻叫一次。
+ * 出声观察点（延迟 A/B 用）：**声音真的开始走**那一刻叫一次，带上这段话的 origin。
  *
  * ★为什么要有这个钩子：判据是"松手→耳朵真听见"，而这个时刻只有 TTS 模块知道。
  * 以前的办法是让长官往控制台贴一段探针——他的原话是「我真的不会去 f12 做这些，
  * 每次都整错」。**要长官去捞证据本身就是设计缺陷**（同 §8 那笔账），所以改成
  * 客户端自己量、搭下一次命令的顺风车回服务端。
+ *
+ * ★三个发声出口全部挂在"真开口"事件上，一个都不许提前报（勘察档新 HIGH-3）：
+ *   Edge 路＝首个 currentTime>0 的 timeupdate；native 路与降级兜底批＝utterance
+ *   的 onstart。播不出来（autoplay 拒/静音/音量 0）就一声不报。
  */
-let playbackObserver: ((text: string) => void) | null = null;
-export function setPlaybackObserver(fn: ((text: string) => void) | null): void {
+let playbackObserver: ((text: string, origin: SpeakOrigin) => void) | null = null;
+export function setPlaybackObserver(fn: ((text: string, origin: SpeakOrigin) => void) | null): void {
   playbackObserver = fn;
 }
 
-function playAudio(audio: HTMLAudioElement): Promise<void> {
+function playAudio(audio: HTMLAudioElement, job: Job): Promise<void> {
   currentAudio = audio;
-  try { playbackObserver?.(currentJob?.text ?? ""); } catch { /* 观察点不许影响播放 */ }
   return new Promise<void>((resolve, reject) => {
+    // ★真出声判据（勘察档新 HIGH-3，判据家法同形）：这一声原来报在 play() 之前，
+    //   于是 autoplay 被拒 / 标签页被静音 / 音量 0 时**照报一声**——任何拿观察者当
+    //   「真出声」证据的验收在全静音浏览器里也全绿。改挂首个 timeupdate：
+    //   currentTime 真的走过才算数，播不出来就一声不报（宁可丢样本，不许造样本）。
+    let announced = false;
+    const announce = () => {
+      if (announced || !(audio.currentTime > 0)) return;
+      announced = true;
+      try { playbackObserver?.(job.text, job.origin); } catch { /* 观察点不许影响播放 */ }
+    };
     const cleanup = () => {
+      audio.removeEventListener("timeupdate", announce);
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
       try { URL.revokeObjectURL(audio.src); } catch { /* noop */ }
@@ -285,6 +312,7 @@ function playAudio(audio: HTMLAudioElement): Promise<void> {
     };
     const onEnded = () => { cleanup(); resolve(); };
     const onError = () => { cleanup(); reject(new Error("AUDIO_ERROR")); };
+    audio.addEventListener("timeupdate", announce);
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("error", onError);
     audio.play().catch((err) => {

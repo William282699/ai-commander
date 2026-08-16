@@ -49,6 +49,8 @@ CHECKS=(
   "pretest-polish                |npx tsx scripts/ab-pretest-polish.ts"
   "pretest-polish-negctl         |npx tsx scripts/ab-pretest-polish.ts --negctl"
   "retreat-semantics             |npx tsx scripts/ab-retreat-semantics.ts --synthetic"
+  "tts-proactive                 |npx tsx scripts/ab-tts-proactive.ts --synthetic"
+  "tts-proactive-negctl          |npx tsx scripts/ab-tts-proactive.ts --negctl"
   "voice-input                   |npx tsx scripts/ab-voice-input.ts --synthetic"
 )
 
