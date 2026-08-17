@@ -103,7 +103,12 @@ export function isBusy(): boolean {
     //   ⇒ 主动台词判"可以释放"，cancel() 顺带把 native 那段掐断，自己又按板 2 不落
     //   native ⇒ 净效果是**掐了长官的回复、自己一声没出**。补这一项后最坏也只是
     //   多等一拍（fail-safe 方向）。
-    (typeof window !== "undefined" && window.speechSynthesis?.speaking === true)
+    (typeof window !== "undefined" &&
+      // ★步 5d：`speaking` 一项不够。探针实测 WebKit 语义下有 **7/41** 的假空窗
+      //   ——排队中但还没起声的那一瞬 speaking 为 false，主动台词正好挤进去，
+      //   把应答**掐掉半句**。`pending` 补上这段队列期。仍是 fail-safe 方向：
+      //   错也只错在多等一拍。
+      (window.speechSynthesis?.speaking === true || window.speechSynthesis?.pending === true))
   );
 }
 

@@ -2458,11 +2458,19 @@ div[style*="overflow-y: auto"]::-webkit-scrollbar-thumb:hover {
 /* ── 「请示要缠人」刀 · 未答请示的频道提示 ─────────────────────────────
    两件都**挂 data 属性**（真状态）而不是挂 class：判据读的是状态本身，
    样式只是状态的一个消费者（C3「指示灯不许撒谎」同源做法）。          */
+/* ★两级，别合成一级：
+     unread  ＝参谋对你说过话、你还没看到那一条 → **静态描边，不动**
+     pending ＝有一张还在等你回话的请示        → 闪
+   主动台词十来秒就能来一条；未读若也用无限闪，频道键会常亮成背景噪音，
+   那时候灯就不再是信息了。 */
+[data-channel-alert="unread"] {
+  box-shadow: inset 2px 0 0 0 var(--hud-accent-cyan, #00d4ff);
+}
 @keyframes ac-escalation-blink {
   0%, 100% { box-shadow: inset 2px 0 0 0 var(--hud-accent-red); }
   50%      { box-shadow: inset 2px 0 0 0 transparent; }
 }
-[data-escalation-pending="1"] {
+[data-channel-alert="pending"] {
   animation: ac-escalation-blink 1.1s ease-in-out infinite;
 }
 

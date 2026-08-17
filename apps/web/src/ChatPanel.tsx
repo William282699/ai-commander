@@ -45,6 +45,8 @@ import {
   getGroupChatMessages,
   getLastMessageTimeBySource,
   getMessages,
+  getSeenUtteranceId,
+  markUtterancesSeen,
   getMessagesByChannel,
   getActiveThreads,
   resolveThread,
@@ -61,7 +63,6 @@ import {
 import { speak, flush, cancel, speakUtterance, isBusy, type Persona } from "./tts";
 import { shouldSpeakMessage, spokenKey, isDeferrable, personaOf, type SpeakContext } from "./proactiveSpeech";
 import { decideEscalationFollowup, pickNagLine, EXPIRE_FALLBACK, type EscalationWatch } from "./nagContract";
-import { soundManager } from "./rendering/audio/soundManager";
 import { API_URL } from "./api";
 import { SESSION_ID } from "./session";
 
@@ -1090,10 +1091,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   }, []);
 
   // ── 步 5：复呼／甩脸 ───────────────────────────────────────────────
-  // 提示音在 ChatPanel 侧自己 init 一次（幂等）：soundManager 的唯一 init 点在
-  // GameCanvas，而弹出面板**不渲染 GameCanvas** ⇒ 弹窗态里 play() 会静默返回 -1、
-  // 零日志。不补这一句，弹窗态的提示音是个查不出来的哑巴。
-  useEffect(() => { try { soundManager.init(); } catch { /* 提示音不许影响主链 */ } }, []);
+  // （步 5d 撤销：这里原来有一句 soundManager.init()，是为弹窗态的到达提示音补的；
+  //   提示音整件事已撤，ChatPanel 不再碰音效系统。）
 
   /**
    * 板 1 的第三件：首局让**陈自己开口**请长官打开电台（对话是唯一界面——提醒是
@@ -1120,10 +1119,25 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   const escWatchRef = useRef<Record<Channel, (EscalationWatch & { question: string }) | null>>({
     ops: null, logistics: null, combat: null,
   });
-  /** 频道键闪烁＝该频道有一张**还在等长官回话**的请示。真状态驱动，灯不许撒谎。 */
-  const [pendingChannels, setPendingChannels] = useState<Record<Channel, boolean>>({
-    ops: false, logistics: false, combat: false,
+  /**
+   * 频道键上的记号。**三值**，因为视觉必须分两级：
+   *   "pending" 有一张还在等长官回话的请示 → 闪
+   *   "unread"  参谋对你说过话、你还没看到那一条 → **静态点，不闪**
+   *   "none"    什么都没有
+   * ★为什么不能只用一档：主动陈述十来秒就能来一条，未读若也用 1.1s 无限闪，
+   *   频道键会常亮成背景噪音——那时候灯就不再是信息了。
+   *
+   * ★铁律：**凡出声 ⇒ 要么那句话当场就在你眼前，要么频道键上有记号。**
+   *   （反过来不成立：不出声的东西不欠记号——proactive/retrospect/advice 与群聊
+   *   回复都不点灯，用户 2026-08-16 裁定。）
+   */
+  const [channelAlert, setChannelAlert] = useState<Record<Channel, "none" | "unread" | "pending">>({
+    ops: "none", logistics: "none", combat: "none",
   });
+  /** 未读水位的打底（与出声侧 spokenPrimedRef 同形）：挂载/换局那一刻店里已有的
+   *  参谋台词一律算"看过"，否则一挂载就满屏未读。 */
+  const alertPrimedRef = useRef(false);
+  const alertEpochRef = useRef<number | null>(null);
   /** 首局那句「请开电台」：脉冲**绑它的生命周期**，不是常驻 affordance。 */
   const radioPromptRef = useRef<{ at: number } | null>(null);
   const [radioPulse, setRadioPulse] = useState(false);
@@ -1224,11 +1238,6 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // 到这儿这条消息就算"处理过了"，无论结局如何——押后的那些由暂存队列接手，
       // 不靠"留在集合外等下一次重扫"。
       spokenRef.current.add(key);
-      // ★到达提示音：**与喇叭无关**（手测 9：TTS 关着时闪烁与提示音照常——
-      //   提醒链不许依赖喇叭）。只给"真参谋台词"响：过期/活单已死那些不响。
-      if (verdict.speak || isDeferrable(verdict.reason)) {
-        try { soundManager.play("roger"); } catch { /* 提示音不许影响主链 */ }
-      }
       if (!verdict.speak) {
         // ★可延后的 deny 进暂存队列（麦克风一松这句话仍然值得说，手测 6 的补播）；
         //   其余 deny 是终局的，到此为止。
@@ -1377,7 +1386,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // ── 复呼／甩脸（同一口轮询，游戏钟；四条合同全在 decideEscalationFollowup）──
       if (s) {
         const now = s.time;
-        const nextPending: Record<Channel, boolean> = { ops: false, logistics: false, combat: false };
+        const nextAlert: Record<Channel, "none" | "unread" | "pending"> = { ops: "none", logistics: "none", combat: "none" };
+        const epochNow = gameEpochRef.current;
         // ★5b/B4：群聊那条回话也要消账。玩家消息只落 `primaryChannel`（ALL 模式下
         //   就是首位那人的频道，且带 groupChat 标记）⇒ 只按频道查的话，长官刚在
         //   群里说完话，另两个频道的活单照样复呼/甩脸＝本刀立案时最怕的
@@ -1389,16 +1399,37 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         // 弹窗二次挂载会拿到一个全新的 ref（nagged 复位）⇒ 同一张单被复呼第二次、
         // 收回面板再来第三次。消息流是跨 realm 共享的那份真相，洗不掉。
         const nagAtByCh: Record<Channel, number | null> = { ops: null, logistics: null, combat: null };
+        // ★未读水位用的两个量：**比 id 不比 time**（游戏钟同一拍会有多条、暂停时还冻住）。
+        const maxUttIdByCh: Record<Channel, number> = { ops: 0, logistics: 0, combat: 0 };
+        const lastPlayerIdByCh: Record<Channel, number> = { ops: 0, logistics: 0, combat: 0 };
+        let lastGroupPlayerId = 0;
         for (const m of feed) {
           if (m.from === "player") {
-            if (m.groupChat) lastGroupPlayer = Math.max(lastGroupPlayer ?? -Infinity, m.time);
+            if (m.groupChat) {
+              lastGroupPlayer = Math.max(lastGroupPlayer ?? -Infinity, m.time);
+              lastGroupPlayerId = Math.max(lastGroupPlayerId, m.id);
+            }
             const cur = lastPlayerByCh[m.channel];
             lastPlayerByCh[m.channel] = cur == null ? m.time : Math.max(cur, m.time);
-          } else if (m.utterance?.kind === "nag") {
-            const cur = nagAtByCh[m.channel];
-            nagAtByCh[m.channel] = cur == null ? m.time : Math.max(cur, m.time);
+            lastPlayerIdByCh[m.channel] = Math.max(lastPlayerIdByCh[m.channel], m.id);
+          } else if (m.utterance) {
+            // 只数**带标记**的（＝会出声的那一族：escalation/nag/expire）。
+            // 不出声的主动陈述/复盘/建议不点灯（用户裁定），群聊回复也不带标记。
+            maxUttIdByCh[m.channel] = Math.max(maxUttIdByCh[m.channel], m.id);
+            if (m.utterance.kind === "nag") {
+              const cur = nagAtByCh[m.channel];
+              nagAtByCh[m.channel] = cur == null ? m.time : Math.max(cur, m.time);
+            }
           }
         }
+        // 打底：挂载/换局各一次。
+        const CHS = ["ops", "logistics", "combat"] as Channel[];
+        if (alertEpochRef.current !== epochNow) { alertEpochRef.current = epochNow; alertPrimedRef.current = false; }
+        if (!alertPrimedRef.current) {
+          for (const c of CHS) markUtterancesSeen(c, maxUttIdByCh[c]);
+          alertPrimedRef.current = true;
+        }
+        const viewingCh = selectedCommanders.length === 1 ? COMMANDER_CHANNEL[selectedCommanders[0]] : null;
         for (const ch of ["ops", "logistics", "combat"] as Channel[]) {
           const persona = personaOf(CHANNEL_PERSONA[ch]);
           if (!persona) continue;
@@ -1443,12 +1474,23 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           //   wNow=null ⇒ pending 判成 true，track 那一拍又 false——灯一半时间在
           //   撒谎，还让整条面板每 200ms 重渲染。`live` 在本循环里从不被改写，
           //   且它的 createdAt 就是这张单的 createdAt，判定天然稳定。
-          nextPending[ch] = live !== null && !(lastP != null && lastP > live.createdAt);
+          // ── 未读水位：两处顶 ──
+          // ① 正看着这个频道（单选）⇒ 一直顶到最新，看着就等于看过了。
+          if (viewingCh === ch) markUtterancesSeen(ch, maxUttIdByCh[ch]);
+          // ② 长官在这个频道（或群聊里）说过话，且那句比最新的参谋台词还新
+          //    ⇒ 他显然看到了。**这条是「回话后停灯」不红的关键**：只靠 pending
+          //    那一半会停，但未读那一半仍为真，并集下灯照亮。
+          const lastPId = Math.max(lastPlayerIdByCh[ch], lastGroupPlayerId);
+          if (lastPId > maxUttIdByCh[ch]) markUtterancesSeen(ch, maxUttIdByCh[ch]);
+
+          const pending = live !== null && !(lastP != null && lastP > live.createdAt);
+          const unread = maxUttIdByCh[ch] > getSeenUtteranceId(ch);
+          nextAlert[ch] = pending ? "pending" : unread ? "unread" : "none";
         }
-        setPendingChannels((prev) =>
-          (["ops", "logistics", "combat"] as Channel[]).every((c) => prev[c] === nextPending[c])
+        setChannelAlert((prev) =>
+          CHS.every((c) => prev[c] === nextAlert[c])
             ? prev // 5Hz 轮询：值没变就不换引用，免得整条面板每 200ms 重渲染
-            : nextPending);
+            : nextAlert);
 
         // 脉冲只在那句台词活着的时候亮：长官点开喇叭＝被回答，超窗＝过期，两头都停。
         const rp = radioPromptRef.current;
@@ -3343,7 +3385,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                     <button
                       key={cmd}
                       className={`dp-channel-btn${isActive ? " dp-channel-btn--active" : ""}`}
-                      data-escalation-pending={pendingChannels[COMMANDER_CHANNEL[cmd]] ? "1" : "0"}
+                      data-channel-alert={channelAlert[COMMANDER_CHANNEL[cmd]]}
                       onClick={() => selectSingleCommander(cmd)}
                       style={{ borderLeftColor: isActive ? cmdColor : "transparent" }}
                       title={`${meta.label} (${meta.role})`}
@@ -3562,7 +3604,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           return (
             <button
               key={cmd}
-              data-escalation-pending={pendingChannels[COMMANDER_CHANNEL[cmd]] ? "1" : "0"}
+              data-channel-alert={channelAlert[COMMANDER_CHANNEL[cmd]]}
               onClick={() => selectSingleCommander(cmd)}
               onContextMenu={(e) => { e.preventDefault(); toggleCommander(cmd); }}
               style={{

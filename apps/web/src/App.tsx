@@ -29,9 +29,32 @@ function PanelApp() {
       const b = (window.opener as Window | null)?.__GAME_BRIDGE__;
       if (b) { setBridge(b); clearInterval(id); }
     }, 100);
-    // If opener closes, close this window too
+    // If opener closes, close this window too.
+    //
+    // ★步 5d：光看 `closed` 不够——**主窗刷新时它是假的**。`window.opener` 绑的是
+    //   browsing context 不是 Document，主窗 reload 之后这个引用照旧有效、
+    //   `closed` 仍为 false ⇒ 弹窗不自尽；而主窗那边 `panelDetached` 是没有持久化
+    //   的 useState ⇒ 复位成 false ⇒ 嵌入版又挂回来。于是**两个 realm 各一份
+    //   ChatPanel、各一份模块级 tts**：cancel 互相碰不到、persona 各判各的，
+    //   手测听到的「一个马克斯一个陈同时说」就是这么来的。更糟的是 panelWinRef
+    //   随旧 realm 一起没了，主窗上「收回面板」按钮也不再渲染 ⇒ 僵尸窗界面上关不掉。
+    //   （vite dev 的 full-reload 会同时刷两扇窗，正好凑齐"两边都活"的条件。）
+    //
+    //   信号取 `__GAME_BRIDGE__` 的**对象身份**：探针实测正常游玩 28 拍 0 次变化
+    //   （那 10 个 useCallback 依赖是稳的），主窗 reload 后变 1 次。连续两拍都对不上
+    //   才自尽——防的是桥被短暂重建的那一瞬（真发生了也只是晚 1 秒关）。
+    //
+    //   理由不只是省事：主窗一刷新，弹窗显示的就是**上一份世界**了，本来就该关。
+    let missStreak = 0;
+    const bornWith = (window.opener as Window | null)?.__GAME_BRIDGE__;
     const checkOpener = setInterval(() => {
-      if (!window.opener || (window.opener as Window).closed) window.close();
+      if (!window.opener || (window.opener as Window).closed) { window.close(); return; }
+      const now = (window.opener as Window).__GAME_BRIDGE__;
+      if (bornWith && now !== bornWith) {
+        if (++missStreak >= 2) window.close();
+      } else {
+        missStreak = 0;
+      }
     }, 1000);
     return () => { clearInterval(id); clearInterval(checkOpener); };
   }, []);

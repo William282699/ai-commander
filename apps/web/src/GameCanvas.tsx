@@ -1886,11 +1886,8 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           .then((r) => r.json())
           .then((data) => {
             if (data?.brief) {
-              // ★发射点④（llm_advice 主动建议）：source 仍是 event_report——
-              //   **只出声、不迁渲染**（渲染迁移＝报告行变人物气泡，是可见手感
-              //   变更，按 plan §1 缓办立账）。utterance 是独立字段，正因如此这
-              //   两件事才解得开：不动 source 也能让它开口。
-              addMessage("info", data.brief, capturedTime, ch, undefined, "event_report", undefined, utteranceFor(ch, "advice"));
+              // 步 5d：同上，主动建议不出声，只上屏（它在屏上本来就长得像战报行）。
+              addMessage("info", data.brief, capturedTime, ch, undefined, "event_report");
             }
           })
           .catch(() => {}); // advisor trigger brief failure is silent
@@ -2015,8 +2012,11 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
                   // layer is optional presence, not a must-say). source="proactive" renders
                   // as the persona speaking (conversation), NOT a report; no setActiveEscalation.
                   if (voiced && !/[？?]/.test(voiced)) {
-                    // ★发射点②（导演层主动陈述 7c.2）
-                    addMessage("info", voiced, state.time, ch, undefined, "proactive", undefined, utteranceFor(ch, "proactive"));
+                    // 步 5d：**不再标记**。导演层主动陈述 12 游戏秒就能来一条，
+                    // 让它们也出声＝参谋在耳边不停自言自语（手测判退）。出声砍回
+                    // 「请示家族」（escalation/nag/expire）＝真正在等长官回话的那些。
+                    // 渲染一个字没动，它照旧上屏。
+                    addMessage("info", voiced, state.time, ch, undefined, "proactive");
                   }
                 })
                 .catch(() => {}) // network failure → silent, no fallback
@@ -2117,8 +2117,8 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
                 // Statement only — a question-shaped line is dropped (a retrospect
                 // never asks). Failure is silent: this layer is optional presence.
                 if (voiced && !/[？?]/.test(voiced)) {
-                  // ★发射点③（决策复盘 7e）
-                  addMessage("info", voiced, state.time, ch, undefined, "retrospect", undefined, utteranceFor(ch, "retrospect"));
+                  // 步 5d：同上，复盘不出声，只上屏。
+                  addMessage("info", voiced, state.time, ch, undefined, "retrospect");
                   // [EVENT] chain: reuse the escalation's actionId when this reviewed
                   // an escalation answer, so escalate → command(escalateId) →
                   // retrospect share one id; standalone decisions log their record id.

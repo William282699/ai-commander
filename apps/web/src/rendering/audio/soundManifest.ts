@@ -37,11 +37,16 @@ export const SOUND_MANIFEST: SoundEntry[] = [
   { id: "order",           src: "/sfx/ui/order.mp3",               volume: 0.30, category: "ui", loop: false, maxInstances: 2 },
   { id: "deselect",        src: "/sfx/ui/deselect.mp3",            volume: 0.20, category: "ui", loop: false, maxInstances: 2 },
   { id: "warning",         src: "/sfx/ui/warning.mp3",             volume: 0.35, category: "ui", loop: false, maxInstances: 2 },
-  // 「请示要缠人」刀：参谋主动开口的到达提示音。素材本来就躺在 public/sfx/ui/
-  // 却从没进过 manifest。选 roger 不选 warning 是有理由的——warning 这个词已经
-  // 被 MessageLevel 占着（NO_FUEL 那一族真警告），同名两义日后拆音色得改两处；
-  // 而"参谋有话说"本来也不是警告。
-  { id: "roger",           src: "/sfx/ui/roger.mp3",               volume: 0.35, category: "ui", loop: false, maxInstances: 2 },
+  // ★步 5d 撤销：曾把 roger.mp3 当"参谋有话说"的到达提示音，手测判退。
+  //   实测它是 1.646s 的无线电片段：静噪 → **男声约三音节**（0.20-0.66s，
+  //   F0 128-155Hz、共振峰在动）→ 静噪 → 双音 beep。实播增益 0.35（category/
+  //   master 系数全仓无调用点、恒为 1），RMS≈-21.8dBFS，与 Edge TTS 同级；
+  //   而 play() 排在 ttsEnabled/loading/isBusy/capturing **所有闸之前**、与
+  //   releaseOne 同拍 ⇒ 每句被念的台词开头都叠着一段人声，maxInstances:2 还
+  //   允许两声互叠。**提示音不能是人声**。
+  //   将来若要加：Web Audio 合成双音哔，且必须排到**仲裁之后**——只在"这句现在
+  //   不会被念"的时候才响。（素材出处：2026-04-13 随音效系统进仓，原名
+  //   Roger-that-sound-effect.mp3；全历史只有本刀引用过。）
 ];
 
 // Unit type → attack sound ID mapping

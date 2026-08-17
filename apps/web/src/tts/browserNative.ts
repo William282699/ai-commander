@@ -42,4 +42,15 @@ export function nativeSpeak(text: string, persona: Persona, onStart?: () => void
 export function nativeCancel(): void {
   if (!hasNative()) return;
   window.speechSynthesis.cancel();
+  // ★步 5d 自愈：cancel() 偶尔不生效。探针找到的**唯一**能造出真重叠的路径就是
+  //   这里——正常 0/41、退化 39/41，重叠的那对儿逐字是「native 马克斯 ＋ Edge 陈」
+  //   同时说话，前置条件是那一轮 /api/tts 吃了 503（应答退到 native）。
+  //   补一拍：还在说就再 cancel 一次。零风险（本来就该停），fail-safe。
+  setTimeout(() => {
+    try {
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+        window.speechSynthesis.cancel();
+      }
+    } catch { /* noop */ }
+  }, 0);
 }

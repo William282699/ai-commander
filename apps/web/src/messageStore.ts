@@ -70,6 +70,8 @@ interface MessageStoreShape {
   getGroupChatMessages: typeof getGroupChatMessages;
   getMessagesByChannel: typeof getMessagesByChannel;
   getLastMessageTimeBySource: typeof getLastMessageTimeBySource;
+  getSeenUtteranceId: typeof getSeenUtteranceId;
+  markUtterancesSeen: typeof markUtterancesSeen;
   subscribe: typeof subscribe;
   getActiveChannel: typeof getActiveChannel;
   setActiveChannel: typeof setActiveChannel;
@@ -99,6 +101,28 @@ function getOpenerStore(): MessageStoreShape | null {
   if (!opener || opener.closed) return null;
   const bridge = (opener as unknown as { __GAME_BRIDGE__?: { messageStore?: MessageStoreShape } }).__GAME_BRIDGE__;
   return bridge?.messageStore ?? null;
+}
+
+// ── 「请示要缠人」刀 · 未读水位 ────────────────────────────────────────
+// 每个频道"长官已经看到第几号参谋台词了"。**存这里不存组件 ref**：弹窗二次挂载
+// 会把 ref 清零（5b/B3 那笔教训），而两个 realm 必须对"看过没有"给出同一个答案。
+// 比 id 不比 time——游戏钟同一拍会有多条、暂停时还会冻住。
+const _seenUtteranceId: Record<Channel, number> = { ops: 0, logistics: 0, combat: 0 };
+
+export function getSeenUtteranceId(channel: Channel): number {
+  const p = getOpenerStore();
+  if (p) return p.getSeenUtteranceId(channel);
+  return _seenUtteranceId[channel];
+}
+
+/** 只增不减：水位只会往上走。 */
+export function markUtterancesSeen(channel: Channel, uptoId: number): void {
+  const p = getOpenerStore();
+  if (p) { p.markUtterancesSeen(channel, uptoId); return; }
+  if (uptoId > _seenUtteranceId[channel]) {
+    _seenUtteranceId[channel] = uptoId;
+    listeners.forEach((fn) => fn());
+  }
 }
 
 // Day 16B: active channel shared state (for CommandPanel to read)
@@ -170,6 +194,7 @@ export function clearMessages(): void {
   if (p) { p.clearMessages(); return; }
   messages.length = 0;
   nextId = 1;
+  _seenUtteranceId.ops = 0; _seenUtteranceId.logistics = 0; _seenUtteranceId.combat = 0;
   _activeChannel = "ops";
   _escalations.ops = null;
   _escalations.logistics = null;
