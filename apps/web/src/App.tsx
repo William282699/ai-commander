@@ -145,8 +145,15 @@ export default function App() {
   //   （勘察档新 HIGH-2，v2 的「单实例保证」作废）。接线之前先把这颗地雷拆了。
   const panelWinRef = useRef<Window | null>(null);
   const handlePopOut = useCallback(() => {
+    // ★P1-12（勘察档）：原来这里用的是 `origin`——**query 全被丢掉**，于是弹出
+    //   面板里 `?webspeech` / `?novoicewarm` / 本刀的 `?nag`/`?expire` 一个都不生效：
+    //   延迟 A/B 的 `isBaselineArm()` 只读本窗 search，弹过面板的那一局臂标签与
+    //   实际路径对不上（已污染的历史样本另账）。改成把原 query 原样带过去，
+    //   再覆上 mode=panel。
+    const params = new URLSearchParams(window.location.search);
+    params.set("mode", "panel");
     const panelWin = window.open(
-      `${window.location.origin}?mode=panel`,
+      `${window.location.origin}${window.location.pathname}?${params.toString()}`,
       "ai-commander-panel",
       "width=1280,height=900",
     );

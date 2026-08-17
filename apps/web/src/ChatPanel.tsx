@@ -135,6 +135,30 @@ function readSecParam(name: string, fallback: number | null): number | null {
     return fallback;
   }
 }
+/**
+ * 板 1 落地：喇叭默认仍关，但**记住长官的选择**（用户裁定：默认关＋持久化＋
+ * 首局陈请开电台）。★读写各自 try/catch——隐私模式下裸调 localStorage 会在
+ * **渲染期**抛错，而全仓没有 ErrorBoundary＝整个面板白屏，比"记不住"严重得多。
+ * 键名走 `voice.` 前缀族（与既有的 voice.novoicewarm 同族），不新建 storage 封装。
+ */
+const TTS_PREF_KEY = "voice.ttsEnabled";
+const RADIO_PROMPTED_KEY = "voice.radioPrompted";
+function readTtsPref(): boolean {
+  try { return window.localStorage.getItem(TTS_PREF_KEY) === "1"; } catch { return false; }
+}
+function writeTtsPref(v: boolean): void {
+  try { window.localStorage.setItem(TTS_PREF_KEY, v ? "1" : "0"); } catch { /* 记不住就记不住 */ }
+}
+function hasRadioPrompted(): boolean {
+  try { return window.localStorage.getItem(RADIO_PROMPTED_KEY) === "1"; } catch { return true; }
+}
+function markRadioPrompted(): void {
+  try { window.localStorage.setItem(RADIO_PROMPTED_KEY, "1"); } catch { /* noop */ }
+}
+
+/** 首局那句「请开电台」的存活窗口（游戏秒）：过了就不再脉冲（"过期"那一半）。 */
+const RADIO_PROMPT_TTL_SEC = 90;
+
 const NAG_AFTER_SEC = readSecParam("nag", 30) ?? 30;
 const EXPIRE_OVERRIDE_SEC = readSecParam("expire", null);
 
@@ -595,7 +619,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // (speak / flush / cancel) imported above. Sentence buffer, queue,
   // generation tokens, fallback state all owned by the module.
   const hasTTS = typeof Audio !== "undefined" || (typeof window !== "undefined" && "speechSynthesis" in window);
-  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [ttsEnabled, setTtsEnabled] = useState<boolean>(readTtsPref);
+  /** 喇叭开关的唯一入口：两颗键（嵌入态／弹窗 dock）都走它，顺手落盘。 */
+  const toggleTts = useCallback(() => {
+    setTtsEnabled((prev) => {
+      const next = !prev;
+      writeTtsPref(next);
+      if (!next) cancel(); // 关的时候把正在播的掐掉（原行为）
+      return next;
+    });
+  }, []);
 
   /**
    * 刀 C：把麦克风握在手里。
@@ -1055,9 +1088,38 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // 零日志。不补这一句，弹窗态的提示音是个查不出来的哑巴。
   useEffect(() => { try { soundManager.init(); } catch { /* 提示音不许影响主链 */ } }, []);
 
+  /**
+   * 板 1 的第三件：首局让**陈自己开口**请长官打开电台（对话是唯一界面——提醒是
+   * 角色行为，不是弹一个设置引导）。它同时替两个窗都挣到那次真实用户手势：
+   * 主窗有教程遮罩兜着，而弹出面板**没有任何必点按钮**、`window.open` 也不继承
+   * opener 的 user activation，第一声很可能撞上 autoplay 策略。
+   * ★这句话自己**不带 utterance 标记**：喇叭还没开，念它是个悖论；fail-closed
+   *   之下它天然只上屏不出声。
+   */
+  useEffect(() => {
+    if (ttsEnabled) return;          // 已经开着就不啰嗦
+    if (hasRadioPrompted()) return;  // 只在"首局新档"发生一次
+    const s = getState();
+    if (!s) return;
+    markRadioPrompted();
+    radioPromptRef.current = { at: s.time };
+    setRadioPulse(true);
+    addMessage("info", "长官，电台还没开——右下角那个喇叭点一下，我说话您就听得见了。",
+      s.time, "combat", "chen", "command_ack");
+    // 只跑一次：依赖留空是有意的（ttsEnabled 后续变化不该再触发这句）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const escWatchRef = useRef<Record<Channel, (EscalationWatch & { question: string }) | null>>({
     ops: null, logistics: null, combat: null,
   });
+  /** 频道键闪烁＝该频道有一张**还在等长官回话**的请示。真状态驱动，灯不许撒谎。 */
+  const [pendingChannels, setPendingChannels] = useState<Record<Channel, boolean>>({
+    ops: false, logistics: false, combat: false,
+  });
+  /** 首局那句「请开电台」：脉冲**绑它的生命周期**，不是常驻 affordance。 */
+  const radioPromptRef = useRef<{ at: number } | null>(null);
+  const [radioPulse, setRadioPulse] = useState(false);
 
   /** 复呼／甩脸都由 ChatPanel 发射 ⇒ 弹窗态会真走跨窗口委托那行（第 8 参必须到得了）。*/
   const postFollowup = useCallback((ch: Channel, persona: Persona, kind: "nag" | "expire", line: string) => {
@@ -1275,6 +1337,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // ── 复呼／甩脸（同一口轮询，游戏钟；四条合同全在 decideEscalationFollowup）──
       if (s) {
         const now = s.time;
+        const nextPending: Record<Channel, boolean> = { ops: false, logistics: false, combat: false };
         for (const ch of ["ops", "logistics", "combat"] as Channel[]) {
           const persona = personaOf(CHANNEL_PERSONA[ch]);
           if (!persona) continue;
@@ -1303,7 +1366,22 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             escWatchRef.current[ch] = null; // 同步清账，异步回来才发话，防重复
             fireExpire(ch, persona, w.question);
           }
+          // 闪烁的真状态：有活单 ∧ 长官还没回过话。与复呼/甩脸同一把尺，
+          // 所以"答了就停闪""甩完脸就停闪"是同一条判定的自然结果，不是另写的。
+          const lastP = getLastMessageTimeBySource(ch, "player");
+          const wNow = escWatchRef.current[ch];
+          nextPending[ch] =
+            live !== null && !(wNow != null && lastP != null && lastP > wNow.createdAt);
         }
+        setPendingChannels((prev) =>
+          (["ops", "logistics", "combat"] as Channel[]).every((c) => prev[c] === nextPending[c])
+            ? prev // 5Hz 轮询：值没变就不换引用，免得整条面板每 200ms 重渲染
+            : nextPending);
+
+        // 脉冲只在那句台词活着的时候亮：长官点开喇叭＝被回答，超窗＝过期，两头都停。
+        const rp = radioPromptRef.current;
+        const pulse = rp != null && !ttsEnabledRef.current && now - rp.at <= RADIO_PROMPT_TTL_SEC;
+        setRadioPulse((prev) => (prev === pulse ? prev : pulse));
       }
 
       // ── 主动台词暂存队列的释放（复用这口 200ms 轮询，不新开计时器、不忙等）──
@@ -3193,6 +3271,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                     <button
                       key={cmd}
                       className={`dp-channel-btn${isActive ? " dp-channel-btn--active" : ""}`}
+                      data-escalation-pending={pendingChannels[COMMANDER_CHANNEL[cmd]] ? "1" : "0"}
                       onClick={() => selectSingleCommander(cmd)}
                       style={{ borderLeftColor: isActive ? cmdColor : "transparent" }}
                       title={`${meta.label} (${meta.role})`}
@@ -3290,8 +3369,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                     <button
                       data-tts-btn
                       data-tts-state={ttsEnabled ? "on" : "off"}
+                      data-tts-pulse={radioPulse ? "on" : "off"}
                       className="dp-dock-btn dp-dock-btn--ptt"
-                      onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }}
+                      onClick={toggleTts}
                       style={{ background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : undefined }}
                       title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}
                     ><HornIcon on={ttsEnabled} /></button>
@@ -3410,6 +3490,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           return (
             <button
               key={cmd}
+              data-escalation-pending={pendingChannels[COMMANDER_CHANNEL[cmd]] ? "1" : "0"}
               onClick={() => selectSingleCommander(cmd)}
               onContextMenu={(e) => { e.preventDefault(); toggleCommander(cmd); }}
               style={{
@@ -3521,7 +3602,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         {/* 步 3：onPointerLeave 的 stopPTT 已删（理由同弹窗态那处注释：它既是
             "滑出即发送"的病本体，又会在 capture 释放时补发一脚踩掉 cancelPTT）。 */}
         <button data-ptt-btn data-ptt-state={pttStateAttr} className={pttCancelArmed ? "ptt-cancel-armed" : undefined} onPointerDown={onPttPointerDown} onPointerMove={onPttPointerMove} onPointerUp={onPttPointerUp} onPointerCancel={onPttPointerCancel} onLostPointerCapture={onPttLostCapture} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttCancelArmed ? "var(--hud-accent-red-dim)" : pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : pttBtnStyle.background, borderColor: pttCancelArmed ? "var(--hud-accent-red)" : "var(--hud-border-bright)", color: pttCancelArmed ? "var(--hud-accent-red)" : "var(--hud-text-primary)", opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttCancelArmed ? "松手取消" : pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttCancelArmed ? "✕" : <MicIcon listening={pttStatus === "listening"} />}</button>
-        {hasTTS && (<button data-tts-btn data-tts-state={ttsEnabled ? "on" : "off"} onClick={() => { setTtsEnabled(e => !e); if (ttsEnabled) cancel(); }} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : pttBtnStyle.background, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}><HornIcon on={ttsEnabled} /></button>)}
+        {hasTTS && (<button data-tts-btn data-tts-state={ttsEnabled ? "on" : "off"} data-tts-pulse={radioPulse ? "on" : "off"} onClick={toggleTts} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : pttBtnStyle.background, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}><HornIcon on={ttsEnabled} /></button>)}
         {onCreateSquad && isChenChannel && (<button onClick={() => onCreateSquad(selectedCommanders[0])} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
         {onDeclareWar && canDeclareWar && (<button onClick={onDeclareWar} style={warBtnStyle} title="向敌方宣战">宣战</button>)}
         <button data-send-btn onClick={() => void sendCommand()} disabled={loading || !message.trim()} style={{ ...sendBtnStyle, opacity: loading || !message.trim() ? 0.5 : 1 }}>{loading ? "..." : "发送"}</button>
