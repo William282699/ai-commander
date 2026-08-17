@@ -35,10 +35,14 @@ import {
   type SpeakCandidate,
   type SpeakContext,
 } from "../apps/web/src/proactiveSpeech";
-import { decideEscalationFollowup, nagPoolSizes, type EscalationWatch } from "../apps/web/src/nagContract";
+import { decideEscalationFollowup, nagPoolSizes, nagLinesOf, EXPIRE_FALLBACK, type EscalationWatch } from "../apps/web/src/nagContract";
 
 let passCount = 0;
 let failCount = 0;
+/** ★5b/B6：★ 刀的**总数**。negctl 的硬线从"有红就算过"改成"必须条条红"——
+ *  原来 15 把刀里 14 把失效仍会打 NEGCTL OK 并 exit 0，覆盖面只活在
+ *  commit message 的人工抄写里，机器不认。这个计数由 checkKnife 自增，自维护。 */
+let knifeCount = 0;
 const NEGCTL = process.argv[2] === "--negctl";
 
 function check(name: string, ok: boolean, detail = ""): void {
@@ -47,6 +51,7 @@ function check(name: string, ok: boolean, detail = ""): void {
   else failCount++;
 }
 function checkKnife(name: string, after: boolean, before: boolean, detail = ""): void {
+  knifeCount++;
   check(`★ ${name}`, NEGCTL ? before : after, detail);
 }
 
@@ -373,8 +378,26 @@ function nagPoolFrozen(): void {
   // ★NEVER EXPAND 的机器锁（照 VOICE_CONFIRMS 先例）。要更自然的措辞＝走 LLM，
   //   不是往池子里加句子——固定句池一旦开始长，就是「台词禁死模板」判死的形态。
   const sizes = nagPoolSizes();
-  check(`复呼池封箱：三人各 3 句（实得 ${sizes.join("/")}）`,
+  check(`复呼池封箱·基数：三人各 3 句（实得 ${sizes.join("/")}）`,
     sizes.length === 3 && sizes.every((n) => n === 3));
+  // ★5b/B5：只锁基数不锁内容 ⇒ 三句改成任意内容（甚至三句全同）照绿。补内容锁。
+  const EXPECT: Record<string, readonly string[]> = {
+    chen: ["长官，请回话。", "长官？还等您一句话。", "长官，我这边还等着。"],
+    marcus: ["长官，请指示。", "长官？参谋部等您一句话。", "长官，还等您定夺。"],
+    emily: ["长官，请回话。", "长官？后勤这边等您一句话。", "长官，我还等着您。"],
+  };
+  for (const p of ["chen", "marcus", "emily"] as const) {
+    check(`复呼池封箱·内容：${p} 三句逐字未变`,
+      JSON.stringify(nagLinesOf(p)) === JSON.stringify(EXPECT[p]), JSON.stringify(nagLinesOf(p)));
+    check(`复呼池内三句互不相同：${p}`, new Set(nagLinesOf(p)).size === nagLinesOf(p).length);
+  }
+  // ★5b/B5：串池（陈说了 Emily 那句）现在抓得到——三人的池两两不重合的那部分
+  //   足以定位归属。
+  check("三人的池不是同一份（串池能被归属判定抓到）",
+    JSON.stringify(nagLinesOf("chen")) !== JSON.stringify(nagLinesOf("marcus")) &&
+    JSON.stringify(nagLinesOf("marcus")) !== JSON.stringify(nagLinesOf("emily")));
+  check("甩脸兜底句三人各一句、互不相同",
+    new Set(["chen", "marcus", "emily"].map((p) => EXPIRE_FALLBACK[p as "chen"])).size === 3);
 }
 
 function runAll(): void {
@@ -411,8 +434,11 @@ function main(): void {
   if (NEGCTL) {
     // 绊索常驻化：★ 条若哪天不再分辨得出修复前后（有人把闸削弱了），这一行
     // 就从 NEGCTL OK 变 BAD，硬线直接红——绊索不是跑一次就完的仪式。
-    const ok = failCount > 0;
-    console.log(ok ? `NEGCTL OK — ${failCount} 条 ★ 真 FAIL` : "NEGCTL BAD — 断言不承重");
+    // ★5b/B6：条条都要红。少红一条＝那把刀不承重，机器必须知道。
+    const ok = failCount === knifeCount;
+    console.log(ok
+      ? `NEGCTL OK — ${failCount}/${knifeCount} 条 ★ 全部真 FAIL`
+      : `NEGCTL BAD — 只红了 ${failCount}/${knifeCount}，有 ★ 刀不承重`);
     process.exit(ok ? 0 : 1);
   } else {
     console.log(failCount === 0 ? "ALL PASS" : `${failCount} FAILED`);

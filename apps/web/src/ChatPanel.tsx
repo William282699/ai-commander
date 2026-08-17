@@ -125,7 +125,14 @@ function pickVoiceConfirm(commander: Commander): string {
  * ★expire 覆写只是"提前把这张单当作已过期看"的**台架捷径**：不写这个参数时，
  *   过期的唯一真相源仍然是引擎 TTL（getActiveEscalation 返回 null），本刀不自数。
  */
+/**
+ * ★5b：本刀自己的两个时值参数**只在 DEV 生效**。它们是台架捷径，不该随生产包
+ * 发出去——`?expire=` 尤其：它只改本刀的 followup 判定、不动引擎 TTL，玩家敲一个
+ * 短值会造出"嘴说不等了、账本上这张单还能再执行一百多秒"的口径分裂。
+ * （既有的 ?webspeech / ?novoicewarm 是别的刀的实验旗，一个字不碰。）
+ */
 function readSecParam(name: string, fallback: number | null): number | null {
+  if (!import.meta.env.DEV) return fallback;
   try {
     const raw = new URLSearchParams(window.location.search).get(name);
     if (raw == null) return fallback;
@@ -1135,6 +1142,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
    */
   const fireExpire = useCallback((ch: Channel, persona: Persona, question: string) => {
     const fallback = EXPIRE_FALLBACK[persona];
+    // ★5b/B1：异步回包必须带重开守卫（同文件应答链的既有形状）。6s abort 窗内
+    //   长官重开一局 ⇒ 上一局的甩脸会投进新局。守 epoch 不守时间：postFollowup
+    //   落地时重取 s.time，本来就盖掉了任何按时间写的迟到闸。
+    const firedEpoch = gameEpochRef.current;
+    const stillSameRun = () => {
+      const s2 = getState();
+      return !!s2 && syncGameEpoch(s2) === firedEpoch;
+    };
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 6000);
     const digest = [
@@ -1147,18 +1162,28 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     fetch(`${API_URL}/api/brief`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ digest, channel: ch }),
+      // ★5b/B2：**必须传 mode**。不传 ⇒ 服务端落 briefMode="brief" ⇒ 用的是
+      //   战报提示词（那条**明禁**首字 acknowledgment，而甩脸正是一句交代），
+      //   而 web 侧唯一的守卫只有问号检测——一句合格战报（没有问号）会原样被
+      //   当成甩脸念出去。retrospect 是三个兄弟里语义最贴的：一句话陈述、
+      //   禁问句、禁建议，且甩脸本就是在复盘"这张单没等到回答"。
+      body: JSON.stringify({ digest, channel: ch, mode: "retrospect" }),
       signal: ac.signal,
     })
       .then((r) => r.json())
       .then((d) => {
         clearTimeout(timer);
+        if (!stillSameRun()) return; // 重开了：这句话属于上一局，丢掉
         const b = typeof d?.brief === "string" ? d.brief.trim() : "";
         // 问号校验同 proactive/retrospect：甩脸是**交代**，不是又抛一个问题。
         postFollowup(ch, persona, "expire", b && !/[？?]/.test(b) ? b : fallback);
       })
-      .catch(() => { clearTimeout(timer); postFollowup(ch, persona, "expire", fallback); });
-  }, [postFollowup]);
+      .catch(() => {
+        clearTimeout(timer);
+        if (!stillSameRun()) return;
+        postFollowup(ch, persona, "expire", fallback);
+      });
+  }, [postFollowup, getState]);
 
   useEffect(() => {
     const s = getState();
@@ -1168,6 +1193,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     if (spokenEpochRef.current !== epoch) {
       spokenRef.current.clear();
       stashRef.current.length = 0; // 换局：上一局押着的话不许带进新局
+      // ★5b/P0-B：盯单的快照也必须跟着清。漏了它 ⇒ 重开局第一拍 live=null、
+      //   w=上一局快照、lastPlayerMsgTime=null ⇒ 直接判 expire ⇒ **上一局的脸
+      //   甩进新局**，还把上一局的问句逐字送进 LLM 请求；kind:"expire" 不查活单、
+      //   age≈0 过新鲜度，闸④两道都拦不住。
+      for (const c of ["ops", "logistics", "combat"] as Channel[]) escWatchRef.current[c] = null;
       spokenEpochRef.current = epoch;
       spokenPrimedRef.current = false;
     }
@@ -1338,21 +1368,52 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       if (s) {
         const now = s.time;
         const nextPending: Record<Channel, boolean> = { ops: false, logistics: false, combat: false };
+        // ★5b/B4：群聊那条回话也要消账。玩家消息只落 `primaryChannel`（ALL 模式下
+        //   就是首位那人的频道，且带 groupChat 标记）⇒ 只按频道查的话，长官刚在
+        //   群里说完话，另两个频道的活单照样复呼/甩脸＝本刀立案时最怕的
+        //   「你答了他还骂你」。所以：本频道的玩家消息 ∪ 任何频道的群聊玩家消息。
+        const feed = getMessages();
+        let lastGroupPlayer: number | null = null;
+        const lastPlayerByCh: Record<Channel, number | null> = { ops: null, logistics: null, combat: null };
+        // 同时收 5b/B3 要的"这张单已经复呼过没有"——**从消息流读**，不只看 ref：
+        // 弹窗二次挂载会拿到一个全新的 ref（nagged 复位）⇒ 同一张单被复呼第二次、
+        // 收回面板再来第三次。消息流是跨 realm 共享的那份真相，洗不掉。
+        const nagAtByCh: Record<Channel, number | null> = { ops: null, logistics: null, combat: null };
+        for (const m of feed) {
+          if (m.from === "player") {
+            if (m.groupChat) lastGroupPlayer = Math.max(lastGroupPlayer ?? -Infinity, m.time);
+            const cur = lastPlayerByCh[m.channel];
+            lastPlayerByCh[m.channel] = cur == null ? m.time : Math.max(cur, m.time);
+          } else if (m.utterance?.kind === "nag") {
+            const cur = nagAtByCh[m.channel];
+            nagAtByCh[m.channel] = cur == null ? m.time : Math.max(cur, m.time);
+          }
+        }
         for (const ch of ["ops", "logistics", "combat"] as Channel[]) {
           const persona = personaOf(CHANNEL_PERSONA[ch]);
           if (!persona) continue;
           const raw = getActiveEscalation(ch, now); // ①引擎 TTL＝唯一真相源
-          // 台架捷径：带了 ?expire= 才提前把它当作已过期看；不带就完全由引擎说了算。
+          // 台架捷径（**只在 DEV 生效**，见 EXPIRE_OVERRIDE_SEC 的注释）：带了
+          // ?expire= 才提前把它当作已过期看；不带就完全由引擎说了算。
           const live =
             EXPIRE_OVERRIDE_SEC != null && raw && now - raw.createdAt >= EXPIRE_OVERRIDE_SEC
               ? null
               : raw;
-          const w = escWatchRef.current[ch];
+          const chLastPlayer = lastPlayerByCh[ch];
+          const lastP =
+            chLastPlayer == null ? lastGroupPlayer
+            : lastGroupPlayer == null ? chLastPlayer
+            : Math.max(chLastPlayer, lastGroupPlayer);
+          const wRef = escWatchRef.current[ch];
+          // B3：ref 说没复呼过，也要问一句消息流——两处任一说复呼过就算数。
+          const naggedAlready =
+            !!wRef && (wRef.nagged || (nagAtByCh[ch] != null && nagAtByCh[ch]! >= wRef.createdAt));
+          const w = wRef && naggedAlready !== wRef.nagged ? { ...wRef, nagged: naggedAlready } : wRef;
           const d = decideEscalationFollowup({
             now,
             live,
             watch: w,
-            lastPlayerMsgTime: getLastMessageTimeBySource(ch, "player"), // ④反问也算回话
+            lastPlayerMsgTime: lastP, // ④反问也算回话（含群聊那一句）
             nagAfterSec: NAG_AFTER_SEC,
           });
           if (d.action === "track") {
@@ -1366,12 +1427,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             escWatchRef.current[ch] = null; // 同步清账，异步回来才发话，防重复
             fireExpire(ch, persona, w.question);
           }
-          // 闪烁的真状态：有活单 ∧ 长官还没回过话。与复呼/甩脸同一把尺，
-          // 所以"答了就停闪""甩完脸就停闪"是同一条判定的自然结果，不是另写的。
-          const lastP = getLastMessageTimeBySource(ch, "player");
-          const wNow = escWatchRef.current[ch];
-          nextPending[ch] =
-            live !== null && !(wNow != null && lastP != null && lastP > wNow.createdAt);
+          // ★5b/P0-C：闪烁的真状态**读 live，不读被同一拍改写的 ref**。
+          //   原来读 `escWatchRef.current[ch]`（mutate 之后）⇒ 撞上 drop↔track 的
+          //   5Hz 振荡：已回话但活单仍被保活时（NOOP/澄清有意保活），drop 那一拍
+          //   wNow=null ⇒ pending 判成 true，track 那一拍又 false——灯一半时间在
+          //   撒谎，还让整条面板每 200ms 重渲染。`live` 在本循环里从不被改写，
+          //   且它的 createdAt 就是这张单的 createdAt，判定天然稳定。
+          nextPending[ch] = live !== null && !(lastP != null && lastP > live.createdAt);
         }
         setPendingChannels((prev) =>
           (["ops", "logistics", "combat"] as Channel[]).every((c) => prev[c] === nextPending[c])

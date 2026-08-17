@@ -47,6 +47,11 @@ export const EXPIRE_FALLBACK: Record<Persona, string> = {
   emily:  "长官没回话，后勤这条先搁下了。",
 };
 
+/** 池子内容（台架锁内容用；顺带给"这句是不是该 persona 的"做归属判定）。 */
+export function nagLinesOf(persona: Persona): readonly string[] {
+  return NAG_LINES[persona];
+}
+
 export function nagPoolSizes(): number[] {
   return (Object.keys(NAG_LINES) as Persona[]).map((p) => NAG_LINES[p].length);
 }
