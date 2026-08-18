@@ -1085,6 +1085,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
    * 下一段会被钉在 native 或 silent 上。释放条件里有 !isBusy()，所以这一下
    * cancel 不会掐到任何正在播的东西。
    */
+  /**
+   * 步 5e：应答上屏行的标记。**只为算未读**，不由钩子出声（kind==="reply" 在
+   * proactiveSpeech 那边是终局 deny）。群聊不标——群聊回复按裁定不算未读。
+   */
+  const replyMark = useCallback((ch: Channel) => {
+    const p = personaOf(CHANNEL_PERSONA[ch]);
+    return p ? ({ persona: p, kind: "reply" } as const) : undefined;
+  }, []);
+
   const releaseOne = useCallback((m: FeedMessage, persona: Persona) => {
     cancel();
     speakUtterance(m.text, persona);
@@ -2149,7 +2158,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             : verdict === "cancel" ? "行，那就不动。"
             : "……(指令未定，请再说一遍)"; // protocol_failure
           const line = (data.brief as string) || fallbackLine;
-          addMessage(verdict === "protocol_failure" ? "warning" : "info", line, state.time, ch, undefined, "command_ack");
+          addMessage(verdict === "protocol_failure" ? "warning" : "info", line, state.time, ch, undefined, "command_ack", undefined, replyMark(ch));
           pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
           // 语音说「可以」批准就走这条路：耳朵拿到的是 spoken，缺席则是这句判词。
           const decisionPlan = sayToEar(line);
@@ -2174,7 +2183,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         setError(null);
         setClarification(null);
         const msg = (data.brief as string) || "Copy, standing by.";
-        addMessage("info", msg, state.time, ch, undefined, "command_ack");
+        addMessage("info", msg, state.time, ch, undefined, "command_ack", undefined, replyMark(ch));
         if (data.brief) {
           pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
         }
@@ -2195,7 +2204,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           setError(null);
           setClarification(null);
           if (data.brief) {
-            addMessage("info", data.brief as string, state.time, ch, undefined, "command_ack");
+            addMessage("info", data.brief as string, state.time, ch, undefined, "command_ack", undefined, replyMark(ch));
             pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
           }
           // processDoctrineFields surfaces its own warning when must_hold locationTag can't be canonicalized.

@@ -28,7 +28,15 @@ export type UtteranceKind =
   | "retrospect"   // 决策复盘（7e）
   | "advice"       // llm_advice 主动建议（原走 event_report，只出声不迁渲染）
   | "nag"          // 复呼（步 5）
-  | "expire";      // 过期甩脸（步 5）
+  | "expire"       // 过期甩脸（步 5）
+  /**
+   * 应答链回你话的那一段（步 5e）。**它不由这条钩子出声**——流式那条路早就念过
+   * 了，再念一遍就是复读。标它只为一件事：**让它算未读**。
+   * 铁律是单向的「凡出声 ⇒ 要么当场在眼前，要么键上有记号」；应答确确实实出声
+   * （`speak(event.content)` 与你在看哪个频道无关），你一切走就既看不见、键上
+   * 又没记号——手测第二笔实测三颗键全 "none"，铁律被它破了。
+   */
+  | "reply";
 
 /** 发射侧钉在消息上的"可配音声明"。缺席＝不出声（fail-closed）。 */
 export interface Utterance {
@@ -97,7 +105,8 @@ export type SpeakDenyReason =
   | "group_chat"        // 闸③ 群聊回复不念（三个人 2.2-4.0s 依次落，会连珠炮）
   | "stale"             // 闸④ 太旧（回灌/暂存释放时的陈年台词）
   | "escalation_dead"   // 闸④ 请示已经不在了（只对 kind==="escalation"）
-  | "capturing";        // 闸⑤ 正在收音——**可延后**，不是丢弃（见下）
+  | "capturing"         // 闸⑤ 正在收音——**可延后**，不是丢弃（见下）
+  | "already_spoken";   // kind==="reply"：应答链自己念过了，钩子不许再念
 
 /**
  * 这条 deny 是不是"等会儿还能再念"。
@@ -129,6 +138,9 @@ export function shouldSpeakMessage(msg: SpeakCandidate, ctx?: SpeakContext): Spe
 
   // 闸③：群聊不念。ALL 频道里三个人的回复是 2.2-4.0s 依次落下的，念出来是连珠炮。
   if (msg.groupChat) return { speak: false, reason: "group_chat" };
+
+  // 应答：标记只为算未读，出声归流式那条路。**终局 deny**（不是可延后）。
+  if (u.kind === "reply") return { speak: false, reason: "already_spoken" };
 
   if (ctx) {
     // 闸⑤：收音窗。**排在闸④之前**——正在收音时这句话该被"押后"而不是"判旧"，
