@@ -83,6 +83,14 @@ const COMMANDER_META: Record<Commander, { label: string; role: string; avatar: s
   emily: { label: "艾米莉中尉", role: "后勤", avatar: "📦" },
 };
 
+/** 侧栏刀 步1: 第二页签的名字跟频道走——侧栏＝当前参谋的领域参考。
+ *  陈的「编制 ☰」字形不动（教程里那句指路逐字指着它）。 */
+const PANEL_TAB_LABEL: Record<Commander, string> = {
+  chen: "编制 ☰",
+  marcus: "计策",
+  emily: "军械",
+};
+
 /** v4 §6c-3c: the slice of COMMANDER_META the core reference predicate needs.
  *  Passed in rather than moved to shared — avatar/role are UI data and have no
  *  business in the engine (minimal-change ruling). */
@@ -489,13 +497,23 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // ── Panel collapse state ──
   const [collapsed, setCollapsed] = useState(false);
 
-  // ── Tab state: "chat" or "org" ──
-  const [activeTab, setActiveTab] = useState<"chat" | "org">("chat");
+  // ── Tab state: "chat" or "panel" ──
+  // 侧栏刀 步1: "panel" ＝「本频道的第二页签，不管它叫什么」——陈是编制树，
+  // 马克斯是计策，艾米莉是军械。原来叫 "org" 时页签内容与频道无关，停在编制页
+  // 切到马克斯会照旧渲染陈的部队树（串台）。
+  const [activeTab, setActiveTab] = useState<"chat" | "panel">("chat");
 
   // ── Commander selection state ──
   const [selectedCommanders, setSelectedCommanders] = useState<Commander[]>(["chen"]);
   const isGroupChat = selectedCommanders.length > 1;
   const isChenChannel = !isGroupChat && selectedCommanders[0] === "chen";
+  // 群聊没有第二页签（领域参考是某一个参谋的，不是三人共有的）。判据用
+  // isGroupChat（length>1）而不是 length===3：右键 toggleCommander 能选出两人组，
+  // 写 ===3 会漏网。
+  const channelHasPanel = !isGroupChat;
+  // 渲染时钳位，不用 useEffect 重置：activeTab 本身留着不动，所以切到群聊只是
+  // 这一帧显示对话（无闪帧），从艾米莉切回陈还记得他刚才停在编制页。
+  const effectiveTab: "chat" | "panel" = channelHasPanel ? activeTab : "chat";
 
   // ── Message display state ──
   const [displayMessages, setDisplayMessages] = useState<readonly FeedMessage[]>([]);
@@ -3665,49 +3683,67 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         </button>
       </div>
 
-      {/* ── Tab switcher: Chat / Org ── */}
-      <div style={tabBarStyle}>
+      {/* ── Tab switcher: Chat / 本频道的领域参考 ──
+          整条只在有第二页签时渲染：群聊里连页签栏都不该出现，只有通讯。 */}
+      {channelHasPanel && (
+      <div style={tabBarStyle} data-tab-bar>
           <button
             onClick={() => setActiveTab("chat")}
             style={{
               ...tabBtnStyle,
-              borderBottomColor: activeTab === "chat" ? "var(--hud-accent-cyan)" : "transparent",
-              color: activeTab === "chat" ? "var(--hud-accent-cyan)" : "var(--hud-text-secondary)",
+              borderBottomColor: effectiveTab === "chat" ? "var(--hud-accent-cyan)" : "transparent",
+              color: effectiveTab === "chat" ? "var(--hud-accent-cyan)" : "var(--hud-text-secondary)",
             }}
           >
             通讯 ☎
           </button>
           <button
-            onClick={() => setActiveTab("org")}
+            data-panel-tab={selectedCommanders[0]}
+            onClick={() => setActiveTab("panel")}
             style={{
               ...tabBtnStyle,
-              borderBottomColor: activeTab === "org" ? "var(--hud-accent-cyan)" : "transparent",
-              color: activeTab === "org" ? "var(--hud-accent-cyan)" : "var(--hud-text-secondary)",
+              borderBottomColor: effectiveTab === "panel" ? "var(--hud-accent-cyan)" : "transparent",
+              color: effectiveTab === "panel" ? "var(--hud-accent-cyan)" : "var(--hud-text-secondary)",
             }}
           >
-            编制 ☰
+            {PANEL_TAB_LABEL[selectedCommanders[0]]}
           </button>
         </div>
+      )}
 
       {/* ── Content area ── */}
       <div style={{ display: "flex", flex: 1, flexDirection: "column" as const, overflow: "hidden" }}>
       <div style={{ display: "flex", flexDirection: "column" as const, flex: 1, overflow: "hidden" }}>
 
-      {activeTab === "org" ? (
+      {effectiveTab === "panel" ? (
         (() => {
-          const st = getState();
-          if (!st) return <div style={{ flex: 1, color: "var(--hud-text-dim)", textAlign: "center", padding: 20 }}>加载中...</div>;
+          // 侧栏刀 步1: 第二页签的内容跟频道走。陈＝编制树（props 一字未动），
+          // 马克斯＝计策（占位，实时内容缓办立账），艾米莉＝军械（步 2 接表）。
+          // effectiveTab==="panel" 已蕴含 channelHasPanel，此处必是单人频道。
+          const cmd = selectedCommanders[0];
+          if (cmd === "chen") {
+            const st = getState();
+            if (!st) return <div style={{ flex: 1, color: "var(--hud-text-dim)", textAlign: "center", padding: 20 }}>加载中...</div>;
+            // 不套 wrapper：OrgTree 靠自己的滚动容器活，多一层 flex 就是回归风险。
+            // 断言走页签的 data-panel-tab ＋ 树自身的内容。
+            return (
+              <OrgTree
+                squads={st.squads}
+                units={st.units}
+                state={st}
+                onSelectUnits={onSelectUnits ?? (() => {})}
+                onMoveSquad={onMoveSquad ?? (() => {})}
+                onRemoveFromParent={onRemoveFromParent ?? (() => {})}
+                onRenameLeader={onRenameLeader ?? (() => {})}
+                onTransferSquad={onTransferSquad ?? (() => {})}
+              />
+            );
+          }
+          // 点进去纯空白像是坏了——一行占位话顶着。
           return (
-            <OrgTree
-              squads={st.squads}
-              units={st.units}
-              state={st}
-              onSelectUnits={onSelectUnits ?? (() => {})}
-              onMoveSquad={onMoveSquad ?? (() => {})}
-              onRemoveFromParent={onRemoveFromParent ?? (() => {})}
-              onRenameLeader={onRenameLeader ?? (() => {})}
-              onTransferSquad={onTransferSquad ?? (() => {})}
-            />
+            <div style={panelPlaceholderStyle} data-panel-content={cmd}>
+              {cmd === "marcus" ? "参谋部尚未拟定方案。" : "军械清单准备中。"}
+            </div>
           );
         })()
       ) : (
@@ -3755,6 +3791,19 @@ const panelStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   boxShadow: "-6px 0 30px rgba(0, 0, 0, 0.7), inset 3px 0 15px rgba(0, 212, 255, 0.06), inset 0 0 60px rgba(0, 0, 0, 0.3)",
+};
+
+/** 侧栏刀 步1: 第二页签还没有真内容时的一行占位（马克斯的计策页、
+ *  步 2 之前的艾米莉军械页）。flex:1 顶住高度，免得内容区塌成一条缝。 */
+const panelPlaceholderStyle: React.CSSProperties = {
+  flex: 1,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 20,
+  color: "var(--hud-text-dim)",
+  fontSize: 12,
+  textAlign: "center",
 };
 
 const tabBarStyle: React.CSSProperties = {
