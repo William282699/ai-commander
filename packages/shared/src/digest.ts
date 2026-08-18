@@ -3,7 +3,7 @@
 // Compressed battlefield summary fed to LLM (200-400 tokens)
 // ============================================================
 
-import type { GameState, Front, Resources, StyleParams, Unit, Mission, Squad, Position, CommanderKey } from "./types";
+import type { GameState, Front, Resources, StyleParams, Unit, Mission, Squad, Position, CommanderKey, UnitCategory, FacilityType } from "./types";
 import { isManualOnlyUnit } from "./types";
 import { collectUnitsUnder } from "./squadHierarchy";
 import { UNIT_STATS, PRODUCTION_FACILITY } from "./constants";
@@ -119,46 +119,28 @@ export function generateDigestV1(
   // Emily production-contract V1: engine-computed production ledger. The LLM
   // must never do this arithmetic (constitution: engine computes, staff only
   // reads). Body ≤4 lines: one per category (UNIT_STATS declaration order
-  // ground→naval→air) + one queue line. Producible set = cost>0 && buildTime>0
-  // (excludes the cost=0/build=0 hero units — no division by zero); the bench
-  // asserts this set matches the ai.ts produceType schema contract. Facility
-  // gate mirrors enqueueProduction exactly: type match && team=player && hp>0.
-  // Each `now` is an INDEPENDENT affordability under the same resource
-  // snapshot (enqueue debits immediately, so queued costs are already out).
+  // ground→naval→air) + one queue line. ALL arithmetic (producible predicate,
+  // facility gate, now=affordability) lives in buildProductionOptions below —
+  // the UI arsenal panel reads the same construction, so this block owns ONLY
+  // the string shape: section header, token template, join(" "), the
+  // "no alive player" absent line (alive=false → absent line + continue, never
+  // an empty options render with a trailing space), the queued "×" glyph and
+  // whole-line omission when the queue is empty.
   {
-    const money = res.money;
-    const fuelNow = res.fuel;
-    const facilityAlive = (facType: string): boolean => {
-      let alive = false;
-      state.facilities.forEach((f) => {
-        if (f.type === facType && f.team === "player" && f.hp > 0) alive = true;
-      });
-      return alive;
-    };
+    const production = buildProductionOptions(state, "player");
     digest += `---PRODUCTION--- (now=independent affordability on the SAME snapshot, NOT additive; queued costs already deducted; max 10/order)\n`;
-    for (const cat of ["ground", "naval", "air"] as const) {
-      const facType = PRODUCTION_FACILITY[cat];
-      if (!facilityAlive(facType)) {
-        digest += `${cat}: no alive player ${facType}\n`;
+    for (const c of production.categories) {
+      if (!c.alive) {
+        digest += `${c.cat}: no alive player ${c.facType}\n`;
         continue;
       }
-      const tokens: string[] = [];
-      for (const [unitType, s] of Object.entries(UNIT_STATS)) {
-        if (s.category !== cat) continue;
-        if (!(s.cost > 0 && s.buildTime > 0)) continue;
-        const byMoney = Math.floor(money / s.cost);
-        const byFuel = s.fuelCost > 0 ? Math.floor(fuelNow / s.fuelCost) : Number.POSITIVE_INFINITY;
-        const now = Math.min(byMoney, byFuel);
-        tokens.push(`${unitType}[$${s.cost}/${s.fuelCost}fu/${s.buildTime}s now=${now}]`);
-      }
-      digest += `${cat}: ${tokens.join(" ")}\n`;
+      const tokens = c.options.map(
+        (o) => `${o.unitType}[$${o.cost}/${o.fuelCost}fu/${o.buildTime}s now=${o.now}]`,
+      );
+      digest += `${c.cat}: ${tokens.join(" ")}\n`;
     }
-    const queued = new Map<string, number>();
-    for (const o of state.productionQueue.player) {
-      queued.set(o.unitType, (queued.get(o.unitType) ?? 0) + 1);
-    }
-    if (queued.size > 0) {
-      digest += `queued: ${Array.from(queued.entries()).map(([t, n]) => `${t}×${n}`).join(" ")}\n`;
+    if (production.queued.length > 0) {
+      digest += `queued: ${production.queued.map((q) => `${q.unitType}×${q.count}`).join(" ")}\n`;
     }
   }
 
@@ -370,6 +352,96 @@ export function generateDigestV1(
   }
 
   return digest;
+}
+
+// ============================================================
+// Production options — the ONE construction of "what can be built"
+// ============================================================
+
+/** One producible unit type inside a category. All numbers, no strings-for-UI. */
+export interface ProductionOption {
+  unitType: string;
+  cost: number;
+  fuelCost: number;
+  buildTime: number;
+  /** Independent affordability RIGHT NOW under the same resource snapshot.
+   *  Always a finite number ≥0: byMoney is finite because cost>0 is part of
+   *  the producible predicate, so min(byMoney, byFuel-sentinel) converges. */
+  now: number;
+}
+
+/** One production category (ground/naval/air) with its facility gate result. */
+export interface ProductionCategoryOptions {
+  cat: UnitCategory;
+  /** The facility type that gates this category (PRODUCTION_FACILITY[cat]). */
+  facType: FacilityType;
+  /** false = no alive facility of facType for this team — the whole category
+   *  is unbuildable regardless of money/fuel. Callers render an absent line
+   *  (digest) or the engine's own wording「无可用生产设施」(UI), never the
+   *  options list. */
+  alive: boolean;
+  options: ProductionOption[];
+}
+
+/**
+ * Engine-computed production ledger — extracted from the digest's former
+ * anonymous block (侧栏刀 步0, 2026-08-18) so digest AND the UI arsenal panel
+ * consume the SAME construction. Precedent: isCapturableFacilityType — a
+ * read-only predicate exported for the render layer so no second truth source
+ * gets a foothold. Hand-written copies of this arithmetic already exist in
+ * economy.ts (the real gate) and the ai.ts produceType enum (bench-pinned);
+ * this export is what keeps the UI from becoming a fourth.
+ *
+ * Contract:
+ * - Producible predicate = cost>0 && buildTime>0. This is the ONLY thing
+ *   excluding the cost=0/build=0 hero units (commander/elite_guard are
+ *   category "ground" too) — callers must NOT re-derive from UNIT_STATS.
+ * - Facility gate mirrors enqueueProduction exactly: type match && team && hp>0.
+ * - `now` is an INDEPENDENT affordability per unit type under the same
+ *   resource snapshot (enqueue debits immediately, so queued costs are
+ *   already out); byFuel uses POSITIVE_INFINITY as the fuelCost=0 sentinel,
+ *   converged back to a finite number by min() before returning.
+ * - Ordering is part of the contract and must stay stable: categories in the
+ *   literal order ground→naval→air, options in UNIT_STATS declaration order
+ *   (Object.entries, never sorted) — ab-emily-production asserts this order
+ *   against the ai.ts schema contract.
+ * - queued aggregates the team's production queue in first-seen order.
+ * - Plain ordered arrays only (no Map/Record) — render layers iterate as-is.
+ */
+export function buildProductionOptions(
+  state: GameState,
+  team: "player" | "enemy",
+): { categories: ProductionCategoryOptions[]; queued: { unitType: string; count: number }[] } {
+  const res = state.economy[team].resources;
+  const money = res.money;
+  const fuelNow = res.fuel;
+
+  const categories: ProductionCategoryOptions[] = [];
+  for (const cat of ["ground", "naval", "air"] as const) {
+    const facType = PRODUCTION_FACILITY[cat];
+    let alive = false;
+    state.facilities.forEach((f) => {
+      if (f.type === facType && f.team === team && f.hp > 0) alive = true;
+    });
+    const options: ProductionOption[] = [];
+    for (const [unitType, s] of Object.entries(UNIT_STATS)) {
+      if (s.category !== cat) continue;
+      if (!(s.cost > 0 && s.buildTime > 0)) continue;
+      const byMoney = Math.floor(money / s.cost);
+      const byFuel = s.fuelCost > 0 ? Math.floor(fuelNow / s.fuelCost) : Number.POSITIVE_INFINITY;
+      const now = Math.min(byMoney, byFuel);
+      options.push({ unitType, cost: s.cost, fuelCost: s.fuelCost, buildTime: s.buildTime, now });
+    }
+    categories.push({ cat, facType, alive, options });
+  }
+
+  const queuedCounts = new Map<string, number>();
+  for (const o of state.productionQueue[team]) {
+    queuedCounts.set(o.unitType, (queuedCounts.get(o.unitType) ?? 0) + 1);
+  }
+  const queued = Array.from(queuedCounts.entries()).map(([unitType, count]) => ({ unitType, count }));
+
+  return { categories, queued };
 }
 
 function formatTime(seconds: number): string {
