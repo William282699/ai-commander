@@ -26,6 +26,7 @@ import {
   TERRAIN_MOVE_MULT,
   getUnitCategory,
   isFootUnit,
+  isProducibleUnitType,
   type UnitCategory,
 } from "@ai-commander/shared";
 
@@ -345,6 +346,13 @@ export function enqueueProduction(
 ): { ok: boolean; reason?: string } {
   const stats = UNIT_STATS[unitType];
   const eco = state.economy[teamKey];
+
+  // 类型闸（LEDGER §P5）——必须排在钱/油/设施三闸**之前**：那三闸对 cost=0 的
+  // 英雄单位（commander / elite_guard）全部放行，这里曾是免费即产的空门。
+  // 谓词与 digest 的可生产清单、applyOrders 的预算防线同一份，不留第二真相源。
+  if (!isProducibleUnitType(unitType)) {
+    return { ok: false, reason: "不可生产的单位类型" };
+  }
 
   // Check money
   if (eco.resources.money < stats.cost) {

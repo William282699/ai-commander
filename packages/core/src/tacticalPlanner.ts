@@ -22,7 +22,7 @@ import type {
   QuantityHint,
   UnitCategoryHint,
 } from "@ai-commander/shared";
-import { getUnitCategory, UNIT_STATS, UNIT_DISPLAY_NAME, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit, isFootUnit } from "@ai-commander/shared";
+import { getUnitCategory, UNIT_STATS, UNIT_DISPLAY_NAME, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit, isFootUnit, isProducibleUnitType } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { frontDestinationFor, type FrontDestinationMode } from "./frontDestination";
 import { createMission } from "./missions";
@@ -938,6 +938,14 @@ function resolveProduce(
     const msg = unitType
       ? `未知单位类型: ${unitType}`
       : "生产命令未指定单位类型";
+    pushDiagnostic(state, "PRODUCE_FAIL", msg);
+    return { orders: [], log: msg, degraded: true };
+  }
+  // 嘴也要诚实（LEDGER §P5）：引擎入口会拒绝 cost=0/buildTime=0 的英雄单位，
+  // 台词就不能先宣布「生产指挥官 ×3」——resolver 的 log 在执行前就上屏，
+  // 说了没发生的事＝假执行回报（v1 提案当初被拦下正是这条）。
+  if (!isProducibleUnitType(unitType)) {
+    const msg = `${UNIT_DISPLAY_NAME[unitType]}不是能生产的单位`;
     pushDiagnostic(state, "PRODUCE_FAIL", msg);
     return { orders: [], log: msg, degraded: true };
   }

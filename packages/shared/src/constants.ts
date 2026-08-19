@@ -69,6 +69,27 @@ export const UNIT_STATS: Record<UnitType, UnitStats> = {
   recon_plane:{ hp: 50,  attack: 0,  attackInterval: 0,    range: 0,  speed: 10.0,cost: 120,  fuelCost: 3,  buildTime: 5,  vision: 15, category: "air",    special: ["no_attack", "spotter"] },
 };
 
+/**
+ * 可生产判据 —— 唯一真相源（LEDGER §P5，2026-08-19）。
+ *
+ * `cost>0 && buildTime>0` 把两种**不是生产出来的**单位挡在生产链外：
+ * `commander` 与 `elite_guard` 的 cost/fuelCost/buildTime 全是 0（开局布阵由
+ * createUnit/placeGroup 发的），而它们的 category 又是 "ground" —— 于是钱闸、
+ * 油闸、设施闸对它们**全部放行**，普通生产路曾因此是一道空门：一句「造个
+ * 指挥官」就能白拿 400 血、每秒回 30 血、三连发的免费单位。
+ *
+ * 收 `string` 而不是 `UnitType`：调用方手里常是未经校验的 LLM 串，或
+ * `Object.entries(UNIT_STATS)` 的键——收窄类型等于把校验点推给调用方，
+ * 那正是这条缝的成因。
+ *
+ * ★四个消费者必须都走它，不留第二真相源：digest 的可生产清单、applyOrders
+ * 的预算防线、引擎入口 enqueueProduction、以及 resolver（让台词也不说谎）。
+ */
+export function isProducibleUnitType(unitType: string): boolean {
+  const s = (UNIT_STATS as Record<string, UnitStats | undefined>)[unitType];
+  return !!s && s.cost > 0 && s.buildTime > 0;
+}
+
 // Player-facing Chinese display names for chat receipts (the der-culprit fix
 // family: raw engine tokens read as logs, not staff speech). Display ONLY —
 // digest/schema/parser keep the English tokens as their machine contract.

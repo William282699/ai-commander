@@ -289,6 +289,57 @@ function runSynthetic(): void {
       `$=${s.economy.player.resources.money} fu=${s.economy.player.resources.fuel}`);
   }
 
+  // Q) 类型闸（LEDGER §P5）：cost=0/buildTime=0 的英雄单位（commander/elite_guard）
+  //    必须在引擎入口被诚实拒绝。预算路早有这道闸（applyOrders 的 defense-in-depth），
+  //    普通路曾是空门——三道闸（钱/油/设施）对 0 成本单位全部放行 ⇒ 免费即产。
+  //    ★每条正断言都配负对照：同一流程走 main_tank 必须照常成功，
+  //    否则「一律拒绝」这种坏修法也会绿。
+  {
+    const s = moneyState(3500, 300);
+    const m0 = s.economy.player.resources.money;
+    const f0 = s.economy.player.resources.fuel;
+    for (const hero of ["commander", "elite_guard"] as const) {
+      const r = enqueueProduction(s, "player", hero);
+      check(`Q1 ${hero}: 引擎入口诚实拒绝`,
+        r.ok === false && r.reason === "不可生产的单位类型",
+        `ok=${r.ok} reason=${r.reason}`);
+    }
+    check("Q2 拒绝后队列为空、钱油分文未动",
+      s.productionQueue.player.length === 0 &&
+      s.economy.player.resources.money === m0 &&
+      s.economy.player.resources.fuel === f0,
+      `q=${s.productionQueue.player.length} $=${s.economy.player.resources.money} fu=${s.economy.player.resources.fuel}`);
+    // ★负对照另起干净 state：与 Q1/Q2 共用同一个 state 的话，闸一坏前面两个英雄
+    //   就混进队列，Q3 会跟着红（q=3≠1）而无法独立表态「闸有没有过严」。
+    //   判据之间不许互相污染——负对照的职责是单独证明"没误伤"。
+    const sOk = moneyState(3500, 300);
+    const okCase = enqueueProduction(sOk, "player", "main_tank");
+    check("Q3 负对照: main_tank 仍照常入队",
+      okCase.ok === true && sOk.productionQueue.player.length === 1,
+      `ok=${okCase.ok} q=${sOk.productionQueue.player.length}`);
+  }
+
+  // R) 嘴也要诚实：resolver 不许先宣布「生产指挥官 ×3」再由引擎默默拒绝——
+  //    台词在执行前就上屏，说了没发生的事就是假执行回报。
+  {
+    const s = moneyState(3500, 300);
+    const r = resolveIntent({ type: "produce", produceType: "commander", quantity: 3 } as Intent, s, style);
+    check("R1 resolver 拒绝英雄单位（degraded + 零 Order）",
+      r.degraded === true && r.orders.length === 0,
+      `degraded=${r.degraded} orders=${r.orders.length} log=${r.log}`);
+    check("R2 台词不宣布数量", !/×\s*\d/.test(r.log), r.log);
+    applyOrders(s, r.orders);
+    check("R3 全链: 队列为空、钱未动",
+      s.productionQueue.player.length === 0 && s.economy.player.resources.money === 3500,
+      `q=${s.productionQueue.player.length} $=${s.economy.player.resources.money}`);
+    const s2 = moneyState(3500, 300);
+    const r2 = resolveIntent({ type: "produce", produceType: "main_tank", quantity: 1 } as Intent, s2, style);
+    applyOrders(s2, r2.orders);
+    check("R4 负对照: main_tank 全链仍成功（队列 +1、扣 $400）",
+      s2.productionQueue.player.length === 1 && s2.economy.player.resources.money === 3100,
+      `q=${s2.productionQueue.player.length} $=${s2.economy.player.resources.money}`);
+  }
+
   console.log(failCount === 0 ? "\nALL SYNTHETIC PASS" : `\n${failCount} FAILURES`);
   process.exit(failCount === 0 ? 0 : 1);
 }

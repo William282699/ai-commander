@@ -6,7 +6,7 @@
 import type { GameState, Front, Resources, StyleParams, Unit, Mission, Squad, Position, CommanderKey, UnitCategory, FacilityType } from "./types";
 import { isManualOnlyUnit } from "./types";
 import { collectUnitsUnder } from "./squadHierarchy";
-import { UNIT_STATS, PRODUCTION_FACILITY } from "./constants";
+import { UNIT_STATS, PRODUCTION_FACILITY, isProducibleUnitType } from "./constants";
 
 /**
  * Precomputed battle-board lines (board-v1a). Built in core/battleBoard.ts and
@@ -429,7 +429,7 @@ export function buildProductionOptions(
     const options: ProductionOption[] = [];
     for (const [unitType, s] of Object.entries(UNIT_STATS)) {
       if (s.category !== cat) continue;
-      if (!(s.cost > 0 && s.buildTime > 0)) continue;
+      if (!isProducibleUnitType(unitType)) continue;
       const byMoney = Math.floor(money / s.cost);
       const byFuel = s.fuelCost > 0 ? Math.floor(fuelNow / s.fuelCost) : Number.POSITIVE_INFINITY;
       const now = Math.min(byMoney, byFuel);

@@ -4,7 +4,7 @@
 // ============================================================
 
 import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask } from "@ai-commander/shared";
-import { TRADE_COSTS, UNIT_STATS, UNIT_DISPLAY_NAME } from "@ai-commander/shared";
+import { TRADE_COSTS, UNIT_STATS, UNIT_DISPLAY_NAME, isProducibleUnitType } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
 import { findPath, clearPathCache } from "./pathfinding";
 
@@ -215,9 +215,11 @@ function executeProduceBudget(
   const stats = UNIT_STATS[unitType];
   const eco = state.economy[team];
 
-  // Defense in depth (mirrors the facts-section predicate): a cost<=0 or
-  // buildTime<=0 type must never enter budget math — no division by zero.
-  if (!stats || stats.cost <= 0 || stats.buildTime <= 0) {
+  // Defense in depth（同一个谓词 isProducibleUnitType，唯一真相源）：cost<=0 或
+  // buildTime<=0 的类型绝不能进预算算术——会除以零。★这道闸不许因为"引擎入口
+  // 已经加了闸"而删：它挡在 enqueueProduction 被调用**之前**（下面的预算除法就
+  // 在本函数里），删了就是把除零放回来。
+  if (!stats || !isProducibleUnitType(unitType)) {
     pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${UNIT_DISPLAY_NAME[unitType]} 失败: 不可生产的单位类型`);
     return;
   }
