@@ -627,6 +627,28 @@ D1-D8；Fable 裁 D5 等价且更强、其余追认、放行刀 B）。
 **下一把刀**：LEDGER §O 里 O17（马克斯 prompt 层）与 §N 的 N4/N5 同族，合成一把
 prompt 刀；O18 归内测账第 1 笔（点名候选截断），会动兵，验收数 `assignedUnitIds`。
 
+## 生产类型闸收口（2026-08-19，分支 `produce-type-gate-v1`，一 commit）
+
+侧栏刀路上挖出的引擎病（LEDGER §P5）：`enqueueProduction` 只查钱/油/设施，
+不查「是不是能造的东西」。`commander`/`elite_guard` 的 cost/buildTime 都是 0
+且 category="ground"，三闸全放行 ⇒ 一句「造个指挥官」白拿 400 血、30 HP/s
+自愈、DPS 19.33（主战坦克 5.33）的免费单位，回执还是通顺中文没人看得出。
+
+修法＝谓词收敛成唯一真相源 `isProducibleUnitType`（shared/constants.ts），
+四处消费：digest 可生产清单／applyOrders 预算防线（★原闸保留，它挡在本函数内
+的预算除法之前，不是冗余）／引擎入口 enqueueProduction（排在三闸之前）／
+resolver（嘴也诚实——不再先喊「生产指挥官 ×3」再由引擎默默拒绝）。
+
+判据：`ab-emily-production` 新增 Q/R 两组 8 条，负对照（Q3/R4）各起干净 state，
+不与正断言共用——否则闸一坏它们跟着红，就没法独立证明"没误伤"。
+绊索自证＝修前 7 红（q=2 而钱未扣、resolver 喊「生产指挥官 ×3」）修后全绿；
+再分别摘掉引擎闸与 resolver 闸各跑一次，Q1/Q2 与 R1/R2 各自变红且原病如实复现，
+而负对照仍绿 ⇒ 两道闸都测得到，台架不是恒绿。
+单位普查（★口径＝el_alamein 图，13 种 × 敌我双方）：各 7 种照常入队（陆 4 ＋ 空 3），
+2 种被新类型闸拒，4 种舰船被**既有**设施闸拒（该图无船坞，与本刀无关）。
+**这个 7 随地图变，别当全局基线；全表可生产集合是 11 种。**
+金样跨仓库 331 行零差异（带非空守卫）；run-benches 27/27、typecheck 四包绿。
+
 ## 侧栏跟频道走 V1 收口（2026-08-18，分支 `side-panel-v1`，四 commit）
 
 侧栏＝**当前参谋的领域参考**：陈＝编制树（原样）／马克斯＝计策（占位）／

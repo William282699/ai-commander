@@ -267,10 +267,20 @@
 - **P4 生产算术与 10 上限的拷贝未收编**：步 0 只收了 digest 那一份。
   `applyOrders.ts:220` 与 `:246-250` 仍各有一份同款算术、`:199` 与
   `tacticalPlanner.ts:973` 各有一份 10 上限。本刀 `packages/core` 零字节，未动。
-- **P5 `enqueueProduction` 无类型闸**（引擎病，另刀）：`produceType:"commander"` /
+- **~~P5 `enqueueProduction` 无类型闸~~ 已修（2026-08-19，分支 `produce-type-gate-v1` @`10c67d3`）**：
+  谓词收敛成唯一真相源 `isProducibleUnitType`（shared/constants.ts），四处消费——
+  digest 可生产清单／applyOrders 预算防线（★原闸保留：它挡在同函数内的预算除法
+  之前，不是"引擎入口已加闸"就能删的冗余）／引擎入口 enqueueProduction／
+  resolver（嘴也诚实，不再先喊「生产指挥官 ×3」；该闸插在"未知单位类型"检查之后，
+  所以 `UNIT_DISPLAY_NAME` 必有值）。台架 `ab-emily-production` 新增 Q/R 两组 8 条，
+  负对照各起干净 state；分别摘掉两道闸各跑一次，Q1/Q2 与 R1/R2 各自变红而负对照仍绿。
+  **单位普查（★口径钉死：el_alamein 图，13 种 × 敌我双方）：各 7 种照常入队
+  （陆 4 ＋ 空 3），2 种被新类型闸拒，4 种舰船被既有设施闸拒（该图无船坞，与本刀无关）。
+  这个 7 随地图变，别当全局基线——全表可生产集合是 11 种。** 金样 331 行零差异。
+  原始记录：`produceType:"commander"` /
   `"elite_guard"` 走普通路会**免费即产**（cost=0/buildTime=0，钱油都不扣）。
   面板挡得住是因为 `buildProductionOptions` 的 `cost>0 && buildTime>0` 谓词，
-  **引擎入口本身没挡**。本刀勿修，记账。
+  **引擎入口本身没挡**。（侧栏刀当时按范围勿修、只记账。）
 - **P6 弹窗右栏群选维持 OrgTree**（裁定，非缺陷）：ALL／两人组时右栏仍是部队编制树
   ——那是三人共有的看板位，没有"某一个参谋的领域"可跟。单人频道才跟频道走。
 - **P7 输入坞在面板页保留**（有意，与 plan 原文不同）：plan 写「看完回通讯页再跟
@@ -280,6 +290,16 @@
   实则 naval 一路恒走缺席行（阿拉曼无玩家船坞且 shipyard 在 NON_CAPTURABLE），
   **四种舰船的 token 渲染路没覆盖**；档头已改口。同理面板快照/探针的覆盖话术
   要写实际测到的那几格，别把"跑过"说成"覆盖"。
+
+- **P9 生产拒绝理由的语域**（现在不漏、将来可能漏，记账勿改）：引擎入口返回的
+  `"不可生产的单位类型"` 若经 applyOrders 普通路上屏，会拼成
+  `生产 commander 失败: 不可生产的单位类型`——**英文 token ＋ 日志腔**，正是
+  `UNIT_DISPLAY_NAME` 立法要防的那族。今天玩家撞不到（resolver 在更前面就拦了，
+  且它说的是人话「指挥官不是能生产的单位」），但哪天有别的路径**直接构造 Order**
+  （批准合同重放、escalation ticket），这行就会上屏。
+  附带：`PRODUCE_FAIL` 不在 `SUPPRESSED_DIAG_CODES` 里，ChatPanel 与 GameCanvas
+  会各排一次（当前频道一行、ops 一行）——这是所有 PRODUCE_FAIL 的既有结构，
+  不是本刀引入；手测「造个指挥官」第一次会看到两行，别当 bug。
 
 ## 用户对局收集清单
 
