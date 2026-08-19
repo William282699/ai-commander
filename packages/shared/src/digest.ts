@@ -365,8 +365,11 @@ export interface ProductionOption {
   fuelCost: number;
   buildTime: number;
   /** Independent affordability RIGHT NOW under the same resource snapshot.
-   *  Always a finite number ≥0: byMoney is finite because cost>0 is part of
-   *  the producible predicate, so min(byMoney, byFuel-sentinel) converges. */
+   *  The POSITIVE_INFINITY fuel sentinel always converges (byMoney is finite
+   *  because cost>0 is part of the producible predicate), but the result is
+   *  only finite and ≥0 *while the resources are*: a negative money balance
+   *  yields a negative count and a NaN balance yields NaN. Render layers must
+   *  therefore test `Number.isFinite(now) && now > 0`, never `now === 0`. */
   now: number;
 }
 

@@ -17,6 +17,7 @@ declare global {
   }
 }
 import { OrgTree } from "./OrgTree";
+import { ArsenalPanel } from "./ArsenalPanel";
 import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines, isAllFrontHint } from "@ai-commander/core";
 import { spokenNameOf, resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, isKnownForceRef, checkDispatchAuthority, retargetIntentForTicket, ticketDestinationVerdict, describeCommittedPull } from "@ai-commander/core";
 import type { CommanderRef, EscalationTicket } from "@ai-commander/core";
@@ -26,7 +27,8 @@ import { buildDigestForChannel } from "./digestHelper";
 // Phase 1 的闸已搬去 autoExecuteGate.ts（零行为变化）——留在组件闭包里台架够不到。
 import { isKnownLocation, isValidTarget, detectStaleSquadRefs, canAutoExecute, decideBucket } from "./autoExecuteGate";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
-import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute } from "@ai-commander/shared";
+import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute, buildProductionOptions } from "@ai-commander/shared";
+import type { ProductionCategoryOptions } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
 import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, getVoiceOpenDiag, type VoiceRecording, type VoiceCaptureArm } from "./voiceRecorder";
 import { probeVoiceChannels, channelUsesVoiceCapture, isBaselineArm } from "./voiceCapability";
@@ -1367,6 +1369,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // Production button state
   const [playerMoney, setPlayerMoney] = useState(0);
   const [playerQueueLen, setPlayerQueueLen] = useState(0);
+  // 侧栏刀 步2: 军械页的数据源。GameState 是被引擎**原地 mutate** 的，对象身份
+  // 不变 ⇒ 光靠 getState() 拿不到"变了"的信号；也不许赌 playerMoney 恰好跟着动
+  // （兵营被拆而钱没动＝表说谎）。所以每拍算一份签名，只有内容真变了才换新对象。
+  const [arsenalCategories, setArsenalCategories] = useState<ProductionCategoryOptions[] | null>(null);
+  const arsenalSigRef = useRef<string>("");
 
   // Poll war declaration eligibility + clear panel on game over + detect restart + production state
   const lastSeenTimeRef = useRef(0);
@@ -1398,6 +1405,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       if (s) {
         setPlayerMoney(s.economy.player.resources.money);
         setPlayerQueueLen(s.productionQueue.player.length);
+        // 军械页：引擎算，UI 只读。签名覆盖面板可能显示的一切（含设施闸 alive
+        // 与每种的 now），所以打掉兵营这种"钱没动、表要变"的事也逃不掉。
+        const prod = buildProductionOptions(s, "player").categories;
+        const sig = JSON.stringify(prod);
+        if (sig !== arsenalSigRef.current) {
+          arsenalSigRef.current = sig;
+          setArsenalCategories(prod);
+        }
       }
       if (s?.gameOver && response) {
         setResponse(null);
@@ -3739,10 +3754,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
               />
             );
           }
-          // 点进去纯空白像是坏了——一行占位话顶着。
+          if (cmd === "emily") {
+            // 步 2：军械页。只吃 buildProductionOptions 那份构造（轮询里算好的
+            // arsenalCategories），组件内再叠 ground 过滤——UI 自己筛 UNIT_STATS
+            // 会把 cost=0 的指挥官/精锐卫队也筛进生产清单。
+            return (
+              <div style={panelContentBoxStyle} data-panel-content="emily">
+                <ArsenalPanel categories={arsenalCategories} />
+              </div>
+            );
+          }
+          // 马克斯的计策页：真内容缓办立账，点进去纯空白像是坏了——一行占位话顶着。
           return (
             <div style={panelPlaceholderStyle} data-panel-content={cmd}>
-              {cmd === "marcus" ? "参谋部尚未拟定方案。" : "军械清单准备中。"}
+              参谋部尚未拟定方案。
             </div>
           );
         })()
@@ -3793,8 +3818,17 @@ const panelStyle: React.CSSProperties = {
   boxShadow: "-6px 0 30px rgba(0, 0, 0, 0.7), inset 3px 0 15px rgba(0, 212, 255, 0.06), inset 0 0 60px rgba(0, 0, 0, 0.3)",
 };
 
-/** 侧栏刀 步1: 第二页签还没有真内容时的一行占位（马克斯的计策页、
- *  步 2 之前的艾米莉军械页）。flex:1 顶住高度，免得内容区塌成一条缝。 */
+/** 侧栏刀 步2: 第二页签真内容的外框。ArsenalPanel 自带滚动，这一层只负责
+ *  在两层 overflow:hidden 的包裹里把高度撑开。 */
+const panelContentBoxStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  flex: 1,
+  overflow: "hidden",
+};
+
+/** 侧栏刀 步1: 第二页签还没有真内容时的一行占位（马克斯的计策页）。
+ *  flex:1 顶住高度，免得内容区塌成一条缝。 */
 const panelPlaceholderStyle: React.CSSProperties = {
   flex: 1,
   display: "flex",

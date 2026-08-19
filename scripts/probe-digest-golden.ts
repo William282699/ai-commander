@@ -3,9 +3,14 @@
  *
  * ⚠ 本档是**取证附件，不是验收臂**（照 probe-naming-frames.ts 家法）：
  * 不进 run-benches.sh，不做断言——它只把六个状态的【完整 digest】打出来，
- * 判据在外面：重构前跑一次存 /tmp/golden-before.txt，重构后跑一次存
- * /tmp/golden-after.txt，diff 零差异才算过。单态比对不够，六态覆盖：
- * 钱界、油界、兵营缺席行、机场缺席行、queued 聚合与插入序。
+ * 判据在外面：重构前跑一次存 golden-before，重构后跑一次存 golden-after，
+ * diff 零差异才算过（C4：路径用会话 scratchpad ＋唯一名，别用 /tmp 固定名——
+ * 并发会话真覆盖过它，产生过假 DIFFERS）。
+ *
+ * 六态练到的是：钱界、油界（含 fuelCost=0 的步兵不受限）、兵营缺席行、
+ * 机场缺席行、queued 聚合与插入序。⚠ **naval 一路恒走缺席行**（阿拉曼没有
+ * 玩家船坞，shipyard 还在 NON_CAPTURABLE 黑名单里），所以四种舰船的 token
+ * 渲染路本档**没覆盖**——别把「六态」读成「全路径」。
  *
  * ⚠ buildDigest 的 mintForceHandles 必须保持缺省 false（true 会灼号，
  * 且 mint 有全局计数器，金样就不可复跑了）。
