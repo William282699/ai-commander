@@ -627,6 +627,37 @@ D1-D8；Fable 裁 D5 等价且更强、其余追认、放行刀 B）。
 **下一把刀**：LEDGER §O 里 O17（马克斯 prompt 层）与 §N 的 N4/N5 同族，合成一把
 prompt 刀；O18 归内测账第 1 笔（点名候选截断），会动兵，验收数 `assignedUnitIds`。
 
+## 侧栏跟频道走 V1 收口（2026-08-18，分支 `side-panel-v1`，四 commit）
+
+侧栏＝**当前参谋的领域参考**：陈＝编制树（原样）／马克斯＝计策（占位）／
+艾米莉＝军械（可生产陆军表，只看不点）／群聊＝没有第二页签。病是新玩家的空白
+画布；改前不是空屏而是**串台**（停在编制页切到马克斯照旧渲染陈的部队树）。
+
+- 步 0 `6a73759`：digest 那段匿名的「能造什么＋每种现在能造几辆」提为 shared 导出
+  `buildProductionOptions(state, team)`，digest 反过来调它 ⇒ UI 不再是第四份拷贝。
+  判据＝六态**完整 digest** 金样前后零字节差（probe-digest-golden.ts）＋绊索自证
+  （floor→ceil 红 14 行）＋`ab-emily-production` 绿。
+- 步 1 `aeeb306`：`activeTab` 改 `chat|panel`，渲染时钳位（`channelHasPanel=!isGroupChat`，
+  判据用 length>1 不用 ===3——右键两人组会漏网）；页签栏整条只在有第二页签时渲染；
+  顺手修 TutorialOverlay 那句假指路（图标 🏗️→☰，补「在陈的频道里」）。
+- 步 2 `256f042`：ArsenalPanel（零按钮）。只吃 `buildProductionOptions` 输出再叠
+  `cat==="ground"` 显式过滤；`alive===false` 先判再渲染（提函数后 options[] 在设施
+  死时**依然是满的**）；灰行判据 `!Number.isFinite(now) || now <= 0`（钱为负时
+  `now===0` 会把四行全判成买得起——实测 now=-7/-3/-2/-2）。
+- 步 3 `<本 commit>`：弹窗态右栏那一格跟频道走（战报 feed 与 dp-style-bar 一字未动；
+  群选维持 OrgTree）。
+
+**方法资产**：①**判据不许 sleep 一次就读**——隐藏/后台标签把定时器节流到 ~1s，
+ChatPanel 那口 200ms 轮询跟着变慢，固定 sleep 会读在轮询之前 ⇒ 判据偶发地红而
+产品是好的；一律 waitFor，且**等的必须是整行状态而非某一格代理条件**（「等步兵
+变灰就断言四行全灰」栽过一次）。②浏览器 DOM 取证落成 `scripts/probe-side-panel-dom.js`
+（probe- 前缀不进 run-benches，37 条＋SELFTEST 故意错项必红）。③一页里挂两份
+ChatPanel 的临时架子**对 JSX 忠实、对刷新时序不忠实**，别拿它下时序结论。
+
+**新账入 LEDGER §P 八笔**（面板漏报空军三种／计策实时内容缓办／88 炮改名缓办／
+生产算术与 10 上限拷贝未收编／enqueueProduction 无类型闸／弹窗群选维持 OrgTree／
+输入坞在面板页保留（与 plan 原文不同，有意）／覆盖宣称须与实际一致）。
+
 ## 归档与资产
 
 - 冻结资料库：worktree `AI Commander-battlefield-facts-v1` @ `4298505`（生产抓包 fixtures 不可再生 + 事实层研究）。

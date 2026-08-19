@@ -23,7 +23,7 @@ import { UNIT_STATS, UNIT_DISPLAY_NAME } from "@ai-commander/shared";
  * 要回来重核这几句——绊索一只盯花费列，盯不住散文。
  */
 const UNIT_BLURB: Partial<Record<UnitType, string>> = {
-  infantry: "便宜耐造、不吃油；唯一能进森林沼泽的陆军，蹲住防守还会掘壕减伤。",
+  infantry: "便宜好补、不吃油；唯一能进森林沼泽的陆军，蹲住防守还会掘壕减伤。",
   light_tank: "全场最快的陆军，欺负步兵和火炮一把好手，别拿去硬碰主战坦克。",
   main_tank: "陆战主力：血最厚、持续输出最高，正面装甲再吃掉两成五伤害。",
   artillery: "射程 12 是坦克的两倍，一炮很疼；但走路时开不了火，皮薄腿慢，最怕飞机。",

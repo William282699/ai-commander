@@ -126,9 +126,14 @@
 
   const bridge = window.__GAME_BRIDGE__;
   if (bridge) {
-    const st = bridge.getState();
-    const saveMoney = st.economy.player.resources.money;
-    const saveFuel = st.economy.player.resources.fuel;
+    // ★★别缓存 state 对象：开局/重开时 GameState 会**换身份**（ChatPanel 自己就带
+    //   一个 object-identity restart guard）。缓存一次再改，改的是**孤儿对象**——
+    //   面板读的是新那份，于是所有断言一起红而产品是好的（2026-08-18 栽过一次，
+    //   I/J 六条同时红，实为探针病）。一切读写都走 res()/fac() 现取。
+    const res = () => bridge.getState().economy.player.resources;
+    const fac = () => bridge.getState().facilities.get("ea_player_barracks");
+    const saveMoney = res().money;
+    const saveFuel = res().fuel;
     // 灰行判据：C1 写 !Number.isFinite(now)||now<=0，不是 now===0。
     // ★等法：等到**整行状态就位**再断言，别等一个代理条件（早先写「等步兵变灰
     //   就断言四行全灰」，在被节流的隐藏标签里偶发地读在半路上——产品是原子
@@ -139,37 +144,36 @@
     const PARTIAL_250 = "infantry:yes,light_tank:yes,main_tank:no,artillery:no";
     const NO_FUEL = "infantry:yes,light_tank:no,main_tank:no,artillery:no";
 
-    st.economy.player.resources.money = 250;
+    res().money = 250;
     await waitFor(() => affLine() === PARTIAL_250);
     chk("I1 钱=250:买得起步兵/轻坦，买不起主战/火炮", affLine(), PARTIAL_250);
 
-    st.economy.player.resources.money = -500;
+    res().money = -500;
     await waitFor(() => affLine() === ALL_NO);
     chk("I2 钱=-500:全灰(now 是负数，now===0 的写法会当成买得起)", affLine(), ALL_NO);
 
-    st.economy.player.resources.money = saveMoney;
+    res().money = saveMoney;
     await waitFor(() => affLine() === ALL_YES);
 
-    st.economy.player.resources.fuel = 0;
+    res().fuel = 0;
     await waitFor(() => affLine() === NO_FUEL);
     chk("I3 油=0:步兵不吃油仍可造，机械化三种趴窝", affLine(), NO_FUEL);
 
-    st.economy.player.resources.fuel = saveFuel;
+    res().fuel = saveFuel;
     await waitFor(() => affLine() === ALL_YES);
 
     // 设施闸：打掉兵营（钱一分不动）——整表必须换成引擎原话
-    const fac = st.facilities.get("ea_player_barracks");
-    const moneyBefore = st.economy.player.resources.money;
-    fac.hp = 0;
+    const moneyBefore = res().money;
+    fac().hp = 0;
     await waitFor(() => rows().length === 0);
     chk("J1 兵营 hp=0:四行消失", rows().length, 0);
     chk("J2 兵营 hp=0:说引擎原话", panelContentEl().innerText.trim(), "无可用生产设施");
-    chk("J3 这一变化与钱无关(钱没动)", st.economy.player.resources.money, moneyBefore);
-    fac.hp = fac.maxHp;
+    chk("J3 这一变化与钱无关(钱没动)", res().money, moneyBefore);
+    fac().hp = fac().maxHp;
     await waitFor(() => rows().length === 4);
     chk("J4 修回兵营:四行回来", rows().length, 4);
-    st.economy.player.resources.money = saveMoney;
-    st.economy.player.resources.fuel = saveFuel;
+    res().money = saveMoney;
+    res().fuel = saveFuel;
   } else {
     R.push({ name: "I/J 段跳过：__GAME_BRIDGE__ 不在（不是主窗？）", got: "skipped", want: "skipped", pass: true });
   }

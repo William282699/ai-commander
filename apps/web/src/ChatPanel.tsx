@@ -3556,11 +3556,24 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             </div>
           </div>
 
-          {/* RIGHT COLUMN: Org Tree */}
+          {/* RIGHT COLUMN: 跟频道走的领域参考（步 3）＋战报 feed（一字未动） */}
           <div className="dp-col-right">
-            <div className="dp-section-header" style={{ padding: "0 0 6px 0" }}>BATTLEGROUP ORG TREE</div>
-            <div className="dp-org-container">
-              {st ? (
+            {/* 侧栏刀 步3: 只换 .dp-org-container 那一格的内容——外加它头顶这行小标题。
+                标题原本写死 BATTLEGROUP ORG TREE，艾米莉频道换成军械表后它就成了
+                屏上的假话（与步 1 修掉的教程假指路同一类），所以跟着频道走。
+                ★要退回"标题永远是 ORG TREE"＝把下面这个三元换回字面量，一行的事。
+                群选（ALL／两人组）维持 OrgTree 现状：弹窗右栏是三人共有的看板位。 */}
+            <div className="dp-section-header" style={{ padding: "0 0 6px 0" }}>
+              {channelHasPanel && selectedCommanders[0] === "emily" ? "军械 ARSENAL"
+                : channelHasPanel && selectedCommanders[0] === "marcus" ? "计策 STAFF PLAN"
+                : "BATTLEGROUP ORG TREE"}
+            </div>
+            <div className="dp-org-container" data-dp-panel={channelHasPanel ? selectedCommanders[0] : "group"}>
+              {channelHasPanel && selectedCommanders[0] === "emily" ? (
+                <ArsenalPanel categories={arsenalCategories} />
+              ) : channelHasPanel && selectedCommanders[0] === "marcus" ? (
+                <div style={panelPlaceholderStyle}>参谋部尚未拟定方案。</div>
+              ) : st ? (
                 <OrgTree
                   squads={st.squads}
                   units={st.units}
