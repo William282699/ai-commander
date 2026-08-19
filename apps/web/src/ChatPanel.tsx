@@ -2784,8 +2784,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     }
 
     if (allOrders.length === 0 && degradedCount > 0) {
-      addMessage("warning", "命令无法执行，请重新描述", state.time, ch, undefined, "command_ack");
-      setClarification("命令不明确，请重述（示例：'北线全部坦克进攻桥头'）");
+      // 刀A（2026-08-19）：这里原来在具体理由之外，还要再补一句泛化的"无法执行"
+      // 消息＋一条"请重述"黄条（clarification banner）。两句都删了，理由有三：
+      // ① 结构性冗余——上面 :2771 那行已经把**具体**理由打出来了（degradedCount
+      //    只在 result.degraded 时才加，而同一循环必先打 result.log）；
+      // ② 它冤枉玩家——能走到这里说明模型**听懂了**并给出了结构化 intent，
+      //    是引擎判定做不到（例：「指挥官不是能生产的单位」）。真正的"没听懂"
+      //    另有其路（模型返回 options:[] 那条，:2223 起），那条才该说请重述；
+      // ③ 姊妹路径 handleThreadApprove（:1645 起）跑同一个循环，从来没有这个块。
+      // 保留 setApprovedIdx 的闪烁与 return——它们是执行反馈，不是措辞。
       setApprovedIdx(idx);
       setTimeout(() => setApprovedIdx(null), 400);
       return;
