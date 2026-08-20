@@ -57,7 +57,30 @@ export function chaseAnchorHomeOf(unitId: number): Position | null {
   return ep ? { ...ep.home } : null;
 }
 
-const LOW_HP_THRESHOLD = 0.25;   // 25% maxHP
+/**
+ * 残血自动撤退线（占 maxHP 的比例）。**2026-08-19 用户裁定：暂停这个功能，
+ * 0.25 → 0。** 活着的单位 `hp/maxHp` 恒 > 0，所以 :127 那条判定永远不成立 ⇒
+ * 自动撤退整个关闭。恢复＝把这里改回 `0.25`，一个数字，别的地方都不用动。
+ *
+ * 为什么关：
+ * - 这段代码**敌我通用**（团队无关），所以关掉是双方一起关——敌军残血坦克
+ *   也不再溜走，这对"后期张力不足"是正面的。
+ * - 撤回去**并不会回血**：`regen.ts` 只给 `commander` 单位与司令部设施回血，
+ *   普通坦克退回家＝纯粹退出战斗还丢阵地，这个功能对玩家几乎没有收益。
+ *
+ * 影响面（已核）：全仓只有两处把单位置为 "retreating" —— 本处（自动）与
+ * `applyOrders.ts:482`（**玩家亲口下令的撤退**）。关掉这里不影响玩家下令撤退，
+ * 也不影响 `no_retreat` / `must_hold` 主义（那条闸在下面，本就走不到了）。
+ *
+ * ★将来要做的方向（用户 2026-08-19 提出）：撤退线应该是**按主义/单位可调**的
+ * 策略维度——有的部队 20% 就撤以保存有生力量，有的 10%，有的 30% 死战不退。
+ * 真要做时，**这里是唯一落点**：把常量换成一个按 unit/doctrine 求值的函数，
+ * :127 的调用形状不用改。
+ *
+ * ⚠ 验证注意：`tick()` **不包含** `processAutoBehavior`（只有 GameCanvas 调它），
+ * 所以 27 项台架基本碰不到这段——台架全绿不等于验过，必须实机打一场看。
+ */
+const LOW_HP_THRESHOLD = 0;      // 原 0.25（25% maxHP）——已暂停，见上
 const ENGAGE_RANGE = 8;          // tiles
 // PATROL_RANGE removed (Day 9.5 Batch A: idle auto-patrol disabled)
 
