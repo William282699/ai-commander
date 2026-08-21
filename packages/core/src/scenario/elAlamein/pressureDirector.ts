@@ -46,6 +46,7 @@ import { type FormationStyle, getFormationOffset, computeHeading } from "../../f
 import { applyEnemyOrders } from "../../applyOrders";
 import { enqueueProduction } from "../../economy";
 import { isOperationReserved } from "./operationRegistry";
+import { canUnitEnterTile } from "../../movementRules";
 
 // ── Strategic Phase Director (V3) ──
 //
@@ -283,6 +284,56 @@ const DRIFT_RELEASE_TILES_SQ = 8 * 8;          // > 8 tiles drift → release cl
 const PRODUCTION_BOOST_COOLDOWN_SEC = 30;
 const MAX_DIAGNOSTICS = 200;
 
+// ── 剧本拳（scripted beats）：后期张力的保底 ────────────────────────────
+//
+// 用户 2026-08-20 定：15 分一波大步兵、20 分一波坦克大潮。
+// 病因（本轮读码所得）：后期波次**配置**本来就是全场最重的（hard 阶段夺回波
+// 8-12 个、最少带 2 辆主战坦克），但敌军供给跟不上——燃油闸把生产锁成只出步兵、
+// 凑不够 4 个就不发波——所以配置要的那一拳发不出来，玩家感受到的是"只剩小兵"。
+// 这两拳是**不依赖敌军经济的保底**：直接投放，绕开生产。
+//
+// ★为什么"投放"而不是"催生产"：生产要建造时间 ＋ 从兵营行军 2-3 分钟，
+//   时机完全掐不住；而这两拳的意义恰恰是"某一刻它压过来了"。
+// ★为什么不走常规波次：常规波有规模上限，且主战坦克是**配额不是下限**
+//   （recapture 只要 2 辆）。把 6 辆坦克丢给 gatherPressurePool，会被拆成
+//   每波 2 辆慢慢送 —— 那是添油，不是大潮。所以这里直调 dispatchWithFormation。
+// ★燃油地板不是为了"造"，是为了"开"：FUEL_EMPTY_PENALTY=0，油尽即**停死**。
+//   投放 10 辆坦克而敌军没油 ⇒ 它们原地不动，看起来就是个 bug。
+// ★步兵那拳不需要燃油地板：步兵 isMechanized 为假，永远走得动。
+interface ScriptedBeat {
+  /** 触发时间（秒，游戏内时钟）。 */
+  at: number;
+  /** 诊断文本用，同时是"只放一次"的键。 */
+  label: string;
+  units: { type: UnitType; count: number }[];
+  /** 投放同时把敌军燃油补到不低于此（为了跑得动，不是为了造）。 */
+  fuelFloor?: number;
+  /** 同上补钱——让它打完这拳还能继续生产，不至于一拳打完彻底哑火。 */
+  moneyFloor?: number;
+}
+const SCRIPTED_BEATS: ScriptedBeat[] = [
+  {
+    at: 15 * 60,
+    label: "步兵潮",
+    units: [{ type: "infantry", count: 12 }],
+  },
+  {
+    at: 20 * 60,
+    label: "坦克大潮",
+    units: [{ type: "main_tank", count: 6 }, { type: "light_tank", count: 4 }],
+    fuelFloor: 300,
+    moneyFloor: 1200,
+  },
+];
+/** 投放点＝从目标沿"目标→敌军司令部"方向退这么多格。
+ *  不硬编码地图坐标：换目标/换地图都不用改。约 1.5 分钟行军，
+ *  玩家看得见它逼近（第一次玩的人有反应时间）。 */
+const SCRIPTED_SPAWN_BACKOFF = 110;
+/** 投放点落在不可通行地形时的最大环形搜索半径。 */
+const SCRIPTED_SPAWN_SEARCH_R = 14;
+/** 已放过的拳（按 label）。resetPressureDirector 里清空 —— 漏清＝第二局不再有拳。 */
+const firedScriptedBeats = new Set<string>();
+
 // ── Module state (never exported) ──
 let p4Timer = 0;
 let p4CooldownUntil = 0;
@@ -336,6 +387,7 @@ export function resetPressureDirector(): void {
   p4AttackerTargets.clear();
   p4TargetHistory.length = 0;
   lastBoostAt = -Infinity;
+  firedScriptedBeats.clear();   // 漏这一行＝第二局起不再有剧本拳
 }
 
 /**
@@ -360,6 +412,10 @@ export function processPressureDirector(state: GameState, dt: number): void {
 function runPressureDirector(state: GameState): void {
   // Per-tick maintenance on already-dispatched P4 units (drift / arrival / death).
   reissueClaimedUnits(state);
+
+  // 剧本拳：★必须排在下面的 grace / cooldown 闸**之前**——它们是保底节拍，
+  // 不该被常规波次的冷却挡住（挡住就等于"最需要它的时候正好没有"）。
+  runScriptedBeats(state);
 
   // Post-capture RESTRICTED window: when a forward post flips to enemy hands
   // (confirmed past the blip debounce), P4 does NOT freeze — it keeps texture
@@ -939,6 +995,121 @@ function boostEnemyProduction(state: GameState): void {
   }
   // On total failure (money too low for everything), don't set cooldown — next
   // 5s tick retries. Underlying problem is defensiveAI's economy, not ours.
+}
+
+// ── 剧本拳 ────────────────────────────────────────────────────────────
+
+function runScriptedBeats(state: GameState): void {
+  for (const beat of SCRIPTED_BEATS) {
+    if (state.time < beat.at) continue;
+    if (firedScriptedBeats.has(beat.label)) continue;
+    // ★没打成就**不落键**（例如此刻一个可打的目标都没有），下个 5s tick 再试。
+    //   先落键再打＝错过一次就永远没有了。
+    if (fireScriptedBeat(state, beat)) firedScriptedBeats.add(beat.label);
+  }
+}
+
+function fireScriptedBeat(state: GameState, beat: ScriptedBeat): boolean {
+  // 打谁：沿用常规打分器，不自造一套寻敌逻辑（applyHistory=false：剧本拳不参与
+  // 目标轮转惩罚，它就是要打最该打的那个）。
+  const candidates = buildPressureTargets(state, false, false);
+  if (candidates.length === 0) return false;
+  candidates.sort((a, b) => (b.score - a.score) || a.targetId.localeCompare(b.targetId));
+  const best = candidates[0];
+
+  // 投放点：目标 → 敌军司令部 方向退 BACKOFF 格。取不到敌 HQ 就退而求其次往西。
+  let hqPos: Position | null = null;
+  for (const [, f] of state.facilities) {
+    if (f.type === "headquarters" && f.team === "enemy" && f.hp > 0) { hqPos = f.position; break; }
+  }
+  const away = hqPos ?? { x: best.position.x - SCRIPTED_SPAWN_BACKOFF, y: best.position.y };
+  const dx = away.x - best.position.x;
+  const dy = away.y - best.position.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const anchor: Position = {
+    x: Math.max(0, Math.min(state.mapWidth - 1,
+      Math.round(best.position.x + (dx / dist) * SCRIPTED_SPAWN_BACKOFF))),
+    y: Math.max(0, Math.min(state.mapHeight - 1,
+      Math.round(best.position.y + (dy / dist) * SCRIPTED_SPAWN_BACKOFF))),
+  };
+
+  // 排成 5 列的块，彼此隔 3 格：投放点周围找可通行格，找不到就跳过这一个。
+  const spawned: Unit[] = [];
+  let idx = 0;
+  for (const spec of beat.units) {
+    for (let i = 0; i < spec.count; i++, idx++) {
+      const want: Position = {
+        x: anchor.x + ((idx % 5) - 2) * 3,
+        y: anchor.y + (Math.floor(idx / 5) - 1) * 3,
+      };
+      const u = spawnEnemyUnit(state, spec.type, want);
+      if (u) spawned.push(u);
+    }
+  }
+  if (spawned.length === 0) return false;   // 整片地形都进不去：不落键，下次再试
+
+  // 燃油/资金地板。★燃油是为了**开得动**（油尽即停死），不是为了造。
+  const eco = state.economy.enemy.resources;
+  if (beat.fuelFloor !== undefined && eco.fuel < beat.fuelFloor) eco.fuel = beat.fuelFloor;
+  if (beat.moneyFloor !== undefined && eco.money < beat.moneyFloor) eco.money = beat.moneyFloor;
+
+  // 整队一起压上：绕开 gatherPressurePool 的规模上限与装甲配额。
+  // dispatchWithFormation 会把它们登记进 claim 系统，所以掉线/发呆时
+  // reissueClaimedUnits 会自动重新发令 —— 白捡整套维护逻辑。
+  const applied = dispatchWithFormation(state, spawned, best.position, "wedge", "high");
+  pushDiagnostic(state,
+    `SCRIPTED ${beat.label} t=${Math.round(state.time)} spawn=${spawned.length} `
+    + `applied=${applied} target=${best.targetId} from=${anchor.x},${anchor.y}`);
+  return true;
+}
+
+/** 在 want 附近找一格可通行地形，就地生成一个敌方单位。找不到返回 null。 */
+function spawnEnemyUnit(state: GameState, type: UnitType, want: Position): Unit | null {
+  const tile = findSpawnTile(state, type, want);
+  if (!tile) return null;
+  const stats = UNIT_STATS[type];
+  const id = state.nextUnitId++;
+  const unit: Unit = {
+    id,
+    type,
+    team: "enemy",
+    hp: stats.hp,
+    maxHp: stats.hp,
+    position: { ...tile },
+    state: "idle",
+    target: null,
+    attackTarget: null,
+    visionRange: stats.vision,
+    attackRange: stats.range,
+    attackDamage: stats.attack,
+    attackInterval: stats.attackInterval,
+    moveSpeed: stats.speed,
+    lastAttackTime: 0,
+    manualOverride: false,
+    detourCount: 0,
+    waypoints: [],
+    patrolPoints: [],
+    orders: [],
+    patrolTaskId: null,
+  };
+  state.units.set(id, unit);
+  return unit;
+}
+
+/** 环形外扩找可通行格（r=0 即 want 本身）。 */
+function findSpawnTile(state: GameState, type: UnitType, want: Position): Position | null {
+  for (let r = 0; r <= SCRIPTED_SPAWN_SEARCH_R; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (r > 0 && Math.abs(dx) !== r && Math.abs(dy) !== r) continue;  // 只扫最外圈
+        const x = want.x + dx;
+        const y = want.y + dy;
+        if (x < 0 || y < 0 || x >= state.mapWidth || y >= state.mapHeight) continue;
+        if (canUnitEnterTile(type, x, y, state)) return { x, y };
+      }
+    }
+  }
+  return null;
 }
 
 // ── Mini helpers (copied in-file so deleting this module touches nothing else) ──
