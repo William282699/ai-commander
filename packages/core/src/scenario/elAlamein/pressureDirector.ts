@@ -301,8 +301,10 @@ const MAX_DIAGNOSTICS = 200;
 //   投放 10 辆坦克而敌军没油 ⇒ 它们原地不动，看起来就是个 bug。
 // ★步兵那拳不需要燃油地板：步兵 isMechanized 为假，永远走得动。
 interface ScriptedBeat {
-  /** 触发时间（秒，游戏内时钟）。 */
-  at: number;
+  /** 触发点＝**剩余时间**（秒）。用剩余而不是已过，是为了跟 HUD 的
+   *  TIME LEFT 和用户口述（「还剩 18 分钟的时候」）同一个口径；
+   *  换 timeLimitSec 时这三拳的相对位置也不用重算。 */
+  leftAt: number;
   /** 诊断文本用，同时是"只放一次"的键。 */
   label: string;
   units: { type: UnitType; count: number }[];
@@ -313,14 +315,25 @@ interface ScriptedBeat {
 }
 const SCRIPTED_BEATS: ScriptedBeat[] = [
   {
-    at: 15 * 60,
-    label: "步兵潮",
-    units: [{ type: "infantry", count: 12 }],
+    leftAt: 18 * 60,          // 开局 12 分
+    label: "步兵大部队",
+    units: [{ type: "infantry", count: 14 }],
   },
   {
-    at: 20 * 60,
-    label: "坦克大潮",
+    leftAt: 16 * 60,          // 开局 14 分
+    label: "坦克大部队",
     units: [{ type: "main_tank", count: 6 }, { type: "light_tank", count: 4 }],
+    fuelFloor: 300,
+    moneyFloor: 1200,
+  },
+  {
+    leftAt: 13 * 60,          // 开局 17 分
+    label: "装甲步兵混合波",
+    units: [
+      { type: "main_tank", count: 4 },
+      { type: "light_tank", count: 4 },
+      { type: "infantry", count: 8 },
+    ],
     fuelFloor: 300,
     moneyFloor: 1200,
   },
@@ -1000,8 +1013,10 @@ function boostEnemyProduction(state: GameState): void {
 // ── 剧本拳 ────────────────────────────────────────────────────────────
 
 function runScriptedBeats(state: GameState): void {
+  // 剩余时间口径（HUD 的 TIME LEFT）。processPressureDirector 已保证 winCfg 非空。
+  const remaining = state.scenarioWinConfig!.timeLimitSec - state.time;
   for (const beat of SCRIPTED_BEATS) {
-    if (state.time < beat.at) continue;
+    if (remaining > beat.leftAt) continue;   // 还没到"剩这么多"的时候
     if (firedScriptedBeats.has(beat.label)) continue;
     // ★没打成就**不落键**（例如此刻一个可打的目标都没有），下个 5s tick 再试。
     //   先落键再打＝错过一次就永远没有了。

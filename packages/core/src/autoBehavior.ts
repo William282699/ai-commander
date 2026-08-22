@@ -80,7 +80,36 @@ export function chaseAnchorHomeOf(unitId: number): Position | null {
  * ⚠ 验证注意：`tick()` **不包含** `processAutoBehavior`（只有 GameCanvas 调它），
  * 所以 27 项台架基本碰不到这段——台架全绿不等于验过，必须实机打一场看。
  */
-const LOW_HP_THRESHOLD = 0;      // 原 0.25（25% maxHP）——已暂停，见上
+const LOW_HP_THRESHOLD_ENEMY = 0.25;    // 敌军保持原行为（25% maxHP）
+/** 玩家部队：5%。★不是 0——见下面第二段，0 会踩掉 capture-stall 的空城保证。 */
+const LOW_HP_THRESHOLD_PLAYER = 0.05;
+
+/**
+ * 撤退线按**单位**求值 —— 这就是上面说的"策略维度"的落点雏形。
+ *
+ * ★2026-08-20 修订（用户手测："压力反而小了"）：昨天双方一起关是错的判断。
+ * 只看单场交火，"敌人不再溜走"像是加压；但军队层面正相反——敌军残血单位以前
+ * 撤回去能**活下来**（虽不回血，但仍算一个可用兵力），而发波门槛是
+ * `P4_MIN_POOL_TO_FIRE=4` 个可用单位。留在原地打到死 ⇒ 敌军家底磨得更快 ⇒
+ * 凑不够 4 个的次数变多 ⇒ **波次更少，压力反而下降**。
+ * 所以改成只关玩家这边：你的坦克不临阵脱逃（本来就是你要的），
+ * 敌军照旧保存有生力量，波次还发得出来。
+ *
+ * ★为什么玩家是 0.05 而不是 0（台架实测抓出来的，别再调回 0）：
+ * 玩家侧设成 0 时 `ab-capture-stall` 的 **T2-MAIN「最长连续空城 ≤20 秒」**
+ * 会红（实测 25s）——玩家残血单位不再撤走就死在岗位上，守军减员 ⇒ 占下的
+ * 据点没人守的时间变长，正好踩掉上一把 capture-stall 刀锁死的保证。
+ * 逐档实测：0 红；**0.05 / 0.10 / 0.15 全绿**。取 0.05 ——
+ * 血量剩 5% 才撤，玩家几乎感觉不到"临阵脱逃"，但保住了那条安全阀。
+ * （敌我都设 0 时该台架反而是绿的：双方一起死绝互相抵消；
+ *   坏的是**不对称**，不是"关撤退"本身。）
+ *
+ * 将来要做「有的 20% 撤、有的 10%、有的 30% 死战不退」，改这个函数即可
+ * （按 doctrine / 单位类型分支），调用处的形状不用动。
+ */
+function lowHpThresholdOf(unit: Unit): number {
+  return unit.team === "player" ? LOW_HP_THRESHOLD_PLAYER : LOW_HP_THRESHOLD_ENEMY;
+}
 const ENGAGE_RANGE = 8;          // tiles
 // PATROL_RANGE removed (Day 9.5 Batch A: idle auto-patrol disabled)
 
@@ -147,7 +176,7 @@ function runAutoBehavior(state: GameState): void {
     // EXCEPTION: units under an active `no_retreat` or `must_hold` doctrine must
     // not auto-retreat — the commander explicitly ordered them to hold the line.
     // Doctrine is a player directive at priority ABOVE system self-preservation.
-    if (unit.hp / unit.maxHp < LOW_HP_THRESHOLD
+    if (unit.hp / unit.maxHp < lowHpThresholdOf(unit)
         && unit.state !== "retreating"
         && !isUnitUnderHoldDoctrine(unit, state)) {
       const hqPos = findTeamHQ(state, unit.team);
