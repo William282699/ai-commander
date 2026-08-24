@@ -623,6 +623,14 @@ const FACTION_RING_LINE = 0.16;      // rim width = rx * this
 const FACTION_RING_FILL_ALPHA = 0.30;
 const FACTION_RING_RIM_ALPHA = 0.95;
 
+/**
+ * The selection ring sits just outside the faction base, as a multiple of it.
+ * It used to be `unitSize / 2 + 3` — 14px against a 44px-wide tank sprite — so
+ * a selected tank showed no ring at all and the player got no confirmation the
+ * click had landed (first external playtest: "编不了队").
+ */
+const SELECTION_RING_GAP = 1.16;
+
 export function renderUnits(
   ctx: CanvasRenderingContext2D,
   units: Unit[],
@@ -692,8 +700,10 @@ export function renderUnits(
     const isSelected = selectedUnitIds?.has(unit.id) ?? false;
     const isPlayer = unit.team === "player";
 
-    // Ground-ellipse geometry. Radius follows baseUnitSize, so it scales with
-    // zoom and inherits that value's 8px floor when zoomed all the way out.
+    // Shared ground-ellipse geometry. The faction base plate and the selection
+    // ring are concentric so they read as one mark on the ground rather than two
+    // unrelated circles. Radius follows baseUnitSize, so it scales with zoom and
+    // inherits that value's 8px floor when zoomed all the way out.
     const ringRx = baseUnitSize * FACTION_RING_RX;
     const ringRy = ringRx * FACTION_RING_FLATTEN;
 
@@ -714,13 +724,17 @@ export function renderUnits(
     ctx.stroke();
     ctx.restore();
 
-    // --- Selection highlight ring (drawn under unit) ---
+    // --- Selection highlight ring (drawn under unit, just outside the base) ---
     if (isSelected) {
+      const selRx = ringRx * SELECTION_RING_GAP;
+      const selRy = selRx * FACTION_RING_FLATTEN;
+      ctx.save();
       ctx.beginPath();
-      ctx.arc(cx, cy, unitSize / 2 + 3, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy + selRy * FACTION_RING_DROP, selRx, selRy, 0, 0, Math.PI * 2);
       ctx.strokeStyle = "#00ff88";
-      ctx.lineWidth = 2.5;
+      ctx.lineWidth = Math.max(2, selRx * 0.09);
       ctx.stroke();
+      ctx.restore();
     }
 
     // --- Team colors ---
