@@ -671,6 +671,18 @@ const DIAG_LEVEL: Record<string, MessageLevel> = {
 /** Distance threshold for single-click unit selection (in tiles) */
 const CLICK_SELECT_RADIUS = 1.5;
 
+/**
+ * Floor on how large that threshold is ON SCREEN, in pixels.
+ *
+ * CLICK_SELECT_RADIUS is a world distance, so its on-screen size shrinks with
+ * the camera: at minimum zoom (0.09 on a 1440px canvas) 1.5 tiles is 4.3 screen
+ * pixels, which is why zoomed-out selection felt broken in the first external
+ * playtest. The two are compared on every click and the larger wins, so this is
+ * a function of zoom rather than a special case: zoomed in, the world radius is
+ * much larger and the behaviour is byte-for-byte what it was before.
+ */
+const MIN_CLICK_SELECT_PX = 14;
+
 /** Find all player units within a screen-space bounding box */
 function findUnitsInBox(
   state: GameState,
@@ -715,6 +727,12 @@ function findUnitAtClick(
   let closestDist = Infinity;
 
   const clickTile = screenToTile(screenX, screenY, camera);
+  // Whichever of the two thresholds is bigger at this zoom level; see
+  // MIN_CLICK_SELECT_PX. Zoomed in this is exactly CLICK_SELECT_RADIUS.
+  const radius = Math.max(
+    CLICK_SELECT_RADIUS,
+    MIN_CLICK_SELECT_PX / (TILE_SIZE * camera.zoom),
+  );
 
   state.units.forEach((unit) => {
     if (unit.team !== "player" || unit.state === "dead") return;
@@ -723,7 +741,7 @@ function findUnitAtClick(
     const dy = unit.position.y - clickTile.tileY;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
-    if (dist < CLICK_SELECT_RADIUS && dist < closestDist) {
+    if (dist < radius && dist < closestDist) {
       closestDist = dist;
       closestId = unit.id;
     }
