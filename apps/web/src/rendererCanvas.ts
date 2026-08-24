@@ -599,6 +599,30 @@ export function renderFacilityCaptureOverlays(
 // Render: Units (circles with team color + HP bar)
 // ──────────────────────────────────────────────
 
+/**
+ * Faction hues, as bare "r,g,b" so every team-coloured unit mark in this file
+ * (placeholder body, ground ring) is built from the SAME two values — no
+ * second copy to drift out of sync.
+ */
+const FACTION_RGB = { player: "40,120,255", enemy: "220,50,50" } as const;
+
+function factionColor(isPlayer: boolean, alpha: number): string {
+  return `rgba(${isPlayer ? FACTION_RGB.player : FACTION_RGB.enemy},${alpha})`;
+}
+
+/**
+ * Ground-ring geometry, in multiples of baseUnitSize (which already carries the
+ * 8px zoomed-out floor, so the ring never collapses to nothing). One size for
+ * every unit type — no per-type table — picked to clear the widest sprite art
+ * (the main tank draws ~2x baseUnitSize along its long axis).
+ */
+const FACTION_RING_RX = 1.4;
+const FACTION_RING_FLATTEN = 0.55;   // ry = rx * this — squashed, so it reads as ground
+const FACTION_RING_DROP = 0.45;      // nudged down by ry * this, to sit at the unit's feet
+const FACTION_RING_LINE = 0.16;      // rim width = rx * this
+const FACTION_RING_FILL_ALPHA = 0.30;
+const FACTION_RING_RIM_ALPHA = 0.95;
+
 export function renderUnits(
   ctx: CanvasRenderingContext2D,
   units: Unit[],
@@ -666,6 +690,29 @@ export function renderUnits(
     const cy = screenY + tileScreenSize / 2;
 
     const isSelected = selectedUnitIds?.has(unit.id) ?? false;
+    const isPlayer = unit.team === "player";
+
+    // Ground-ellipse geometry. Radius follows baseUnitSize, so it scales with
+    // zoom and inherits that value's 8px floor when zoomed all the way out.
+    const ringRx = baseUnitSize * FACTION_RING_RX;
+    const ringRy = ringRx * FACTION_RING_FLATTEN;
+
+    // --- Faction ground ring (drawn first: under the selection ring and body) ---
+    // The TDS sprite pack has no per-faction artwork — a player tank and an
+    // enemy tank are literally the same bitmap — so the only faction cue on a
+    // sprite unit used to be the small chevron above its head, which the first
+    // external playtester kept missing ("经常分不清是自己的人还是敌方的人").
+    // A coloured base under the feet is the RTS-standard read: it survives
+    // overlap, motion, and greyscale (the two hues differ in luminance too).
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + ringRy * FACTION_RING_DROP, ringRx, ringRy, 0, 0, Math.PI * 2);
+    ctx.fillStyle = factionColor(isPlayer, FACTION_RING_FILL_ALPHA);
+    ctx.fill();
+    ctx.lineWidth = Math.max(1.5, ringRx * FACTION_RING_LINE);
+    ctx.strokeStyle = factionColor(isPlayer, FACTION_RING_RIM_ALPHA);
+    ctx.stroke();
+    ctx.restore();
 
     // --- Selection highlight ring (drawn under unit) ---
     if (isSelected) {
@@ -677,7 +724,6 @@ export function renderUnits(
     }
 
     // --- Team colors ---
-    const isPlayer = unit.team === "player";
     let fillColor: string;
     let borderColor: string;
 
@@ -690,9 +736,7 @@ export function renderUnits(
       fillColor = isPlayer ? "#FFFFFF" : "rgba(255,180,180,0.95)";
       borderColor = isPlayer ? "#888888" : "#a02020";
     } else {
-      fillColor = isPlayer
-        ? "rgba(40,120,255,0.85)"
-        : "rgba(220,50,50,0.85)";
+      fillColor = factionColor(isPlayer, 0.85);
       borderColor = isPlayer ? "#1a5ab8" : "#a02020";
     }
 
