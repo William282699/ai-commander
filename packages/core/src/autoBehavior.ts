@@ -12,7 +12,7 @@
 // Constraints enforced: C1, C2, C3, C4, C5
 // ============================================================
 
-import type { GameState, Unit, Position, Team, PatrolTask, Squad } from "@ai-commander/shared";
+import type { GameState, Unit, Position, Team, PatrolTask, Squad, LeaderPersonality } from "@ai-commander/shared";
 import { getUnitCategory, isManualOnlyUnit } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
 import { clearPathCache } from "./pathfinding";
@@ -110,7 +110,75 @@ const LOW_HP_THRESHOLD_PLAYER = 0.05;
 function lowHpThresholdOf(unit: Unit): number {
   return unit.team === "player" ? LOW_HP_THRESHOLD_PLAYER : LOW_HP_THRESHOLD_ENEMY;
 }
-const ENGAGE_RANGE = 8;          // tiles
+// ════════════════════════════════════════════════════════════
+// 队长性格 → 自动交战半径 / 拴绳长度
+//
+// ★★ 界线（写进代码，因为不写清楚将来一定有人把"保守"实现成"不执行命令"）：
+//    **命令决定"去不去、干什么"；性格决定"路上和现场，那些没被命令的事怎么
+//    处理"。** 保守的队长照样打下命令指定的镇子——他不会抗命；他只是不会为了
+//    十几格外冒出来的一辆坦克脱离轴线，激进的会。
+//    "听不听话"是另一个轴（服从度），不在这套东西里。
+//
+// 为什么存在：玩家的鼠标控制权是**有意**拿掉的（全场只有指挥官+精锐卫队
+// isPlayerControlled）。既然拿掉了，就得给玩家一支靠得住的部队；而"靠得住"
+// 到什么程度，应该是**用人决策**（派谁去哪儿），不是一个可调的滑条。
+// ════════════════════════════════════════════════════════════
+
+/**
+ * 三档表 —— **全仓唯一一处**。加主义、将军卡、上级压制，都只是往下面
+ * postureOf 里加分支，这张表和三个调用点都不用动。
+ *
+ * ★不可违反的不变量：`leash − engage ≥ 4`。
+ *   拴绳量的是**离锚点**的距离，不是离敌人的距离：单位从锚点朝敌人移动，
+ *   走到 leash 就掉头回岗（见下方 :~300 的 leash 分支）。若 leash 逼近 engage，
+ *   它会在刚接触的瞬间掉头 —— 正是本项目修过一整刀的"追出去又掉头"那族 bug
+ *   （BUG-2 round 2）。改这张表时先算这个差，别只盯单个数字好不好看。
+ *
+ * cautious 刻意 **等于改动前的 8/12** —— 安全锚点兼对照组：三档设成同一行
+ * 即退化回改动前的行为，天然可回滚，也是负对照的做法。
+ *
+ * 参考尺度（阿拉曼视野覆盖，fog.ts EL_ALAMEIN_UNIT_VISION）：步兵 15、轻坦 18、
+ * 主战 15、火炮 16。改动前的 8 格与"看得见"之间有一条死区 —— 敌军坦克在
+ * 十来格外看得见，自己的部队站着不动，首轮外部试玩撞的就是它。
+ */
+const PERSONALITY_RANGE: Record<LeaderPersonality, { engage: number; leash: number }> = {
+  cautious:   { engage: 8,  leash: 12 },   // ← 改动前的行为，对照组
+  balanced:   { engage: 11, leash: 15 },   // ← 兜底档也是这一行，见 postureOf
+  aggressive: { engage: 14, leash: 18 },
+};
+
+/**
+ * 这个单位此刻按谁的脾气行动。
+ *
+ * ★**兜底只写在这一处**：拿不到队长 ⇒ 当作 `"balanced"`。
+ *   不另开一个 DEFAULT_ENGAGE 常量 —— 那就是第二真相源，改了三档表却忘了改
+ *   兜底常量是这类 bug 的标准形状。
+ *
+ * 谁会拿不到队长（**这是影响面最大的一路，不是边角情况**）：
+ *   · **全部敌军** —— 敌军从来不编队；
+ *   · 玩家没手动编过队的部队 —— 开局 `squads = []`
+ *     （core/scenario/elAlamein/index.ts:63），createSquad 只有玩家点「编队」
+ *     一个调用者。
+ *   所以兜底档 = balanced 是一次**全局难度上升**，必须实机看，台架看不全。
+ *
+ * ★步 3「命令带脾气」的落点就是这个函数：在开头加一句"有任务姿态就用任务
+ *   姿态"，回落到下面这行即可。engageRangeOf / leashOf 与三处调用点一个字
+ *   都不用改 —— 这就是为什么格数**只能算出来、不许存在 Squad 上**。
+ */
+function postureOf(state: GameState, unit: Unit): LeaderPersonality {
+  return findLeaderSquadForUnit(state, unit.id)?.leader.personality ?? "balanced";
+}
+
+/** 主动接敌半径（格）。取代原来的 ENGAGE_RANGE 常量。 */
+function engageRangeOf(state: GameState, unit: Unit): number {
+  return PERSONALITY_RANGE[postureOf(state, unit)].engage;
+}
+
+/** 离锚点的拴绳长度（格）。取代原来的 REACT_LEASH 常量。 */
+function leashOf(state: GameState, unit: Unit): number {
+  return PERSONALITY_RANGE[postureOf(state, unit)].leash;
+}
+
 // PATROL_RANGE removed (Day 9.5 Batch A: idle auto-patrol disabled)
 
 const RECENTLY_DAMAGED_WINDOW = 3.0;  // seconds — "recently damaged" for chase response
@@ -123,11 +191,14 @@ const CHASE_MAX_RANGE = 15;           // tiles
 // BUG-2 round 2 (playtest: unit chained chase-hops from its post to the road,
 // 60+ tiles): reactions must stay ANCHORED to the unit's post. Chase bounds are
 // measured from the chase-episode ANCHOR (not the unit's current spot), so
-// consecutive hops cannot migrate; a unit dragged beyond this leash walks back.
-// Geometry note: with CHASE_MAX_RANGE 15 and attackRange ≤ 6, a pure chase ends
-// ≥6 short of the bound, so the leash-return is a safety net for compound drift
-// (4a/4c pulls, kited shooters), not the primary limiter.
-const REACT_LEASH = 12;               // tiles from the chase anchor
+// consecutive hops cannot migrate; a unit dragged beyond its leash walks back.
+// 拴绳长度**不再是常量**——按队长性格求值，见上面的 leashOf / PERSONALITY_RANGE
+// （原值 12 现在是 cautious 那一档）。
+// Geometry note: with CHASE_MAX_RANGE 15 and attackRange <= 6, a pure chase ends
+// short of the bound, so the leash-return is a safety net for compound drift
+// (4a/4c pulls, kited shooters), not the primary limiter. 注意 aggressive 的
+// leash=18 > CHASE_MAX_RANGE=15：4b 的追击仍由 CHASE_MAX_RANGE 封顶，激进档
+// 放开的是 4a 主动接敌那一路，不是让人追得更远。
 // BUG-2 round 3 — 守军纪律 (defender discipline, causal rule, no type lists):
 // an idle/defending unit may LEAVE POST only for a threat IN ACTION —
 // (1) it was hit (recentDamage → chase the revealed shooter, 4b),
@@ -291,10 +362,11 @@ function runAutoBehavior(state: GameState): void {
       const adx = unit.position.x - episode.home.x;
       const ady = unit.position.y - episode.home.y;
       const anchorDist2 = adx * adx + ady * ady;
+      const leash = leashOf(state, unit);   // 按队长性格，不再是常量
       if (anchorDist2 <= 2 * 2) {
         chaseAnchors.delete(unit.id); // home again — episode over
         episode = null;
-      } else if (anchorDist2 > REACT_LEASH * REACT_LEASH) {
+      } else if (anchorDist2 > leash * leash) {
         // Dragged beyond the leash — stop reacting outward, walk back to post.
         unit.state = "moving";
         clearPathCache(unit.id);
@@ -313,7 +385,7 @@ function runAutoBehavior(state: GameState): void {
     // only a threat IN ACTION justifies leaving post (see isThreatInAction),
     // and the move-out is episode-anchored so the leash bounds the excursion.
     if (unit.state === "patrolling") {
-      const enemy = findNearestEnemy(unit, state, ENGAGE_RANGE);
+      const enemy = findNearestEnemy(unit, state, engageRangeOf(state, unit));
       if (enemy) {
         unit.state = "moving";
         clearPathCache(unit.id);
@@ -324,7 +396,7 @@ function runAutoBehavior(state: GameState): void {
       }
     }
     if (unit.state === "idle" || unit.state === "defending") {
-      const enemy = findNearestEnemy(unit, state, ENGAGE_RANGE);
+      const enemy = findNearestEnemy(unit, state, engageRangeOf(state, unit));
       if (enemy && isThreatInAction(state, enemy)) {
         pinEpisode(unit, episode, enemy.position);
         unit.state = "moving";

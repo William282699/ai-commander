@@ -3,7 +3,8 @@
 // Auto-generate squad IDs, ranks, and leader names.
 // ============================================================
 
-import type { UnitType, SquadRank, SquadLeader, Squad, CommanderKey, SquadRole, Position } from "./types";
+import type { UnitType, SquadRank, SquadLeader, Squad, CommanderKey, SquadRole, Position, LeaderPersonality } from "./types";
+import { personalityForLeaderName } from "./namePool";
 
 // ── Unit type → squad prefix (P1-2: explicit deterministic mapping) ──
 
@@ -83,14 +84,26 @@ let leaderNameIdx = 0;
 
 /**
  * Create a SquadLeader with auto-generated attributes.
+ *
+ * `personality` 由**名册**给（调用方查 personalityForLeaderName(leaderName) 传进来）——
+ * 性格是数据，建队那一刻钉死，之后只读。参数可选、默认 balanced，是为了不给
+ * 现有调用方加破坏性签名；真正的两个调用方（createSquad / promoteToCommander）
+ * 都显式传值。
+ *
+ * ⚠ 这里的 `name`（中文名，循环下标）**全仓零读取**，屏上/嘴里/台架里认的都是
+ *   `squad.leaderName`（namePool 的英文名）。两者不同源是历史遗留，本刀不动它，
+ *   但别拿 `leader.name` 当身份用。
  */
-export function createSquadLeader(unitCount: number): SquadLeader {
+export function createSquadLeader(
+  unitCount: number,
+  personality: LeaderPersonality = "balanced",
+): SquadLeader {
   const name = LEADER_NAMES[leaderNameIdx % LEADER_NAMES.length];
   leaderNameIdx++;
   return {
     name,
     rank: autoRank(unitCount),
-    personality: "balanced",
+    personality,
   };
 }
 
@@ -146,7 +159,7 @@ export function createSquad(
     id,
     name: autoSquadName(id),
     unitIds: [...filteredIds],
-    leader: createSquadLeader(unitIds.length),
+    leader: createSquadLeader(unitIds.length, personalityForLeaderName(leaderName)),
     currentMission: null,
     missionTarget: null,
     morale: 1.0,

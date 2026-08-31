@@ -428,10 +428,19 @@ export interface PatrolTask {
 
 export type SquadRank = "squad_leader" | "platoon_leader" | "company_commander" | "battalion_commander";
 
+/**
+ * 队长性格。**闭集**——三个值，不是可扩展的关键词表。
+ * 引擎侧靠它决定部队自动交战多远（见 core/autoBehavior.ts 的 PERSONALITY_RANGE）。
+ * 提出来单独命名，是因为 namePool（名册）/ autoBehavior（求值）/ OrgTree（显示）
+ * 三处都要引用同一个类型；写成三份字面量联合就是三个真相源。
+ */
+export type LeaderPersonality = "cautious" | "balanced" | "aggressive";
+
 export interface SquadLeader {
   name: string;                    // auto-generated captain name
   rank: SquadRank;                 // determined by squad size
-  personality: "cautious" | "balanced" | "aggressive";
+  /** 天生的，不可由玩家调整（用人是决策，调数值是配置界面）。名册建队时钉死。 */
+  personality: LeaderPersonality;
 }
 
 export type CommanderKey = "chen" | "marcus" | "emily";

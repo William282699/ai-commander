@@ -6,7 +6,7 @@
 
 import type { GameState, Squad, UnitType, CommanderKey } from "./types";
 import { autoSquadId, autoSquadName, createSquadLeader } from "./squad";
-import { pickLeaderName, getUsedLeaderNames } from "./namePool";
+import { pickLeaderName, getUsedLeaderNames, personalityForLeaderName } from "./namePool";
 
 // ── Invariant ──
 
@@ -116,7 +116,10 @@ function promoteToCommander(state: GameState, leader: Squad): Squad {
     id: childId,
     name: autoSquadName(childId),
     unitIds: [...leader.unitIds],
-    leader: createSquadLeader(leader.unitIds.length),
+    // 晋升会现造一个新队长来接管原队的兵 —— 他是名册上**另一个人**，
+    // 所以按他自己的名字取性格。不这么做，编制树上显示 "Ellis · 激进"
+    // 的队会按 balanced 打，名与实对不上（§7 判据 4 正是查这个）。
+    leader: createSquadLeader(leader.unitIds.length, personalityForLeaderName(childLeaderName)),
     currentMission: leader.currentMission,
     missionTarget: leader.missionTarget ? { ...leader.missionTarget } : null,
     morale: leader.morale,

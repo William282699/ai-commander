@@ -6,7 +6,7 @@
 // ============================================================
 
 import React, { useState, useCallback, useRef, useEffect } from "react";
-import type { Squad, Unit, CommanderKey } from "@ai-commander/shared";
+import type { Squad, Unit, CommanderKey, LeaderPersonality } from "@ai-commander/shared";
 import { collectUnitsUnder, getChildren, getSquadDepth, isDescendantOrSelf, getMaxSubtreeDepth } from "@ai-commander/shared";
 import type { GameState } from "@ai-commander/shared";
 
@@ -120,6 +120,20 @@ function isSquadWiped(squad: Squad, squads: Squad[], units: Map<number, Unit>): 
 
 const LINE_COLOR = "rgba(0, 212, 255, 0.15)"; // fallback when no commander accent in scope
 const VERT_GAP = 20;
+
+// ── 队长性格的显示（只显示，不参与任何判定；引擎侧的三档表在 core/autoBehavior.ts）──
+// 穷尽一个**闭集**（LeaderPersonality 三个值），不是按名字/兵种枚举关键词。
+const PERSONALITY_LABEL: Record<LeaderPersonality, string> = {
+  aggressive: "激进",
+  balanced: "稳健",
+  cautious: "保守",
+};
+// 稳健是多数档，颜色刻意压暗——它不该抢眼；激进/保守才是玩家要一眼挑出来的。
+const PERSONALITY_COLOR: Record<LeaderPersonality, string> = {
+  aggressive: "#f87171",
+  balanced: "var(--hud-text-dim)",
+  cautious: "#60a5fa",
+};
 
 // ── Component ──
 
@@ -483,6 +497,12 @@ function TreeNode({
           <span style={{ color: "var(--hud-text-dim)" }}>{squad.id}</span>
           <span style={{ color: statusColor, fontWeight: "bold" }}>{totalUnits}</span>
           {squad.role === "commander" && <span style={{ color: "#8b5cf6", fontWeight: "bold" }}>CMD</span>}
+          {/* 队长性格：另起一个标签，**不塞进上面那个 contentEditable 的改名 span** —— 
+              塞进去玩家双击改名时会把它一起编辑掉。commander 角色也显示：他此刻
+              不带兵（层级不变量），性格显示了但还不生效，规则二（步 3）才补上。 */}
+          <span style={{ color: PERSONALITY_COLOR[squad.leader.personality], fontWeight: "bold" }}>
+            {PERSONALITY_LABEL[squad.leader.personality]}
+          </span>
           {isDropTarget && willPromote && <span style={{ color: "#fbbf24", fontWeight: "bold" }}>⬆</span>}
         </div>
       </div>
