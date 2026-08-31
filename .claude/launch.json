@@ -176,6 +176,22 @@
         ".claude/start-frame-web.sh"
       ],
       "port": 3025
+    },
+    {
+      "name": "squadp-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-squadp-api.sh"
+      ],
+      "port": 3026
+    },
+    {
+      "name": "squadp-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-squadp-web.sh"
+      ],
+      "port": 3027
     }
   ]
 }
