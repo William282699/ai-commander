@@ -4341,11 +4341,21 @@ const PICKER_PERSONALITY_LABEL: Record<LeaderPersonality, string> = {
 const PICKER_PERSONALITY_COLOR: Record<LeaderPersonality, string> = {
   aggressive: "#f87171", balanced: "var(--hud-text-dim)", cautious: "#60a5fa",
 };
-/** 一句话说清这档队长会怎么打——玩家要凭这个做用人决策，不能只给个标签。 */
+/**
+ * 一句话说清这档队长会怎么打——玩家要凭这个做用人决策，不能只给个标签。
+ *
+ * ★ 措辞铁律：**任何一档都不许说"看得见就管"**（2026-08-30 用户抓出来的错）。
+ *   引擎的交战半径是 8/11/14 格，而阿拉曼视野是 15~18 格（fog.ts
+ *   EL_ALAMEIN_UNIT_VISION）——每一档的交战半径都**小于**视野，中间那 4~7 格
+ *   是"看得见但不管"的带。而首轮外部试玩者的原话正是"能看到敌军坦克在不远处
+ *   但部队不动"：说"看得见就管"等于把那个 bug 重新承诺一遍，而 balanced
+ *   还是兜底档（全部敌军 + 未编队部队都吃它），承诺面最大。
+ *   改数值时这三句要跟着数值一起核，别只核数值。
+ */
 const PICKER_PERSONALITY_HINT: Record<LeaderPersonality, string> = {
-  aggressive: "十几格外的敌人也会主动扑上去",
-  balanced: "看得见就管，不追远",
-  cautious: "守住阵地，不为路过的目标脱离",
+  aggressive: "十几格外的敌人也会主动扑上去",   // engage 14
+  balanced: "十格内的敌人会管，不追远",         // engage 11 —— 说"十格内"是真的；说"看得见"是假的
+  cautious: "守住阵地，不为路过的目标脱离",     // engage 8
 };
 
 function LeaderPicker({ p, onPick, onClose }: {
