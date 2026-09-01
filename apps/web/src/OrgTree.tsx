@@ -493,16 +493,23 @@ function TreeNode({
             {squad.leaderName}
           </span>
         </div>
+        {/* 队长性格：独立一行、与队长名同号（10px）。
+            ★ 2026-08-30 用户裁定从 8px 的 id/人数行里挪出来放大——首轮外部试玩最大的
+            抱怨就是"分不清哪支队是哪支"，性格正是那个身份标签，不该比人数还小。
+            ★ 必须是**独立的 span，不能塞进上面那个 contentEditable 的改名 span**：
+            塞进去玩家双击改名时会把它一起编辑掉。也没有并进名字那一行——节点盒
+            maxWidth 80 + nowrap，"Aiden 激进" 一行会挤出去。
+            commander 角色也显示：他此刻不带兵（层级不变量），性格显示了但还不生效，
+            规则二（步 3 命令带脾气）才补上。 */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10 }}>
+          <span style={{ color: PERSONALITY_COLOR[squad.leader.personality], fontWeight: "bold" }}>
+            {PERSONALITY_LABEL[squad.leader.personality]}
+          </span>
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 2, justifyContent: "center", fontSize: 8 }}>
           <span style={{ color: "var(--hud-text-dim)" }}>{squad.id}</span>
           <span style={{ color: statusColor, fontWeight: "bold" }}>{totalUnits}</span>
           {squad.role === "commander" && <span style={{ color: "#8b5cf6", fontWeight: "bold" }}>CMD</span>}
-          {/* 队长性格：另起一个标签，**不塞进上面那个 contentEditable 的改名 span** —— 
-              塞进去玩家双击改名时会把它一起编辑掉。commander 角色也显示：他此刻
-              不带兵（层级不变量），性格显示了但还不生效，规则二（步 3）才补上。 */}
-          <span style={{ color: PERSONALITY_COLOR[squad.leader.personality], fontWeight: "bold" }}>
-            {PERSONALITY_LABEL[squad.leader.personality]}
-          </span>
           {isDropTarget && willPromote && <span style={{ color: "#fbbf24", fontWeight: "bold" }}>⬆</span>}
         </div>
       </div>
