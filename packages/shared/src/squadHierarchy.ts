@@ -6,7 +6,7 @@
 
 import type { GameState, Squad, UnitType, CommanderKey } from "./types";
 import { autoSquadId, autoSquadName, createSquadLeader } from "./squad";
-import { pickLeaderName, getUsedLeaderNames, personalityForLeaderName } from "./namePool";
+import { pickLeaderName, getUsedLeaderNames, personalityForLeaderName, placeholderLeaderName } from "./namePool";
 
 // ── Invariant ──
 
@@ -110,8 +110,9 @@ function promoteToCommander(state: GameState, leader: Squad): Squad {
 
   // Generate new child leader
   const usedNames = getUsedLeaderNames(state.squads);
-  const childLeaderName = pickLeaderName(usedNames);
   const childId = autoSquadId(unitTypes.length > 0 ? unitTypes : ["infantry"], state.nextSquadNum);
+  // 名册空了 ⇒ 这个现造的子队没有队长（占位名），与玩家手动编队时同一条规则。
+  const childLeaderName = pickLeaderName(usedNames) ?? placeholderLeaderName(childId);
   const childSquad: Squad = {
     id: childId,
     name: autoSquadName(childId),

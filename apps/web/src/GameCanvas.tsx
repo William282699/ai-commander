@@ -78,7 +78,8 @@ import {
 import type { FacilitySituationType, AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot, StrategicSituation, ViewportGeometry } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
 import { TILE_SIZE } from "@ai-commander/shared";
-import { createSquad, pickLeaderName, getUsedLeaderNames, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
+import { createSquad, pickLeaderName, getUsedLeaderNames, availableLeaderProfiles, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
+import type { LeaderProfile } from "@ai-commander/shared";
 import { ChatPanel } from "./ChatPanel";
 import { TaskBar } from "./TaskBar";
 import * as messageStoreModule from "./messageStore";
@@ -828,8 +829,9 @@ export interface GameBridge {
   /** Presence Step C: read-only raw viewport geometry (camera px + canvas px).
    *  All conversion/spatial work lives in core — the render layer only reports. */
   getViewport: () => ViewportGeometry | null;
-  onCreateSquad: (owner: "chen" | "marcus" | "emily") => void;
+  onCreateSquad: (owner: "chen" | "marcus" | "emily", choice?: { leaderName: string | null }) => void;
   canCreateSquad: () => boolean;
+  getAssignableLeaders: () => LeaderProfile[];
   onDeclareWar: () => void;
   onSelectUnits: (unitIds: number[]) => void;
   onMoveSquad: (squadId: string, newParentId: string) => void;
@@ -1097,7 +1099,32 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
 
   // Stable callback: create a squad from selected units
   // Phase 2.5: allows extracting units from existing squads (dissolves empty squads)
-  const handleCreateSquad = useCallback((owner: "chen" | "marcus" | "emily") => {
+  /**
+   * 名册上此刻**派得出去**的将军。步 2 点将弹窗列的就是它。
+   *
+   * ★不是简单的"名册 − 已用"：编队会把选中单位从原队里抽走，抽空的叶子队会被
+   * dissolveSquad 解散，那个队长于是当场重获自由。所以这里要按"编完之后还活着的队"
+   * 算占用，否则玩家把 Aiden 全队重编一次，Aiden 反而挑不到自己。
+   * 与 handleCreateSquad 里真正的解散判定同一条规则（role==="leader" 且被抽空）。
+   */
+  const getAssignableLeaders = useCallback((): LeaderProfile[] => {
+    const state = stateRef.current;
+    if (!state) return [];
+    const ids = new Set(inputRef.current.selectedUnitIds);
+    const survivingNames = new Set(
+      state.squads
+        .filter((sq) => !(sq.role === "leader" && sq.unitIds.length > 0 && sq.unitIds.every((id) => ids.has(id))))
+        .map((sq) => sq.leaderName),
+    );
+    return availableLeaderProfiles(survivingNames);
+  }, []);
+
+  const handleCreateSquad = useCallback((
+    owner: "chen" | "marcus" | "emily",
+    /** 玩家点将的结果。省略＝引擎自动挑第一个可用的（步 1 的行为，桥/旧调用方保留）；
+     *  `{ leaderName: null }` ＝ 玩家明知名册已空，仍然编队（这支队没有队长）。 */
+    choice?: { leaderName: string | null },
+  ) => {
     const state = stateRef.current;
     if (!state) return;
     const ids = inputRef.current.selectedUnitIds;
@@ -1144,11 +1171,17 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     const unitTypes = squadIds
       .map((id) => state.units.get(id)!)
       .map((u) => u.type);
-    const usedNames = getUsedLeaderNames(state.squads);
-    const leaderName = pickLeaderName(usedNames);
+    // 玩家点了将就用他点的；没点（桥调用 / 旧路径）就沿用步 1 的引擎自动挑。
+    // 名册空了 ⇒ null ⇒ createSquad 给占位名，仍然建得成队（不报错）。
+    const leaderName = choice !== undefined
+      ? choice.leaderName
+      : pickLeaderName(getUsedLeaderNames(state.squads));
     const squad = createSquad(squadIds, unitTypes, state.nextSquadNum, owner, leaderName);
     state.squads.push(squad);
-    addMessage("info", `新建分队 ${squad.id}:${squad.name} (${squadIds.length}人) → ${owner}`, state.time, "ops", "player", "player");
+    addMessage("info",
+      `新建分队 ${squad.id}:${squad.name} (${squadIds.length}人) → ${owner}` +
+      (leaderName === null ? "（名册已空，这支队没有队长）" : `，队长 ${squad.leaderName}`),
+      state.time, "ops", "player", "player");
   }, []);
 
   // Phase 2: OrgTree callbacks
@@ -1208,6 +1241,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       getViewport,
       onCreateSquad: handleCreateSquad,
       canCreateSquad,
+      getAssignableLeaders,
       onDeclareWar: handleDeclareWar,
       onSelectUnits: handleSelectUnits,
       onMoveSquad: handleMoveSquad,
@@ -1217,7 +1251,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       messageStore: messageStoreModule,
     };
     return () => { delete window.__GAME_BRIDGE__; };
-  }, [getSelectedUnitIds, getViewport, handleCreateSquad, canCreateSquad, handleDeclareWar, handleSelectUnits, handleMoveSquad, handleRemoveFromParent, handleRenameLeader, handleTransferSquad]);
+  }, [getSelectedUnitIds, getViewport, handleCreateSquad, canCreateSquad, getAssignableLeaders, handleDeclareWar, handleSelectUnits, handleMoveSquad, handleRemoveFromParent, handleRenameLeader, handleTransferSquad]);
 
   // Day 12: restart callback
   // Day 13: Facility context menu action handlers
@@ -2416,6 +2450,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           getViewport={getViewport}
           onCreateSquad={handleCreateSquad}
           canCreateSquad={canCreateSquad}
+          getAssignableLeaders={getAssignableLeaders}
           onDeclareWar={handleDeclareWar}
           onSelectUnits={handleSelectUnits}
           onMoveSquad={handleMoveSquad}

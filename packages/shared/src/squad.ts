@@ -4,7 +4,7 @@
 // ============================================================
 
 import type { UnitType, SquadRank, SquadLeader, Squad, CommanderKey, SquadRole, Position, LeaderPersonality } from "./types";
-import { personalityForLeaderName } from "./namePool";
+import { personalityForLeaderName, placeholderLeaderName } from "./namePool";
 
 // ── Unit type → squad prefix (P1-2: explicit deterministic mapping) ──
 
@@ -148,24 +148,29 @@ export function createSquad(
   unitTypes: UnitType[],
   nextNums: { [prefix: string]: number },
   ownerCommander: CommanderKey,
-  leaderName: string,
+  /** 名册里挑的那个人；**null = 名册空了，这支队没有队长**（仍然可以编队，
+   *  不报错——"人手不够"是一种处境，不是一个错误）。null 时用占位名，
+   *  理由见 namePool.placeholderLeaderName。 */
+  leaderName: string | null,
   opts?: { role?: SquadRole; parentSquadId?: string },
 ): Squad {
   // MVP2: Filter out elite units that are mouse-only
   const filteredIds = unitIds.filter((_, i) => !SQUAD_EXCLUDED_TYPES.includes(unitTypes[i]));
   const filteredTypes = unitTypes.filter((t) => !SQUAD_EXCLUDED_TYPES.includes(t));
   const id = autoSquadId(filteredTypes.length > 0 ? filteredTypes : unitTypes, nextNums);
+  // 占位名要等 id 生成之后才拼得出来，所以在这里兜底而不是在调用方。
+  const finalLeaderName = leaderName ?? placeholderLeaderName(id);
   return {
     id,
     name: autoSquadName(id),
     unitIds: [...filteredIds],
-    leader: createSquadLeader(unitIds.length, personalityForLeaderName(leaderName)),
+    leader: createSquadLeader(unitIds.length, personalityForLeaderName(finalLeaderName)),
     currentMission: null,
     missionTarget: null,
     morale: 1.0,
     formationStyle: "line",
     ownerCommander,
-    leaderName,
+    leaderName: finalLeaderName,
     role: opts?.role ?? "leader",
     parentSquadId: opts?.parentSquadId,
   };

@@ -30,6 +30,7 @@ import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-com
 import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute, buildProductionOptions } from "@ai-commander/shared";
 import type { ProductionCategoryOptions } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
+import type { LeaderProfile, LeaderPersonality } from "@ai-commander/shared";
 import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, getVoiceOpenDiag, type VoiceRecording, type VoiceCaptureArm } from "./voiceRecorder";
 import { probeVoiceChannels, channelUsesVoiceCapture, isBaselineArm } from "./voiceCapability";
 import { RadioCallRow } from "./RadioCallRow";
@@ -475,8 +476,10 @@ interface Props {
   getSelectedUnitIds?: () => number[];
   /** Presence Step C: raw viewport geometry from the render layer (null until ready). */
   getViewport?: () => ViewportGeometry | null;
-  onCreateSquad?: (owner: "chen" | "marcus" | "emily") => void;
+  onCreateSquad?: (owner: "chen" | "marcus" | "emily", choice?: { leaderName: string | null }) => void;
   canCreateSquad?: () => boolean;
+  /** 名册上此刻派得出去的将军（点将弹窗的内容）。缺省＝没接（走引擎自动挑）。 */
+  getAssignableLeaders?: () => LeaderProfile[];
   onDeclareWar?: () => void;
   onSelectUnits?: (unitIds: number[]) => void;
   onMoveSquad?: (squadId: string, newParentId: string) => void;
@@ -495,7 +498,7 @@ interface DisplayResponse extends AdvisorResponse {
 const SHOW_QUICK_BUY = false;
 
 
-export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
+export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, getAssignableLeaders, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
   // ── Panel collapse state ──
   const [collapsed, setCollapsed] = useState(false);
 
@@ -1299,6 +1302,42 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [pttStatus]);
+
+  // ── 步 2 点将弹窗 ──
+  // 战场还在跑，所以它**不是模态框**：没有遮罩、不拦点击、Esc 可取消。
+  // 只记锚点坐标与 owner；名单每次打开时现取（名册随编队实时变短）。
+  const [leaderPicker, setLeaderPicker] = useState<
+    { owner: "chen" | "marcus" | "emily"; x: number; y: number; list: LeaderProfile[] } | null
+  >(null);
+
+  const openLeaderPicker = useCallback((owner: "chen" | "marcus" | "emily", e: React.MouseEvent) => {
+    // 没接 getAssignableLeaders（例如被别的宿主复用）就退回步 1 的引擎自动挑，
+    // 不弹窗、不报错——少一个可选依赖不该让"编队"这个基本操作失灵。
+    if (!getAssignableLeaders) { onCreateSquad?.(owner); return; }
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setLeaderPicker({ owner, x: r.left, y: r.top, list: getAssignableLeaders() });
+  }, [getAssignableLeaders, onCreateSquad]);
+
+  const closeLeaderPicker = useCallback(() => setLeaderPicker(null), []);
+
+  // Esc 取消 + 点别处取消。战场在跑，玩家随时可能想放弃这次编队。
+  useEffect(() => {
+    if (!leaderPicker) return;
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === "Escape") { ev.stopPropagation(); closeLeaderPicker(); } };
+    const onDown = (ev: MouseEvent) => {
+      if (!(ev.target as HTMLElement)?.closest?.("[data-leader-picker]")) closeLeaderPicker();
+    };
+    // capture 阶段接 Esc，抢在别的全局 Esc 处理（取消选择等）之前
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("mousedown", onDown);
+    return () => { window.removeEventListener("keydown", onKey, true); window.removeEventListener("mousedown", onDown); };
+  }, [leaderPicker, closeLeaderPicker]);
+
+  const confirmLeader = useCallback((leaderName: string | null) => {
+    if (!leaderPicker) return;
+    onCreateSquad?.(leaderPicker.owner, { leaderName });
+    setLeaderPicker(null);
+  }, [leaderPicker, onCreateSquad]);
 
   // P2: poll canCreateSquad every 200ms
   const [squadBtnEnabled, setSquadBtnEnabled] = useState(false);
@@ -3542,7 +3581,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                   {onCreateSquad && isChenChannel && (
                     <button
                       className="dp-dock-btn dp-dock-btn--action"
-                      onClick={() => onCreateSquad(selectedCommanders[0])}
+                      onClick={(e) => openLeaderPicker(selectedCommanders[0], e)}
                       disabled={!squadBtnEnabled}
                       style={{ opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }}
                       title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}
@@ -3807,12 +3846,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             "滑出即发送"的病本体，又会在 capture 释放时补发一脚踩掉 cancelPTT）。 */}
         <button data-ptt-btn data-ptt-state={pttStateAttr} className={pttCancelArmed ? "ptt-cancel-armed" : undefined} onPointerDown={onPttPointerDown} onPointerMove={onPttPointerMove} onPointerUp={onPttPointerUp} onPointerCancel={onPttPointerCancel} onLostPointerCapture={onPttLostCapture} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttCancelArmed ? "var(--hud-accent-red-dim)" : pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : pttBtnStyle.background, borderColor: pttCancelArmed ? "var(--hud-accent-red)" : "var(--hud-border-bright)", color: pttCancelArmed ? "var(--hud-accent-red)" : "var(--hud-text-primary)", opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttCancelArmed ? "松手取消" : pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttCancelArmed ? "✕" : <MicIcon listening={pttStatus === "listening"} />}</button>
         {hasTTS && (<button data-tts-btn data-tts-state={ttsEnabled ? "on" : "off"} data-tts-pulse={radioPulse ? "on" : "off"} onClick={toggleTts} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : pttBtnStyle.background, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}><HornIcon on={ttsEnabled} /></button>)}
-        {onCreateSquad && isChenChannel && (<button onClick={() => onCreateSquad(selectedCommanders[0])} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
+        {onCreateSquad && isChenChannel && (<button onClick={(e) => openLeaderPicker(selectedCommanders[0], e)} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
         {onDeclareWar && canDeclareWar && (<button onClick={onDeclareWar} style={warBtnStyle} title="向敌方宣战">宣战</button>)}
         <button data-send-btn onClick={() => void sendCommand()} disabled={loading || !message.trim()} style={{ ...sendBtnStyle, opacity: loading || !message.trim() ? 0.5 : 1 }}>{loading ? "..." : "发送"}</button>
       </div>
       </div>
       </div>
+      {leaderPicker && <LeaderPicker p={leaderPicker} onPick={confirmLeader} onClose={closeLeaderPicker} />}
     </div>
     </>
   );
@@ -4279,3 +4319,109 @@ const sendBtnStyle: React.CSSProperties = {
   textTransform: "uppercase",
   clipPath: "var(--hud-chamfer-sm)",
 };
+
+
+// ════════════════════════════════════════════════════════════
+// 步 2 · 点将弹窗
+//
+// 交接档 §3 的硬约束，逐条落在这里：
+//   · **不是挡屏的模态框**——没有遮罩层、不拦背景点击。战场还在跑。
+//   · 小、贴着触发它的那个按钮弹出（不是屏幕中央）。
+//   · Esc 可取消，点别处也取消。
+//   · **必须让人感觉到"用掉一个就少一个"**：标题直接写「可用队长（N）」，
+//     并把剩下的人一个个列出来。如果每支队都配得到激进的，"激进"就没有意义，
+//     这个功能会退化成一个带名字的下拉框——稀缺是地基，不是省事。
+//   · 名册空了**仍然可以编队**，只是这支队没有队长（吃兜底档 balanced，
+//     也没人替它说话）。不报错——"人手不够"是一种处境。
+// ════════════════════════════════════════════════════════════
+
+const PICKER_PERSONALITY_LABEL: Record<LeaderPersonality, string> = {
+  aggressive: "激进", balanced: "稳健", cautious: "保守",
+};
+const PICKER_PERSONALITY_COLOR: Record<LeaderPersonality, string> = {
+  aggressive: "#f87171", balanced: "var(--hud-text-dim)", cautious: "#60a5fa",
+};
+/** 一句话说清这档队长会怎么打——玩家要凭这个做用人决策，不能只给个标签。 */
+const PICKER_PERSONALITY_HINT: Record<LeaderPersonality, string> = {
+  aggressive: "十几格外的敌人也会主动扑上去",
+  balanced: "看得见就管，不追远",
+  cautious: "守住阵地，不为路过的目标脱离",
+};
+
+function LeaderPicker({ p, onPick, onClose }: {
+  p: { owner: "chen" | "marcus" | "emily"; x: number; y: number; list: LeaderProfile[] };
+  onPick: (leaderName: string | null) => void;
+  onClose: () => void;
+}) {
+  const empty = p.list.length === 0;
+  // 贴着按钮往上弹；夹在视口内，别被挤出屏幕。
+  const width = 208;
+  const left = Math.max(8, Math.min(p.x, window.innerWidth - width - 8));
+  const bottom = Math.max(8, window.innerHeight - p.y + 8);
+  return (
+    <div
+      data-leader-picker
+      style={{
+        position: "fixed", left, bottom, width, zIndex: 9000,
+        background: "var(--hud-bg-secondary)", border: "1px solid var(--hud-border-bright)",
+        borderRadius: 8, padding: 8, boxShadow: "0 6px 24px rgba(0,0,0,0.55)",
+        fontFamily: "var(--hud-font-mono)", maxHeight: 320, overflowY: "auto",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
+        <span style={{ fontSize: 11, color: "var(--hud-text-primary)", fontWeight: "bold" }}>
+          可用队长（{p.list.length}）
+        </span>
+        <span style={{ fontSize: 9, color: "var(--hud-text-dim)" }}>Esc 取消</span>
+      </div>
+
+      {empty ? (
+        <>
+          <div style={{ fontSize: 10, color: "var(--hud-text-dim)", lineHeight: 1.5, marginBottom: 8 }}>
+            名册已空，没有军官可派。仍然可以编队——这支队不会有队长，
+            按<span style={{ color: "var(--hud-text-primary)" }}>稳健</span>行动，也没人替它说话。
+          </div>
+          <button
+            onClick={() => onPick(null)}
+            style={{
+              width: "100%", padding: "6px 8px", fontSize: 10, cursor: "pointer",
+              background: "transparent", color: "var(--hud-text-primary)",
+              border: "1px dashed var(--hud-border-bright)", borderRadius: 6,
+              fontFamily: "var(--hud-font-mono)",
+            }}
+          >仍然编队（无队长）</button>
+        </>
+      ) : (
+        p.list.map((lp) => (
+          <button
+            key={lp.name}
+            onClick={() => onPick(lp.name)}
+            style={{
+              display: "block", width: "100%", textAlign: "left", marginBottom: 3,
+              padding: "5px 7px", cursor: "pointer", borderRadius: 6,
+              background: "transparent", border: "1px solid var(--hud-border-dim, rgba(255,255,255,0.08))",
+              fontFamily: "var(--hud-font-mono)",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(0,212,255,0.10)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+          >
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+              <span style={{ fontSize: 11, color: "var(--hud-text-primary)", fontWeight: "bold" }}>{lp.name}</span>
+              <span style={{ fontSize: 10, fontWeight: "bold", color: PICKER_PERSONALITY_COLOR[lp.personality] }}>
+                {PICKER_PERSONALITY_LABEL[lp.personality]}
+              </span>
+            </div>
+            <div style={{ fontSize: 8, color: "var(--hud-text-dim)", marginTop: 1 }}>
+              {PICKER_PERSONALITY_HINT[lp.personality]}
+            </div>
+          </button>
+        ))
+      )}
+      {!empty && (
+        <div style={{ fontSize: 8, color: "var(--hud-text-dim)", marginTop: 5, lineHeight: 1.4 }}>
+          派出去就少一个。名册共 12 人。
+        </div>
+      )}
+    </div>
+  );
+}

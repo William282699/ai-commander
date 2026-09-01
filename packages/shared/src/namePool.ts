@@ -69,28 +69,44 @@ export function personalityForLeaderName(name: string): LeaderPersonality {
 }
 
 /**
- * Pick a unique leader name not in usedNames.
- * Falls back to "Name-2", "Name-3", etc. if the roster is exhausted.
+ * 名册上**还没被派出去**的将军，按名册顺序。步 2 点将弹窗列的就是这个，
+ * "可用队长（N）"的 N 也是它的长度。
  *
- * 步 1 的"引擎自动挑"就是这个函数（取名册里第一个没被占用的）。步 2 换成
- * 玩家点将时，**数据模型一个字不动**，差别只有"谁来挑"。
+ * 稀缺是这套设计的地基：这个列表会越用越短，短到空为止。
  */
-export function pickLeaderName(usedNames: Set<string>): string {
-  for (const { name } of LEADER_ROSTER) {
-    if (!usedNames.has(name)) {
-      return name;
-    }
-  }
-  // 名册用光 —— 加后缀。这些临时名不在名册里 ⇒ 查不到性格 ⇒ 兜底 balanced。
-  // （步 2 会把"名册空了"改成"这支队没有队长"，是那一步的事，步 1 不动它。）
-  for (let suffix = 2; ; suffix++) {
-    for (const { name } of LEADER_ROSTER) {
-      const candidate = `${name}-${suffix}`;
-      if (!usedNames.has(candidate)) {
-        return candidate;
-      }
-    }
-  }
+export function availableLeaderProfiles(usedNames: Set<string>): LeaderProfile[] {
+  return LEADER_ROSTER.filter((p) => !usedNames.has(p.name));
+}
+
+/**
+ * 名册空了之后新建的队用的**占位名**（如 `无队长I1`）。
+ *
+ * ★为什么不是空字符串（2026-08-30 用户拍板）：`leaderName` 不只是 UI 标签，
+ * 它是全链路的身份串——信封 SQUADS 行 `digest.ts:258` 逐字打印它、
+ * `ai.ts` 明令陈"逐字照抄"、`crisisResponse` 拿它拼「调XX支援」、
+ * `tacticalPlanner`/`commandAuthority`/`taskTracker` 都按它解析点名。
+ * 留空会让信封出现 `(I1,leader)`、台词出现「调支援」，还会让多支无队长的队
+ * 在点名解析时互相撞车——而 §5 明令不碰信封合同。
+ * 占位名唯一、可解析、下游全部句子仍然通顺，且玩家在屏上和陈的口中都能
+ * 直接听出"这支队没人带"。同形先例：crisisResponse.ts:579 的 "预备队"。
+ *
+ * 它不在名册里 ⇒ personalityForLeaderName 查不到 ⇒ 落兜底档 balanced，
+ * 正是交接档要的"没有队长就吃兜底档"。
+ */
+export function placeholderLeaderName(squadId: string): string {
+  return `无队长${squadId}`;
+}
+
+/**
+ * 取名册里第一个没被占用的名字；**名册空了返回 null**（不再发 "Aiden-2"
+ * 那种带后缀的临时名——那看起来像另一个人，会把稀缺感稀释掉）。
+ *
+ * 步 1 的"引擎自动挑"就是这个函数。步 2 玩家点将时改成从
+ * availableLeaderProfiles 里选一个传进来，**数据模型一个字不动**，
+ * 差别只有"谁来挑"。
+ */
+export function pickLeaderName(usedNames: Set<string>): string | null {
+  return availableLeaderProfiles(usedNames)[0]?.name ?? null;
 }
 
 /**
