@@ -49,6 +49,49 @@
 //   【蓝色圆环】(rendererCanvas.ts:406) 不是任务条。环从不"冻结"（要么锯齿悬停要么 8 秒掉光后
 //   整个不画）；"冻结"只存在于任务条（missions.ts:194 带守卫的单向镜像）。两个口径分开断言。
 //
+// ★★ 判据改版 2026-08-30（队长性格 V1 · 用户裁定）——为什么换掉原来那两条
+//
+//   原判据：①「最长连续空城 ≤20 秒」 ②「存活的指派单位【全都】持有圈内 defend 单」。
+//   两条都被换掉了。改的不是门槛高低，是**口径**——原口径量的不是代码的性质。
+//
+//   ▸ 证据一（负对照：基线自己就过不了）：把引擎恢复到本刀改动前的
+//     `balanced = 8/12`（即队长性格落地之前的行为），跑八个种子量「最长连续空城」：
+//         seed   1=15s   7=13s  1337=14s   42=16s
+//         seed  99=34s ★ 2026=32s ★  555=15s  8080=11s
+//     **seed 99 / 2026 在改动前就是 34s / 32s，本来就破 ≤20s。**
+//     台架只跑 1/7/1337 三个种子，那三个恰好是 11~16s ⇒ 「≤20s」是**这三个种子的
+//     性质，不是代码的性质**。拿一条随种子而变的门槛去判新代码，判的是运气。
+//     （用户与审核窗各自独立重跑复核过这两个数。）
+//
+//   ▸ 证据二（原口径量错了对象）：「全都持有 defend 单」的分母是"所有存活的指派单位"。
+//     队长性格落地后它掉到 94%，掉的是同一个 u17——一辆被打到 hp=5/120、退到 157 格外
+//     的轻坦。改动前它 29s 就阵亡（三种子一致），改动后活了下来，于是被算进分母。
+//     **一辆 157 格外的残兵活下来，不构成"据点没人守"的证据。**
+//     十六个真守军全程都还持有圈内 defend 单，一个没丢。
+//
+//   新判据（口径＝据点本身，不是每个单位；且多种子聚合）：
+//     ①「据点有人守的时间占比」——占领后 120 秒里，圈内至少有一个我方单位的采样占比。
+//        它就是原来那个 emptyFractionPct 的正面写法，但**升格为断言并跨八个种子聚合**。
+//     ②「还有几个单位持有锚在圈内的持久 defend 单」——刀B 的产物本身（家法②：
+//        有隐藏状态的病断言状态本身）。改成**数量下限**而不是"全员比例"，
+//        残兵活下来不再能把它拉红。
+//
+//   ▸ 门槛怎么定的（先量后定，三个群体各八种子，见 NEGCTL_NO_KNIFE_B / POST_FIX_MAIN）：
+//         刀B 关（原病）      有人守 均值19% 最高26%   岗位单持有者 全 0
+//         刀B 开 · 性格前     有人守 均值62% 最低49%   岗位单持有者 最低 11
+//         刀B 开 · 性格后     有人守 均值84% 最低67%   岗位单持有者 最低 12
+//     取 每种子 ≥35% / 八种子均值 ≥45% / 持有者 ≥5：三条都卡在两群中间，
+//     两侧都有十几个百分点余量，且**在性格改动前后都成立**——判据不绑本刀的取值。
+//
+//   ▸ 自证（用户条件 b，家法⑤的本次执行）：把 sim.ts:272 刀B 那条 else-if 加 `false &&`
+//     摘掉，新判据必须变红。实测三条全红（有人守 19%、持有者 0、seed 555 据点直接丢回敌军）。
+//     **抓不住原病的判据是摆设。**
+//
+//   ⚠ 顺带查出来的账：下面 PRE_FIX_MAIN 那组"改前基线"（占比 29/57/66%）是
+//     b73d973 那个引擎版本上测的，**在今天的引擎上复现不出来**——今天把刀B 摘掉
+//     实测是 74~87% 空。数字没写错，是引擎变了。所以它只留作历史记录，
+//     不再作为断言的比较基准；要比就比 NEGCTL_NO_KNIFE_B（今天实测的负对照）。
+//
 // Modes:
 //   --synthetic       确定性断言（默认）
 //   --seed=N          换种子复跑（默认 1；主臂稳定性用 --sweep）
@@ -286,9 +329,18 @@ interface MainArmResult {
    *  比"终态离圈几格"稳健得多：终态是单帧快照，会被最后一次抖动整个改写。 */
   longestEmptySec: number;
   emptyFractionPct: number;
-  /** 存活的指派单位里，处于「defending + 持久 defend 单 + 锚点在圈内」的比例——刀B 的机制本身
-   *  （家法②：有隐藏状态的病断言状态本身；空城时长只是它的下游代理，还混着合法的出击往返）。 */
+  /** 存活的指派单位里，处于「defending + 持久 defend 单 + 锚点在圈内」的比例。
+   *  ⚠ 2026-08-30 起**不再作断言**，只作参考色：分母是"所有存活的指派单位"，
+   *  一辆退到 157 格外的残兵只要活着就能把它拉低（见头部判据改版 ▸证据二）。
+   *  断言改用下面的 postOrderHolders（数量，不是比例）。 */
   defendingAtPostPct: number;
+  /** ★ 还有几个单位持有【锚点在圈内】的持久 defend 单——刀B 的产物本身。
+   *  家法②：有隐藏状态的病断言状态本身。用**数量下限**而非"全员比例"，
+   *  这样残兵活下来不会误判成"据点没人守"。刀B 摘掉时这个数是 0。 */
+  postOrderHolders: number;
+  /** ★ 占领后 120 秒里，圈内至少有一个我方单位的采样占比＝「据点有人守」。
+   *  emptyFractionPct 的正面写法；口径是**据点**，不是每个单位。 */
+  heldFractionPct: number;
   /** 占领成功之后该设施还被 CONTESTED / LOST 过几次（改前 seed1 是 +118s 被抢、198s 丢掉）。 */
   contestedOrLostAfterCapture: number;
 }
@@ -355,6 +407,11 @@ function runMainArm(seed: number, verbose: boolean): MainArmResult {
           !!u.orders[0]?.target && dist(u.orders[0].target!, fac.position) <= CAPTURE_RADIUS,
         ).length / alive.length) * 100)
       : -1,
+    postOrderHolders: alive.filter((u) =>
+      u.orders[0]?.action === "defend" &&
+      !!u.orders[0]?.target && dist(u.orders[0].target!, fac.position) <= CAPTURE_RADIUS,
+    ).length,
+    heldFractionPct: samples ? Math.round(((samples - emptySamples) / samples) * 100) : -1,
     contestedOrLostAfterCapture: rel.filter(
       (e) => e.time > t0 + Math.max(capturedAt, 0) + 1 &&
         (e.type === "FACILITY_CONTESTED" || e.type === "FACILITY_LOST"),
@@ -373,13 +430,42 @@ function runMainArm(seed: number, verbose: boolean): MainArmResult {
 }
 
 /** commit ① 在【未修引擎】(b73d973 + bench) 上测得并经 Fable 逐位复算的病态基线。
- *  刀B 落地后这些数必须垮掉——T2 断言的就是"垮掉"，T3 负对照断言"把刀B 注释掉就回到这里"。 */
+ *  ⚠ 2026-08-30：**已陈旧，只作历史记录，不再当断言基准**。今天把刀B 摘掉实测是
+ *  74~87% 空（不是这里记的 29/57/66%）——数字没写错，是这之间引擎变了好几刀。
+ *  要比"改后是否严格优于原病"，比 NEGCTL_NO_KNIFE_B（今天实测）。 */
 const PRE_FIX_MAIN = {
   capturedAtSec: 72.0,                       // 三种子完全一致（行军时间主导）
   longestEmptySec: { s1: 35, s7: 36, s1337: 27 },
   emptyFractionPct: { s1: 29, s7: 57, s1337: 66 },
   silentWindowSec: { s1: 118, s7: 71, s1337: 76 },
 } as const;
+
+/** ★ 今天（2026-08-30）在**当前引擎**上摘掉刀B（sim.ts:272 那条 else-if 加 `false &&`）
+ *  实测的负对照。八个种子，「据点有人守」的时间占比：
+ *      s1=26 s7=17 s1337=21 s42=21 s99=13 s2026=17 s555=16 s8080=20  ⇒ 均值 19，最高 26
+ *  岗位单持有者：八个种子**全是 0**。seed 555 的据点还被敌军夺了回去。
+ *  这是新判据的"红"侧标定点——门槛必须让这组数据 FAIL，否则判据抓不住原病。 */
+const NEGCTL_NO_KNIFE_B = {
+  heldFractionPct: { s1: 26, s7: 17, s1337: 21, s42: 21, s99: 13, s2026: 17, s555: 16, s8080: 20 },
+  meanHeldPct: 19,
+  postOrderHolders: 0,
+} as const;
+
+/** 判据门槛。三条都取在"原病"与"修好"两群中间，两侧各有十几个百分点余量，
+ *  且在队长性格改动**前后都成立**（改动前均值 62/最低 49，改动后 84/67）——
+ *  判据不绑任何一刀的取值。 */
+const GARRISON_THRESHOLDS = {
+  /** 每个种子：据点有人守的时间占比下限。原病最高 26%，性格改动前最低 49%。 */
+  perSeedHeldPct: 35,
+  /** 八种子均值下限。原病 19%，性格改动前 62%。 */
+  meanHeldPct: 45,
+  /** 每个种子：持有圈内 defend 单的单位数下限。原病 0，实测最低 11。 */
+  minPostOrderHolders: 5,
+} as const;
+
+/** 聚合用的种子组。★ 八个，不是三个——「≤20s」那条就是栽在"三个种子的性质
+ *  被当成了代码的性质"（见头部判据改版 ▸证据一）。 */
+const AGG_SEEDS = [1, 7, 1337, 42, 99, 2026, 555, 8080] as const;
 
 function T2_main(seed: number): void {
   console.log("\n── T2-MAIN 刀B 效果（真剧本，零脚本化）：占完有人守 ──");
@@ -388,42 +474,72 @@ function T2_main(seed: number): void {
     `${PRE_FIX_MAIN.longestEmptySec.s7}/${PRE_FIX_MAIN.longestEmptySec.s1337}s、` +
     `占比 ${PRE_FIX_MAIN.emptyFractionPct.s1}/${PRE_FIX_MAIN.emptyFractionPct.s7}/${PRE_FIX_MAIN.emptyFractionPct.s1337}%`);
 
-  const preLongest = PRE_FIX_MAIN.longestEmptySec[`s${seed}` as keyof typeof PRE_FIX_MAIN.longestEmptySec];
+  const negHeld: number | undefined =
+    NEGCTL_NO_KNIFE_B.heldFractionPct[`s${seed}` as keyof typeof NEGCTL_NO_KNIFE_B.heldFractionPct];
 
   check("T2-MAIN 占领仍然成功（刀B 不该拖慢占领本身）", r.capturedAt > 0,
     `capturedAt=${r.capturedAt.toFixed(1)}s（改前 ${PRE_FIX_MAIN.capturedAtSec}s）`);
   check("T2-MAIN 存活单位仍有", r.survivors > 0, `存活 ${r.survivors}/${r.assigned}`);
   // ★ 机制断言排第一（家法②）：耐久状态＝那张锚在圈内的 defend 单。
-  check("T2-MAIN ★存活的指派单位全都持有锚在圈内的持久 defend 单（岗位本身）",
-    r.defendingAtPostPct === 100, `${r.defendingAtPostPct}%`);
+  //   量的是**还有几个人守着**，不是"每个存活的指派单位是不是都在岗"——
+  //   后者的分母混进了退到 157 格外的残兵（见头部 ▸证据二）。
+  check(`T2-MAIN ★据点有人守：持有锚在圈内 defend 单的单位 ≥${GARRISON_THRESHOLDS.minPostOrderHolders}（摘掉刀B 时为 0）`,
+    r.postOrderHolders >= GARRISON_THRESHOLDS.minPostOrderHolders,
+    `${r.postOrderHolders} 个（存活 ${r.survivors}，其中在岗比例 ${r.defendingAtPostPct}% 仅作参考不作判据）`);
   check("T2-MAIN ★占领之后该设施再没被 CONTESTED / LOST 过（改前 seed=1 是 +118s 被抢、198s 丢掉）",
     r.contestedOrLostAfterCapture === 0, `${r.contestedOrLostAfterCapture} 次`);
-  // 空城时长：门槛先量后定（改前 35/36/27s → 改后 11/13/18s，三种子逐个严格下降）。
-  check("T2-MAIN 长段弃守消失：最长连续空城 ≤20 秒（改前 27-36s，改后实测 11-18s）",
-    r.longestEmptySec <= 20, `最长 ${r.longestEmptySec}s`);
-  check(`T2-MAIN 最长空城严格小于改前同种子（${preLongest}s）`,
-    preLongest === undefined || r.longestEmptySec < preLongest,
-    `改后 ${r.longestEmptySec}s vs 改前 ${preLongest}s`);
-  info(`空城【占比】29/57/66% → 26/37/33%：只小幅下降，且【不作断言】——剩下的空窗是驻防单位` +
-    `合法出击往返（defend 允许迎击射程内威胁，脱战再回岗），不是弃守。本刀治的是"回不回来"，` +
-    `不是"一步不离"（接战方式属手感，用户 07-29 裁定押后）。`);
+  // 据点有人守的时间占比：口径是据点不是单位；本种子先看一眼，聚合判据在 T2_main_aggregate。
+  check(`T2-MAIN 据点有人守的时间占比 ≥${GARRISON_THRESHOLDS.perSeedHeldPct}%（摘掉刀B 时 ${negHeld ?? "?"}%）`,
+    r.heldFractionPct >= GARRISON_THRESHOLDS.perSeedHeldPct,
+    `${r.heldFractionPct}%（空 ${r.emptyFractionPct}%）`);
+  check(`T2-MAIN 有人守占比严格优于摘掉刀B 的同种子负对照（${negHeld ?? "?"}%）`,
+    negHeld === undefined || r.heldFractionPct > negHeld,
+    `修好 ${r.heldFractionPct}% vs 原病 ${negHeld}%`);
+  info(`「最长连续空城 ${r.longestEmptySec}s」**不再作断言**——它是单段极值，随种子跳得厉害` +
+    `（改动前同一份代码在 seed 99/2026 上就是 34s/32s，见头部判据改版）。剩下的空窗多半是驻防` +
+    `单位合法出击往返（defend 允许迎击射程内威胁，脱战再回岗），不是弃守。`);
   info(`（终态离圈 ${r.minDistEnd.toFixed(1)}~${r.maxDistEnd.toFixed(1)} 格、圈内 ${r.inCircleEnd} 人；` +
     `静默 ${r.silentWindowSec.toFixed(0)}s——静默归刀A 治，本 commit 不动）`);
 }
 
-function T2_main_sweep(): void {
-  console.log("\n── T2-MAIN 稳定性：跨种子复跑（换种子应仍成立） ──");
-  const seeds = [1, 7, 1337];
-  const rows = seeds.map((sd) => runMainArm(sd, false));
+/** ★ 跨【八】个种子的聚合判据（2026-08-30 起在默认模式里跑，不再藏在 --sweep 后面）。
+ *
+ *  为什么必须聚合、必须八个：原来这里是三个种子 + 「最长空城 ≤20s」。那条门槛
+ *  在**改动前的同一份代码**上，seed 99 就是 34s、seed 2026 就是 32s ——
+ *  它是那三个种子的性质，不是代码的性质（详见文件头「判据改版」）。
+ *  单段极值随种子跳得厉害，占比稳得多，所以判据换成占比 + 跨种子聚合。 */
+function T2_main_aggregate(): void {
+  console.log("\n── T2-MAIN 聚合判据：八个种子，「据点有人守」的时间占比 ──");
+  const rows = AGG_SEEDS.map((sd) => runMainArm(sd, false));
   for (const r of rows) {
-    info(`seed=${r.seed} 占领@${r.capturedAt.toFixed(1)}s 存活${r.survivors}/${r.assigned} 驻岗${r.defendingAtPostPct}% 抢/丢${r.contestedOrLostAfterCapture}次 ` +
-      `空城最长${r.longestEmptySec}s(${r.emptyFractionPct}%) 终态离圈${r.minDistEnd.toFixed(1)}~${r.maxDistEnd.toFixed(1)} ` +
-      `圈内${r.inCircleEnd} 终态${r.lostBack ? "被夺回" : "仍我方"} 静默${r.silentWindowSec.toFixed(0)}s`);
+    const neg = NEGCTL_NO_KNIFE_B.heldFractionPct[`s${r.seed}` as keyof typeof NEGCTL_NO_KNIFE_B.heldFractionPct];
+    info(`seed=${String(r.seed).padStart(4)} 占领@${r.capturedAt.toFixed(0)}s 存活${r.survivors}/${r.assigned} ` +
+      `★有人守${String(r.heldFractionPct).padStart(3)}%(摘刀B 时${neg}%) 岗位单持有者${String(r.postOrderHolders).padStart(2)} ` +
+      `抢/丢${r.contestedOrLostAfterCapture}次 终态${r.lostBack ? "★被夺回" : "仍我方"} ` +
+      `[参考 最长空${r.longestEmptySec}s 驻岗${r.defendingAtPostPct}%]`);
   }
-  check("T2-MAIN 三个种子都：占领成功 + 全员持有圈内 defend 单 + 设施再没被抢/丢 + 最长空城 ≤20s",
-    rows.every((r) => r.capturedAt > 0 && r.defendingAtPostPct === 100 &&
-      r.contestedOrLostAfterCapture === 0 && r.longestEmptySec <= 20),
-    rows.map((r) => `s${r.seed}:驻岗${r.defendingAtPostPct}%/抢丢${r.contestedOrLostAfterCapture}/空${r.longestEmptySec}s`).join(" "));
+  const held = rows.map((r) => r.heldFractionPct);
+  const mean = Math.round(held.reduce((a, b) => a + b, 0) / held.length);
+  info(`聚合：有人守 均值${mean}% 最低${Math.min(...held)}% 最高${Math.max(...held)}% ` +
+    `｜ 负对照（摘掉刀B）均值${NEGCTL_NO_KNIFE_B.meanHeldPct}% 最高26%、岗位单持有者全 0`);
+
+  check(`T2-MAIN ★八种子均值：据点有人守 ≥${GARRISON_THRESHOLDS.meanHeldPct}%（原病 ${NEGCTL_NO_KNIFE_B.meanHeldPct}%）`,
+    mean >= GARRISON_THRESHOLDS.meanHeldPct, `均值 ${mean}%`);
+  check(`T2-MAIN ★每个种子：据点有人守 ≥${GARRISON_THRESHOLDS.perSeedHeldPct}%（原病最高 26%）`,
+    rows.every((r) => r.heldFractionPct >= GARRISON_THRESHOLDS.perSeedHeldPct),
+    rows.map((r) => `s${r.seed}:${r.heldFractionPct}%`).join(" "));
+  check(`T2-MAIN ★每个种子：岗位单持有者 ≥${GARRISON_THRESHOLDS.minPostOrderHolders}（原病全 0）`,
+    rows.every((r) => r.postOrderHolders >= GARRISON_THRESHOLDS.minPostOrderHolders),
+    rows.map((r) => `s${r.seed}:${r.postOrderHolders}`).join(" "));
+  check("T2-MAIN 八个种子都：占领成功 + 设施再没被抢/丢 + 终态仍是我方",
+    rows.every((r) => r.capturedAt > 0 && r.contestedOrLostAfterCapture === 0 && !r.lostBack),
+    rows.map((r) => `s${r.seed}:抢丢${r.contestedOrLostAfterCapture}${r.lostBack ? "/★丢了" : ""}`).join(" "));
+  check("T2-MAIN 每个种子都严格优于摘掉刀B 的同种子负对照",
+    rows.every((r) => {
+      const neg = NEGCTL_NO_KNIFE_B.heldFractionPct[`s${r.seed}` as keyof typeof NEGCTL_NO_KNIFE_B.heldFractionPct];
+      return neg === undefined || r.heldFractionPct > neg;
+    }),
+    rows.map((r) => `s${r.seed}:${r.heldFractionPct}%`).join(" "));
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1068,7 +1184,7 @@ if (args.includes("--print-snapshot")) {
   T2_script_defendConversion();
   T5b_mousePathConversion();
   T2_main(SEED);
-  if (args.includes("--sweep")) T2_main_sweep();
+  T2_main_aggregate();   // ★ 默认就跑（八种子聚合）；--sweep 保留只为向后兼容，已无额外作用
   T5_script(SEED);
   T8_reasonBranches();
   T9_escalationFrame();
