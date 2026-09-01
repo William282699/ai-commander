@@ -1306,16 +1306,28 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // ── 步 2 点将弹窗 ──
   // 战场还在跑，所以它**不是模态框**：没有遮罩、不拦点击、Esc 可取消。
   // 只记锚点坐标与 owner；名单每次打开时现取（名册随编队实时变短）。
+  // ★ 只存锚点，**不存名单**。名单必须每次渲染现算——
+  //   缓存下来的名单会过期，玩家就可能选到一个已经被派出去的队长，
+  //   于是两支队顶着同一个人，稀缺模型当场就破了。
+  //   （落地那一侧 GameCanvas.handleCreateSquad 还有一道唯一性强制，双保险。）
   const [leaderPicker, setLeaderPicker] = useState<
-    { owner: "chen" | "marcus" | "emily"; x: number; y: number; list: LeaderProfile[] } | null
+    { owner: "chen" | "marcus" | "emily"; x: number; y: number } | null
   >(null);
+  // 名单是从 ref 里现算的，React 不会因为它变了而重渲染；弹窗开着时定时打一拍，
+  // 保证玩家看到的就是此刻真实可派的人。
+  const [, setPickerTick] = useState(0);
+  useEffect(() => {
+    if (!leaderPicker) return;
+    const id = setInterval(() => setPickerTick((n) => n + 1), 250);
+    return () => clearInterval(id);
+  }, [leaderPicker]);
 
   const openLeaderPicker = useCallback((owner: "chen" | "marcus" | "emily", e: React.MouseEvent) => {
     // 没接 getAssignableLeaders（例如被别的宿主复用）就退回步 1 的引擎自动挑，
     // 不弹窗、不报错——少一个可选依赖不该让"编队"这个基本操作失灵。
     if (!getAssignableLeaders) { onCreateSquad?.(owner); return; }
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setLeaderPicker({ owner, x: r.left, y: r.top, list: getAssignableLeaders() });
+    setLeaderPicker({ owner, x: r.left, y: r.top });
   }, [getAssignableLeaders, onCreateSquad]);
 
   const closeLeaderPicker = useCallback(() => setLeaderPicker(null), []);
@@ -3852,7 +3864,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       </div>
       </div>
       </div>
-      {leaderPicker && <LeaderPicker p={leaderPicker} onPick={confirmLeader} onClose={closeLeaderPicker} />}
+      {leaderPicker && (
+        <LeaderPicker
+          p={leaderPicker}
+          list={getAssignableLeaders ? getAssignableLeaders() : []}
+          onPick={confirmLeader}
+        />
+      )}
     </div>
     </>
   );
@@ -4358,12 +4376,13 @@ const PICKER_PERSONALITY_HINT: Record<LeaderPersonality, string> = {
   cautious: "守住阵地，不为路过的目标脱离",     // engage 8
 };
 
-function LeaderPicker({ p, onPick, onClose }: {
-  p: { owner: "chen" | "marcus" | "emily"; x: number; y: number; list: LeaderProfile[] };
+function LeaderPicker({ p, list, onPick }: {
+  p: { owner: "chen" | "marcus" | "emily"; x: number; y: number };
+  /** 每次渲染由调用方现算传入——**不要在这里缓存**，理由见 leaderPicker 状态处。 */
+  list: LeaderProfile[];
   onPick: (leaderName: string | null) => void;
-  onClose: () => void;
 }) {
-  const empty = p.list.length === 0;
+  const empty = list.length === 0;
   // 贴着按钮往上弹；夹在视口内，别被挤出屏幕。
   const width = 208;
   const left = Math.max(8, Math.min(p.x, window.innerWidth - width - 8));
@@ -4380,7 +4399,7 @@ function LeaderPicker({ p, onPick, onClose }: {
     >
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
         <span style={{ fontSize: 11, color: "var(--hud-text-primary)", fontWeight: "bold" }}>
-          可用队长（{p.list.length}）
+          可用队长（{list.length}）
         </span>
         <span style={{ fontSize: 9, color: "var(--hud-text-dim)" }}>Esc 取消</span>
       </div>
@@ -4402,7 +4421,7 @@ function LeaderPicker({ p, onPick, onClose }: {
           >仍然编队（无队长）</button>
         </>
       ) : (
-        p.list.map((lp) => (
+        list.map((lp) => (
           <button
             key={lp.name}
             onClick={() => onPick(lp.name)}

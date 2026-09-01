@@ -1173,14 +1173,32 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       .map((u) => u.type);
     // 玩家点了将就用他点的；没点（桥调用 / 旧路径）就沿用步 1 的引擎自动挑。
     // 名册空了 ⇒ null ⇒ createSquad 给占位名，仍然建得成队（不报错）。
-    const leaderName = choice !== undefined
-      ? choice.leaderName
-      : pickLeaderName(getUsedLeaderNames(state.squads));
+    //
+    // ★ 唯一性在**落地这一侧**强制，不能只靠弹窗显示得对：弹窗名单是玩家点开
+    //   之后才被消费的，中间任何一次编队/编制树晋升都可能把他看中的人派出去。
+    //   真让两支队顶同一个人，稀缺模型就破了（"用掉一个就少一个"不再成立），
+    //   而且按 leaderName 解析点名的那几处（tacticalPlanner / commandAuthority /
+    //   taskTracker）会开始撞车。所以这里重新按**此刻**的占用判一次。
+    const usedNow = getUsedLeaderNames(state.squads);
+    let leaderName: string | null;
+    let staleChoice: string | null = null;
+    if (choice === undefined) {
+      leaderName = pickLeaderName(usedNow);                 // 引擎自动挑
+    } else if (choice.leaderName === null) {
+      leaderName = null;                                    // 玩家明知名册已空，仍要编
+    } else if (!usedNow.has(choice.leaderName)) {
+      leaderName = choice.leaderName;                       // 玩家点的人还在 → 就是他
+    } else {
+      staleChoice = choice.leaderName;                      // 点开弹窗之后被人占了
+      leaderName = pickLeaderName(usedNow);                 // 退到下一个可用的；没有就 null
+    }
     const squad = createSquad(squadIds, unitTypes, state.nextSquadNum, owner, leaderName);
     state.squads.push(squad);
     addMessage("info",
       `新建分队 ${squad.id}:${squad.name} (${squadIds.length}人) → ${owner}` +
-      (leaderName === null ? "（名册已空，这支队没有队长）" : `，队长 ${squad.leaderName}`),
+      (leaderName === null ? "（名册已空，这支队没有队长）" : `，队长 ${squad.leaderName}`) +
+      // 不静默改掉玩家的选择——他点的是谁、最后给的是谁，说清楚。
+      (staleChoice ? `（${staleChoice} 已被派出，改派 ${leaderName ?? "无"}）` : ""),
       state.time, "ops", "player", "player");
   }, []);
 
