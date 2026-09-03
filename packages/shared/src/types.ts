@@ -603,7 +603,7 @@ export interface BattleMarker {
 
 // --- Scenario ---
 
-export type ScenarioId = "dual_island" | "el_alamein";
+export type ScenarioId = "dual_island" | "el_alamein" | "tutorial";
 
 // --- Named Route (scenario-specific pre-defined movement paths) ---
 

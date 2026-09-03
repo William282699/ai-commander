@@ -25,7 +25,17 @@ import {
   screenToTile,
   isBoxSelection,
 } from "./input";
-import { FRONT_CAMERA_TARGETS, EL_ALAMEIN_CAMERA_TARGETS } from "@ai-commander/shared";
+import { FRONT_CAMERA_TARGETS, EL_ALAMEIN_CAMERA_TARGETS, TUTORIAL_CAMERA_TARGETS } from "@ai-commander/shared";
+
+/** URL → scenarioId 的**唯一**一处解析。
+ *  原本 `handleRestart` 与初始化各抄了一份同样的三元表达式；加教学关时
+ *  漏改任一处，都会变成"开局是教学图、重开变回阿拉曼"。 */
+function scenarioFromUrl(): ScenarioId {
+  const p = new URLSearchParams(window.location.search).get("scenario");
+  if (p === "dual_island") return "dual_island";
+  if (p === "tutorial") return "tutorial";
+  return "el_alamein";
+}
 import { createInitialGameState } from "@ai-commander/core";
 import {
   tick,
@@ -76,7 +86,7 @@ import {
   resetPressureDirector,
 } from "@ai-commander/core";
 import type { FacilitySituationType, AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot, StrategicSituation, ViewportGeometry } from "@ai-commander/core";
-import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
+import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, ReportEventType, TaskPriority, CrisisEvent, ScenarioId } from "@ai-commander/shared";
 import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, availableLeaderProfiles, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import type { LeaderProfile } from "@ai-commander/shared";
@@ -1325,9 +1335,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
   }, [facilityMenu]);
 
   const handleRestart = useCallback(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const scenarioParam = urlParams.get("scenario");
-    const sid = scenarioParam === "dual_island" ? "dual_island" as const : "el_alamein" as const;
+    const sid = scenarioFromUrl();
     const newState = createInitialGameState(sid);
     stateRef.current = newState;
     gameOverDetectedRef.current = false;
@@ -1383,8 +1391,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
 
     // Create game state — El Alamein is the default; only ?scenario=dual_island opts out.
     const urlParams = new URLSearchParams(window.location.search);
-    const scenarioParam = urlParams.get("scenario");
-    const scenarioId = scenarioParam === "dual_island" ? "dual_island" as const : "el_alamein" as const;
+    const scenarioId = scenarioFromUrl();
     const noFog = urlParams.get("nofog") === "1";
     const initialState = createInitialGameState(scenarioId);
     stateRef.current = initialState;
@@ -1415,7 +1422,9 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     // Camera: center on player HQ
     const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
     cameraRef.current = camera; // live object — input listeners mutate it in place
-    const hqCenter = scenarioId === "el_alamein" ? { x: 430, y: 90 } : { x: 100, y: 7 };
+    const hqCenter = scenarioId === "el_alamein" ? { x: 430, y: 90 }
+      : scenarioId === "tutorial" ? { x: 14, y: 40 }   // tut_player_hq
+      : { x: 100, y: 7 };
     centerCameraOn(camera, hqCenter.x, hqCenter.y, canvas.width, canvas.height, initialState.mapWidth, initialState.mapHeight);
 
     // Input — use ref so it's accessible outside useEffect
@@ -1427,8 +1436,8 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     // Fronts array (ordered 1-5 for hotkey mapping) — `let` so restart can refresh
     let frontIds = initialState.fronts.map((f) => f.id);
     // Select camera targets by scenario (no merge — keys like front_center overlap)
-    const cameraTargets = scenarioId === "el_alamein"
-      ? EL_ALAMEIN_CAMERA_TARGETS
+    const cameraTargets = scenarioId === "el_alamein" ? EL_ALAMEIN_CAMERA_TARGETS
+      : scenarioId === "tutorial" ? TUTORIAL_CAMERA_TARGETS
       : FRONT_CAMERA_TARGETS;
 
     // Compute initial fog so first frame shows visibility
