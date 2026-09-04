@@ -2,6 +2,7 @@ import { useRef, useState, useEffect, useCallback } from "react";
 import { GameCanvas } from "./GameCanvas";
 import { ChatPanel } from "./ChatPanel";
 import { TutorialOverlay } from "./TutorialOverlay";
+import { IntroGate } from "./IntroGate";
 import type { GameState } from "@ai-commander/shared";
 import type { GameBridge } from "./GameCanvas";
 
@@ -16,9 +17,36 @@ function formatTime(sec: number): string {
 
 const isPanelMode = new URLSearchParams(window.location.search).get("mode") === "panel";
 
-// El Alamein is the default scenario (only ?scenario=dual_island opts out). The
-// onboarding tutorial runs on El Alamein, so it shows on the default load too.
-const isTutorialScenario = new URLSearchParams(window.location.search).get("scenario") !== "dual_island";
+// ── 开场闸（教学关 步2）────────────────────────────────────
+// 改之前：`scenario !== "dual_island"` ⇒ **教学关也会弹那 12 张卡**，而那 12 张
+// 卡第一张写的是「阿拉曼前线／30 分钟／4 个据点夺 3 个／3 个前哨全丢就输」——
+// 四个数字对教学关**全是错的**（教学关是 1 个目标、1 个哨站，且那条败北条件
+// 永不触发）。所以闸必须按场景分三路，不能再二选一。
+const SCENARIO_PARAM = new URLSearchParams(window.location.search).get("scenario");
+const IS_TUTORIAL_MAP = SCENARIO_PARAM === "tutorial";
+const IS_DUAL_ISLAND = SCENARIO_PARAM === "dual_island";
+/** 正式局（默认场景）。只有它才弹开场闸。 */
+const IS_MAIN_CAMPAIGN = !IS_TUTORIAL_MAP && !IS_DUAL_ISLAND;
+
+/** 看过就不再弹（审核提过：现在没有任何"看过"记忆，每次开局都重放 12 张卡，
+ *  测试者玩两局要读 24 张）。`?intro=1` 强制弹回来，手测/试玩用。 */
+const INTRO_SEEN_KEY = "aic_intro_seen_v1";
+const FORCE_INTRO = new URLSearchParams(window.location.search).get("intro") === "1";
+
+function introSeen(): boolean {
+  // localStorage 在无痕窗口/禁用站点数据时会直接抛，不能裸读。
+  try { return window.localStorage.getItem(INTRO_SEEN_KEY) === "1"; } catch { return false; }
+}
+function markIntroSeen(): void {
+  try { window.localStorage.setItem(INTRO_SEEN_KEY, "1"); } catch { /* 存不下就每次弹，不致命 */ }
+}
+
+/** 开场屏的三态：闸 → （可选）说明书 → 关掉。教学图与 dual_island 直接 none。 */
+type IntroMode = "gate" | "manual" | "none";
+function initialIntroMode(): IntroMode {
+  if (!IS_MAIN_CAMPAIGN) return "none";
+  return FORCE_INTRO || !introSeen() ? "gate" : "none";
+}
 
 function PanelApp() {
   const [bridge, setBridge] = useState<GameBridge | null>(null);
@@ -97,9 +125,10 @@ export default function App() {
 
   const stateGetterRef = useRef<(() => GameState | null) | null>(null);
   const [panelDetached, setPanelDetached] = useState(false);
-  // Onboarding tutorial overlay gate (every El Alamein launch; skippable). When
-  // active, GameCanvas is paused (frozen map, clock stopped) until 开始作战/跳过.
-  const [tutorialActive, setTutorialActive] = useState(isTutorialScenario);
+  // 开场屏。挂着时 GameCanvas 是 paused（地图冻住、钟不走），与改前同一个机制。
+  const [introMode, setIntroMode] = useState<IntroMode>(initialIntroMode);
+  const introActive = introMode !== "none";
+  const dismissIntro = () => { markIntroSeen(); setIntroMode("none"); };
 
   const [topBar, setTopBar] = useState({
     money: 2000,
@@ -306,10 +335,19 @@ export default function App() {
 
       {/* Main canvas area */}
       <div style={{ flex: 1, position: "relative" }}>
-        <GameCanvas onStateReady={registerStateGetter} panelDetached={panelDetached} paused={tutorialActive} />
+        <GameCanvas onStateReady={registerStateGetter} panelDetached={panelDetached} paused={introActive} />
       </div>
 
-      {tutorialActive && <TutorialOverlay onStart={() => setTutorialActive(false)} />}
+      {introMode === "gate" && (
+        <IntroGate
+          // 进教学＝换场景，必须整页跳转：场景是在 GameCanvas 的 useEffect 里
+          // 按 URL 建的，光改 state 不会重建 GameState。
+          onEnterTutorial={() => { markIntroSeen(); window.location.search = "?scenario=tutorial"; }}
+          onSkip={dismissIntro}
+          onOpenManual={() => setIntroMode("manual")}
+        />
+      )}
+      {introMode === "manual" && <TutorialOverlay onStart={dismissIntro} />}
     </div>
   );
 }
