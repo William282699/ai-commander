@@ -27,8 +27,16 @@ import type { GameState } from "@ai-commander/shared";
  *  游戏时间自然停住 ⇒ 人不在座位上就不会被催，正好是我们要的。 */
 export const NUDGE_AFTER_SEC = 15;
 
+/** 这一步要玩家去点的那个键。UI 层据此让**那一个**键呼吸。
+ *  ★ 复用喇叭键那条先例的规矩：**绑这一步的生死**——步骤一完成就停，
+ *  绝不做常驻 affordance（`game-ui.css` 里那段注释写着理由）。
+ *  将来步 4/5 会加 `"channel:logistics"` / `"channel:ops"` 之类。 */
+export type GuideHint = "squad";
+
 export interface GuideStep {
   id: string;
+  /** 这一步该点哪个键；省略＝这一步没有要点的键（例如只要说话）。 */
+  hint?: GuideHint;
   /** 进入这一步时陈说的那句。 */
   say: string;
   /** 卡了 NUDGE_AFTER_SEC 还没动静时再说的一句。
@@ -45,12 +53,14 @@ export interface GuideStep {
 export const GUIDE_STEPS: GuideStep[] = [
   {
     id: "squad_1",
+    hint: "squad",
     say: "长官，先认认您的部队。北边那四个步兵，用鼠标拖个框圈上，点右下角的「编队」，给他们指个队长。",
     nudge: "长官？把北边那四个步兵拖个框圈上，然后点「编队」——挑谁当队长您说了算。",
     done: (s) => s.squads.length >= 1,
   },
   {
     id: "squad_2",
+    hint: "squad",
     say: "好，这队归您点名了。地图上还有一批兵散着没编——照样圈上、点「编队」，咱们手上就有两支能整队调动的部队。",
     nudge: "长官，还有一批散兵没编队。圈上、点「编队」，跟刚才一样。",
     done: (s) => s.squads.length >= 2,
@@ -105,6 +115,13 @@ export function advanceGuide(g: GuideState, s: GameState, now: number): GuideEff
   }
 
   return { say: null, next: g };
+}
+
+/** 当前这一步该点哪个键；引导走完或这一步没有键就返回 null。
+ *  UI 层每拍读它——**没有第二份状态**，脉冲跟着引导进度自动生灭。 */
+export function currentHint(g: GuideState | null): GuideHint | null {
+  if (!g || g.index >= GUIDE_STEPS.length) return null;
+  return GUIDE_STEPS[g.index].hint ?? null;
 }
 
 /** 开场那一句（第 0 步的 say）。由调用方在引导启动时发一次。 */

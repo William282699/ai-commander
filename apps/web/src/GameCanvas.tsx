@@ -90,7 +90,8 @@ import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, Repor
 import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, availableLeaderProfiles, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import type { LeaderProfile } from "@ai-commander/shared";
-import { advanceGuide, initialGuideState, openingLine, type GuideState } from "./tutorialGuide";
+import { advanceGuide, initialGuideState, openingLine, currentHint,
+  type GuideState, type GuideHint } from "./tutorialGuide";
 import { ChatPanel } from "./ChatPanel";
 import { TaskBar } from "./TaskBar";
 import * as messageStoreModule from "./messageStore";
@@ -842,6 +843,9 @@ export interface GameBridge {
   getViewport: () => ViewportGeometry | null;
   onCreateSquad: (owner: "chen" | "marcus" | "emily", choice?: { leaderName: string | null }) => void;
   canCreateSquad: () => boolean;
+  /** 教学引导：当前这一步要玩家点哪个键（UI 据此让那一个键呼吸）。
+   *  走桥而不是模块级变量——弹出面板是**另一个 window**，模块级过不去。 */
+  getGuideHint: () => GuideHint | null;
   getAssignableLeaders: () => LeaderProfile[];
   onDeclareWar: () => void;
   onSelectUnits: (unitIds: number[]) => void;
@@ -1002,6 +1006,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     }, 500);
     return () => clearInterval(id);
   }, []);
+
+  /** 脉冲绑引导这一步的生死：步骤一完成 `currentHint` 自然返回 null，
+   *  引导走完也返回 null——不做常驻 affordance（照喇叭键那条先例）。 */
+  const getGuideHint = useCallback(() => currentHint(guideRef.current), []);
 
   const handleTaskCancel = useCallback((taskId: string) => {
     const state = stateRef.current;
@@ -1298,6 +1306,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       getViewport,
       onCreateSquad: handleCreateSquad,
       canCreateSquad,
+      getGuideHint,
       getAssignableLeaders,
       onDeclareWar: handleDeclareWar,
       onSelectUnits: handleSelectUnits,
@@ -2509,6 +2518,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           getViewport={getViewport}
           onCreateSquad={handleCreateSquad}
           canCreateSquad={canCreateSquad}
+          getGuideHint={getGuideHint}
           getAssignableLeaders={getAssignableLeaders}
           onDeclareWar={handleDeclareWar}
           onSelectUnits={handleSelectUnits}

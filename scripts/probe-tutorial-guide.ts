@@ -16,7 +16,7 @@
 import { createInitialGameState } from "../packages/core/src/index";
 import { createSquad } from "../packages/shared/src/squad";
 import { advanceGuide, initialGuideState, openingLine, GUIDE_STEPS, NUDGE_AFTER_SEC,
-  type GuideState } from "../apps/web/src/tutorialGuide";
+  currentHint, type GuideState } from "../apps/web/src/tutorialGuide";
 import type { GameState, Unit } from "../packages/shared/src/types";
 
 const TRIPWIRE = process.argv.includes("--tripwire");
@@ -121,6 +121,24 @@ console.log("\n── ⑤ 玩家抢跑：陈还没开口他就编好了 ──")
   const { g, said } = run(s, 60, 1);
   check("抢跑也能直接走完", g.index >= GUIDE_STEPS.length, `index=${g.index}`);
   check("一句催促都没有", !said.some(x => GUIDE_STEPS.some(st => st.nudge === x)), "无催促");
+}
+
+console.log("\n── ⑥ 该点哪个键的脉冲：跟着步骤生灭，不常驻 ──");
+{
+  // 铁律照喇叭键那条先例：**绑这一步的生死**。常驻的提示等于没有提示，还烦人。
+  const s = createInitialGameState("tutorial");
+  let g: GuideState | null = initialGuideState(s.time);
+  check("第一步：提示点「编队」", currentHint(g) === "squad", String(currentHint(g)));
+
+  makeSquad(s, "infantry");
+  s.time += 1; g = advanceGuide(g!, s, s.time).next;
+  check("第二步：还是「编队」", currentHint(g) === "squad", String(currentHint(g)));
+
+  makeSquad(s, "light_tank");
+  s.time += 1; g = advanceGuide(g!, s, s.time).next;
+  // ★ 这条是承重的：引导走完脉冲必须灭，否则那个键会一直闪到关机
+  check("引导走完：脉冲灭", currentHint(g) === null, String(currentHint(g)));
+  check("引导没起来时也不亮（正式局不误伤）", currentHint(null) === null, String(currentHint(null)));
 }
 
 if (TRIPWIRE) {
