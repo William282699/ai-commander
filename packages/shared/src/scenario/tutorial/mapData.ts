@@ -2,8 +2,13 @@
 // AI Commander — 教学关地图数据
 //
 // 设计约束（写在这里，免得将来被"顺手扩充"）：
-//  1. **两个据点**——我方一个、敌方一个。敌方那个就是过关目标。
-//     多一个据点就多一份要教的东西，教学关不背这个。
+//  1. **三个可占点，但只有一个是过关目标**：
+//       · `tut_player_post` 我方哨站——开局就是你的，用来教"这是我的点"
+//       · `tut_beacon` 烽火台（中立，无人守）——教学的**第一次占领**，
+//         占下来东边的迷雾自己散（见该设施的注释）
+//       · `tut_enemy_post` 敌军哨站——**过关目标**，有人守，最后一步
+//     顺序是有意的：先在没有战斗的情况下学会占领机制、拿到一个看得见的奖励，
+//     再去打真的。别再加第四个——多一个点就多一份要教的东西。
 //  2. **地名必须好念**。参谋说话全靠地名；玩家要能把听到的名字原样说回去
 //     （撞过账：语音识别听不懂音译名）。所以三个地名都是常用字。
 //  3. **一条战线**。马克斯要有东西可报；零战线时判读行会空掉。
@@ -37,7 +42,7 @@ export const TUTORIAL_REGIONS: Region[] = [
     chokepoints: [],
     adjacent: ["tut_base", "tut_ridge"],
     strategicValue: ["open_ground", "approach"],
-    facilities: [],
+    facilities: ["tut_beacon"],
   },
   {
     id: "tut_ridge",
@@ -101,6 +106,29 @@ export const TUTORIAL_FACILITIES: Facility[] = [
     capturingTeam: null,
   },
   {
+    // ★ 迷雾的钥匙（用户设计 2026-09-03）：教学关第一次占领就是它。
+    //
+    //  · **中立**不是敌方——第一次占领要**没有战斗**，先把机制教干净，
+    //    打仗留给后面的敌军哨站。
+    //  · **`radar` 型**：非 el_alamein 分支给 radar 20 格视野（`fog.ts:63`），
+    //    而 `updateFog` 只算玩家拥有的设施 ⇒ 占下就自己亮，**零新机制**。
+    //  · **(75,40) 是算过的**：到敌军哨站 (92,40) 距离 17（<20，照得到）、
+    //    到敌军指挥部 (110,40) 距离 35（>20，照不到）。挪它之前先重算这两个数，
+    //    挪错了要么白占（照不到目标）、要么把玩家引向总部那条不该走的通关路。
+    id: "tut_beacon",
+    name: "烽火台",
+    tags: ["beacon", "neutral", "烽火台", "了望塔"],
+    type: "radar",
+    position: { x: 75, y: 40 },
+    team: "neutral",
+    hp: 200,
+    maxHp: 200,
+    regionId: "tut_valley",
+    strategicEffect: "Observation tower — reveals the eastern approach once held",
+    captureProgress: 0,
+    capturingTeam: null,
+  },
+  {
     // ★ 教学关的过关目标。类型必须可占（见档头约束 4）。
     id: "tut_enemy_post",
     name: "敌军哨站",
@@ -137,7 +165,10 @@ export const TUTORIAL_FRONTS: Front[] = [
   {
     id: "tut_front_center",
     name: "中央战线",
-    regionIds: ["tut_valley", "tut_ridge"],
+    // ★ tut_base 必须在里面：玩家 12 个单位全站在营地区，漏掉它 ⇒
+    //   信封写 `OurPwr=0`、马克斯的 ops 面写 `EMPTY?/QUIET` + `KEY_RISKS: None`，
+    //   教学第 4 步「问马克斯当前什么情况」他手上一个字都没有。（审核挖出）
+    regionIds: ["tut_base", "tut_valley", "tut_ridge"],
     playerPower: 0,
     enemyPower: 0,
     enemyPowerKnown: false,

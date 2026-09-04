@@ -60,8 +60,10 @@ export function resetAttackWaveState(): void {
 }
 
 function runEnemyAI(state: GameState): void {
-  // Defensive AI mode (El Alamein) — handled by separate module
-  if (state.enemyAIMode === "defensive") return;
+  // Defensive AI mode (El Alamein) — handled by separate module.
+  // "none" = 本场景不要任何敌方战略 AI（教学关）——注意这是**反向**闸，
+  // 字段缺席会落到这里继续跑，所以关掉必须显式写 "none"。
+  if (state.enemyAIMode === "defensive" || state.enemyAIMode === "none") return;
 
   const assessments = assessFronts(state);
 

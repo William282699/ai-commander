@@ -184,7 +184,8 @@ function generateCriticalFrontMarkers(state: GameState, now: number): void {
   // Offensive scenarios (player is attacking, enemy is defending) — skip entirely.
   // critical_front is a DEFENSIVE alarm ("your front is being overwhelmed"), meaningless
   // when all fronts are enemy-held by design.
-  if (state.enemyAIMode === "defensive") return;
+  // "none"（教学关）同样是进攻局：玩家去打敌人的点，没有"我方战线被压垮"这回事。
+  if (state.enemyAIMode === "defensive" || state.enemyAIMode === "none") return;
 
   for (const front of state.fronts) {
     // Only flag as critical when player HAS forces on this front but is being overwhelmed.

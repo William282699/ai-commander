@@ -147,6 +147,7 @@ export function createElAlameinState(): GameState {
     scenarioWinConfig: {
       timeLimitSec: 1800,                  // 30 minutes
       requiredCapturedObjectives: 3,       // 5C-lite: K=3 of 4 Axis objectives
+      victoryLabel: "阿拉曼大捷！",          // 原本写死在 warPhase，搬到场景自己带
       friendlyKeypoints: [
         "ea_player_coastal_post",
         "ea_player_central_post",

@@ -684,13 +684,26 @@ export interface GameState {
     requiredCapturedObjectives: number;   // K-of-N from captureObjectives
     friendlyKeypoints: string[];          // facility IDs whose loss is a defeat trigger
     maxFriendlyKeypointsLost: number;     // defeat when this many keypoints are lost
+    /** 达成 K-of-N 时那句通关文案。缺席＝沿用旧的写死句（`warPhase.ts`）。
+     *  ★ 加它是因为胜利文案里写死了"阿拉曼大捷！"，教学关通关会恭喜玩家
+     *  打赢了阿拉曼（审核挖出）。场景专属的话就该由场景自己带。 */
+    victoryLabel?: string;
     /** 5C-lite: 30-min timeout rating thresholds on score = captured - lost. */
     ratingThresholds?: {
       majorVictory: number; victory: number; minorVictory: number;
       draw: number; minorDefeat: number; defeat: number;
     };
   };
-  enemyAIMode?: "offensive" | "defensive";
+  /** 敌方 AI 选择器。
+   *  - `"defensive"` = El Alamein 那套（`scenario/elAlamein/defensiveAI.ts`）
+   *  - `"offensive"` / 缺席 = 老的全局 `enemyAI.ts::runEnemyAI`
+   *  - `"none"` = **都不跑**（教学关）
+   *
+   *  ★ 为什么要有 `"none"`：`enemyAI.ts` 与 `battleAwareness.ts` 里那两道闸是
+   *  **反向**的（`=== "defensive"` 才 return），所以"字段缺席"并不等于"没有敌方
+   *  AI"——它等于"跑老的那套"。教学关一度就栽在这：以为不设就是敌人不动，
+   *  实测敌军一路向西游到中央谷地、守军离岗。 */
+  enemyAIMode?: "offensive" | "defensive" | "none";
   entrenchTimers: Map<number, number>;  // unitId → seconds spent stationary in defend
 }
 

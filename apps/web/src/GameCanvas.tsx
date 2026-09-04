@@ -1423,7 +1423,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
     cameraRef.current = camera; // live object — input listeners mutate it in place
     const hqCenter = scenarioId === "el_alamein" ? { x: 430, y: 90 }
-      : scenarioId === "tutorial" ? { x: 14, y: 40 }   // tut_player_hq
+      // ★ 不是 HQ(14,40)：审核实测 900×700 / 1000×800 画布下，镜头被 clampCamera
+      //   顶到 camera.x=0，可视 x∈[0,31.3]，而玩家的兵在 x=32~35 ⇒ **开局一个
+      //   自己的兵都看不见**。往东挪到两坨兵中间，HQ 与两坨同屏。
+      : scenarioId === "tutorial" ? { x: 26, y: 40 }
       : { x: 100, y: 7 };
     centerCameraOn(camera, hqCenter.x, hqCenter.y, canvas.width, canvas.height, initialState.mapWidth, initialState.mapHeight);
 

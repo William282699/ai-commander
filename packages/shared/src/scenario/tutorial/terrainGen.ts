@@ -32,6 +32,9 @@ export function generateTutorialTerrain(): TerrainType[][] {
 
   // 我军营地一小片城镇底色（让基地区域在地图上认得出来）
   fill(10, 34, 26, 48, "urban");
+  // ★ 补回被 urban 盖掉的那段公路（审核抓出：(12,40) 曾经是 urban）。
+  //   顺序敏感——这一笔必须在 urban 之后，否则又被盖回去。
+  fill(10, 38, 26, 42, "road");
 
   return map;
 }
