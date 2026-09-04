@@ -106,7 +106,8 @@ export function advanceGuide(g: GuideState, s: GameState, now: number): GuideEff
   if (step.done(s)) {
     const index = g.index + 1;
     const next: GuideState = { index, stepStartedAt: now, nudged: false };
-    return { say: index < GUIDE_STEPS.length ? GUIDE_STEPS[index].say : null, next };
+    // 走完最后一步 ⇒ 说结束语（解除引导），不是静默收摊
+    return { say: index < GUIDE_STEPS.length ? GUIDE_STEPS[index].say : OUTRO_LINE, next };
   }
 
   // ③ 卡住了 → 催一次（一步只催一次）
@@ -116,6 +117,24 @@ export function advanceGuide(g: GuideState, s: GameState, now: number): GuideEff
 
   return { say: null, next: g };
 }
+
+/**
+ * 引导走完时陈说的最后一句。
+ *
+ * ★ 为什么必须有它（用户 2026-09-04 提出，是个很硬的设计观察）：
+ *   手把手引导有个自带的副作用——**它会把玩家训练成"等指令"**。走完两步之后
+ *   玩家很容易继续坐着等下一条提示，而不是自己开口。这对别的游戏只是节奏问题，
+ *   对本作是**要命**的：整个产品命题就是"你用自己的话指挥"，玩家一旦进入
+ *   "照着教程做完就算玩过了"的模式，我们要验证的那件事根本不会发生。
+ *
+ *   所以最后一句的职责不是道别，是**明确解除引导**：告诉他从现在起不用等我说话。
+ *
+ * 措辞上有意举两三个例子而不列清单——是给他看**范围**（打哪儿/派谁/要不要先看看），
+ * 不是给他一张命令菜单。给菜单他就会照着念，那又变成另一种"等指令"。
+ */
+export const OUTRO_LINE =
+  "基本操作就这些了。往后不用等我开口——您想到什么就直接跟我说，用平常说话的方式："
+  + "打哪儿、派谁去、要不要先摸一摸敌情，都由您定。我在。";
 
 /** 当前这一步该点哪个键；引导走完或这一步没有键就返回 null。
  *  UI 层每拍读它——**没有第二份状态**，脉冲跟着引导进度自动生灭。 */

@@ -16,7 +16,7 @@
 import { createInitialGameState } from "../packages/core/src/index";
 import { createSquad } from "../packages/shared/src/squad";
 import { advanceGuide, initialGuideState, openingLine, GUIDE_STEPS, NUDGE_AFTER_SEC,
-  currentHint, type GuideState } from "../apps/web/src/tutorialGuide";
+  currentHint, OUTRO_LINE, type GuideState } from "../apps/web/src/tutorialGuide";
 import type { GameState, Unit } from "../packages/shared/src/types";
 
 const TRIPWIRE = process.argv.includes("--tripwire");
@@ -93,7 +93,13 @@ console.log("\n── ④ 两队都编完：引导走完，从此闭嘴 ──")
   const before = said.length;
   const after = run(s, 30, 1, undefined, g);
   check("走完后不再说话", after.said.length === 0, `又说了 ${after.said.length} 句`);
-  check("全程说的句数合理（开场＋第二句）", before === 2, `${before} 句`);
+  check("全程＝开场＋第二句＋结束语", before === 3, `${before} 句`);
+  // ★ 结束语是承重的：手把手引导会把玩家训练成"等指令"，必须显式解除
+  check("结束语说了", said.includes(OUTRO_LINE), OUTRO_LINE.slice(0, 20) + "…");
+  check("结束语只说一次", said.filter(x => x === OUTRO_LINE).length === 1,
+    `${said.filter(x => x === OUTRO_LINE).length} 次`);
+  check("结束语里没有 markdown 星号（面板不渲染它）", !/\*/.test(OUTRO_LINE), "无星号");
+  check("结束语明说了不用等指令", /不用等我|自己|由您定/.test(OUTRO_LINE), "有解除语");
 }
 
 console.log("\n── ④b 倒着做：先编坦克再编步兵（实机抓出来的）──");

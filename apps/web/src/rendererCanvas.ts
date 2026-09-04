@@ -622,6 +622,12 @@ const FACTION_RING_DROP = 0.45;      // nudged down by ry * this, to sit at the 
 const FACTION_RING_LINE = 0.16;      // rim width = rx * this
 const FACTION_RING_FILL_ALPHA = 0.30;
 const FACTION_RING_RIM_ALPHA = 0.95;
+/** 外面那圈晕（"发光"）。**故意做得便宜**：一个额外的 fill，不用 `shadowBlur`
+ *  也不用每帧造渐变——canvas 的 shadow 与 gradient 都是按单位按帧的重开销，
+ *  而「鼠标 1-2 秒卡顿」是 LEDGER 里**还没结的账**（首个外部试玩者的机器）。
+ *  每单位新增 1 次 fill；85 个单位 ⇒ +85 fill/帧。 */
+const FACTION_GLOW_RX = 1.55;        // 比本体圈大这么多倍
+const FACTION_GLOW_ALPHA = 0.16;     // 压得很淡，是"晕"不是第二个圈
 
 /**
  * The selection ring sits just outside the faction base, as a multiple of it.
@@ -715,6 +721,14 @@ export function renderUnits(
     // A coloured base under the feet is the RTS-standard read: it survives
     // overlap, motion, and greyscale (the two hues differ in luminance too).
     ctx.save();
+    // 外晕先画（在本体圈之下），让阵营色从边缘化开，不是一条硬边。
+    const glowRx = ringRx * FACTION_GLOW_RX;
+    const glowRy = glowRx * FACTION_RING_FLATTEN;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + glowRy * FACTION_RING_DROP, glowRx, glowRy, 0, 0, Math.PI * 2);
+    ctx.fillStyle = factionColor(isPlayer, FACTION_GLOW_ALPHA);
+    ctx.fill();
+
     ctx.beginPath();
     ctx.ellipse(cx, cy + ringRy * FACTION_RING_DROP, ringRx, ringRy, 0, 0, Math.PI * 2);
     ctx.fillStyle = factionColor(isPlayer, FACTION_RING_FILL_ALPHA);
