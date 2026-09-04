@@ -90,6 +90,7 @@ import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, Repor
 import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, availableLeaderProfiles, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import type { LeaderProfile } from "@ai-commander/shared";
+import { advanceGuide, initialGuideState, openingLine, type GuideState } from "./tutorialGuide";
 import { ChatPanel } from "./ChatPanel";
 import { TaskBar } from "./TaskBar";
 import * as messageStoreModule from "./messageStore";
@@ -970,6 +971,34 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         taskHashRef.current = hash;
         setTaskSnapshot([...s.tasks]);
       }
+    }, 500);
+    return () => clearInterval(id);
+  }, []);
+
+  // ── 教学关引导（步 3）──────────────────────────────────
+  // 只在教学图跑。判定读引擎状态（数 squads），台词走陈的频道＋出声标记，
+  // 不做任何浮层／步骤条（家法「对话是唯一界面」）。逻辑全在 tutorialGuide.ts
+  // 的纯函数里，这里只负责按拍调用它、把要说的话递给消息层。
+  const guideRef = useRef<GuideState | null>(null);
+  useEffect(() => {
+    if (scenarioFromUrl() !== "tutorial") return;
+    const sayAsChen = (text: string, t: number) => {
+      // from 留空让 addMessage 按频道自己推导（闸②要求标记与 from 互证）
+      addMessage("info", text, t, "combat", undefined, "proactive", undefined,
+        utteranceFor("combat", "proactive"));
+    };
+    const id = setInterval(() => {
+      const st = stateRef.current;
+      if (!st || st.gameOver) return;
+      if (guideRef.current === null) {
+        // 开场第一句：等 state 真的就位再说，别对着空状态开口
+        guideRef.current = initialGuideState(st.time);
+        sayAsChen(openingLine(), st.time);
+        return;
+      }
+      const { say, next } = advanceGuide(guideRef.current, st, st.time);
+      guideRef.current = next;
+      if (say) sayAsChen(say, st.time);
     }, 500);
     return () => clearInterval(id);
   }, []);
