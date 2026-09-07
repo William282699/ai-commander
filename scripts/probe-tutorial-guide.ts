@@ -28,6 +28,8 @@ function check(name: string, cond: boolean, detail: string) {
 
 /** 照生产那条路真建一支队（GameCanvas 的 handleCreateSquad 最终也是调它）。 */
 function talk(ch: string) { spoke.add(ch); }
+/** 直接把设施翻成玩家的——判据读的就是引擎里这面旗子。 */
+function capture(s: GameState, id: string) { s.facilities.get(id)!.team = "player"; }
 
 function makeSquad(s: GameState, type: Unit["type"]) {
   const us = [...s.units.values()].filter(u => u.team === "player" && u.type === type);
@@ -59,14 +61,15 @@ function run(s: GameState, ticks: number, dt: number, onTick?: (i: number) => vo
 }
 
 console.log("\n── ① 台词本身 ──");
-check("四步都有话、有催促", GUIDE_STEPS.length === 4 && GUIDE_STEPS.every(x => x.say && x.nudge),
+check("六步都有话、有催促", GUIDE_STEPS.length === 6 && GUIDE_STEPS.every(x => x.say && x.nudge),
   `${GUIDE_STEPS.length} 步`);
 // ★「催」不许是复读——复读零信息，且撞过「逐字复读 4→8/131」那笔账
 check("催促句与原句逐字不同", GUIDE_STEPS.every(x => x.say !== x.nudge), "两步都不同");
 // 编队两步要点名「编队」；说话两步要点名那个参谋
 check("每一步都点名了要点的东西",
   GUIDE_STEPS.slice(0,2).every(x => x.say.includes("编队"))
-  && GUIDE_STEPS[2].say.includes("艾米莉") && GUIDE_STEPS[3].say.includes("马克斯"), "四步都点名了");
+  && GUIDE_STEPS[2].say.includes("艾米莉") && GUIDE_STEPS[3].say.includes("马克斯")
+  && GUIDE_STEPS[4].say.includes("烽火台") && GUIDE_STEPS[5].say.includes("敌军哨站"), "六步都点名了");
 // ★ 用户 09-06 定的台词结构：示范 + 明说可以随便讲。两样缺一不可。
 for (const i of [2, 3]) {
   const st = GUIDE_STEPS[i];
@@ -109,6 +112,8 @@ console.log("\n── ④ 两队都编完：引导走完，从此闭嘴 ──")
     if (i === 8) makeSquad(s, "light_tank");
     if (i === 13) talk("logistics");
     if (i === 18) talk("ops");
+    if (i === 23) capture(s, "tut_beacon");
+    if (i === 28) capture(s, "tut_enemy_post");
   });
   check("两支队都建起来了", s.squads.length === 2, `${s.squads.length} 支`);
   check("引导走完", g.index >= GUIDE_STEPS.length, `index=${g.index}/${GUIDE_STEPS.length}`);
@@ -116,13 +121,14 @@ console.log("\n── ④ 两队都编完：引导走完，从此闭嘴 ──")
   const before = said.length;
   const after = run(s, 30, 1, undefined, g);
   check("走完后不再说话", after.said.length === 0, `又说了 ${after.said.length} 句`);
-  check("全程＝开场＋后三步＋结束语", before === 5, `${before} 句`);
+  check("全程＝开场＋后五步＋结束语", before === 7, `${before} 句`);
   // ★ 结束语是承重的：手把手引导会把玩家训练成"等指令"，必须显式解除
   check("结束语说了", said.includes(OUTRO_LINE), OUTRO_LINE.slice(0, 20) + "…");
   check("结束语只说一次", said.filter(x => x === OUTRO_LINE).length === 1,
     `${said.filter(x => x === OUTRO_LINE).length} 次`);
   check("结束语里没有 markdown 星号（面板不渲染它）", !/\*/.test(OUTRO_LINE), "无星号");
-  check("结束语明说了不用等指令", /不用等我|自己|由您定/.test(OUTRO_LINE), "有解除语");
+  check("结束语明说了不用等指令", /不用等我|由您定/.test(OUTRO_LINE), "有解除语");
+  check("结束语指向正式战役", /阿拉曼/.test(OUTRO_LINE), "有去处");
 }
 
 console.log("\n── ④b 倒着做：先编坦克再编步兵（实机抓出来的）──");
@@ -137,6 +143,8 @@ console.log("\n── ④b 倒着做：先编坦克再编步兵（实机抓出�
     if (i === 8) makeSquad(s, "infantry");
     if (i === 13) talk("logistics");
     if (i === 18) talk("ops");
+    if (i === 23) capture(s, "tut_beacon");
+    if (i === 28) capture(s, "tut_enemy_post");
   });
   check("倒着做也能走完", g.index >= GUIDE_STEPS.length, `index=${g.index}`);
   check("第二句不点名兵种（顺序无关）",
@@ -152,6 +160,7 @@ console.log("\n── ⑤ 玩家抢跑：陈还没开口他就编好了 ──")
   makeSquad(s, "infantry");
   makeSquad(s, "light_tank");
   talk("logistics"); talk("ops");
+  capture(s, "tut_beacon"); capture(s, "tut_enemy_post");
   const { g, said } = run(s, 60, 1);
   check("抢跑也能直接走完", g.index >= GUIDE_STEPS.length, `index=${g.index}`);
   check("一句催促都没有", !said.some(x => GUIDE_STEPS.some(st => st.nudge === x)), "无催促");
@@ -178,6 +187,13 @@ console.log("\n── ⑥ 该点哪个键的脉冲：跟着步骤生灭，不常
   check("第四步：提示点马克斯的频道键", currentHint(g) === "channel:ops", String(currentHint(g)));
 
   talk("ops");
+  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
+  // 第五步是地图上的动作（去占烽火台），没有键要点 ⇒ 不该乱亮
+  check("第五步：没有键要点，不乱亮", currentHint(g) === null, String(currentHint(g)));
+
+  capture(s, "tut_beacon");
+  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
+  capture(s, "tut_enemy_post");
   s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
   // ★ 这条是承重的：引导走完脉冲必须灭，否则那个键会一直闪到关机
   check("引导走完：脉冲灭", currentHint(g) === null, String(currentHint(g)));

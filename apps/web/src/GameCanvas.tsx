@@ -2759,10 +2759,24 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
                 color: "#94a3b8",
                 fontSize: 13,
               }}>
-                据点 {gameOverInfo.breakdown.capturedObjectives}/3 · 丢失 {gameOverInfo.breakdown.lostKeypoints}/3 · 净分 {gameOverInfo.breakdown.score >= 0 ? "+" : ""}{gameOverInfo.breakdown.score}
+                {/* ★ 分母原本写死 3（LEDGER H2 那笔旧账）——教学关只有 1 个目标、
+                    2 个前哨，会显示成"据点 1/3"。改成从场景的 winCfg 里取。 */}
+                据点 {gameOverInfo.breakdown.capturedObjectives}/{stateRef.current?.scenarioWinConfig?.requiredCapturedObjectives ?? 3} · 丢失 {gameOverInfo.breakdown.lostKeypoints}/{stateRef.current?.scenarioWinConfig?.friendlyKeypoints.length ?? 3} · 净分 {gameOverInfo.breakdown.score >= 0 ? "+" : ""}{gameOverInfo.breakdown.score}
               </div>
             )}
-            <button onClick={handleRestart} className="hud-btn hud-btn-primary hud-btn-lg" style={{ marginTop: 20 }}>
+            {/* 教学关打赢 ⇒ 主按钮是「进入正式战役」，不是「再来一局」。
+                ★ 用的是**本来就有的结算屏**，不新造弹窗：家法「对话是唯一界面」
+                针对的是对话流里的确认件，不是这块已经存在的收尾屏；而换场景
+                是一次整页跳转，非得有个可点的东西不可（陈说一句解除引导的话
+                由 OUTRO_LINE 在对话里负责，两边各干各的）。 */}
+            {scenarioFromUrl() === "tutorial" && gameOverInfo.isVictory && (
+              <button
+                onClick={() => { window.location.search = ""; }}
+                className="hud-btn hud-btn-primary hud-btn-lg"
+                style={{ marginTop: 20 }}
+              >进入正式战役 ▶</button>
+            )}
+            <button onClick={handleRestart} className="hud-btn hud-btn-primary hud-btn-lg" style={{ marginTop: 20, marginLeft: 10 }}>
               再来一局
             </button>
           </div>
