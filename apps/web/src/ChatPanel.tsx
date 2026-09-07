@@ -479,7 +479,9 @@ interface Props {
   onCreateSquad?: (owner: "chen" | "marcus" | "emily", choice?: { leaderName: string | null }) => void;
   canCreateSquad?: () => boolean;
   /** 教学引导：这一步该点哪个键（null＝不提示）。 */
-  getGuideHint?: () => "squad" | null;
+  getGuideHint?: () => "squad" | "channel:logistics" | "channel:ops" | null;
+  /** 玩家真发出一条消息时喊一声（教学关用）。 */
+  onPlayerSpoke?: (ch: Channel) => void;
   /** 名册上此刻派得出去的将军（点将弹窗的内容）。缺省＝没接（走引擎自动挑）。 */
   getAssignableLeaders?: () => LeaderProfile[];
   onDeclareWar?: () => void;
@@ -500,7 +502,7 @@ interface DisplayResponse extends AdvisorResponse {
 const SHOW_QUICK_BUY = false;
 
 
-export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, getGuideHint, getAssignableLeaders, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
+export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, getGuideHint, onPlayerSpoke, getAssignableLeaders, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
   // ── Panel collapse state ──
   const [collapsed, setCollapsed] = useState(false);
 
@@ -1357,13 +1359,17 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // ★教学引导的脉冲**搭这口现成的轮询**，不新开计时器——它本来就是管「编队」键的。
   const [squadBtnEnabled, setSquadBtnEnabled] = useState(false);
   const [guidePulseSquad, setGuidePulseSquad] = useState(false);
+  const [guidePulseChannel, setGuidePulseChannel] = useState<string | null>(null);
   useEffect(() => {
     if (!canCreateSquad) return;
     const id = setInterval(() => {
       setSquadBtnEnabled(canCreateSquad());
       // 引导没接（正式局）时 getGuideHint 缺席 ⇒ 恒 false，脉冲不会误伤正式局
-      const want = getGuideHint?.() === "squad";
-      setGuidePulseSquad((prev) => (prev === want ? prev : want));
+      const h = getGuideHint?.() ?? null;
+      setGuidePulseSquad((prev) => (prev === (h === "squad") ? prev : h === "squad"));
+      // 频道键：把 "channel:xxx" 收成频道名，没有就是 null
+      const ch = h && h.startsWith("channel:") ? h.slice("channel:".length) : null;
+      setGuidePulseChannel((prev) => (prev === ch ? prev : ch));
     }, 200);
     return () => clearInterval(id);
   }, [canCreateSquad, getGuideHint]);
@@ -1955,6 +1961,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // (a) 案：回填时点是"整条回复念完之后"，不是 ~2s——用户 2026-08-09 拍板，
     // (b) 流首 heard 事件登记为 demo 后升级项。
     addMessage("info", isVoiceTurn ? "🎤 …" : userMsg, state.time, primaryChannel, "player", "player", isGroupChat ? true : undefined);
+    onPlayerSpoke?.(primaryChannel);   // 教学关：这才是"玩家开口"的唯一真事件
 
     // Chat commands are not constrained by map box-selection.
     // Only manual unit control (right-click move) uses selectedUnitIds as hard constraint.
@@ -3495,7 +3502,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                       key={cmd}
                       className={`dp-channel-btn${isActive ? " dp-channel-btn--active" : ""}`}
                       data-channel-alert={channelAlert[COMMANDER_CHANNEL[cmd]]}
-                      onClick={() => selectSingleCommander(cmd)}
+              data-guide-pulse={guidePulseChannel === COMMANDER_CHANNEL[cmd] ? "on" : "off"}
+                                            onClick={() => selectSingleCommander(cmd)}
                       style={{ borderLeftColor: isActive ? cmdColor : "transparent" }}
                       title={`${meta.label} (${meta.role})`}
                     >
@@ -3730,6 +3738,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             <button
               key={cmd}
               data-channel-alert={channelAlert[COMMANDER_CHANNEL[cmd]]}
+              data-guide-pulse={guidePulseChannel === COMMANDER_CHANNEL[cmd] ? "on" : "off"}
               onClick={() => selectSingleCommander(cmd)}
               onContextMenu={(e) => { e.preventDefault(); toggleCommander(cmd); }}
               style={{

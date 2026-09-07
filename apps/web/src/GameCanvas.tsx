@@ -846,6 +846,11 @@ export interface GameBridge {
   /** 教学引导：当前这一步要玩家点哪个键（UI 据此让那一个键呼吸）。
    *  走桥而不是模块级变量——弹出面板是**另一个 window**，模块级过不去。 */
   getGuideHint: () => GuideHint | null;
+  /** ChatPanel 真把玩家那句话发出去时喊一声（教学关判"跟这个参谋说过话没有"用）。
+   *  ★ 不能靠嗅 messageStore：编队等引擎日志也记成 `source="player"`
+   *  （`GameCanvas.tsx:1254` 那条 `新建分队…` 就落在 ops 频道），
+   *  嗅出来的结果是"玩家还没跟马克斯说话就算说过了"——实机当场撞到。 */
+  onPlayerSpoke: (ch: Channel) => void;
   getAssignableLeaders: () => LeaderProfile[];
   onDeclareWar: () => void;
   onSelectUnits: (unitIds: number[]) => void;
@@ -1000,7 +1005,12 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         sayAsChen(openingLine(), st.time);
         return;
       }
-      const { say, next } = advanceGuide(guideRef.current, st, st.time);
+      const { say, next } = advanceGuide(guideRef.current, {
+        state: st,
+        // 判松：这个频道里有过一条 source="player" 的消息就算说过话。
+        // 走 messageStore 的公开读法，它自带跨窗口委托（弹出面板也数得到）。
+        playerSpokeIn: (ch) => spokeChannelsRef.current.has(ch),
+      }, st.time);
       guideRef.current = next;
       if (say) sayAsChen(say, st.time);
     }, 500);
@@ -1010,6 +1020,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
   /** 脉冲绑引导这一步的生死：步骤一完成 `currentHint` 自然返回 null，
    *  引导走完也返回 null——不做常驻 affordance（照喇叭键那条先例）。 */
   const getGuideHint = useCallback(() => currentHint(guideRef.current), []);
+
+  /** 玩家真开过口的频道。只由 ChatPanel 的发送路径写入。 */
+  const spokeChannelsRef = useRef<Set<Channel>>(new Set());
+  const onPlayerSpoke = useCallback((ch: Channel) => { spokeChannelsRef.current.add(ch); }, []);
 
   const handleTaskCancel = useCallback((taskId: string) => {
     const state = stateRef.current;
@@ -1307,6 +1321,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       onCreateSquad: handleCreateSquad,
       canCreateSquad,
       getGuideHint,
+      onPlayerSpoke,
       getAssignableLeaders,
       onDeclareWar: handleDeclareWar,
       onSelectUnits: handleSelectUnits,
@@ -2519,6 +2534,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           onCreateSquad={handleCreateSquad}
           canCreateSquad={canCreateSquad}
           getGuideHint={getGuideHint}
+          onPlayerSpoke={onPlayerSpoke}
           getAssignableLeaders={getAssignableLeaders}
           onDeclareWar={handleDeclareWar}
           onSelectUnits={handleSelectUnits}

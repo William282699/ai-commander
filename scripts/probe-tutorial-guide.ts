@@ -27,6 +27,8 @@ function check(name: string, cond: boolean, detail: string) {
 }
 
 /** 照生产那条路真建一支队（GameCanvas 的 handleCreateSquad 最终也是调它）。 */
+function talk(ch: string) { spoke.add(ch); }
+
 function makeSquad(s: GameState, type: Unit["type"]) {
   const us = [...s.units.values()].filter(u => u.team === "player" && u.type === type);
   const sq = createSquad(us.map(u => u.id), us.map(u => u.type), s.nextSquadNum, "chen", "Aiden");
@@ -36,6 +38,12 @@ function makeSquad(s: GameState, type: Unit["type"]) {
 /** 跑 N 个引导拍，收集陈说出口的每一句。dt＝每拍推进的游戏秒。
  *  `from` 给了就**接着那个状态往下跑**（测"走完之后还说不说话"必须这样，
  *  重开一个新状态会让它把两步的话合法地重走一遍——第一版就栽在这）。 */
+/** 玩家说过话的频道集合——由测试自己控制，模拟"他去点了艾米莉说了句话"。 */
+const spoke = new Set<string>();
+function ctxOf(s: GameState) {
+  return { state: s, playerSpokeIn: (ch: string) => spoke.has(ch) };
+}
+
 function run(s: GameState, ticks: number, dt: number, onTick?: (i: number) => void,
              from?: GuideState) {
   let g = from ?? initialGuideState(s.time);
@@ -43,7 +51,7 @@ function run(s: GameState, ticks: number, dt: number, onTick?: (i: number) => vo
   for (let i = 0; i < ticks; i++) {
     onTick?.(i);
     s.time += dt;
-    const r = advanceGuide(g, s, s.time);
+    const r = advanceGuide(g, ctxOf(s) as never, s.time);
     g = r.next;
     if (r.say) said.push(r.say);
   }
@@ -51,14 +59,25 @@ function run(s: GameState, ticks: number, dt: number, onTick?: (i: number) => vo
 }
 
 console.log("\n── ① 台词本身 ──");
-check("两步都有话、有催促", GUIDE_STEPS.length === 2 && GUIDE_STEPS.every(x => x.say && x.nudge),
+check("四步都有话、有催促", GUIDE_STEPS.length === 4 && GUIDE_STEPS.every(x => x.say && x.nudge),
   `${GUIDE_STEPS.length} 步`);
 // ★「催」不许是复读——复读零信息，且撞过「逐字复读 4→8/131」那笔账
 check("催促句与原句逐字不同", GUIDE_STEPS.every(x => x.say !== x.nudge), "两步都不同");
-check("台词里点得出玩家要点的那个键", GUIDE_STEPS.every(x => x.say.includes("编队")), "都提了「编队」");
+// 编队两步要点名「编队」；说话两步要点名那个参谋
+check("每一步都点名了要点的东西",
+  GUIDE_STEPS.slice(0,2).every(x => x.say.includes("编队"))
+  && GUIDE_STEPS[2].say.includes("艾米莉") && GUIDE_STEPS[3].say.includes("马克斯"), "四步都点名了");
+// ★ 用户 09-06 定的台词结构：示范 + 明说可以随便讲。两样缺一不可。
+for (const i of [2, 3]) {
+  const st = GUIDE_STEPS[i];
+  check(`第${i+1}步给了示范台词`, /「[^」]+」/.test(st.say.replace(/「艾米莉中尉」|「马克斯上尉」/g, "")),
+    st.say.slice(0, 30) + "…");
+  check(`第${i+1}步明说了可以随便讲`, /怎么说|怎么问|随便/.test(st.say), "有解放句");
+}
 
 console.log("\n── ② 什么都不做：该催一次，且只催一次 ──");
 {
+  spoke.clear();
   const s = createInitialGameState("tutorial");
   // 60 拍 × 1 秒 ＝ 60 游戏秒，远超 NUDGE_AFTER_SEC
   const { g, said } = run(s, 60, 1);
@@ -71,6 +90,7 @@ console.log("\n── ② 什么都不做：该催一次，且只催一次 ─�
 
 console.log("\n── ③ 真编一队：推进到第二步，并说出第二句 ──");
 {
+  spoke.clear();
   const s = createInitialGameState("tutorial");
   const { g, said } = run(s, 20, 1, (i) => { if (i === 5) makeSquad(s, "infantry"); });
   check("编队后引擎里真多了一支队", s.squads.length === 1, `${s.squads.length} 支`);
@@ -82,10 +102,13 @@ console.log("\n── ③ 真编一队：推进到第二步，并说出第二句
 
 console.log("\n── ④ 两队都编完：引导走完，从此闭嘴 ──");
 {
+  spoke.clear();
   const s = createInitialGameState("tutorial");
   const { g, said } = run(s, 40, 1, (i) => {
     if (i === 3) makeSquad(s, "infantry");
     if (i === 8) makeSquad(s, "light_tank");
+    if (i === 13) talk("logistics");
+    if (i === 18) talk("ops");
   });
   check("两支队都建起来了", s.squads.length === 2, `${s.squads.length} 支`);
   check("引导走完", g.index >= GUIDE_STEPS.length, `index=${g.index}/${GUIDE_STEPS.length}`);
@@ -93,7 +116,7 @@ console.log("\n── ④ 两队都编完：引导走完，从此闭嘴 ──")
   const before = said.length;
   const after = run(s, 30, 1, undefined, g);
   check("走完后不再说话", after.said.length === 0, `又说了 ${after.said.length} 句`);
-  check("全程＝开场＋第二句＋结束语", before === 3, `${before} 句`);
+  check("全程＝开场＋后三步＋结束语", before === 5, `${before} 句`);
   // ★ 结束语是承重的：手把手引导会把玩家训练成"等指令"，必须显式解除
   check("结束语说了", said.includes(OUTRO_LINE), OUTRO_LINE.slice(0, 20) + "…");
   check("结束语只说一次", said.filter(x => x === OUTRO_LINE).length === 1,
@@ -107,10 +130,13 @@ console.log("\n── ④b 倒着做：先编坦克再编步兵（实机抓出�
   // ★ 实机手测当场撞到：台词原本写死"南边还有三辆轻坦"，而玩家完全可以**先编坦克**
   //   ⇒ 第二句变成"叫他去做刚做完的事"。判据只能测效果：两种顺序都要能走完，
   //   且第二句里不许钉死某一坨的番号/兵种。
+  spoke.clear();
   const s = createInitialGameState("tutorial");
   const { g, said } = run(s, 40, 1, (i) => {
     if (i === 3) makeSquad(s, "light_tank");   // 反着来
     if (i === 8) makeSquad(s, "infantry");
+    if (i === 13) talk("logistics");
+    if (i === 18) talk("ops");
   });
   check("倒着做也能走完", g.index >= GUIDE_STEPS.length, `index=${g.index}`);
   check("第二句不点名兵种（顺序无关）",
@@ -121,9 +147,11 @@ console.log("\n── ④b 倒着做：先编坦克再编步兵（实机抓出�
 console.log("\n── ⑤ 玩家抢跑：陈还没开口他就编好了 ──");
 {
   // 真玩家完全可能没听指挥先自己编队。这时不该催他做已经做完的事。
+  spoke.clear();
   const s = createInitialGameState("tutorial");
   makeSquad(s, "infantry");
   makeSquad(s, "light_tank");
+  talk("logistics"); talk("ops");
   const { g, said } = run(s, 60, 1);
   check("抢跑也能直接走完", g.index >= GUIDE_STEPS.length, `index=${g.index}`);
   check("一句催促都没有", !said.some(x => GUIDE_STEPS.some(st => st.nudge === x)), "无催促");
@@ -132,16 +160,25 @@ console.log("\n── ⑤ 玩家抢跑：陈还没开口他就编好了 ──")
 console.log("\n── ⑥ 该点哪个键的脉冲：跟着步骤生灭，不常驻 ──");
 {
   // 铁律照喇叭键那条先例：**绑这一步的生死**。常驻的提示等于没有提示，还烦人。
+  spoke.clear();
   const s = createInitialGameState("tutorial");
   let g: GuideState | null = initialGuideState(s.time);
   check("第一步：提示点「编队」", currentHint(g) === "squad", String(currentHint(g)));
 
   makeSquad(s, "infantry");
-  s.time += 1; g = advanceGuide(g!, s, s.time).next;
+  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
   check("第二步：还是「编队」", currentHint(g) === "squad", String(currentHint(g)));
 
   makeSquad(s, "light_tank");
-  s.time += 1; g = advanceGuide(g!, s, s.time).next;
+  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
+  check("第三步：提示点艾米莉的频道键", currentHint(g) === "channel:logistics", String(currentHint(g)));
+
+  talk("logistics");
+  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
+  check("第四步：提示点马克斯的频道键", currentHint(g) === "channel:ops", String(currentHint(g)));
+
+  talk("ops");
+  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
   // ★ 这条是承重的：引导走完脉冲必须灭，否则那个键会一直闪到关机
   check("引导走完：脉冲灭", currentHint(g) === null, String(currentHint(g)));
   check("引导没起来时也不亮（正式局不误伤）", currentHint(null) === null, String(currentHint(null)));
@@ -150,6 +187,7 @@ console.log("\n── ⑥ 该点哪个键的脉冲：跟着步骤生灭，不常
 if (TRIPWIRE) {
   console.log("\n── ⑥ 绊索自证 ──");
   // 把完成判据改成恒假 ⇒ ③ 那格必须不再推进
+  spoke.clear();
   const s = createInitialGameState("tutorial");
   const realDone = GUIDE_STEPS[0].done;
   (GUIDE_STEPS[0] as { done: (s: GameState) => boolean }).done = () => false;

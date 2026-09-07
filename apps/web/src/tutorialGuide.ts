@@ -21,7 +21,7 @@
 // 不看玩家点没点按钮、也不看回执说了什么。家法栽过五次的那一族。
 // ============================================================
 
-import type { GameState } from "@ai-commander/shared";
+import type { GameState, Channel } from "@ai-commander/shared";
 
 /** 卡住多久算卡住（游戏秒）。用游戏时钟不用墙钟：玩家切走时 rAF 被饿死、
  *  游戏时间自然停住 ⇒ 人不在座位上就不会被催，正好是我们要的。 */
@@ -31,7 +31,21 @@ export const NUDGE_AFTER_SEC = 15;
  *  ★ 复用喇叭键那条先例的规矩：**绑这一步的生死**——步骤一完成就停，
  *  绝不做常驻 affordance（`game-ui.css` 里那段注释写着理由）。
  *  将来步 4/5 会加 `"channel:logistics"` / `"channel:ops"` 之类。 */
-export type GuideHint = "squad";
+export type GuideHint = "squad" | "channel:logistics" | "channel:ops";
+
+/** 判定这一步用得到的东西。
+ *  ★ 为什么不是直接传 GameState：从步 4 起，"完成"不再只是引擎状态
+ *  （多没多一支队），还包括"玩家有没有跟某个参谋说过话"——那条信息在
+ *  `messageStore` 里不在 GameState 里。用一个 ctx 把两边并起来，
+ *  `advanceGuide` 仍然是**纯函数**（依赖全从参数进来，台架照样能逐拍重放）。 */
+export interface GuideCtx {
+  state: GameState;
+  /** 玩家在这个频道**发过消息**没有。★判松（用户 2026-09-06 裁定）：
+   *  说什么都算，哪怕只是"你好"。这一步教的是"你可以跟她说话"，
+   *  不是"你得说对咒语"——判紧等于在教学关里亲手造一个新手过不去的门槛，
+   *  而"词汇不通"（她说人话、Agent 等军语）正是账本里还没结的账。 */
+  playerSpokeIn: (ch: Channel) => boolean;
+}
 
 export interface GuideStep {
   id: string;
@@ -43,7 +57,7 @@ export interface GuideStep {
    *  **换个说法，不复读**——复读是零信息，且撞过「逐字复读」那笔账。 */
   nudge: string;
   /** 这一步算不算完成了。判据只读引擎状态。 */
-  done: (s: GameState) => boolean;
+  done: (c: GuideCtx) => boolean;
 }
 
 /**
@@ -56,14 +70,33 @@ export const GUIDE_STEPS: GuideStep[] = [
     hint: "squad",
     say: "长官，先认认您的部队。北边那四个步兵，用鼠标拖个框圈上，点右下角的「编队」，给他们指个队长。",
     nudge: "长官？把北边那四个步兵拖个框圈上，然后点「编队」——挑谁当队长您说了算。",
-    done: (s) => s.squads.length >= 1,
+    done: (c) => c.state.squads.length >= 1,
   },
   {
     id: "squad_2",
     hint: "squad",
     say: "好，这队归您点名了。地图上还有一批兵散着没编——照样圈上、点「编队」，咱们手上就有两支能整队调动的部队。",
     nudge: "长官，还有一批散兵没编队。圈上、点「编队」，跟刚才一样。",
-    done: (s) => s.squads.length >= 2,
+    done: (c) => c.state.squads.length >= 2,
+  },
+  {
+    // ★ 台词结构（用户 2026-09-06 定）：**给一句示范 + 明说可以随便讲**。
+    //   只给示范，玩家会当成咒语照念（"说错了会不会不认"）；只说随便讲，
+    //   他对着空输入框不知道从哪开口。两句都要。
+    //   与结束语同一条道理：给的是范围，不是菜单。
+    id: "talk_emily",
+    hint: "channel:logistics",
+    say: "后勤这块归艾米莉。点上面「艾米莉中尉」，跟她说句话——比如「造两个步兵」。"
+       + "不用照着念，您想怎么说就怎么说，她听得懂人话。",
+    nudge: "长官，艾米莉那边还没您的消息。点她的名字，随便说句什么都行——问问现在能造什么也算。",
+    done: (c) => c.playerSpokeIn("logistics"),
+  },
+  {
+    id: "talk_marcus",
+    hint: "channel:ops",
+    say: "马克斯管战况判读。点「马克斯上尉」问他一句——比如「现在什么情况」。同样，怎么问都行。",
+    nudge: "长官，还没跟马克斯说过话。点他的名字问一句，随便什么都行。",
+    done: (c) => c.playerSpokeIn("ops"),
   },
 ];
 
@@ -97,13 +130,13 @@ export interface GuideEffect {
  *  ② 再判要不要开口（刚进这一步）
  *  ③ 最后才判要不要催
  */
-export function advanceGuide(g: GuideState, s: GameState, now: number): GuideEffect {
+export function advanceGuide(g: GuideState, c: GuideCtx, now: number): GuideEffect {
   if (g.index >= GUIDE_STEPS.length) return { say: null, next: g };
 
   const step = GUIDE_STEPS[g.index];
 
   // ① 完成 → 进下一步，并把下一步的话说出来
-  if (step.done(s)) {
+  if (step.done(c)) {
     const index = g.index + 1;
     const next: GuideState = { index, stepStartedAt: now, nudged: false };
     // 走完最后一步 ⇒ 说结束语（解除引导），不是静默收摊
