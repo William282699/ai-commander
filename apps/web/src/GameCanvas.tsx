@@ -988,6 +988,17 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
   // 只在教学图跑。判定读引擎状态（数 squads），台词走陈的频道＋出声标记，
   // 不做任何浮层／步骤条（家法「对话是唯一界面」）。逻辑全在 tutorialGuide.ts
   // 的纯函数里，这里只负责按拍调用它、把要说的话递给消息层。
+  /** 玩家最后一次"动过手"的游戏时间（发命令/编队/右键派兵）。
+   *  引导用它判断"他是卡住了还是正在做"——正在做的人不该被催。 */
+  const lastPlayerActionRef = useRef(0);
+  const markPlayerAction = useCallback(() => {
+    const st = stateRef.current;
+    if (st) lastPlayerActionRef.current = st.time;
+  }, []);
+  const onPlayerSpoke = useCallback((ch: Channel) => {
+    spokeChannelsRef.current.add(ch);
+    markPlayerAction();
+  }, [markPlayerAction]);
   const guideRef = useRef<GuideState | null>(null);
   useEffect(() => {
     if (scenarioFromUrl() !== "tutorial") return;
@@ -1012,6 +1023,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         // 判松：这个频道里有过一条 source="player" 的消息就算说过话。
         // 走 messageStore 的公开读法，它自带跨窗口委托（弹出面板也数得到）。
         playerSpokeIn: (ch) => spokeChannelsRef.current.has(ch),
+        playerActedSince: (t) => lastPlayerActionRef.current > t,
       }, st.time);
       guideRef.current = next;
       if (say) sayAsChen(say, st.time);
@@ -1033,6 +1045,27 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     "fac:beacon": "tut_beacon",
     "fac:enemy_post": "tut_enemy_post",
   };
+  /** 把散兵按位置分坨，返回**最靠北那一坨**的 id。
+   *  单链：两个兵相距 ≤ CLUSTER_TILES 就算同一坨（教学图两坨隔 11 格，够分开）。 */
+  const CLUSTER_TILES = 8;
+  function firstClusterOf(free: { id: number; x: number; y: number }[]): number[] {
+    if (free.length === 0) return [];
+    const rest = [...free].sort((a, b) => a.y - b.y);   // 从北往南
+    const seed = rest.shift()!;
+    const cluster = [seed];
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (let i = rest.length - 1; i >= 0; i--) {
+        const u = rest[i];
+        if (cluster.some((c) => Math.hypot(c.x - u.x, c.y - u.y) <= CLUSTER_TILES)) {
+          cluster.push(u); rest.splice(i, 1); grew = true;
+        }
+      }
+    }
+    return cluster.map((u) => u.id);
+  }
+
   const recomputeGuideHighlight = useCallback((st: GameState) => {
     const tg = currentTargets(guideRef.current);
     const unitIds = new Set<number>();
@@ -1041,12 +1074,18 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       if (t === "units:unsquadded") {
         const inSquad = new Set<number>();
         for (const sq of st.squads) for (const id of sq.unitIds) inSquad.add(id);
+        const free: { id: number; x: number; y: number }[] = [];
         st.units.forEach((u) => {
           // 鼠标点得动的那几个（指挥官/卫队）编不进队，别亮它们误导人
           if (u.team !== "player" || u.isPlayerControlled) return;
           if (u.hp <= 0 || u.state === "dead") return;
-          if (!inSquad.has(u.id)) unitIds.add(u.id);
+          if (!inSquad.has(u.id)) free.push({ id: u.id, x: u.position.x, y: u.position.y });
         });
+        // ★ 用户 2026-09-08：**一次只亮一坨**。全亮的话玩家不知道该框哪个，
+        //   而台词说的是"那批兵"（单数）——说一批、亮两批，自相矛盾。
+        //   做法＝单链聚类（≤CLUSTER_TILES 算同一坨），只取**最靠北**那坨；
+        //   编完它之后剩下的那坨自动变成"最靠北"，不用记状态、也不写死兵种。
+        for (const id of firstClusterOf(free)) unitIds.add(id);
       } else if (FAC_OF_TARGET[t]) {
         facilityIds.add(FAC_OF_TARGET[t]);
       }
@@ -1056,7 +1095,6 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
 
   /** 玩家真开过口的频道。只由 ChatPanel 的发送路径写入。 */
   const spokeChannelsRef = useRef<Set<Channel>>(new Set());
-  const onPlayerSpoke = useCallback((ch: Channel) => { spokeChannelsRef.current.add(ch); }, []);
 
   const handleTaskCancel = useCallback((taskId: string) => {
     const state = stateRef.current;
@@ -1223,6 +1261,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     if (!state) return;
     const ids = inputRef.current.selectedUnitIds;
     if (ids.length === 0) return;
+    markPlayerAction();   // 教学引导：编队算动手，别在他操作时催他
 
     // Filter: player + alive
     const validIds = ids.filter((id) => {

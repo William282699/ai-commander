@@ -25,7 +25,11 @@ import type { GameState, Channel } from "@ai-commander/shared";
 
 /** 卡住多久算卡住（游戏秒）。用游戏时钟不用墙钟：玩家切走时 rAF 被饿死、
  *  游戏时间自然停住 ⇒ 人不在座位上就不会被催，正好是我们要的。 */
-export const NUDGE_AFTER_SEC = 15;
+export const NUDGE_AFTER_SEC = 30;
+
+/** 要玩家**派兵走一段路**的步骤，催促得更晚——行军本来就要时间，
+ *  15 秒就催等于对着正在走的兵喊"你怎么还没到"。 */
+export const NUDGE_AFTER_SEC_SLOW = 75;
 
 /** 这一步要玩家去点的那个键。UI 层据此让**那一个**键呼吸。
  *  ★ 复用喇叭键那条先例的规矩：**绑这一步的生死**——步骤一完成就停，
@@ -63,6 +67,12 @@ export type GuideHint = GuideTarget;
  *  `advanceGuide` 仍然是**纯函数**（依赖全从参数进来，台架照样能逐拍重放）。 */
 export interface GuideCtx {
   state: GameState;
+  /** 从这一步开始到现在，玩家有没有**动过手**（下过命令、编过队、点过右键）。
+   *  ★ 用户 2026-09-08 手测抓出来的：催促响的那一刻他其实正在做，五秒后就做完了，
+   *  于是屏上变成"催一句＋紧接着下一句"两条挤在一起，催的那句纯属噪音。
+   *  **正在动手的人不该被催。** 这是"判据要测效果"的同一族——
+   *  旧判据测的是"时间到了没有"，真正该测的是"他是不是卡住了"。 */
+  playerActedSince: (sinceGameTime: number) => boolean;
   /** 玩家在这个频道**发过消息**没有。★判松（用户 2026-09-06 裁定）：
    *  说什么都算，哪怕只是"你好"。这一步教的是"你可以跟她说话"，
    *  不是"你得说对咒语"——判紧等于在教学关里亲手造一个新手过不去的门槛，
@@ -76,9 +86,11 @@ export interface GuideStep {
   targets?: GuideTarget[];
   /** 进入这一步时陈说的那句。 */
   say: string;
-  /** 卡了 NUDGE_AFTER_SEC 还没动静时再说的一句。
+  /** 卡了这么久还没动静时再说的一句。
    *  **换个说法，不复读**——复读是零信息，且撞过「逐字复读」那笔账。 */
   nudge: string;
+  /** 这一步等多久才催；省略＝`NUDGE_AFTER_SEC`。行军类的步骤要给足时间。 */
+  nudgeAfterSec?: number;
   /** 这一步算不算完成了。判据只读引擎状态。 */
   done: (c: GuideCtx) => boolean;
 }
@@ -130,6 +142,7 @@ export const GUIDE_STEPS: GuideStep[] = [
     //   `SQUAD_EXCLUDED_TYPES`（createSquad 会滤掉）⇒ **不生产就编不出第三队**。
     //   所以台词与催促都必须把"先让艾米莉造兵"说出来，否则这一步是个死结。
     id: "squad_3",
+    nudgeAfterSec: NUDGE_AFTER_SEC_SLOW,   // 要等艾米莉把兵造出来
     targets: ["units:unsquadded", "btn:squad", "fac:barracks"],
     say: "艾米莉造的兵到位了就在兵营旁边。把他们也圈起来编成第三队——"
        + "这样您手上就有三个队长了。要是还没造，先跟艾米莉要两个步兵。",
@@ -151,6 +164,7 @@ export const GUIDE_STEPS: GuideStep[] = [
     // ★ 第一次占领刻意选中立、无人守的烽火台：先在没有战斗的情况下把机制教干净，
     //   还给一个看得见的奖励（东边迷雾散开）。打仗留给下一步。
     id: "take_beacon",
+    nudgeAfterSec: NUDGE_AFTER_SEC_SLOW,
     targets: ["fac:beacon", "btn:input", "btn:mic"],
     say: "来真的。地图中间闪着的那座烽火台没人守，占下它东边就亮了，能看见敌人在哪。"
        + "跟我说一句就行——比如「派 Aiden 去占领烽火台」。名字换成您哪个队长都行，"
@@ -162,6 +176,7 @@ export const GUIDE_STEPS: GuideStep[] = [
     // ★ 胜负条件在这一步讲（用户 2026-09-08）：玩家正要去打那个点，
     //   此刻指着顶栏的 OBJECTIVES 说"占它就算赢"最有画面。
     id: "take_post",
+    nudgeAfterSec: NUDGE_AFTER_SEC_SLOW,
     targets: ["fac:enemy_post", "hud:objectives"],
     say: "东岭上那个插着旗的敌军哨站在闪——占下它这一关就算赢，"
        + "顶上「OBJECTIVES」那个数就是记这个的，插旗的点占几个算几个。"
@@ -217,7 +232,10 @@ export function advanceGuide(g: GuideState, c: GuideCtx, now: number): GuideEffe
   }
 
   // ③ 卡住了 → 催一次（一步只催一次）
-  if (!g.nudged && now - g.stepStartedAt >= NUDGE_AFTER_SEC) {
+  //   ★ 两道闸，缺一不可：等够时间**且**这段时间里他一下都没动过。
+  //     只看时间会催到正在操作的人；只看动作会永远不催（他一直在乱点）。
+  const wait = step.nudgeAfterSec ?? NUDGE_AFTER_SEC;
+  if (!g.nudged && now - g.stepStartedAt >= wait && !c.playerActedSince(g.stepStartedAt)) {
     return { say: step.nudge, next: { ...g, nudged: true } };
   }
 
