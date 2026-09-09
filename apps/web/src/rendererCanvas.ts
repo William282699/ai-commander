@@ -296,6 +296,8 @@ export function renderFacilities(
   camera: Camera,
   captureObjectives?: string[],
   friendlyKeypoints?: string[],
+  guide?: GuideHighlight,
+  gameTime?: number,
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
   // 刀3 fix1: 胜负相关点全插旗 — 4 个夺取目标（占3胜）+ 3 个我方前哨（丢3败）。
@@ -317,6 +319,11 @@ export function renderFacilities(
     const cy = screenY + tileScreenSize / 2;
 
     const spriteEntry = FACILITY_SPRITE_MAP[fac.type];
+
+    // 教学引导的"看这儿"圈：画在设施脚下、其余装饰之前。
+    if (guide?.facilityIds?.has(fac.id)) {
+      drawGuideRing(ctx, cx, cy, tileScreenSize * 1.15, gameTime ?? 0);
+    }
 
     // 刀3 fix4: 可占产出据点 → 队色地环（RTS 控制点语言，画在建筑脚下）。
     // 判据=有资源行（FACILITY_GLYPH_ROW，同一真相源）：环与资源字永远成对出现。
@@ -637,6 +644,48 @@ const FACTION_GLOW_ALPHA = 0.16;     // 压得很淡，是"晕"不是第二个�
  */
 const SELECTION_RING_GAP = 1.16;
 
+/**
+ * 教学引导的"看这儿"呼吸圈（用户 2026-09-08 提的：引导说到什么，什么就得自己亮，
+ * 不然玩家得满地图找——那正是首次外部试玩里"注意力全被找东西吃掉"的翻版）。
+ *
+ * ★ 为什么画在 canvas 里而不是复用按钮那套 CSS 脉冲：地图上的兵和设施是画出来的，
+ *   DOM 里没有它们的元素。两边的**节奏刻意对齐**（1.6s 一个来回），这样屏边的键
+ *   和地图上的目标看起来是同一件事在闪。
+ * ★ 用 `gameTime` 而不是 `performance.now()` 驱动：游戏暂停时它跟着停，
+ *   不会在冻住的画面上继续呼吸。
+ */
+const GUIDE_RING_PERIOD_SEC = 1.6;
+const GUIDE_RING_COLOR = "255,214,64";     // 琥珀色——与蓝(我方)/红(敌方)/绿(选中)都不撞
+function guideRingAlpha(gameTime: number): number {
+  // 0.35 ↔ 0.95 之间呼吸，不做全灭全亮（全灭那一拍会像掉帧）
+  return 0.35 + 0.6 * (0.5 + 0.5 * Math.sin((gameTime / GUIDE_RING_PERIOD_SEC) * Math.PI * 2));
+}
+/** 在 (sx,sy) 画一圈呼吸的琥珀色椭圆。rx 是屏幕像素半径。 */
+function drawGuideRing(
+  ctx: CanvasRenderingContext2D, sx: number, sy: number, rx: number, gameTime: number,
+): void {
+  const ry = rx * FACTION_RING_FLATTEN;
+  const a = guideRingAlpha(gameTime);
+  ctx.save();
+  // 外面一圈很淡的晕，让它在杂乱地表上也跳得出来
+  ctx.beginPath();
+  ctx.ellipse(sx, sy, rx * 1.28, ry * 1.28, 0, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(${GUIDE_RING_COLOR},${a * 0.18})`;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(${GUIDE_RING_COLOR},${a})`;
+  ctx.lineWidth = Math.max(2, rx * 0.13);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** 引导要点亮的东西（由 GameCanvas 每帧算好递进来）。空＝什么都不亮。 */
+export interface GuideHighlight {
+  unitIds?: ReadonlySet<number>;
+  facilityIds?: ReadonlySet<string>;
+}
+
 export function renderUnits(
   ctx: CanvasRenderingContext2D,
   units: Unit[],
@@ -646,6 +695,7 @@ export function renderUnits(
   canvasHeight: number,
   gameTime: number,
   selectedUnitIds?: Set<number>,
+  guide?: GuideHighlight,
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
   const baseUnitSize = Math.max(8, tileScreenSize * 0.7);
@@ -712,6 +762,11 @@ export function renderUnits(
     // inherits that value's 8px floor when zoomed all the way out.
     const ringRx = baseUnitSize * FACTION_RING_RX;
     const ringRy = ringRx * FACTION_RING_FLATTEN;
+
+    // --- 教学引导的"看这儿"圈（最底下画，别盖住阵营色与选中环）---
+    if (guide?.unitIds?.has(unit.id)) {
+      drawGuideRing(ctx, cx, cy + ringRy * FACTION_RING_DROP, ringRx * 1.5, gameTime);
+    }
 
     // --- Faction ground ring (drawn first: under the selection ring and body) ---
     // The TDS sprite pack has no per-faction artwork — a player tank and an

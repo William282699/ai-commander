@@ -103,7 +103,7 @@ function PanelApp() {
         getViewport={bridge.getViewport}
         onCreateSquad={bridge.onCreateSquad}
         canCreateSquad={bridge.canCreateSquad}
-        getGuideHint={bridge.getGuideHint}
+        getGuideTargets={bridge.getGuideTargets}
         onPlayerSpoke={bridge.onPlayerSpoke}
         // 弹出窗里也要能点将：弹窗渲染在按钮所在的那个 window，
         // 所以名单必须通过桥从主窗口取，不能在 GameCanvas 里画。
@@ -129,6 +129,18 @@ export default function App() {
   const [panelDetached, setPanelDetached] = useState(false);
   // 开场屏。挂着时 GameCanvas 是 paused（地图冻住、钟不走），与改前同一个机制。
   const [introMode, setIntroMode] = useState<IntroMode>(initialIntroMode);
+
+  // 顶栏那几个 chip 长在 App 里（不在 ChatPanel），所以引导目标得在这儿也读一份。
+  // 1Hz 足够——它只用来决定 OBJECTIVES 那格闪不闪。
+  const [guideTargets, setGuideTargets] = useState<readonly string[]>([]);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const tg = window.__GAME_BRIDGE__?.getGuideTargets?.() ?? [];
+      setGuideTargets((prev) =>
+        prev.length === tg.length && tg.every((t, i) => prev[i] === t) ? prev : [...tg]);
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
   const introActive = introMode !== "none";
   const dismissIntro = () => { markIntroSeen(); setIntroMode("none"); };
 
@@ -310,6 +322,7 @@ export default function App() {
           <div className="hud-topbar__resources" style={{ marginLeft: "auto" }}>
             <div
               className="hud-resource-chip hud-resource-chip--info"
+              data-guide-pulse={guideTargets.includes("hud:objectives") ? "on" : "off"}
               title={`夺下地图上 ${winProgress.pool} 面旗中的任意 ${winProgress.required} 面即胜`}
             >
               <span className="hud-resource-chip__label">OBJECTIVES</span>

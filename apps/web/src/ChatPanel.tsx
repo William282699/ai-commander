@@ -479,7 +479,8 @@ interface Props {
   onCreateSquad?: (owner: "chen" | "marcus" | "emily", choice?: { leaderName: string | null }) => void;
   canCreateSquad?: () => boolean;
   /** 教学引导：这一步该点哪个键（null＝不提示）。 */
-  getGuideHint?: () => "squad" | "channel:logistics" | "channel:ops" | null;
+  /** 教学引导：这一步要点亮的目标（`btn:*` / `chan:*` / `hud:*` 归本组件认领）。 */
+  getGuideTargets?: () => readonly string[];
   /** 玩家真发出一条消息时喊一声（教学关用）。 */
   onPlayerSpoke?: (ch: Channel) => void;
   /** 名册上此刻派得出去的将军（点将弹窗的内容）。缺省＝没接（走引擎自动挑）。 */
@@ -502,7 +503,7 @@ interface DisplayResponse extends AdvisorResponse {
 const SHOW_QUICK_BUY = false;
 
 
-export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, getGuideHint, onPlayerSpoke, getAssignableLeaders, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
+export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, getGuideTargets, onPlayerSpoke, getAssignableLeaders, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
   // ── Panel collapse state ──
   const [collapsed, setCollapsed] = useState(false);
 
@@ -1358,21 +1359,23 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // P2: poll canCreateSquad every 200ms
   // ★教学引导的脉冲**搭这口现成的轮询**，不新开计时器——它本来就是管「编队」键的。
   const [squadBtnEnabled, setSquadBtnEnabled] = useState(false);
-  const [guidePulseSquad, setGuidePulseSquad] = useState(false);
-  const [guidePulseChannel, setGuidePulseChannel] = useState<string | null>(null);
+  // 这一步要亮的目标集合。一个 Set 顶掉一堆布尔——加新目标不用再加一个 state。
+  const [guideSet, setGuideSet] = useState<ReadonlySet<string>>(new Set());
+  const onGuide = (t: string) => guideSet.has(t);
   useEffect(() => {
     if (!canCreateSquad) return;
     const id = setInterval(() => {
       setSquadBtnEnabled(canCreateSquad());
       // 引导没接（正式局）时 getGuideHint 缺席 ⇒ 恒 false，脉冲不会误伤正式局
-      const h = getGuideHint?.() ?? null;
-      setGuidePulseSquad((prev) => (prev === (h === "squad") ? prev : h === "squad"));
-      // 频道键：把 "channel:xxx" 收成频道名，没有就是 null
-      const ch = h && h.startsWith("channel:") ? h.slice("channel:".length) : null;
-      setGuidePulseChannel((prev) => (prev === ch ? prev : ch));
+      // 引导没接（正式局）时 getGuideTargets 缺席 ⇒ 恒空，脉冲不会误伤正式局
+      const tg = getGuideTargets?.() ?? [];
+      setGuideSet((prev) => {
+        if (prev.size === tg.length && tg.every((t) => prev.has(t))) return prev;
+        return new Set(tg);
+      });
     }, 200);
     return () => clearInterval(id);
-  }, [canCreateSquad, getGuideHint]);
+  }, [canCreateSquad, getGuideTargets]);
 
   // Day 13 P3-6: style visibility — poll style params at 1Hz
   const [showStyle, setShowStyle] = useState(false);
@@ -3502,7 +3505,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                       key={cmd}
                       className={`dp-channel-btn${isActive ? " dp-channel-btn--active" : ""}`}
                       data-channel-alert={channelAlert[COMMANDER_CHANNEL[cmd]]}
-              data-guide-pulse={guidePulseChannel === COMMANDER_CHANNEL[cmd] ? "on" : "off"}
+              data-guide-pulse={onGuide("chan:" + COMMANDER_CHANNEL[cmd]) ? "on" : "off"}
                                             onClick={() => selectSingleCommander(cmd)}
                       style={{ borderLeftColor: isActive ? cmdColor : "transparent" }}
                       title={`${meta.label} (${meta.role})`}
@@ -3562,6 +3565,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                     value={message}
                     onChange={handleTypedChange}
                     onKeyDown={handleKeyDown}
+                    data-guide-pulse={onGuide("btn:input") ? "on" : "off"}
                     placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`}
                     disabled={loading}
                   />
@@ -3575,6 +3579,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                   <button
                     data-ptt-btn
                     data-ptt-state={pttStateAttr}
+                    data-guide-pulse={onGuide("btn:mic") ? "on" : "off"}
                     className={`dp-dock-btn dp-dock-btn--ptt-main${pttCancelArmed ? " ptt-cancel-armed" : ""}`}
                     onPointerDown={onPttPointerDown}
                     onPointerMove={onPttPointerMove}
@@ -3612,7 +3617,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                       className="dp-dock-btn dp-dock-btn--action"
                       // 教学引导：这一步该点它的时候呼吸一下。★只有键**可点**时才亮——
                       //   亮一个按不下去的键是在耍玩家（没框选时它是 disabled 的）。
-                      data-guide-pulse={guidePulseSquad && squadBtnEnabled ? "on" : "off"}
+                      data-guide-pulse={onGuide("btn:squad") && squadBtnEnabled ? "on" : "off"}
                       onClick={(e) => openLeaderPicker(selectedCommanders[0], e)}
                       disabled={!squadBtnEnabled}
                       style={{ opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }}
@@ -3738,7 +3743,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             <button
               key={cmd}
               data-channel-alert={channelAlert[COMMANDER_CHANNEL[cmd]]}
-              data-guide-pulse={guidePulseChannel === COMMANDER_CHANNEL[cmd] ? "on" : "off"}
+              data-guide-pulse={onGuide("chan:" + COMMANDER_CHANNEL[cmd]) ? "on" : "off"}
               onClick={() => selectSingleCommander(cmd)}
               onContextMenu={(e) => { e.preventDefault(); toggleCommander(cmd); }}
               style={{
@@ -3806,6 +3811,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           </button>
           <button
             data-panel-tab={selectedCommanders[0]}
+            data-guide-pulse={onGuide("btn:orgtab") ? "on" : "off"}
             onClick={() => setActiveTab("panel")}
             style={{
               ...tabBtnStyle,
@@ -3873,13 +3879,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         <button onClick={() => handleProduce("infantry")} disabled={playerMoney < 80 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 80 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产步兵 ($80)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+兵$80</button>
         <button onClick={() => handleProduce("light_tank")} disabled={playerMoney < 200 || playerQueueLen >= 3} style={{ ...prodBtnStyle, opacity: playerMoney >= 200 && playerQueueLen < 3 ? 1 : 0.35 }} title={`生产轻坦 ($200)${playerQueueLen >= 3 ? " — 队列已满" : ""}`}>+坦$200</button>
         </>)}
-        <input ref={inputRef} type="text" value={message} onChange={handleTypedChange} onKeyDown={handleKeyDown} placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`} disabled={loading} style={inputStyle} />
+        <input ref={inputRef} data-guide-pulse={onGuide("btn:input") ? "on" : "off"} type="text" value={message} onChange={handleTypedChange} onKeyDown={handleKeyDown} placeholder={isGroupChat ? "全体通信（仅讨论，不可下令）..." : `对${COMMANDER_META[selectedCommanders[0]].label}下令...`} disabled={loading} style={inputStyle} />
         <TelegraphKey pulses={telegraphPulses} transmits={telegraphTransmits} />
         {/* 步 3：onPointerLeave 的 stopPTT 已删（理由同弹窗态那处注释：它既是
             "滑出即发送"的病本体，又会在 capture 释放时补发一脚踩掉 cancelPTT）。 */}
-        <button data-ptt-btn data-ptt-state={pttStateAttr} className={pttCancelArmed ? "ptt-cancel-armed" : undefined} onPointerDown={onPttPointerDown} onPointerMove={onPttPointerMove} onPointerUp={onPttPointerUp} onPointerCancel={onPttPointerCancel} onLostPointerCapture={onPttLostCapture} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttCancelArmed ? "var(--hud-accent-red-dim)" : pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : pttBtnStyle.background, borderColor: pttCancelArmed ? "var(--hud-accent-red)" : "var(--hud-border-bright)", color: pttCancelArmed ? "var(--hud-accent-red)" : "var(--hud-text-primary)", opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttCancelArmed ? "松手取消" : pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttCancelArmed ? "✕" : <MicIcon listening={pttStatus === "listening"} />}</button>
+        <button data-ptt-btn data-ptt-state={pttStateAttr} data-guide-pulse={onGuide("btn:mic") ? "on" : "off"} className={pttCancelArmed ? "ptt-cancel-armed" : undefined} onPointerDown={onPttPointerDown} onPointerMove={onPttPointerMove} onPointerUp={onPttPointerUp} onPointerCancel={onPttPointerCancel} onLostPointerCapture={onPttLostCapture} disabled={pttStatus === "unsupported" || loading} style={{ ...pttBtnStyle, ...pttBigStyle, background: pttCancelArmed ? "var(--hud-accent-red-dim)" : pttStatus === "listening" ? "var(--hud-accent-red)" : pttStatus === "error" ? "rgba(127, 29, 29, 0.8)" : pttBtnStyle.background, borderColor: pttCancelArmed ? "var(--hud-accent-red)" : "var(--hud-border-bright)", color: pttCancelArmed ? "var(--hud-accent-red)" : "var(--hud-text-primary)", opacity: pttStatus === "unsupported" || loading ? 0.35 : 1, cursor: pttStatus === "unsupported" || loading ? "default" : "pointer" }} title={pttCancelArmed ? "松手取消" : pttStatus === "unsupported" ? "浏览器不支持语音识别" : pttStatus === "error" ? "麦克风权限被拒绝" : pttStatus === "listening" ? "松开结束录音并发送" : "按住说话"}>{pttCancelArmed ? "✕" : <MicIcon listening={pttStatus === "listening"} />}</button>
         {hasTTS && (<button data-tts-btn data-tts-state={ttsEnabled ? "on" : "off"} data-tts-pulse={radioPulse ? "on" : "off"} onClick={toggleTts} style={{ ...pttBtnStyle, background: ttsEnabled ? "rgba(0, 212, 255, 0.2)" : pttBtnStyle.background, opacity: 1, cursor: "pointer", fontSize: 14 }} title={ttsEnabled ? "关闭语音朗读" : "开启语音朗读（参谋回复会被读出来）"}><HornIcon on={ttsEnabled} /></button>)}
-        {onCreateSquad && isChenChannel && (<button data-guide-pulse={guidePulseSquad && squadBtnEnabled ? "on" : "off"} onClick={(e) => openLeaderPicker(selectedCommanders[0], e)} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
+        {onCreateSquad && isChenChannel && (<button data-guide-pulse={onGuide("btn:squad") && squadBtnEnabled ? "on" : "off"} onClick={(e) => openLeaderPicker(selectedCommanders[0], e)} disabled={!squadBtnEnabled} style={{ ...actionBtnStyle, opacity: squadBtnEnabled ? 1 : 0.35, cursor: squadBtnEnabled ? "pointer" : "default" }} title={squadBtnEnabled ? "将选中单位编为分队" : "请先框选未编队的单位"}>编队</button>)}
         {onDeclareWar && canDeclareWar && (<button onClick={onDeclareWar} style={warBtnStyle} title="向敌方宣战">宣战</button>)}
         <button data-send-btn onClick={() => void sendCommand()} disabled={loading || !message.trim()} style={{ ...sendBtnStyle, opacity: loading || !message.trim() ? 0.5 : 1 }}>{loading ? "..." : "发送"}</button>
       </div>

@@ -31,7 +31,30 @@ export const NUDGE_AFTER_SEC = 15;
  *  ★ 复用喇叭键那条先例的规矩：**绑这一步的生死**——步骤一完成就停，
  *  绝不做常驻 affordance（`game-ui.css` 里那段注释写着理由）。
  *  将来步 4/5 会加 `"channel:logistics"` / `"channel:ops"` 之类。 */
-export type GuideHint = "squad" | "channel:logistics" | "channel:ops";
+/**
+ * 这一步要玩家看的**每一个**东西。用户 2026-09-08 定的规矩：
+ * **引导提到什么，什么就得自己亮**——不管它是屏边的按钮还是地图上的兵/设施。
+ * 不亮的话玩家得满地图找，那正是首次外部试玩里"注意力全被找东西吃掉"的翻版。
+ *
+ * 分两族，由 UI 层各自认领：
+ *  · `btn:*` / `chan:*` / `hud:*` ＝ DOM 元素，挂 `data-guide-pulse`（CSS 呼吸）
+ *  · `units:*` / `fac:*`        ＝ 地图上的东西，canvas 里画呼吸圈
+ * 两边节奏刻意都是 1.6s，看起来是同一件事在闪。
+ */
+export type GuideTarget =
+  // — 屏边的键 —
+  | "btn:squad"          // 「编队」
+  | "btn:input"          // 打字输入框
+  | "btn:mic"            // 麦克风
+  | "btn:orgtab"         // 右上「编制」页签
+  | "chan:logistics" | "chan:ops"
+  | "hud:objectives"     // 顶栏 OBJECTIVES 计数
+  // — 地图上的东西 —
+  | "units:unsquadded"   // 还没编队的玩家部队（第几坨由引擎当场算，不写死兵种）
+  | "fac:barracks" | "fac:beacon" | "fac:enemy_post";
+
+/** 老名字保留给不需要区分的地方；现在一步可以同时点亮多个目标。 */
+export type GuideHint = GuideTarget;
 
 /** 判定这一步用得到的东西。
  *  ★ 为什么不是直接传 GameState：从步 4 起，"完成"不再只是引擎状态
@@ -49,8 +72,8 @@ export interface GuideCtx {
 
 export interface GuideStep {
   id: string;
-  /** 这一步该点哪个键；省略＝这一步没有要点的键（例如只要说话）。 */
-  hint?: GuideHint;
+  /** 这一步要点亮的东西，可以多个。省略＝这一步没有要指的地方。 */
+  targets?: GuideTarget[];
   /** 进入这一步时陈说的那句。 */
   say: string;
   /** 卡了 NUDGE_AFTER_SEC 还没动静时再说的一句。
@@ -67,51 +90,85 @@ export interface GuideStep {
 export const GUIDE_STEPS: GuideStep[] = [
   {
     id: "squad_1",
-    hint: "squad",
-    say: "长官，先认认您的部队。北边那四个步兵，用鼠标拖个框圈上，点右下角的「编队」，给他们指个队长。",
-    nudge: "长官？把北边那四个步兵拖个框圈上，然后点「编队」——挑谁当队长您说了算。",
+    targets: ["units:unsquadded", "btn:squad"],
+    say: "长官，先认认您的部队。地图上闪着的那批兵还没编队——用鼠标拖个框圈上，"
+       + "点右下角的「编队」，给他们指个队长。",
+    nudge: "长官？把闪着的那批兵拖个框圈上，然后点「编队」——挑谁当队长您说了算。",
     done: (c) => c.state.squads.length >= 1,
   },
   {
     id: "squad_2",
-    hint: "squad",
-    say: "好，这队归您点名了。地图上还有一批兵散着没编——照样圈上、点「编队」，咱们手上就有两支能整队调动的部队。",
+    targets: ["units:unsquadded", "btn:squad"],
+    say: "好，这队归您点名了。还有一批兵在闪，照样圈上、点「编队」，"
+       + "咱们手上就有两支能整队调动的部队。",
     nudge: "长官，还有一批散兵没编队。圈上、点「编队」，跟刚才一样。",
     done: (c) => c.state.squads.length >= 2,
   },
   {
     // ★ 台词结构（用户 2026-09-06 定）：**给一句示范 + 明说可以随便讲**。
-    //   只给示范，玩家会当成咒语照念（"说错了会不会不认"）；只说随便讲，
-    //   他对着空输入框不知道从哪开口。两句都要。
-    //   与结束语同一条道理：给的是范围，不是菜单。
+    //   只给示范，玩家会当成咒语照念；只说随便讲，他对着空输入框不知道从哪开口。
     id: "talk_emily",
-    hint: "channel:logistics",
-    say: "后勤这块归艾米莉。点上面「艾米莉中尉」，跟她说句话——比如「造两个步兵」。"
-       + "不用照着念，您想怎么说就怎么说，她听得懂人话。",
-    nudge: "长官，艾米莉那边还没您的消息。点她的名字，随便说句什么都行——问问现在能造什么也算。",
+    targets: ["chan:logistics", "btn:input", "btn:mic", "fac:barracks"],
+    say: "后勤归艾米莉。点上面闪着的「艾米莉中尉」，跟她说句话——比如「造两个步兵」。"
+       + "打字或者按住麦克风说都行，两个都在闪。不用照着念，您想怎么说就怎么说。"
+       + "造出来的新兵会出现在闪着的那个我军兵营旁边。",
+    nudge: "长官，艾米莉那边还没您的消息。点她的名字，打字或按住麦克风都行——"
+         + "让她造两个步兵，一会儿要用。",
     done: (c) => c.playerSpokeIn("logistics"),
   },
   {
     id: "talk_marcus",
-    hint: "channel:ops",
-    say: "马克斯管战况判读。点「马克斯上尉」问他一句——比如「现在什么情况」。同样，怎么问都行。",
+    targets: ["chan:ops", "btn:input", "btn:mic"],
+    say: "马克斯管战况判读。点闪着的「马克斯上尉」问他一句——比如「现在什么情况」。"
+       + "同样，打字、语音，怎么问都行。",
     nudge: "长官，还没跟马克斯说过话。点他的名字问一句，随便什么都行。",
     done: (c) => c.playerSpokeIn("ops"),
   },
   {
-    // ★ 第一次占领刻意选中立、无人守的烽火台：**先在没有战斗的情况下**把占领
-    //   机制教干净，还给一个看得见的奖励（东边的迷雾散开）。打仗留给下一步。
+    // ★ 用户 2026-09-08 加的一步：让艾米莉造的兵派上用场，凑够三个队长。
+    //   ⚠ 卡点提醒：玩家手上原有的兵在前两步就编完了，指挥官与卫队是
+    //   `SQUAD_EXCLUDED_TYPES`（createSquad 会滤掉）⇒ **不生产就编不出第三队**。
+    //   所以台词与催促都必须把"先让艾米莉造兵"说出来，否则这一步是个死结。
+    id: "squad_3",
+    targets: ["units:unsquadded", "btn:squad", "fac:barracks"],
+    say: "艾米莉造的兵到位了就在兵营旁边。把他们也圈起来编成第三队——"
+       + "这样您手上就有三个队长了。要是还没造，先跟艾米莉要两个步兵。",
+    nudge: "长官，第三队还没编。兵营旁边有新兵就圈起来点「编队」；没有的话，"
+         + "先让艾米莉造两个步兵。",
+    done: (c) => c.state.squads.length >= 3,
+  },
+  {
+    // ★ 编队层级引导（用户 2026-09-08）：教"两队并一队、点名上级＝整个都动"。
+    id: "merge_squads",
+    targets: ["btn:orgtab"],
+    say: "右边「编制」页签点开——那儿能看见每个队长手下都有谁。"
+       + "用鼠标把一个队长拖到另一个队长身上，两支队就合成一支，被拖上去的那个是上级。"
+       + "合完之后您跟我说「让上级那个人进攻」，他手下两支队会一起动。",
+    nudge: "长官，去右边「编制」页签，把一个队长拖到另一个队长身上——两队就并成一队了。",
+    done: (c) => c.state.squads.some((sq) => !!sq.parentSquadId),
+  },
+  {
+    // ★ 第一次占领刻意选中立、无人守的烽火台：先在没有战斗的情况下把机制教干净，
+    //   还给一个看得见的奖励（东边迷雾散开）。打仗留给下一步。
     id: "take_beacon",
-    say: "基本功您已经有了，来真的。中央谷地那座烽火台没人守——派队人过去站上去，"
-       + "占下它东边就亮了，能看见敌人在哪。怎么派由您，说话或者直接右键都行。",
-    nudge: "长官，烽火台还空着。派一队过去占了它，东边才看得见。",
+    targets: ["fac:beacon", "btn:input", "btn:mic"],
+    say: "来真的。地图中间闪着的那座烽火台没人守，占下它东边就亮了，能看见敌人在哪。"
+       + "跟我说一句就行——比如「派 Aiden 去占领烽火台」。名字换成您哪个队长都行，"
+       + "怎么说都行，我听得懂。",
+    nudge: "长官，烽火台还空着。跟我说「派某某去占领烽火台」，或者直接右键点它也行。",
     done: (c) => c.state.facilities.get("tut_beacon")?.team === "player",
   },
   {
+    // ★ 胜负条件在这一步讲（用户 2026-09-08）：玩家正要去打那个点，
+    //   此刻指着顶栏的 OBJECTIVES 说"占它就算赢"最有画面。
     id: "take_post",
-    say: "看见东岭上那个敌军哨站了吧？打下它这一关就算过。它有人守，别一个人上。",
-    nudge: "长官，敌军哨站还在敌人手里。派兵过去打下来——这一关就差它了。",
-    // 过关目标翻蓝＝这一步完成，同时引擎也判胜（`requiredCapturedObjectives: 1`）
+    targets: ["fac:enemy_post", "hud:objectives"],
+    say: "东岭上那个插着旗的敌军哨站在闪——占下它这一关就算赢，"
+       + "顶上「OBJECTIVES」那个数就是记这个的，插旗的点占几个算几个。"
+       + "它有人守，别一个人上：可以说「派 Farrell 去攻占敌军哨站」，"
+       + "也可以说「派 Farrell 和 Ellis 一起打敌军哨站」，两支队就一块儿上。"
+       + "名字换成您自己的队长，怎么说都行。",
+    nudge: "长官，敌军哨站还在敌人手里。跟我说派谁去打——一个队长嫌少就点两个名字。",
     done: (c) => c.state.facilities.get("tut_enemy_post")?.team === "player",
   },
 ];
@@ -186,11 +243,17 @@ export const OUTRO_LINE =
   + "用平常说话的方式：打哪儿、派谁去、要不要先摸一摸敌情，都由您定。"
   + "真正的仗在阿拉曼，我们那边见。";
 
-/** 当前这一步该点哪个键；引导走完或这一步没有键就返回 null。
+/** 当前这一步要点亮的东西；引导走完或这一步没有目标就返回空数组。
  *  UI 层每拍读它——**没有第二份状态**，脉冲跟着引导进度自动生灭。 */
-export function currentHint(g: GuideState | null): GuideHint | null {
-  if (!g || g.index >= GUIDE_STEPS.length) return null;
-  return GUIDE_STEPS[g.index].hint ?? null;
+export function currentTargets(g: GuideState | null): readonly GuideTarget[] {
+  if (!g || g.index >= GUIDE_STEPS.length) return EMPTY_TARGETS;
+  return GUIDE_STEPS[g.index].targets ?? EMPTY_TARGETS;
+}
+const EMPTY_TARGETS: readonly GuideTarget[] = [];
+
+/** 旧接口的兼容壳：返回第一个目标或 null。台架里还在用它做单值断言。 */
+export function currentHint(g: GuideState | null): GuideTarget | null {
+  return currentTargets(g)[0] ?? null;
 }
 
 /** 开场那一句（第 0 步的 say）。由调用方在引导启动时发一次。 */

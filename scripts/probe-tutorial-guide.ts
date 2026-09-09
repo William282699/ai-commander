@@ -16,7 +16,7 @@
 import { createInitialGameState } from "../packages/core/src/index";
 import { createSquad } from "../packages/shared/src/squad";
 import { advanceGuide, initialGuideState, openingLine, GUIDE_STEPS, NUDGE_AFTER_SEC,
-  currentHint, OUTRO_LINE, type GuideState } from "../apps/web/src/tutorialGuide";
+  currentTargets, OUTRO_LINE, type GuideState } from "../apps/web/src/tutorialGuide";
 import type { GameState, Unit } from "../packages/shared/src/types";
 
 const TRIPWIRE = process.argv.includes("--tripwire");
@@ -30,6 +30,11 @@ function check(name: string, cond: boolean, detail: string) {
 function talk(ch: string) { spoke.add(ch); }
 /** 直接把设施翻成玩家的——判据读的就是引擎里这面旗子。 */
 function capture(s: GameState, id: string) { s.facilities.get(id)!.team = "player"; }
+
+/** 把两支队合并（拖编制树的引擎等价物）——判据读的就是 parentSquadId。 */
+function mergeSquads(s: GameState) {
+  if (s.squads.length >= 2) s.squads[1].parentSquadId = s.squads[0].id;
+}
 
 function makeSquad(s: GameState, type: Unit["type"]) {
   const us = [...s.units.values()].filter(u => u.team === "player" && u.type === type);
@@ -61,21 +66,36 @@ function run(s: GameState, ticks: number, dt: number, onTick?: (i: number) => vo
 }
 
 console.log("\n── ① 台词本身 ──");
-check("六步都有话、有催促", GUIDE_STEPS.length === 6 && GUIDE_STEPS.every(x => x.say && x.nudge),
+check("八步都有话、有催促", GUIDE_STEPS.length === 8 && GUIDE_STEPS.every(x => x.say && x.nudge),
   `${GUIDE_STEPS.length} 步`);
 // ★「催」不许是复读——复读零信息，且撞过「逐字复读 4→8/131」那笔账
 check("催促句与原句逐字不同", GUIDE_STEPS.every(x => x.say !== x.nudge), "两步都不同");
 // 编队两步要点名「编队」；说话两步要点名那个参谋
-check("每一步都点名了要点的东西",
-  GUIDE_STEPS.slice(0,2).every(x => x.say.includes("编队"))
-  && GUIDE_STEPS[2].say.includes("艾米莉") && GUIDE_STEPS[3].say.includes("马克斯")
-  && GUIDE_STEPS[4].say.includes("烽火台") && GUIDE_STEPS[5].say.includes("敌军哨站"), "六步都点名了");
+// ★ 用户 2026-09-08 立的规矩：**引导提到什么，什么就得自己亮**。机器版＝每一步
+//   都必须至少声明一个目标，否则玩家又得满地图找。
+check("每一步都有要点亮的目标（不许光说不指）",
+  GUIDE_STEPS.every(x => (x.targets?.length ?? 0) > 0),
+  GUIDE_STEPS.map(x => `${x.id}:${x.targets?.length ?? 0}`).join(" "));
+check("台词点名了那个东西",
+  GUIDE_STEPS[2].say.includes("艾米莉") && GUIDE_STEPS[3].say.includes("马克斯")
+  && GUIDE_STEPS[5].say.includes("编制") && GUIDE_STEPS[6].say.includes("烽火台")
+  && GUIDE_STEPS[7].say.includes("敌军哨站"), "都点名了");
+// ★ 台词里不许有 markdown（面板不渲染，星号会原样上屏）——本轮又犯过一次
+check("八步台词零 markdown 星号", GUIDE_STEPS.every(x => !/\*/.test(x.say + x.nudge)), "零星号");
+// ★ 死结防线：第三队必须靠生产，所以那一步的台词与催促都得把"先让艾米莉造兵"说出来
+check("第三队那步说明了要先造兵（否则是死结）",
+  /艾米莉/.test(GUIDE_STEPS[4].say) && /艾米莉/.test(GUIDE_STEPS[4].nudge),
+  GUIDE_STEPS[4].say.slice(0, 26) + "…");
+// ★ 打哨站那步要讲清怎么算赢，并给"两个队长一起上"的示范
+check("最后一步讲了胜负条件 + 给了双队长示范",
+  /算赢|OBJECTIVES/.test(GUIDE_STEPS[7].say) && /和|一起/.test(GUIDE_STEPS[7].say),
+  GUIDE_STEPS[7].say.slice(0, 30) + "…");
 // ★ 用户 09-06 定的台词结构：示范 + 明说可以随便讲。两样缺一不可。
-for (const i of [2, 3]) {
+for (const i of [2, 3, 6, 7]) {
   const st = GUIDE_STEPS[i];
   check(`第${i+1}步给了示范台词`, /「[^」]+」/.test(st.say.replace(/「艾米莉中尉」|「马克斯上尉」/g, "")),
     st.say.slice(0, 30) + "…");
-  check(`第${i+1}步明说了可以随便讲`, /怎么说|怎么问|随便/.test(st.say), "有解放句");
+  check(`第${i+1}步明说了可以随便讲`, /怎么说|怎么问|随便|都行/.test(st.say), "有解放句");
 }
 
 console.log("\n── ② 什么都不做：该催一次，且只催一次 ──");
@@ -107,21 +127,23 @@ console.log("\n── ④ 两队都编完：引导走完，从此闭嘴 ──")
 {
   spoke.clear();
   const s = createInitialGameState("tutorial");
-  const { g, said } = run(s, 40, 1, (i) => {
+  const { g, said } = run(s, 50, 1, (i) => {
     if (i === 3) makeSquad(s, "infantry");
     if (i === 8) makeSquad(s, "light_tank");
     if (i === 13) talk("logistics");
     if (i === 18) talk("ops");
-    if (i === 23) capture(s, "tut_beacon");
-    if (i === 28) capture(s, "tut_enemy_post");
+    if (i === 23) makeSquad(s, "artillery");            // 第三队（模拟艾米莉造的兵）
+    if (i === 28) mergeSquads(s);                       // 合并
+    if (i === 33) capture(s, "tut_beacon");
+    if (i === 38) capture(s, "tut_enemy_post");
   });
-  check("两支队都建起来了", s.squads.length === 2, `${s.squads.length} 支`);
+  check("三支队都建起来了（含艾米莉造兵那队）", s.squads.length === 3, `${s.squads.length} 支`);
   check("引导走完", g.index >= GUIDE_STEPS.length, `index=${g.index}/${GUIDE_STEPS.length}`);
   // 走完之后**接着这个状态**再跑很多拍，一句都不许再冒出来
   const before = said.length;
   const after = run(s, 30, 1, undefined, g);
   check("走完后不再说话", after.said.length === 0, `又说了 ${after.said.length} 句`);
-  check("全程＝开场＋后五步＋结束语", before === 7, `${before} 句`);
+  check("全程＝开场＋后七步＋结束语", before === 9, `${before} 句`);
   // ★ 结束语是承重的：手把手引导会把玩家训练成"等指令"，必须显式解除
   check("结束语说了", said.includes(OUTRO_LINE), OUTRO_LINE.slice(0, 20) + "…");
   check("结束语只说一次", said.filter(x => x === OUTRO_LINE).length === 1,
@@ -138,13 +160,15 @@ console.log("\n── ④b 倒着做：先编坦克再编步兵（实机抓出�
   //   且第二句里不许钉死某一坨的番号/兵种。
   spoke.clear();
   const s = createInitialGameState("tutorial");
-  const { g, said } = run(s, 40, 1, (i) => {
+  const { g, said } = run(s, 50, 1, (i) => {
     if (i === 3) makeSquad(s, "light_tank");   // 反着来
     if (i === 8) makeSquad(s, "infantry");
     if (i === 13) talk("logistics");
     if (i === 18) talk("ops");
-    if (i === 23) capture(s, "tut_beacon");
-    if (i === 28) capture(s, "tut_enemy_post");
+    if (i === 23) makeSquad(s, "artillery");
+    if (i === 28) mergeSquads(s);
+    if (i === 33) capture(s, "tut_beacon");
+    if (i === 38) capture(s, "tut_enemy_post");
   });
   check("倒着做也能走完", g.index >= GUIDE_STEPS.length, `index=${g.index}`);
   check("第二句不点名兵种（顺序无关）",
@@ -160,44 +184,58 @@ console.log("\n── ⑤ 玩家抢跑：陈还没开口他就编好了 ──")
   makeSquad(s, "infantry");
   makeSquad(s, "light_tank");
   talk("logistics"); talk("ops");
+  makeSquad(s, "artillery"); mergeSquads(s);
   capture(s, "tut_beacon"); capture(s, "tut_enemy_post");
   const { g, said } = run(s, 60, 1);
   check("抢跑也能直接走完", g.index >= GUIDE_STEPS.length, `index=${g.index}`);
   check("一句催促都没有", !said.some(x => GUIDE_STEPS.some(st => st.nudge === x)), "无催促");
 }
 
-console.log("\n── ⑥ 该点哪个键的脉冲：跟着步骤生灭，不常驻 ──");
+console.log("\n── ⑥ 要点亮的目标：跟着步骤生灭，不常驻 ──");
 {
   // 铁律照喇叭键那条先例：**绑这一步的生死**。常驻的提示等于没有提示，还烦人。
   spoke.clear();
   const s = createInitialGameState("tutorial");
   let g: GuideState | null = initialGuideState(s.time);
-  check("第一步：提示点「编队」", currentHint(g) === "squad", String(currentHint(g)));
+  const has = (t: string) => currentTargets(g).includes(t as never);
+  const step = () => { s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next; };
 
-  makeSquad(s, "infantry");
-  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
-  check("第二步：还是「编队」", currentHint(g) === "squad", String(currentHint(g)));
+  check("① 编队：兵在闪 + 编队键在闪", has("units:unsquadded") && has("btn:squad"),
+    currentTargets(g).join());
 
-  makeSquad(s, "light_tank");
-  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
-  check("第三步：提示点艾米莉的频道键", currentHint(g) === "channel:logistics", String(currentHint(g)));
+  makeSquad(s, "infantry"); step();
+  check("② 还是兵 + 编队键", has("units:unsquadded") && has("btn:squad"), currentTargets(g).join());
 
-  talk("logistics");
-  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
-  check("第四步：提示点马克斯的频道键", currentHint(g) === "channel:ops", String(currentHint(g)));
+  makeSquad(s, "light_tank"); step();
+  // ★ 用户 09-08 要的：到艾米莉这步，打字框和麦克风都得闪，兵营也要闪
+  check("③ 艾米莉：频道键 + 输入框 + 麦克风 + 兵营 四个都在",
+    has("chan:logistics") && has("btn:input") && has("btn:mic") && has("fac:barracks"),
+    currentTargets(g).join());
 
-  talk("ops");
-  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
-  // 第五步是地图上的动作（去占烽火台），没有键要点 ⇒ 不该乱亮
-  check("第五步：没有键要点，不乱亮", currentHint(g) === null, String(currentHint(g)));
+  talk("logistics"); step();
+  check("④ 马克斯：频道键 + 输入框 + 麦克风", has("chan:ops") && has("btn:input") && has("btn:mic"),
+    currentTargets(g).join());
 
-  capture(s, "tut_beacon");
-  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
-  capture(s, "tut_enemy_post");
-  s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next;
-  // ★ 这条是承重的：引导走完脉冲必须灭，否则那个键会一直闪到关机
-  check("引导走完：脉冲灭", currentHint(g) === null, String(currentHint(g)));
-  check("引导没起来时也不亮（正式局不误伤）", currentHint(null) === null, String(currentHint(null)));
+  talk("ops"); step();
+  check("⑤ 第三队：兵 + 编队键 + 兵营（新兵从那儿出来）",
+    has("units:unsquadded") && has("btn:squad") && has("fac:barracks"), currentTargets(g).join());
+
+  makeSquad(s, "artillery"); step();
+  check("⑥ 合并：编制页签在闪", has("btn:orgtab"), currentTargets(g).join());
+
+  mergeSquads(s); step();
+  check("⑦ 烽火台：烽火台 + 输入框/麦克风", has("fac:beacon") && has("btn:input"),
+    currentTargets(g).join());
+
+  capture(s, "tut_beacon"); step();
+  // ★ 打哨站这步要同时指着哨站和顶栏的 OBJECTIVES（胜负条件就在那儿讲）
+  check("⑧ 哨站：哨站 + 顶栏 OBJECTIVES", has("fac:enemy_post") && has("hud:objectives"),
+    currentTargets(g).join());
+
+  capture(s, "tut_enemy_post"); step();
+  // ★ 承重：引导走完必须全灭，否则那些东西会一直闪到关机
+  check("走完：全灭", currentTargets(g).length === 0, `[${currentTargets(g).join()}]`);
+  check("引导没起来时也不亮（正式局不误伤）", currentTargets(null).length === 0, "空");
 }
 
 if (TRIPWIRE) {

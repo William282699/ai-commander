@@ -90,8 +90,8 @@ import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, Repor
 import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, availableLeaderProfiles, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import type { LeaderProfile } from "@ai-commander/shared";
-import { advanceGuide, initialGuideState, openingLine, currentHint,
-  type GuideState, type GuideHint } from "./tutorialGuide";
+import { advanceGuide, initialGuideState, openingLine, currentTargets,
+  type GuideState, type GuideTarget } from "./tutorialGuide";
 import { ChatPanel } from "./ChatPanel";
 import { TaskBar } from "./TaskBar";
 import * as messageStoreModule from "./messageStore";
@@ -843,9 +843,9 @@ export interface GameBridge {
   getViewport: () => ViewportGeometry | null;
   onCreateSquad: (owner: "chen" | "marcus" | "emily", choice?: { leaderName: string | null }) => void;
   canCreateSquad: () => boolean;
-  /** 教学引导：当前这一步要玩家点哪个键（UI 据此让那一个键呼吸）。
+  /** 教学引导：当前这一步要点亮的**所有**目标（按钮 + 地图上的东西）。
    *  走桥而不是模块级变量——弹出面板是**另一个 window**，模块级过不去。 */
-  getGuideHint: () => GuideHint | null;
+  getGuideTargets: () => readonly GuideTarget[];
   /** ChatPanel 真把玩家那句话发出去时喊一声（教学关判"跟这个参谋说过话没有"用）。
    *  ★ 不能靠嗅 messageStore：编队等引擎日志也记成 `source="player"`
    *  （`GameCanvas.tsx:1254` 那条 `新建分队…` 就落在 ops 频道），
@@ -1002,9 +1002,11 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       if (guideRef.current === null) {
         // 开场第一句：等 state 真的就位再说，别对着空状态开口
         guideRef.current = initialGuideState(st.time);
+        recomputeGuideHighlight(st);
         sayAsChen(openingLine(), st.time);
         return;
       }
+      recomputeGuideHighlight(st);
       const { say, next } = advanceGuide(guideRef.current, {
         state: st,
         // 判松：这个频道里有过一条 source="player" 的消息就算说过话。
@@ -1017,9 +1019,40 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     return () => clearInterval(id);
   }, []);
 
-  /** 脉冲绑引导这一步的生死：步骤一完成 `currentHint` 自然返回 null，
-   *  引导走完也返回 null——不做常驻 affordance（照喇叭键那条先例）。 */
-  const getGuideHint = useCallback(() => currentHint(guideRef.current), []);
+  /** 脉冲绑引导这一步的生死：步骤一完成 `currentTargets` 自然变空，
+   *  引导走完也是空——不做常驻 affordance（照喇叭键那条先例）。 */
+  const getGuideTargets = useCallback(() => currentTargets(guideRef.current), []);
+
+  /** 把这一步的目标翻译成**地图上要画圈的那些东西**（渲染层每帧读它）。
+   *  ★ `units:unsquadded` 是**当场算**的，不写死兵种／不写死 id——玩家先编哪一坨
+   *  都行（"台词钉死顺序"那个 bug 就是这么来的），而且编完一坨它自动只剩另一坨。 */
+  const guideHighlightRef = useRef<{ unitIds: Set<number>; facilityIds: Set<string> }>(
+    { unitIds: new Set(), facilityIds: new Set() });
+  const FAC_OF_TARGET: Record<string, string> = {
+    "fac:barracks": "tut_player_barracks",
+    "fac:beacon": "tut_beacon",
+    "fac:enemy_post": "tut_enemy_post",
+  };
+  const recomputeGuideHighlight = useCallback((st: GameState) => {
+    const tg = currentTargets(guideRef.current);
+    const unitIds = new Set<number>();
+    const facilityIds = new Set<string>();
+    for (const t of tg) {
+      if (t === "units:unsquadded") {
+        const inSquad = new Set<number>();
+        for (const sq of st.squads) for (const id of sq.unitIds) inSquad.add(id);
+        st.units.forEach((u) => {
+          // 鼠标点得动的那几个（指挥官/卫队）编不进队，别亮它们误导人
+          if (u.team !== "player" || u.isPlayerControlled) return;
+          if (u.hp <= 0 || u.state === "dead") return;
+          if (!inSquad.has(u.id)) unitIds.add(u.id);
+        });
+      } else if (FAC_OF_TARGET[t]) {
+        facilityIds.add(FAC_OF_TARGET[t]);
+      }
+    }
+    guideHighlightRef.current = { unitIds, facilityIds };
+  }, []);
 
   /** 玩家真开过口的频道。只由 ChatPanel 的发送路径写入。 */
   const spokeChannelsRef = useRef<Set<Channel>>(new Set());
@@ -1320,7 +1353,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       getViewport,
       onCreateSquad: handleCreateSquad,
       canCreateSquad,
-      getGuideHint,
+      getGuideTargets,
       onPlayerSpoke,
       getAssignableLeaders,
       onDeclareWar: handleDeclareWar,
@@ -2407,7 +2440,8 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       const facArray = Array.from(state.facilities.values());
       // 刀3(+fix1): 胜负点插旗——4 个夺取目标 + 3 个我方前哨（恒显，雾层在后只压暗）。
       renderFacilities(ctx, facArray, camera, state.captureObjectives,
-        state.scenarioWinConfig?.friendlyKeypoints);
+        state.scenarioWinConfig?.friendlyKeypoints,
+        guideHighlightRef.current, state.time);
 
       // 3. Fog of war overlay (darkens unseen areas)
       if (!noFog) {
@@ -2429,6 +2463,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         canvas.height,
         state.time,
         selectedSet,
+        guideHighlightRef.current,
       );
 
       // 4.5 Capture overlays — drawn above units so a contested forward post is
@@ -2533,7 +2568,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           getViewport={getViewport}
           onCreateSquad={handleCreateSquad}
           canCreateSquad={canCreateSquad}
-          getGuideHint={getGuideHint}
+          getGuideTargets={getGuideTargets}
           onPlayerSpoke={onPlayerSpoke}
           getAssignableLeaders={getAssignableLeaders}
           onDeclareWar={handleDeclareWar}
