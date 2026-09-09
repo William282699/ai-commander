@@ -483,6 +483,8 @@ interface Props {
   getGuideTargets?: () => readonly string[];
   /** 玩家真发出一条消息时喊一声（教学关用）。 */
   onPlayerSpoke?: (ch: Channel) => void;
+  /** 玩家点开第二页签（艾米莉那儿＝军械）时喊一声（教学关用）。 */
+  onOpenPanelTab?: (ch: Channel) => void;
   /** 名册上此刻派得出去的将军（点将弹窗的内容）。缺省＝没接（走引擎自动挑）。 */
   getAssignableLeaders?: () => LeaderProfile[];
   onDeclareWar?: () => void;
@@ -503,7 +505,7 @@ interface DisplayResponse extends AdvisorResponse {
 const SHOW_QUICK_BUY = false;
 
 
-export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, getGuideTargets, onPlayerSpoke, getAssignableLeaders, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
+export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, getGuideTargets, onPlayerSpoke, onOpenPanelTab, getAssignableLeaders, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
   // ── Panel collapse state ──
   const [collapsed, setCollapsed] = useState(false);
 
@@ -3811,8 +3813,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           </button>
           <button
             data-panel-tab={selectedCommanders[0]}
-            data-guide-pulse={onGuide("btn:orgtab") ? "on" : "off"}
-            onClick={() => setActiveTab("panel")}
+            data-guide-pulse={onGuide("btn:paneltab") ? "on" : "off"}
+            onClick={() => {
+              setActiveTab("panel");
+              onOpenPanelTab?.(COMMANDER_CHANNEL[selectedCommanders[0]]);
+            }}
             style={{
               ...tabBtnStyle,
               borderBottomColor: effectiveTab === "panel" ? "var(--hud-accent-cyan)" : "transparent",

@@ -59,7 +59,7 @@ export type GuideTarget =
   | "btn:squad"          // 「编队」
   | "btn:input"          // 打字输入框
   | "btn:mic"            // 麦克风
-  | "btn:orgtab"         // 右上「编制」页签
+  | "btn:paneltab"       // 右上那个第二页签（陈＝编制／艾米莉＝军械，同一个键）
   | "chan:logistics" | "chan:ops"
   | "hud:objectives"     // 顶栏 OBJECTIVES 计数
   // — 地图上的东西 —
@@ -82,6 +82,8 @@ export interface GuideCtx {
    *  **正在动手的人不该被催。** 这是"判据要测效果"的同一族——
    *  旧判据测的是"时间到了没有"，真正该测的是"他是不是卡住了"。 */
   playerActedSince: (sinceGameTime: number) => boolean;
+  /** 玩家有没有点开过第二页签（艾米莉那儿＝军械）。判松：切过去就算。 */
+  playerSawArsenal: () => boolean;
   /** 玩家在这个频道**发过消息**没有。★判松（用户 2026-09-06 裁定）：
    *  说什么都算，哪怕只是"你好"。这一步教的是"你可以跟她说话"，
    *  不是"你得说对咒语"——判紧等于在教学关里亲手造一个新手过不去的门槛，
@@ -93,8 +95,11 @@ export interface GuideStep {
   id: string;
   /** 这一步要点亮的东西，可以多个。省略＝这一步没有要指的地方。 */
   targets?: GuideTarget[];
-  /** 进入这一步时陈说的那句。 */
-  say: string;
+  /** 进入这一步时陈说的那句。
+   *  可以是函数——★用户 2026-09-08：合并那句原本写「让上级那个人进攻」，
+   *  玩家会纳闷"上级是谁"。引擎其实知道（`parentSquadId` 指向谁），
+   *  所以让台词**把那个名字说出来**，别让玩家猜。 */
+  say: string | ((c: GuideCtx) => string);
   /** 卡了这么久还没动静时再说的一句。
    *  **换个说法，不复读**——复读是零信息，且撞过「逐字复读」那笔账。 */
   nudge: string;
@@ -142,6 +147,16 @@ export const GUIDE_STEPS: GuideStep[] = [
     done: (c) => c.playerSpokeIn("logistics"),
   },
   {
+    // ★ 用户 2026-09-08：下完生产令之后，让玩家看一眼「军械」——知道到底能造什么，
+    //   以后才说得出口。判据只要他**切到那一页**，不要求他看懂（判松同一条道理）。
+    id: "see_arsenal",
+    targets: ["btn:paneltab"],
+    say: "对了，在艾米莉这儿点一下右上角闪着的「军械」——那一页列着现在能造什么、"
+       + "各要多少钱。看一眼心里有数，以后想造什么直接跟她说就行。",
+    nudge: "长官，右上角那个「军械」页签点一下，看看手上能造哪些兵。",
+    done: (c) => c.playerSawArsenal(),
+  },
+  {
     id: "talk_marcus",
     settleSec: SETTLE_SEC_TALK,
     targets: ["chan:ops", "btn:input", "btn:mic"],
@@ -167,10 +182,19 @@ export const GUIDE_STEPS: GuideStep[] = [
   {
     // ★ 编队层级引导（用户 2026-09-08）：教"两队并一队、点名上级＝整个都动"。
     id: "merge_squads",
-    targets: ["btn:orgtab"],
-    say: "右边「编制」页签点开——那儿能看见每个队长手下都有谁。"
-       + "用鼠标把一个队长拖到另一个队长身上，两支队就合成一支，被拖上去的那个是上级。"
-       + "合完之后您跟我说「让上级那个人进攻」，他手下两支队会一起动。",
+    targets: ["btn:paneltab"],
+    say: (c) => {
+      // 已经合过了就直接点名那个人；还没合就先讲怎么合（这一步刚开始时的常态）。
+      const child = c.state.squads.find((sq) => !!sq.parentSquadId);
+      const boss = child && c.state.squads.find((sq) => sq.id === child.parentSquadId);
+      const who = boss?.leaderName;
+      return "右边「编制」页签点开——那儿能看见每个队长手下都有谁。"
+        + "用鼠标把一个队长拖到另一个队长身上，两支队就合成一支，被拖上去的那个是上级。"
+        + (who
+          ? `合完了：${who} 现在是上级。以后您只要说「${who} 进攻某某地方」，他手下两支队会一起动。`
+          : "合完之后，您只要点那个上级队长的名字下令——比如「让他进攻某某地方」——"
+            + "他手下两支队就会一起动。这一步不急，先合上再说。");
+    },
     nudge: "长官，去右边「编制」页签，把一个队长拖到另一个队长身上——两队就并成一队了。",
     done: (c) => c.state.squads.some((sq) => !!sq.parentSquadId),
   },
@@ -185,9 +209,9 @@ export const GUIDE_STEPS: GuideStep[] = [
     //   陈说的和长官想的对不上。
     id: "place_tag",
     targets: ["btn:input"],
-    say: "还有一手您会用得上：按一下键盘 T，再在地图上点一个地方，给它起个名字，"
-       + "那儿就成了您自己的地标。以后跟我说「去那个名字」我就懂。"
-       + "起名字别跟地图上已有的地名重样——重了我分不清您说的是哪个。",
+    say: "还有一手您会用得上：按一下键盘 T，再在地图上点一个地方，给它起个名字——"
+       + "比如「三角洲」。那儿就成了您自己的地标，以后跟我说「去三角洲」我就懂。"
+       + "名字随您起，只要别跟地图上已有的地名重样——重了我分不清您说的是哪个。",
     nudge: "长官，试试按 T 再点地图上一个点，起个名字——起个新名，别跟现成的地名重样。",
     done: (c) => (c.state.tags?.length ?? 0) >= 1,
   },
@@ -262,7 +286,7 @@ export function advanceGuide(g: GuideState, c: GuideCtx, now: number): GuideEffe
   //      否则静拍会白吃掉玩家的思考时间。
   if (g.sayAt !== null) {
     if (now < g.sayAt) return { say: null, next: g };
-    const line = g.index < GUIDE_STEPS.length ? GUIDE_STEPS[g.index].say : OUTRO_LINE;
+    const line = g.index < GUIDE_STEPS.length ? resolveSay(GUIDE_STEPS[g.index].say, c) : OUTRO_LINE;
     return { say: line, next: { ...g, sayAt: null, stepStartedAt: now, nudged: false } };
   }
 
@@ -327,5 +351,12 @@ export function currentHint(g: GuideState | null): GuideTarget | null {
 
 /** 开场那一句（第 0 步的 say）。由调用方在引导启动时发一次。 */
 export function openingLine(): string {
-  return GUIDE_STEPS[0].say;
+  return resolveSay(GUIDE_STEPS[0].say, null);
+}
+
+/** 台词可能是函数——统一在这里解开。ctx 缺席时函数式台词退回它的兜底写法。 */
+export function resolveSay(
+  say: string | ((c: GuideCtx) => string), c: GuideCtx | null,
+): string {
+  return typeof say === "string" ? say : (c ? say(c) : "");
 }

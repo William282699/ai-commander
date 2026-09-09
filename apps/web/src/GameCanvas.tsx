@@ -3,6 +3,7 @@ import {
   renderTerrain,
   renderMinimap,
   renderFacilities,
+  renderGuideHighlights,
   renderFacilityCaptureOverlays,
   renderFrontLabels,
   renderRouteLabels,
@@ -851,6 +852,8 @@ export interface GameBridge {
    *  （`GameCanvas.tsx:1254` 那条 `新建分队…` 就落在 ops 频道），
    *  嗅出来的结果是"玩家还没跟马克斯说话就算说过了"——实机当场撞到。 */
   onPlayerSpoke: (ch: Channel) => void;
+  /** 玩家点开第二页签时喊一声（教学关判"看没看军械"用）。 */
+  onOpenPanelTab: (ch: Channel) => void;
   getAssignableLeaders: () => LeaderProfile[];
   onDeclareWar: () => void;
   onSelectUnits: (unitIds: number[]) => void;
@@ -999,6 +1002,12 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     spokeChannelsRef.current.add(ch);
     markPlayerAction();
   }, [markPlayerAction]);
+  /** 玩家点开过第二页签的频道集合（教学关只关心 logistics＝军械）。 */
+  const panelTabSeenRef = useRef<Set<Channel>>(new Set());
+  const onOpenPanelTab = useCallback((ch: Channel) => {
+    panelTabSeenRef.current.add(ch);
+    markPlayerAction();
+  }, [markPlayerAction]);
   const guideRef = useRef<GuideState | null>(null);
   useEffect(() => {
     if (scenarioFromUrl() !== "tutorial") return;
@@ -1024,6 +1033,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         // 走 messageStore 的公开读法，它自带跨窗口委托（弹出面板也数得到）。
         playerSpokeIn: (ch) => spokeChannelsRef.current.has(ch),
         playerActedSince: (t) => lastPlayerActionRef.current > t,
+        playerSawArsenal: () => panelTabSeenRef.current.has("logistics"),
       }, st.time);
       guideRef.current = next;
       if (say) sayAsChen(say, st.time);
@@ -1394,6 +1404,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       canCreateSquad,
       getGuideTargets,
       onPlayerSpoke,
+      onOpenPanelTab,
       getAssignableLeaders,
       onDeclareWar: handleDeclareWar,
       onSelectUnits: handleSelectUnits,
@@ -2479,8 +2490,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       const facArray = Array.from(state.facilities.values());
       // 刀3(+fix1): 胜负点插旗——4 个夺取目标 + 3 个我方前哨（恒显，雾层在后只压暗）。
       renderFacilities(ctx, facArray, camera, state.captureObjectives,
-        state.scenarioWinConfig?.friendlyKeypoints,
-        guideHighlightRef.current, state.time);
+        state.scenarioWinConfig?.friendlyKeypoints);
 
       // 3. Fog of war overlay (darkens unseen areas)
       if (!noFog) {
@@ -2502,8 +2512,12 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         canvas.height,
         state.time,
         selectedSet,
-        guideHighlightRef.current,
       );
+
+      // 4.2 教学引导高亮——**必须在迷雾之后**画（顺序是 设施→迷雾→单位）。
+      //     圈原本画在设施里，被迷雾整个盖住，烽火台那一步玩家什么都看不见。
+      renderGuideHighlights(ctx, unitArray, facArray, camera, state.time,
+        guideHighlightRef.current);
 
       // 4.5 Capture overlays — drawn above units so a contested forward post is
       // readable even when tanks/infantry crowd the facility sprite.
@@ -2609,6 +2623,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           canCreateSquad={canCreateSquad}
           getGuideTargets={getGuideTargets}
           onPlayerSpoke={onPlayerSpoke}
+          onOpenPanelTab={onOpenPanelTab}
           getAssignableLeaders={getAssignableLeaders}
           onDeclareWar={handleDeclareWar}
           onSelectUnits={handleSelectUnits}

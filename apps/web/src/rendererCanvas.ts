@@ -320,11 +320,6 @@ export function renderFacilities(
 
     const spriteEntry = FACILITY_SPRITE_MAP[fac.type];
 
-    // 教学引导的"看这儿"圈：画在设施脚下、其余装饰之前。
-    if (guide?.facilityIds?.has(fac.id)) {
-      drawGuideRing(ctx, cx, cy, tileScreenSize * 1.15, gameTime ?? 0);
-    }
-
     // 刀3 fix4: 可占产出据点 → 队色地环（RTS 控制点语言，画在建筑脚下）。
     // 判据=有资源行（FACILITY_GLYPH_ROW，同一真相源）：环与资源字永远成对出现。
     // 三层视觉语言：旗=胜负点、环+资源字=可占的产出据点、素图=不可占设施。
@@ -657,8 +652,9 @@ const SELECTION_RING_GAP = 1.16;
 const GUIDE_RING_PERIOD_SEC = 1.6;
 const GUIDE_RING_COLOR = "255,214,64";     // 琥珀色——与蓝(我方)/红(敌方)/绿(选中)都不撞
 function guideRingAlpha(gameTime: number): number {
-  // 0.35 ↔ 0.95 之间呼吸，不做全灭全亮（全灭那一拍会像掉帧）
-  return 0.35 + 0.6 * (0.5 + 0.5 * Math.sin((gameTime / GUIDE_RING_PERIOD_SEC) * Math.PI * 2));
+  // 用户 2026-09-08：「闪烁都很轻」⇒ 谷底从 0.35 抬到 0.6，峰值顶到 1.0，
+  // 且不做全灭（全灭那一拍会像掉帧）。
+  return 0.6 + 0.4 * (0.5 + 0.5 * Math.sin((gameTime / GUIDE_RING_PERIOD_SEC) * Math.PI * 2));
 }
 /** 在 (sx,sy) 画一圈呼吸的琥珀色椭圆。rx 是屏幕像素半径。 */
 function drawGuideRing(
@@ -670,12 +666,18 @@ function drawGuideRing(
   // 外面一圈很淡的晕，让它在杂乱地表上也跳得出来
   ctx.beginPath();
   ctx.ellipse(sx, sy, rx * 1.28, ry * 1.28, 0, 0, Math.PI * 2);
-  ctx.fillStyle = `rgba(${GUIDE_RING_COLOR},${a * 0.18})`;
+  ctx.fillStyle = `rgba(${GUIDE_RING_COLOR},${a * 0.30})`;
   ctx.fill();
   ctx.beginPath();
   ctx.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
   ctx.strokeStyle = `rgba(${GUIDE_RING_COLOR},${a})`;
-  ctx.lineWidth = Math.max(2, rx * 0.13);
+  ctx.lineWidth = Math.max(3, rx * 0.18);
+  ctx.stroke();
+  // 再描一圈更亮的内线，让它在沙地上也跳得出来
+  ctx.beginPath();
+  ctx.ellipse(sx, sy, rx * 0.88, ry * 0.88, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(255,255,255,${a * 0.45})`;
+  ctx.lineWidth = Math.max(1.5, rx * 0.07);
   ctx.stroke();
   ctx.restore();
 }
@@ -684,6 +686,45 @@ function drawGuideRing(
 export interface GuideHighlight {
   unitIds?: ReadonlySet<number>;
   facilityIds?: ReadonlySet<string>;
+}
+
+/**
+ * 教学引导的高亮，**单独一遍、画在迷雾之后**。
+ *
+ * ★ 为什么必须自己一遍（用户 2026-09-08 手测："烽火台没有闪烁"）：
+ *   渲染顺序是 设施 → **迷雾** → 单位，圈原本画在设施里 ⇒ 迷雾直接盖住它。
+ *   烽火台正好在未探索区，于是那一步玩家看不到任何提示。
+ *   引导圈是**陈在指路**，不是敌情读数——它本来就该无视雾。
+ */
+export function renderGuideHighlights(
+  ctx: CanvasRenderingContext2D,
+  units: Unit[],
+  facilities: Facility[],
+  camera: Camera,
+  gameTime: number,
+  guide?: GuideHighlight,
+): void {
+  if (!guide) return;
+  const tileScreenSize = TILE_SIZE * camera.zoom;
+  const baseUnitSize = Math.max(8, tileScreenSize * 0.7);
+
+  if (guide.facilityIds?.size) {
+    for (const fac of facilities) {
+      if (!guide.facilityIds.has(fac.id)) continue;
+      const sx = (fac.position.x * TILE_SIZE - camera.x) * camera.zoom + tileScreenSize / 2;
+      const sy = (fac.position.y * TILE_SIZE - camera.y) * camera.zoom + tileScreenSize / 2;
+      drawGuideRing(ctx, sx, sy, tileScreenSize * 1.25, gameTime);
+    }
+  }
+  if (guide.unitIds?.size) {
+    const ringRx = baseUnitSize * FACTION_RING_RX * 1.5;
+    for (const u of units) {
+      if (!guide.unitIds.has(u.id) || u.hp <= 0) continue;
+      const sx = (u.position.x * TILE_SIZE - camera.x) * camera.zoom;
+      const sy = (u.position.y * TILE_SIZE - camera.y) * camera.zoom;
+      drawGuideRing(ctx, sx, sy + ringRx * FACTION_RING_FLATTEN * FACTION_RING_DROP, ringRx, gameTime);
+    }
+  }
 }
 
 export function renderUnits(
@@ -762,11 +803,6 @@ export function renderUnits(
     // inherits that value's 8px floor when zoomed all the way out.
     const ringRx = baseUnitSize * FACTION_RING_RX;
     const ringRy = ringRx * FACTION_RING_FLATTEN;
-
-    // --- 教学引导的"看这儿"圈（最底下画，别盖住阵营色与选中环）---
-    if (guide?.unitIds?.has(unit.id)) {
-      drawGuideRing(ctx, cx, cy + ringRy * FACTION_RING_DROP, ringRx * 1.5, gameTime);
-    }
 
     // --- Faction ground ring (drawn first: under the selection ring and body) ---
     // The TDS sprite pack has no per-faction artwork — a player tank and an

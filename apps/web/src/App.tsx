@@ -105,6 +105,7 @@ function PanelApp() {
         canCreateSquad={bridge.canCreateSquad}
         getGuideTargets={bridge.getGuideTargets}
         onPlayerSpoke={bridge.onPlayerSpoke}
+        onOpenPanelTab={bridge.onOpenPanelTab}
         // 弹出窗里也要能点将：弹窗渲染在按钮所在的那个 window，
         // 所以名单必须通过桥从主窗口取，不能在 GameCanvas 里画。
         getAssignableLeaders={bridge.getAssignableLeaders}
