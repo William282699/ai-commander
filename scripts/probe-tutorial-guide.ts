@@ -16,7 +16,7 @@
 import { createInitialGameState } from "../packages/core/src/index";
 import { createSquad } from "../packages/shared/src/squad";
 import { advanceGuide, initialGuideState, openingLine, GUIDE_STEPS, NUDGE_AFTER_SEC,
-  currentTargets, OUTRO_LINE, NUDGE_AFTER_SEC_SLOW, type GuideState } from "../apps/web/src/tutorialGuide";
+  currentTargets, OUTRO_LINE, NUDGE_AFTER_SEC_SLOW, SETTLE_SEC_TALK, type GuideState } from "../apps/web/src/tutorialGuide";
 import type { GameState, Unit } from "../packages/shared/src/types";
 
 const TRIPWIRE = process.argv.includes("--tripwire");
@@ -135,7 +135,7 @@ console.log("\n── ②b ★正在动手就不许催（用户 09-08 手测抓�
   // 下一句"两条挤一起。判据要测的是"他是不是卡住了"，不是"时间到了没有"。
   spoke.clear(); lastAction = -1;
   const s = createInitialGameState("tutorial");
-  const { said } = run(s, 60, 1, (i) => { if (i % 5 === 0) act(s); });   // 一直在动手
+  const { said } = run(s, 140, 1, (i) => { if (i % 5 === 0) act(s); });   // 一直在动手
   check("全程在动手 ⇒ 一句催促都没有",
     !said.some(x => GUIDE_STEPS.some(st => st.nudge === x)), `说了 ${said.length} 句`);
 }
@@ -150,6 +150,36 @@ console.log("\n── ②b ★正在动手就不许催（用户 09-08 手测抓�
 check("行军类步骤给了更长的等待", GUIDE_STEPS[7].nudgeAfterSec === NUDGE_AFTER_SEC_SLOW
   && GUIDE_STEPS[8].nudgeAfterSec === NUDGE_AFTER_SEC_SLOW,
   `烽火台 ${GUIDE_STEPS[7].nudgeAfterSec}s / 哨站 ${GUIDE_STEPS[8].nudgeAfterSec}s`);
+
+console.log("\n── ②c ★做完一步先静一拍，别抢跑（用户 09-08 手测第二次抓的）──");
+{
+  // 病历：判松＝玩家一按发送这步就算完 ⇒ 艾米莉还在回话、兵还在造，
+  // 陈已经把下一句推出来、马克斯的键已经在闪了。
+  spoke.clear(); lastAction = -1;
+  const s = createInitialGameState("tutorial");
+  let g: GuideState | null = initialGuideState(s.time);
+  makeSquad(s, "infantry");
+  s.time += 1; let r = advanceGuide(g!, ctxOf(s) as never, s.time); g = r.next;
+  check("完成的那一拍不说话", r.say === null, String(r.say));
+  check("静拍期间什么都不闪（不许抢跑）", currentTargets(g).length === 0,
+    `[${currentTargets(g).join()}]`);
+  // 静过之后才开口
+  s.time += 5; r = advanceGuide(g!, ctxOf(s) as never, s.time); g = r.next;
+  check("静完才说下一句", r.say === GUIDE_STEPS[1].say, (r.say ?? "null").slice(0, 20));
+  check("说了才开始闪", currentTargets(g).length > 0, currentTargets(g).join());
+}
+{
+  // 跟参谋说话那两步要静更久（LLM 回话要几秒，玩家还要读）
+  check("说话两步的静拍更长",
+    GUIDE_STEPS[2].settleSec === SETTLE_SEC_TALK && GUIDE_STEPS[3].settleSec === SETTLE_SEC_TALK,
+    `艾米莉 ${GUIDE_STEPS[2].settleSec}s / 马克斯 ${GUIDE_STEPS[3].settleSec}s`);
+  // ★ 承重：静拍不许把催促计时也吃掉——催应当从**说出口**那刻起算
+  spoke.clear(); lastAction = -1;
+  const s = createInitialGameState("tutorial");
+  const { said } = run(s, 120, 1, (i) => { if (i === 2) makeSquad(s, "infantry"); });
+  check("静拍之后照样会催（计时从说出口起算）",
+    said.includes(GUIDE_STEPS[1].nudge), `说了 ${said.length} 句`);
+}
 
 console.log("\n── ③ 真编一队：推进到第二步，并说出第二句 ──");
 {
@@ -167,15 +197,15 @@ console.log("\n── ④ 两队都编完：引导走完，从此闭嘴 ──")
 {
   spoke.clear(); lastAction = -1;
   const s = createInitialGameState("tutorial");
-  const { g, said } = run(s, 60, 1, (i) => {
+  const { g, said } = run(s, 140, 1, (i) => {
     if (i === 3) makeSquad(s, "infantry");
-    if (i === 8) makeSquad(s, "light_tank");
-    if (i === 13) talk("logistics");
-    if (i === 18) talk("ops");
-    if (i === 23) makeSquad(s, "artillery");            // 第三队（模拟艾米莉造的兵）
-    if (i === 28) mergeSquads(s);                       // 合并
-    if (i === 33) placeTag(s);
-    if (i === 38) capture(s, "tut_beacon");
+    if (i === 12) makeSquad(s, "light_tank");
+    if (i === 24) talk("logistics");
+    if (i === 44) talk("ops");
+    if (i === 64) makeSquad(s, "artillery");            // 第三队（模拟艾米莉造的兵）
+    if (i === 76) mergeSquads(s);                       // 合并
+    if (i === 88) placeTag(s);
+    if (i === 100) capture(s, "tut_beacon");
     if (i === 38) capture(s, "tut_enemy_post");
   });
   check("三支队都建起来了（含艾米莉造兵那队）", s.squads.length === 3, `${s.squads.length} 支`);
@@ -201,16 +231,16 @@ console.log("\n── ④b 倒着做：先编坦克再编步兵（实机抓出�
   //   且第二句里不许钉死某一坨的番号/兵种。
   spoke.clear(); lastAction = -1;
   const s = createInitialGameState("tutorial");
-  const { g, said } = run(s, 60, 1, (i) => {
+  const { g, said } = run(s, 140, 1, (i) => {
     if (i === 3) makeSquad(s, "light_tank");   // 反着来
     if (i === 8) makeSquad(s, "infantry");
-    if (i === 13) talk("logistics");
-    if (i === 18) talk("ops");
-    if (i === 23) makeSquad(s, "artillery");
-    if (i === 28) mergeSquads(s);
-    if (i === 33) placeTag(s);
-    if (i === 38) capture(s, "tut_beacon");
-    if (i === 43) capture(s, "tut_enemy_post");
+    if (i === 24) talk("logistics");
+    if (i === 44) talk("ops");
+    if (i === 64) makeSquad(s, "artillery");
+    if (i === 76) mergeSquads(s);
+    if (i === 88) placeTag(s);
+    if (i === 100) capture(s, "tut_beacon");
+    if (i === 112) capture(s, "tut_enemy_post");
   });
   check("倒着做也能走完", g.index >= GUIDE_STEPS.length, `index=${g.index}`);
   check("第二句不点名兵种（顺序无关）",
@@ -228,7 +258,7 @@ console.log("\n── ⑤ 玩家抢跑：陈还没开口他就编好了 ──")
   talk("logistics"); talk("ops");
   makeSquad(s, "artillery"); mergeSquads(s); placeTag(s);
   capture(s, "tut_beacon"); capture(s, "tut_enemy_post");
-  const { g, said } = run(s, 60, 1);
+  const { g, said } = run(s, 140, 1);
   check("抢跑也能直接走完", g.index >= GUIDE_STEPS.length, `index=${g.index}`);
   check("一句催促都没有", !said.some(x => GUIDE_STEPS.some(st => st.nudge === x)), "无催促");
 }
@@ -240,7 +270,15 @@ console.log("\n── ⑥ 要点亮的目标：跟着步骤生灭，不常驻 �
   const s = createInitialGameState("tutorial");
   let g: GuideState | null = initialGuideState(s.time);
   const has = (t: string) => currentTargets(g).includes(t as never);
-  const step = () => { s.time += 1; g = advanceGuide(g!, ctxOf(s) as never, s.time).next; };
+  // ★ 每步之间现在夹着一拍静默，所以推进要跨过它：一直跑到把话说出口为止
+  const step = () => {
+    for (let k = 0; k < 40; k++) {
+      s.time += 1;
+      const r = advanceGuide(g!, ctxOf(s) as never, s.time);
+      g = r.next;
+      if (r.say) return;
+    }
+  };
 
   check("① 编队：兵在闪 + 编队键在闪", has("units:unsquadded") && has("btn:squad"),
     currentTargets(g).join());

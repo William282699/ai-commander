@@ -31,6 +31,15 @@ export const NUDGE_AFTER_SEC = 30;
  *  15 秒就催等于对着正在走的兵喊"你怎么还没到"。 */
 export const NUDGE_AFTER_SEC_SLOW = 75;
 
+/** 一步做完之后**先静一拍**再说下一句（游戏秒）。
+ *  ★ 用户 2026-09-08 手测第二次抓的同一族噪音，比催促那次更狠：
+ *  判松＝玩家一按发送这步就算完，于是**艾米莉还在回话、兵还在造，
+ *  陈已经把下一句推出来、马克斯的键已经在闪了**。
+ *  静这一拍里陈不说话、什么都不闪——让当前这件事自己收尾。 */
+export const SETTLE_SEC = 4;
+/** 跟参谋说话那两步要静更久：LLM 回话本身要几秒，玩家还要读。 */
+export const SETTLE_SEC_TALK = 12;
+
 /** 这一步要玩家去点的那个键。UI 层据此让**那一个**键呼吸。
  *  ★ 复用喇叭键那条先例的规矩：**绑这一步的生死**——步骤一完成就停，
  *  绝不做常驻 affordance（`game-ui.css` 里那段注释写着理由）。
@@ -91,6 +100,9 @@ export interface GuideStep {
   nudge: string;
   /** 这一步等多久才催；省略＝`NUDGE_AFTER_SEC`。行军类的步骤要给足时间。 */
   nudgeAfterSec?: number;
+  /** **做完这一步之后**静多久再说下一句；省略＝`SETTLE_SEC`。
+   *  跟参谋说话那种"发出去还没收到回话"的步骤要给更久。 */
+  settleSec?: number;
   /** 这一步算不算完成了。判据只读引擎状态。 */
   done: (c: GuideCtx) => boolean;
 }
@@ -120,6 +132,7 @@ export const GUIDE_STEPS: GuideStep[] = [
     // ★ 台词结构（用户 2026-09-06 定）：**给一句示范 + 明说可以随便讲**。
     //   只给示范，玩家会当成咒语照念；只说随便讲，他对着空输入框不知道从哪开口。
     id: "talk_emily",
+    settleSec: SETTLE_SEC_TALK,
     targets: ["chan:logistics", "btn:input", "btn:mic", "fac:barracks"],
     say: "后勤归艾米莉。点上面闪着的「艾米莉中尉」，跟她说句话——比如「造两个步兵」。"
        + "打字或者按住麦克风说都行，两个都在闪。不用照着念，您想怎么说就怎么说。"
@@ -130,6 +143,7 @@ export const GUIDE_STEPS: GuideStep[] = [
   },
   {
     id: "talk_marcus",
+    settleSec: SETTLE_SEC_TALK,
     targets: ["chan:ops", "btn:input", "btn:mic"],
     say: "马克斯管战况判读。点闪着的「马克斯上尉」问他一句——比如「现在什么情况」。"
        + "同样，打字、语音，怎么问都行。",
@@ -215,10 +229,15 @@ export interface GuideState {
   stepStartedAt: number;
   /** 这一步催过没有。一步只催一次，别变成唠叨。 */
   nudged: boolean;
+  /** 这一步的开场白还没说出口——正在"静一拍"。null ＝ 已经说过了。
+   *  静拍期间 `currentTargets` 返回空：**不说话就什么都不闪**，
+   *  免得玩家还在跟艾米莉说话、马克斯的键就先亮了。 */
+  sayAt: number | null;
 }
 
 export function initialGuideState(now: number): GuideState {
-  return { index: 0, stepStartedAt: now, nudged: false };
+  // 开场第一句由调用方直接发（openingLine），所以这里 sayAt 已经是 null
+  return { index: 0, stepStartedAt: now, nudged: false, sayAt: null };
 }
 
 /** `advanceGuide` 要 App/GameCanvas 替它做的事（它自己不碰 React、不碰 DOM）。 */
@@ -238,16 +257,26 @@ export interface GuideEffect {
  *  ③ 最后才判要不要催
  */
 export function advanceGuide(g: GuideState, c: GuideCtx, now: number): GuideEffect {
+  // ⓪ 正在"静一拍"：时间到了才把这一步的话说出口，没到就完全安静。
+  //    ★ 催促计时从**说出口那一刻**起算，不从上一步完成起算——
+  //      否则静拍会白吃掉玩家的思考时间。
+  if (g.sayAt !== null) {
+    if (now < g.sayAt) return { say: null, next: g };
+    const line = g.index < GUIDE_STEPS.length ? GUIDE_STEPS[g.index].say : OUTRO_LINE;
+    return { say: line, next: { ...g, sayAt: null, stepStartedAt: now, nudged: false } };
+  }
+
   if (g.index >= GUIDE_STEPS.length) return { say: null, next: g };
 
   const step = GUIDE_STEPS[g.index];
 
-  // ① 完成 → 进下一步，并把下一步的话说出来
+  // ① 完成 → 进下一步，但**先静一拍**再开口（下一拍由 ⓪ 说出来）
   if (step.done(c)) {
-    const index = g.index + 1;
-    const next: GuideState = { index, stepStartedAt: now, nudged: false };
-    // 走完最后一步 ⇒ 说结束语（解除引导），不是静默收摊
-    return { say: index < GUIDE_STEPS.length ? GUIDE_STEPS[index].say : OUTRO_LINE, next };
+    const settle = step.settleSec ?? SETTLE_SEC;
+    const next: GuideState = {
+      index: g.index + 1, stepStartedAt: now, nudged: false, sayAt: now + settle,
+    };
+    return { say: null, next };
   }
 
   // ③ 卡住了 → 催一次（一步只催一次）
@@ -284,6 +313,9 @@ export const OUTRO_LINE =
  *  UI 层每拍读它——**没有第二份状态**，脉冲跟着引导进度自动生灭。 */
 export function currentTargets(g: GuideState | null): readonly GuideTarget[] {
   if (!g || g.index >= GUIDE_STEPS.length) return EMPTY_TARGETS;
+  // 静拍期间什么都不闪——话还没说，先亮起来就是"抢跑"（用户手测：
+  // 还在跟艾米莉说话，马克斯的键已经在闪了）。
+  if (g.sayAt !== null) return EMPTY_TARGETS;
   return GUIDE_STEPS[g.index].targets ?? EMPTY_TARGETS;
 }
 const EMPTY_TARGETS: readonly GuideTarget[] = [];
