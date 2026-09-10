@@ -1,4 +1,4 @@
-# 教学关 V1 · 交接档（2026-09-06 建，**2026-09-10 更新到步 6f**）
+# 教学关 V1 · 交接档（2026-09-06 建，**2026-09-10 更新到步 6h**）
 
 > 给新窗口：**本档自含**，不需要上一轮对话。
 > **在同一个 worktree 继续开工**（用户裁定 2026-09-06），不要另开分支。
@@ -9,8 +9,8 @@
 
 | 文件 | 是什么 |
 |---|---|
-| `ROADMAP.md`（**本 worktree 的那份**） | 「🚧 教学关 V1」那一段就是本刀的收口段，已写到步 6f |
-| `LEDGER_ALL_KNOWN_ACCOUNTS_20260806.md`（本 worktree） | **§W** 是本刀的账，W1-W12 |
+| `ROADMAP.md`（**本 worktree 的那份**） | 「🚧 教学关 V1」那一段就是本刀的收口段，已写到步 6h |
+| `LEDGER_ALL_KNOWN_ACCOUNTS_20260806.md`（本 worktree） | **§W** 是本刀的账，W1-W15 |
 | `~/.claude/projects/-Users-yuqiaohuang-MyProjects-AI-Commander/memory/MEMORY.md` | 家法（feedback_*），违反会被用户当场抓 |
 
 ⚠ ROADMAP 与 LEDGER 的改动**只在本分支上**，主仓库那两份没动——合并时一起走，扔掉也一起扔。
@@ -31,7 +31,7 @@
 
 ```
 worktree : /Users/yuqiaohuang/MyProjects/AI Commander-squad-personality
-分支     : tutorial-map-v1     （14 commit，未合 main）
+分支     : tutorial-map-v1     （18 commit＝16 刀＋2 笔收口档，未合 main）
 基线     : main = 293a14d      （主仓库代码零改动）
 ```
 
@@ -41,7 +41,7 @@ worktree : /Users/yuqiaohuang/MyProjects/AI Commander-squad-personality
 npm run typecheck                                     # 四包
 bash scripts/run-benches.sh                           # 27/27
 npx tsx scripts/probe-tutorial-map.ts --tripwire      # 31/31
-npx tsx scripts/probe-tutorial-guide.ts --tripwire    # 67/67
+npx tsx scripts/probe-tutorial-guide.ts --tripwire    # 77/77
 ```
 
 **dev server**（★用 `preview_start`，不许用 Bash 起）：`squadp-api`(3026) / `squadp-web`(3027)。
@@ -58,13 +58,17 @@ lsof -nP -iTCP:3027 -sTCP:LISTEN | awk 'NR>1{print $2}' | head -1 | xargs -I{} s
 
 ## 3. 做到哪儿了
 
-**十四个 commit**，引导**十步**：
-`squad_1` → `squad_2` → `talk_emily` → `see_arsenal` → `talk_marcus` → `squad_3` →
-`merge_squads` → `place_tag` → `take_beacon` → `take_post` → 结束语。
+**十六刀**，引导**十一步**：
+`squad_1` → `squad_2` → **`read_hud`** → `talk_emily` → `see_arsenal` → `talk_marcus` →
+`squad_3` → `merge_squads` → `place_tag` → `take_beacon` → `take_post` → 结束语。
 
-玩家完整体验：开场闸 →（选进教学）→ 编两队 → 跟艾米莉说话 → 看军械 → 问马克斯 →
-用她造的兵编第三队 → 编制页拖动合并 → 按 T 插旗 → 占烽火台（迷雾散）→
-打下敌军哨站 → 结算屏 +「进入正式战役 ▶」。
+玩家完整体验：开场闸 →（选进教学）→ 编两队 → **读一眼顶栏家底＋知道有「弹出面板」** →
+跟艾米莉说话 → 看军械 → 问马克斯 → 用她造的兵编第三队 → 编制页拖动合并 →
+按 T 插旗 → 占烽火台（迷雾散）→ 打下敌军哨站 → 结算屏 +「进入正式战役 ▶」。
+
+**`read_hud` 是唯一一个"没有动作"的步骤**：`done` 判 `sinceStepStart >= 12`
+（新加的 `GuideCtx.sinceStepStart`），读够一拍自己往下，不催。**别给它加"点一下资源条"**
+——那是凭空造动作（§4.7 判松）。
 
 **没做**：步 6 手测修单（用户正在玩）。
 
@@ -80,6 +84,8 @@ lsof -nP -iTCP:3027 -sTCP:LISTEN | awk 'NR>1{print $2}' | head -1 | xargs -I{} s
    最后一句的职责是**显式解除引导**；有意举例而**不列清单**。
 4. **引导提到什么，那个东西就得自己亮**（用户 09-08）。屏边走 CSS 脉冲、地图走 canvas
    呼吸圈，**都是 1.6s、同一个琥珀色**。探针机器版规矩：**每一步至少一个目标，不许光说不指**。
+   顶栏那排数字与「弹出面板」键住在 `App.tsx`（不在 ChatPanel），所以它们自己
+   1Hz 轮询 `window.__GAME_BRIDGE__?.getGuideTargets?.()` 拿该不该亮。
 5. **脉冲绑生命周期，不做常驻**；**只有键可点时才亮**；**已经在那个频道/页就不闪它**。
 6. **节奏三层闸**（两轮手测逼出来的，别随便拆）：
    · 做完一步**先静一拍**（默认 4s／说话类 12s），期间不说话也什么都不闪
@@ -99,7 +105,9 @@ lsof -nP -iTCP:3027 -sTCP:LISTEN | awk 'NR>1{print $2}' | head -1 | xargs -I{} s
 4. **渲染顺序吃掉视觉提示**（W4）——引导圈画在设施里被迷雾盖住。
 5. **同一个东西有两份渲染**——ChatPanel 里「编队」键、频道键各两份。**改按钮前先 grep 数一遍。**
 6. **判据不该跟着数组下标走**（W5）——插一步就全错位，已改成按 id 找。
-7. **台词里两次写了 markdown `**`**（W6）、**一次写了查无出处的「全力进攻」**（W7）。
+7. **台词里两次写了 markdown `**`**（W6）、**一次写了查无出处的「全力进攻」**（W7）、
+   **示范用的将军名写死过**（W13——玩家那局的队长是按序发的，写死＝举例里没他的人）。
+   要点名队长就读 `squad.leaderName`（**不是 `squad.leader.name`**，§V3 两个源）。
 8. **玩家此刻站在哪**要考虑：「编队」键只在陈的频道、「编制/军械」页签跟着频道走——
    引导得先把他叫回去（用户 09-09 连报三条）。
 
@@ -123,6 +131,8 @@ lsof -nP -iTCP:3027 -sTCP:LISTEN | awk 'NR>1{print $2}' | head -1 | xargs -I{} s
    （禁脑内枚举同义词，「词汇不通」那笔账）。
 2. **合 main 之前**：把 7 个勾稽点收敛成一个 integration 文件（W12），
    那时正好要决定哪些留哪些扔。
+   ⚠ 还有两格**我没验成**（浏览器窗格反复自己藏起来、游戏钟冻在 0）：
+   **结算屏＋「进入正式战役 ▶」**、**琥珀圈亮度好不好看**。这两格得靠人眼。
 3. main 上那笔 ROADMAP 文档 commit `293a14d` **还没 push**。
 
 ---
@@ -137,5 +147,6 @@ lsof -nP -iTCP:3027 -sTCP:LISTEN | awk 'NR>1{print $2}' | head -1 | xargs -I{} s
 - **影响手感的变更先给用户三行人话确认**
 - **直接读代码，别扇出 agent**（ultracode 与它打架时**用户偏好优先**）
 - ★ **台架有盲区**：`processAutoBehavior`／导演／引导 interval 都不在 `tick()` 里，
+  **时间类的判据台架还得自己把钟推起来**（W14 就是栽在这），
   27/27 绿**不代表**验过——所以引导判定才被抽成纯函数 `advanceGuide` 以便逐拍重放
 - **给用户报卡住的地方要原话**
