@@ -60,7 +60,8 @@ export type GuideTarget =
   | "btn:input"          // 打字输入框
   | "btn:mic"            // 麦克风
   | "btn:paneltab"       // 右上那个第二页签（陈＝编制／艾米莉＝军械，同一个键）
-  | "chan:logistics" | "chan:ops"
+  | "btn:chattab"        // 右上「通讯」页签
+  | "chan:combat" | "chan:logistics" | "chan:ops"
   | "hud:objectives"     // 顶栏 OBJECTIVES 计数
   // — 地图上的东西 —
   | "units:unsquadded"   // 还没编队的玩家部队（第几坨由引擎当场算，不写死兵种）
@@ -84,6 +85,10 @@ export interface GuideCtx {
   playerActedSince: (sinceGameTime: number) => boolean;
   /** 玩家有没有点开过第二页签（艾米莉那儿＝军械）。判松：切过去就算。 */
   playerSawArsenal: () => boolean;
+  /** 参谋此刻正在回话（流式还没完）。
+   *  ★ 用户 2026-09-09：「马克斯说话太久了，需要再延迟一下到下一步」。
+   *  与其猜一个秒数，不如**等他真说完**——静拍到点了但参谋还在说，就继续等。 */
+  advisorBusy: () => boolean;
   /** 玩家在这个频道**发过消息**没有。★判松（用户 2026-09-06 裁定）：
    *  说什么都算，哪怕只是"你好"。这一步教的是"你可以跟她说话"，
    *  不是"你得说对咒语"——判紧等于在教学关里亲手造一个新手过不去的门槛，
@@ -159,10 +164,13 @@ export const GUIDE_STEPS: GuideStep[] = [
   {
     id: "talk_marcus",
     settleSec: SETTLE_SEC_TALK,
-    targets: ["chan:ops", "btn:input", "btn:mic"],
-    say: "马克斯管战况判读。点闪着的「马克斯上尉」问他一句——比如「现在什么情况」。"
-       + "同样，打字、语音，怎么问都行。",
-    nudge: "长官，还没跟马克斯说过话。点他的名字问一句，随便什么都行。",
+    // ★ 用户 2026-09-09 手测：上一步刚看过「军械」，页签停在面板页 ⇒ 点到马克斯
+    //   落在他的「计策」页，看不见对话框。所以「通讯」页签也要亮、台词也要点名。
+    targets: ["chan:ops", "btn:chattab", "btn:input", "btn:mic"],
+    say: "马克斯管战况判读。点闪着的「马克斯上尉」——刚才您在看军械，"
+       + "记得把右上角切回闪着的「通讯」，才看得见对话框。"
+       + "然后问他一句，比如「现在什么情况」。打字、语音，怎么问都行。",
+    nudge: "长官，还没跟马克斯说过话。点他的名字，右上角切到「通讯」，问一句就行。",
     done: (c) => c.playerSpokeIn("ops"),
   },
   {
@@ -172,17 +180,22 @@ export const GUIDE_STEPS: GuideStep[] = [
     //   所以台词与催促都必须把"先让艾米莉造兵"说出来，否则这一步是个死结。
     id: "squad_3",
     nudgeAfterSec: NUDGE_AFTER_SEC_SLOW,   // 要等艾米莉把兵造出来
-    targets: ["units:unsquadded", "btn:squad", "fac:barracks"],
-    say: "艾米莉造的兵到位了就在兵营旁边。把他们也圈起来编成第三队——"
+    // ★ 用户 2026-09-09 手测：这一步玩家还在马克斯的频道，而**「编队」键只在
+    //   陈的频道里才有**（ChatPanel: `onCreateSquad && isChenChannel`）——
+    //   不先回陈那儿，他根本按不到那个键。所以陈的频道键也要亮、台词也要点名。
+    targets: ["chan:combat", "units:unsquadded", "btn:squad", "fac:barracks"],
+    say: "长官，先切回我这儿——上面闪着的「陈军士」，编队的按钮在我这边才有。"
+       + "然后把兵营旁边艾米莉刚造的那批新兵圈起来，点「编队」编成第三队，"
        + "这样您手上就有三个队长了。要是还没造，先跟艾米莉要两个步兵。",
-    nudge: "长官，第三队还没编。兵营旁边有新兵就圈起来点「编队」；没有的话，"
-         + "先让艾米莉造两个步兵。",
+    nudge: "长官，先点回闪着的「陈军士」，再把兵营旁边的新兵圈起来点「编队」；"
+         + "还没造的话，先让艾米莉造两个步兵。",
     done: (c) => c.state.squads.length >= 3,
   },
   {
     // ★ 编队层级引导（用户 2026-09-08）：教"两队并一队、点名上级＝整个都动"。
     id: "merge_squads",
-    targets: ["btn:paneltab"],
+    // 「编制」页签同样只在陈的频道里（陈＝编制／艾米莉＝军械／马克斯＝计策）
+    targets: ["chan:combat", "btn:paneltab"],
     say: (c) => {
       // 已经合过了就直接点名那个人；还没合就先讲怎么合（这一步刚开始时的常态）。
       const child = c.state.squads.find((sq) => !!sq.parentSquadId);
@@ -286,6 +299,9 @@ export function advanceGuide(g: GuideState, c: GuideCtx, now: number): GuideEffe
   //      否则静拍会白吃掉玩家的思考时间。
   if (g.sayAt !== null) {
     if (now < g.sayAt) return { say: null, next: g };
+    // ★ 时间到了，但参谋还在回话 ⇒ 再等一拍。用户手测：马克斯话长，
+    //   静拍走完他还没说完，陈就插进来了。等他说完比猜一个秒数准。
+    if (c.advisorBusy()) return { say: null, next: g };
     const line = g.index < GUIDE_STEPS.length ? resolveSay(GUIDE_STEPS[g.index].say, c) : OUTRO_LINE;
     return { say: line, next: { ...g, sayAt: null, stepStartedAt: now, nudged: false } };
   }

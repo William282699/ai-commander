@@ -485,6 +485,8 @@ interface Props {
   onPlayerSpoke?: (ch: Channel) => void;
   /** 玩家点开第二页签（艾米莉那儿＝军械）时喊一声（教学关用）。 */
   onOpenPanelTab?: (ch: Channel) => void;
+  /** 参谋正在回话（流式还没完）。教学引导拿它决定"要不要先别说下一句"。 */
+  onAdvisorBusy?: (busy: boolean) => void;
   /** 名册上此刻派得出去的将军（点将弹窗的内容）。缺省＝没接（走引擎自动挑）。 */
   getAssignableLeaders?: () => LeaderProfile[];
   onDeclareWar?: () => void;
@@ -505,7 +507,7 @@ interface DisplayResponse extends AdvisorResponse {
 const SHOW_QUICK_BUY = false;
 
 
-export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, getGuideTargets, onPlayerSpoke, onOpenPanelTab, getAssignableLeaders, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
+export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateSquad, canCreateSquad, getGuideTargets, onPlayerSpoke, onOpenPanelTab, onAdvisorBusy, getAssignableLeaders, onDeclareWar, onSelectUnits, onMoveSquad, onRemoveFromParent, onRenameLeader, onTransferSquad, isDetached }: Props) {
   // ── Panel collapse state ──
   const [collapsed, setCollapsed] = useState(false);
 
@@ -1073,6 +1075,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   ttsEnabledRef.current = ttsEnabled;
   const loadingRef = useRef(false);
   loadingRef.current = loading;
+  // 把"参谋正在回话"递给教学引导——它靠这个决定要不要先闭嘴。
+  useEffect(() => { onAdvisorBusy?.(loading); }, [loading, onAdvisorBusy]);
   /**
    * 暂存队列。★**建在 tts 模块之外**：模块内的 queue 会被 cancel() 清空，而
    * cancel 恰恰在按下 PTT、打字回合起流、关喇叭这三处被调用——押后的话正好死在
@@ -3507,7 +3511,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                       key={cmd}
                       className={`dp-channel-btn${isActive ? " dp-channel-btn--active" : ""}`}
                       data-channel-alert={channelAlert[COMMANDER_CHANNEL[cmd]]}
-              data-guide-pulse={onGuide("chan:" + COMMANDER_CHANNEL[cmd]) ? "on" : "off"}
+              data-guide-pulse={onGuide("chan:" + COMMANDER_CHANNEL[cmd]) && !isActive ? "on" : "off"}
                                             onClick={() => selectSingleCommander(cmd)}
                       style={{ borderLeftColor: isActive ? cmdColor : "transparent" }}
                       title={`${meta.label} (${meta.role})`}
@@ -3745,7 +3749,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             <button
               key={cmd}
               data-channel-alert={channelAlert[COMMANDER_CHANNEL[cmd]]}
-              data-guide-pulse={onGuide("chan:" + COMMANDER_CHANNEL[cmd]) ? "on" : "off"}
+              data-guide-pulse={onGuide("chan:" + COMMANDER_CHANNEL[cmd]) && !isSelected ? "on" : "off"}
               onClick={() => selectSingleCommander(cmd)}
               onContextMenu={(e) => { e.preventDefault(); toggleCommander(cmd); }}
               style={{
@@ -3802,6 +3806,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       {channelHasPanel && (
       <div style={tabBarStyle} data-tab-bar>
           <button
+            data-guide-pulse={onGuide("btn:chattab") && effectiveTab !== "chat" ? "on" : "off"}
             onClick={() => setActiveTab("chat")}
             style={{
               ...tabBtnStyle,
@@ -3813,7 +3818,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           </button>
           <button
             data-panel-tab={selectedCommanders[0]}
-            data-guide-pulse={onGuide("btn:paneltab") ? "on" : "off"}
+            data-guide-pulse={onGuide("btn:paneltab") && effectiveTab !== "panel" ? "on" : "off"}
             onClick={() => {
               setActiveTab("panel");
               onOpenPanelTab?.(COMMANDER_CHANNEL[selectedCommanders[0]]);

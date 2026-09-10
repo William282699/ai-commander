@@ -854,6 +854,8 @@ export interface GameBridge {
   onPlayerSpoke: (ch: Channel) => void;
   /** 玩家点开第二页签时喊一声（教学关判"看没看军械"用）。 */
   onOpenPanelTab: (ch: Channel) => void;
+  /** 参谋正在回话——教学引导据此推迟下一句。 */
+  onAdvisorBusy: (busy: boolean) => void;
   getAssignableLeaders: () => LeaderProfile[];
   onDeclareWar: () => void;
   onSelectUnits: (unitIds: number[]) => void;
@@ -1008,6 +1010,9 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     panelTabSeenRef.current.add(ch);
     markPlayerAction();
   }, [markPlayerAction]);
+  /** 参谋是不是正在回话。引导拿它决定"先别说下一句"。 */
+  const advisorBusyRef = useRef(false);
+  const onAdvisorBusy = useCallback((busy: boolean) => { advisorBusyRef.current = busy; }, []);
   const guideRef = useRef<GuideState | null>(null);
   useEffect(() => {
     if (scenarioFromUrl() !== "tutorial") return;
@@ -1034,6 +1039,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         playerSpokeIn: (ch) => spokeChannelsRef.current.has(ch),
         playerActedSince: (t) => lastPlayerActionRef.current > t,
         playerSawArsenal: () => panelTabSeenRef.current.has("logistics"),
+        advisorBusy: () => advisorBusyRef.current,
       }, st.time);
       guideRef.current = next;
       if (say) sayAsChen(say, st.time);
@@ -1405,6 +1411,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       getGuideTargets,
       onPlayerSpoke,
       onOpenPanelTab,
+      onAdvisorBusy,
       getAssignableLeaders,
       onDeclareWar: handleDeclareWar,
       onSelectUnits: handleSelectUnits,
@@ -2624,6 +2631,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           getGuideTargets={getGuideTargets}
           onPlayerSpoke={onPlayerSpoke}
           onOpenPanelTab={onOpenPanelTab}
+          onAdvisorBusy={onAdvisorBusy}
           getAssignableLeaders={getAssignableLeaders}
           onDeclareWar={handleDeclareWar}
           onSelectUnits={handleSelectUnits}
