@@ -1040,6 +1040,8 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         playerActedSince: (t) => lastPlayerActionRef.current > t,
         playerSawArsenal: () => panelTabSeenRef.current.has("logistics"),
         advisorBusy: () => advisorBusyRef.current,
+        // 时间步（"读一眼顶栏"那种没有动作的）靠它自己走完
+        sinceStepStart: st.time - (guideRef.current?.stepStartedAt ?? st.time),
       }, st.time);
       guideRef.current = next;
       if (say) sayAsChen(say, st.time);

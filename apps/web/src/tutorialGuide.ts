@@ -63,6 +63,8 @@ export type GuideTarget =
   | "btn:chattab"        // 右上「通讯」页签
   | "chan:combat" | "chan:logistics" | "chan:ops"
   | "hud:objectives"     // 顶栏 OBJECTIVES 计数
+  | "hud:resources"      // 顶栏那排家底（钱/油/弹/情报/战备）
+  | "btn:popout"         // 「弹出面板 ↗」
   // — 地图上的东西 —
   | "units:unsquadded"   // 还没编队的玩家部队（第几坨由引擎当场算，不写死兵种）
   | "fac:barracks" | "fac:beacon" | "fac:enemy_post";
@@ -94,6 +96,10 @@ export interface GuideCtx {
    *  不是"你得说对咒语"——判紧等于在教学关里亲手造一个新手过不去的门槛，
    *  而"词汇不通"（她说人话、Agent 等军语）正是账本里还没结的账。 */
   playerSpokeIn: (ch: Channel) => boolean;
+  /** 这一步已经开始了多少游戏秒。
+   *  ★ 有些步骤**没有要做的动作，只是读一眼**（顶栏那排家底）。它们靠时间自己走完，
+   *  否则玩家会对着一句"看一眼"发愣、等一个根本不存在的动作。 */
+  sinceStepStart: number;
 }
 
 /**
@@ -151,6 +157,20 @@ export const GUIDE_STEPS: GuideStep[] = [
        + "咱们手上就有两支能整队调动的部队。",
     nudge: "长官，还有一批散兵没编队。圈上、点「编队」，跟刚才一样。",
     done: (c) => c.state.squads.length >= 2,
+  },
+  {
+    // ★ 用户 2026-09-09：顶栏和「弹出面板」一次都没介绍过。
+    //   放在艾米莉之前——**下一步就要花钱**，先知道自己有多少家底才讲得通。
+    //   ⚠ 这一步**没有要做的动作**，靠 `sinceStepStart` 自己走完；
+    //   要求玩家"点一下资源条"是硬造动作，反而添堵。
+    id: "read_hud",
+    targets: ["hud:resources", "btn:popout"],
+    nudgeAfterSec: 9999,     // 时间步不需要催——它自己会走完
+    say: "抬头看一眼闪着的那排数字，那是您的家底："
+       + "💰钱造兵、⛽油让坦克跑得动、🔫弹打仗要耗、🛰情报看得更远、⚡战备是部队状态。"
+       + "右边那个「弹出面板」能把我们几个的对话框拉成单独一个窗口，嫌挤就用它。",
+    nudge: "长官，顶上那排数字就是您的家底，看一眼就行。",
+    done: (c) => c.sinceStepStart >= 12,   // 读一拍（12 游戏秒）自动往下
   },
   {
     // ★ 台词结构（用户 2026-09-06 定）：**给一句示范 + 明说可以随便讲**。

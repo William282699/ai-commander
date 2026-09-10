@@ -267,7 +267,8 @@ export default function App() {
           OPERATIONAL
         </span>
 
-        <div className="hud-topbar__resources">
+        <div className="hud-topbar__resources"
+             data-guide-pulse={guideTargets.includes("hud:resources") ? "on" : "off"}>
           {/* Money */}
           <div className={`hud-resource-chip hud-resource-chip--success`}>
             <span className="hud-resource-chip__label">MONEY</span>
@@ -310,6 +311,7 @@ export default function App() {
         {!panelDetached && (
           <button
             className="hud-btn hud-btn-ghost hud-btn-sm"
+            data-guide-pulse={guideTargets.includes("btn:popout") ? "on" : "off"}
             onClick={handlePopOut}
           >
             弹出面板 ↗
