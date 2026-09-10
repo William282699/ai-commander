@@ -30,8 +30,14 @@ const IDX = (id: string) => {
 };
 const STEP = (id: string) => GUIDE_STEPS[IDX(id)];
 /** 函数式台词要给个 ctx 才解得开——用一份干净的教学关状态当基准。 */
-const SAY_OF = (id: string) =>
-  resolveSay(STEP(id).say, ctxOf(createInitialGameState("tutorial")) as never);
+const SAY_OF = (id: string) => {
+  // 造一份"玩家已经编过队"的状态：函数式台词要点名真队长，空状态只会给兜底句。
+  const g = createInitialGameState("tutorial");
+  makeSquad(g, "infantry");
+  makeSquad(g, "light_tank");
+  g.squads[1].parentSquadId = g.squads[0].id;      // 合并那句也需要它
+  return resolveSay(STEP(id).say, ctxOf(g) as never);
+};
 
 const SAY = (i: number, c?: unknown) => resolveSay(GUIDE_STEPS[i].say, (c ?? null) as GuideCtx | null);
 
@@ -123,6 +129,27 @@ check("马克斯那步指了「通讯」页签",
 check("第三队那步先叫玩家回陈的频道",
   STEP("squad_3").targets!.includes("chan:combat") && /陈军士/.test(SAY_OF("squad_3")),
   SAY_OF("squad_3").slice(0, 22) + "…");
+// ★ 用户 09-09：示范台词里的将军必须是**玩家真有的**。写死 Farrell/Ellis 时
+//   玩家那局的队长是 Aiden/Blake/Griffin/Carter，举的例子里一个他的人都没有，
+//   照着念还会被引擎拒。名册是 namePool 按序发的，写死＝赌运气。
+{
+  const g2 = createInitialGameState("tutorial");
+  makeSquad(g2, "infantry");            // 造一支队，队长名固定是 "Aiden"
+  const ctx2 = ctxOf(g2) as never;
+  const beacon = resolveSay(STEP("take_beacon").say, ctx2);
+  const post = resolveSay(STEP("take_post").say, ctx2);
+  const real = g2.squads[0].leaderName;
+  check("烽火台示范用玩家真有的队长", beacon.includes(real), `点名了 ${real}`);
+  check("打哨站示范用玩家真有的队长", post.includes(real), `点名了 ${real}`);
+  check("台词里不再出现写死的 Farrell/Ellis",
+    !/Farrell|Ellis/.test(beacon + post), "已清");
+  // ★ 兜底：一支队都没有时不许吐出空名字或 undefined
+  const g0 = createInitialGameState("tutorial");
+  const b0 = resolveSay(STEP("take_beacon").say, ctxOf(g0) as never);
+  const p0 = resolveSay(STEP("take_post").say, ctxOf(g0) as never);
+  check("没队长时也说得出人话（不吐 undefined/空名）",
+    !/undefined|「 |「」/.test(b0 + p0) && b0.length > 20 && p0.length > 20, "兜底正常");
+}
 check("插旗那步提醒了别跟已有地名重名", /重样|重名/.test(SAY_OF("place_tag")), "有提醒");
 // ★ 用户 09-08：起名要给个例子，别让玩家对着空框想
 check("插旗那步给了名字例子", /「[^」]+」/.test(SAY_OF("place_tag")), SAY_OF("place_tag").slice(0,28)+"…");
@@ -144,11 +171,12 @@ check("最后一步讲了胜负条件 + 给了双队长示范",
 check("合并那步的台词能把上级名字说出来", typeof STEP("merge_squads").say === "function",
   typeof STEP("merge_squads").say);
 // ★ 用户 09-06 定的台词结构：示范 + 明说可以随便讲。两样缺一不可。
-for (const i of [IDX("talk_emily"), IDX("talk_marcus"), IDX("take_beacon"), IDX("take_post")]) {
-  const st = GUIDE_STEPS[i];
-  check(`第${i+1}步给了示范台词`, /「[^」]+」/.test(SAY(i).replace(/「艾米莉中尉」|「马克斯上尉」/g, "")),
-    SAY(i).slice(0, 30) + "…");
-  check(`第${i+1}步明说了可以随便讲`, /怎么说|怎么问|随便|都行/.test(SAY(i)), "有解放句");
+for (const id of ["talk_emily", "talk_marcus", "take_beacon", "take_post"]) {
+  const line = SAY_OF(id);
+  check(`${id} 给了示范台词`,
+    /「[^」]+」/.test(line.replace(/「艾米莉中尉」|「马克斯上尉」|「通讯」|「军械」/g, "")),
+    line.slice(0, 30) + "…");
+  check(`${id} 明说了可以随便讲`, /怎么说|怎么问|随便|都行/.test(line), "有解放句");
 }
 
 console.log("\n── ② 什么都不做：该催一次，且只催一次 ──");

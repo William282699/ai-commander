@@ -96,6 +96,20 @@ export interface GuideCtx {
   playerSpokeIn: (ch: Channel) => boolean;
 }
 
+/**
+ * 玩家**真有的**队长名字（`squad.leaderName` ＝ 真身份，见 LEDGER §V3；
+ * `squad.leader.name` 是另一条全仓零读取的死轴，别读错那个）。
+ *
+ * ★ 用户 2026-09-09：示范台词原本写死「派 Farrell…」「派 Ellis…」，而玩家那局的
+ * 队长是 Aiden/Blake/Griffin/Carter——**举的例子里没有一个是他的人**，
+ * 照着念反而会被引擎拒。名册是 `namePool` 按顺序发的，写死等于赌运气。
+ */
+function leaderNamesOf(c: GuideCtx): string[] {
+  return c.state.squads
+    .map((sq) => sq.leaderName)
+    .filter((n) => !!n && !n.startsWith("无队长"));   // 占位名不往台词里放
+}
+
 export interface GuideStep {
   id: string;
   /** 这一步要点亮的东西，可以多个。省略＝这一步没有要指的地方。 */
@@ -234,9 +248,14 @@ export const GUIDE_STEPS: GuideStep[] = [
     id: "take_beacon",
     nudgeAfterSec: NUDGE_AFTER_SEC_SLOW,
     targets: ["fac:beacon", "btn:input", "btn:mic"],
-    say: "来真的。地图中间闪着的那座烽火台没人守，占下它东边就亮了，能看见敌人在哪。"
-       + "跟我说一句就行——比如「派 Aiden 去占领烽火台」。名字换成您哪个队长都行，"
-       + "怎么说都行，我听得懂。",
+    say: (c) => {
+      const who = leaderNamesOf(c)[0];
+      return "来真的。地图中间闪着的那座烽火台没人守，占下它东边就亮了，能看见敌人在哪。"
+        + (who
+          ? `跟我说一句就行——比如「派 ${who} 去占领烽火台」。换成您别的队长也行，`
+          : "跟我说一句就行——比如「派一队人去占领烽火台」。")
+        + "怎么说都行，我听得懂。";
+    },
     nudge: "长官，烽火台还空着。跟我说「派某某去占领烽火台」，或者直接右键点它也行。",
     done: (c) => c.state.facilities.get("tut_beacon")?.team === "player",
   },
@@ -246,13 +265,19 @@ export const GUIDE_STEPS: GuideStep[] = [
     id: "take_post",
     nudgeAfterSec: NUDGE_AFTER_SEC_SLOW,
     targets: ["fac:enemy_post", "hud:objectives"],
-    say: "东岭上那个插着旗的敌军哨站在闪——占下它这一关就算赢，"
-       + "顶上「OBJECTIVES」那个数就是记这个的，插旗的点占几个算几个。"
-       + "它有人守，别一个人上：可以说「派 Farrell 去攻占敌军哨站」，"
-       + "也可以说「派 Farrell 和 Ellis 一起打敌军哨站」，两支队就一块儿上。"
-       + "名字换成您自己的队长，怎么说都行。"
-       + "还能顺手指定阵型——「楔形阵冲敌军哨站」是尖头突破，「长蛇阵」是沿路走。"
-       + "真想一次压上去，就说「全军进攻敌军哨站」，能动的都会去。",
+    say: (c) => {
+      const [a, b] = leaderNamesOf(c);
+      const demo = a && b
+        ? `可以说「派 ${a} 去攻占敌军哨站」，也可以说「派 ${a} 和 ${b} 一起打敌军哨站」，两支队就一块儿上。`
+        : a
+          ? `可以说「派 ${a} 去攻占敌军哨站」；想让两个队长一块儿上，就把两个名字都说出来。`
+          : "可以说「派某某去攻占敌军哨站」；想让两个队长一块儿上，就把两个名字都说出来。";
+      return "东岭上那个插着旗的敌军哨站在闪——占下它这一关就算赢，"
+        + "顶上「OBJECTIVES」那个数就是记这个的，插旗的点占几个算几个。"
+        + "它有人守，别一个人上：" + demo + "怎么说都行。"
+        + "还能顺手指定阵型——「楔形阵冲敌军哨站」是尖头突破，「长蛇阵」是沿路走。"
+        + "真想一次压上去，就说「全军进攻敌军哨站」，能动的都会去。";
+    },
     nudge: "长官，敌军哨站还在敌人手里。跟我说派谁去打——一个队长嫌少就点两个名字。",
     done: (c) => c.state.facilities.get("tut_enemy_post")?.team === "player",
   },
