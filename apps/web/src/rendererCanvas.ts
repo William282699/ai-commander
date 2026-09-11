@@ -686,6 +686,8 @@ function drawGuideRing(
 export interface GuideHighlight {
   unitIds?: ReadonlySet<number>;
   facilityIds?: ReadonlySet<string>;
+  /** 玩家自己插的旗（`Tag.id`）。引导让他"派人去那面旗"时，那面旗得自己亮。 */
+  tagIds?: ReadonlySet<string>;
 }
 
 /**
@@ -703,10 +705,22 @@ export function renderGuideHighlights(
   camera: Camera,
   gameTime: number,
   guide?: GuideHighlight,
+  tags?: Tag[],
 ): void {
   if (!guide) return;
   const tileScreenSize = TILE_SIZE * camera.zoom;
   const baseUnitSize = Math.max(8, tileScreenSize * 0.7);
+
+  if (guide.tagIds?.size && tags) {
+    for (const tag of tags) {
+      if (!guide.tagIds.has(tag.id)) continue;
+      // 旗子是从落点**往上**长的（旗杆 24px），圈往上抬半根杆才套得住它
+      const sx = (tag.position.x * TILE_SIZE - camera.x) * camera.zoom;
+      const sy = (tag.position.y * TILE_SIZE - camera.y) * camera.zoom
+               - Math.max(16, 24 * camera.zoom) * 0.5;
+      drawGuideRing(ctx, sx, sy, tileScreenSize * 1.1, gameTime);
+    }
+  }
 
   if (guide.facilityIds?.size) {
     for (const fac of facilities) {

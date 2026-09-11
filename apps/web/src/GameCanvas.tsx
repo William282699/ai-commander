@@ -1068,8 +1068,8 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
   /** 把这一步的目标翻译成**地图上要画圈的那些东西**（渲染层每帧读它）。
    *  ★ `units:unsquadded` 是**当场算**的，不写死兵种／不写死 id——玩家先编哪一坨
    *  都行（"台词钉死顺序"那个 bug 就是这么来的），而且编完一坨它自动只剩另一坨。 */
-  const guideHighlightRef = useRef<{ unitIds: Set<number>; facilityIds: Set<string> }>(
-    { unitIds: new Set(), facilityIds: new Set() });
+  const guideHighlightRef = useRef<{ unitIds: Set<number>; facilityIds: Set<string>;
+    tagIds: Set<string> }>({ unitIds: new Set(), facilityIds: new Set(), tagIds: new Set() });
   const FAC_OF_TARGET: Record<string, string> = {
     "fac:barracks": "tut_player_barracks",
     "fac:beacon": "tut_beacon",
@@ -1100,7 +1100,9 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     const tg = currentTargets(guideRef.current);
     const unitIds = new Set<number>();
     const facilityIds = new Set<string>();
+    const tagIds = new Set<string>();
     for (const t of tg) {
+      if (t === "map:tag") { for (const tag of st.tags) tagIds.add(tag.id); continue; }
       if (t === "units:unsquadded") {
         const inSquad = new Set<number>();
         for (const sq of st.squads) for (const id of sq.unitIds) inSquad.add(id);
@@ -1120,7 +1122,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         facilityIds.add(FAC_OF_TARGET[t]);
       }
     }
-    guideHighlightRef.current = { unitIds, facilityIds };
+    guideHighlightRef.current = { unitIds, facilityIds, tagIds };
   }, []);
 
   /** 玩家真开过口的频道。只由 ChatPanel 的发送路径写入。 */
@@ -2538,7 +2540,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       // 4.2 教学引导高亮——**必须在迷雾之后**画（顺序是 设施→迷雾→单位）。
       //     圈原本画在设施里，被迷雾整个盖住，烽火台那一步玩家什么都看不见。
       renderGuideHighlights(ctx, unitArray, facArray, camera, state.time,
-        guideHighlightRef.current);
+        guideHighlightRef.current, state.tags);
 
       // 4.5 Capture overlays — drawn above units so a contested forward post is
       // readable even when tanks/infantry crowd the facility sprite.

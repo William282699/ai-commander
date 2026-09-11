@@ -66,6 +66,7 @@ export type GuideTarget =
   | "hud:resources"      // 顶栏那排家底（钱/油/弹/情报/战备）
   | "btn:popout"         // 「弹出面板 ↗」
   // — 地图上的东西 —
+  | "map:tag"
   | "units:unsquadded"   // 还没编队的玩家部队（第几坨由引擎当场算，不写死兵种）
   | "fac:barracks" | "fac:beacon" | "fac:enemy_post";
 
@@ -122,6 +123,37 @@ function leaderNamesOf(c: GuideCtx): string[] {
   return c.state.squads
     .map((sq) => sq.leaderName)
     .filter((n) => !!n && !n.startsWith("无队长"));   // 占位名不往台词里放
+}
+
+/** 玩家刚插的那面旗叫什么（台词要用**他自己起的名字**，不是我们编一个）。 */
+function tagNameOf(c: GuideCtx): string | null {
+  const tags = c.state.tags ?? [];
+  return tags.length ? tags[tags.length - 1].name : null;
+}
+
+/** 落点离旗多近算"派到了"。判松（§7）：派兵会散开站，不卡死在一格上。 */
+const DEST_NEAR_TAG_TILES = 8;
+
+/** 玩家**真把人派过去了**没有。
+ *  ★ 判据读的是引擎里那些兵的**落点**，不是他打了什么字——说得对但引擎没派出去，
+ *    这一步就不该算完成（同 LEDGER「会动兵的验收要数 assignedUnitIds」那一族）。
+ *  ★ `unit.target` 是**路径的第一个拐点**、不是终点（`applyOrders` 里 `unit.target = wps[0]`），
+ *    所以有 waypoints 时必须看最后一个，否则量的是"他往哪个方向迈了第一步"。
+ *  ★ 只数编进队的兵：指挥官/卫队是鼠标点得动的那几个，这一步教的是**用嘴派人**。 */
+function sentSomeoneToTag(c: GuideCtx): boolean {
+  const tags = c.state.tags ?? [];
+  if (tags.length === 0) return false;
+  for (const u of c.state.units.values()) {
+    if (u.team !== "player" || u.isPlayerControlled) continue;
+    if (u.hp <= 0) continue;
+    const dest = u.waypoints && u.waypoints.length > 0
+      ? u.waypoints[u.waypoints.length - 1] : u.target;
+    if (!dest) continue;
+    for (const t of tags) {
+      if (Math.hypot(dest.x - t.position.x, dest.y - t.position.y) <= DEST_NEAR_TAG_TILES) return true;
+    }
+  }
+  return false;
 }
 
 export interface GuideStep {
@@ -281,6 +313,27 @@ export const GUIDE_STEPS: GuideStep[] = [
        + "名字随您起，只要别跟地图上已有的地名重样——重了我分不清您说的是哪个。",
     nudge: "长官，试试按 T 再点地图上一个点，起个名字——起个新名，别跟现成的地名重样。",
     done: (c) => (c.state.tags?.length ?? 0) >= 1,
+  },
+  // ★ 用户 2026-09-10 原话：「让玩家打 tag，然后派一个将军去这个 tag 点，让玩家做一次，
+  //   这样才能记住，然后要检测玩家是否真做了，然后再开始下一步」。
+  //   插完旗就往下走，那面旗对玩家还只是个装饰——**插了但没用过就等于没学**。
+  //   这一步是整关里第一次"谁 + 去哪儿"的完整句，后面打烽火台、打哨站都是它的重复。
+  {
+    id: "send_to_tag",
+    targets: ["map:tag", "btn:input", "btn:mic"],
+    // 要打一句话、还要等我回话 ⇒ 用慢档，别在他正组织语言时催
+    nudgeAfterSec: NUDGE_AFTER_SEC_SLOW,
+    settleSec: SETTLE_SEC_TALK,
+    say: (c) => {
+      const nm = tagNameOf(c) ?? "您刚插的那个点";
+      const who = leaderNamesOf(c)[0] ?? "您手上那支队";
+      return `旗插好了，现在用它一次您就记住了——跟我说「让${who}去${nm}」。`
+           + `队长的名字我认，您起的地名我也认，一句话我就把人派过去。`
+           + `换个人、换个说法都行，听得懂的我都办。`;
+    },
+    nudge: (() => "长官，就一句话：「让谁谁去那面旗」——派谁都行，先走一趟我看看。")(),
+    // ★ 判"真派了"＝引擎里那些兵的落点落在旗附近，不是判他打了什么字
+    done: (c) => sentSomeoneToTag(c),
   },
   {
     // ★ 第一次占领刻意选中立、无人守的烽火台：先在没有战斗的情况下把机制教干净，

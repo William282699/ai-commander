@@ -58,6 +58,20 @@ function placeTag(s: GameState) {
   s.tags.push({ id: `tag_${s.nextTagNum++}`, name: "战狼点", position: { x: 60, y: 40 } } as never);
 }
 
+/** 模拟「让某某去那面旗」**在引擎里留下的痕迹**。
+ *  ★ 照 `applyOrders` 的真实形状钉：`target` 是路径的**第一个拐点**，
+ *    `waypoints` 的最后一个才是终点。判据要是图省事读 `target`，这里就会绿得莫名其妙。 */
+function sendToTag(s: GameState, far = false) {
+  const tag = s.tags[s.tags.length - 1];
+  const dest = far ? { x: 5, y: 5 } : { ...tag.position };
+  const us = [...s.units.values()]
+    .filter(u => u.team === "player" && !u.isPlayerControlled).slice(0, 3);
+  for (const u of us) {
+    u.waypoints = [{ x: u.position.x + 1, y: u.position.y }, dest];
+    u.target = u.waypoints[0];
+  }
+}
+
 function mergeSquads(s: GameState) {
   if (s.squads.length >= 2) s.squads[1].parentSquadId = s.squads[0].id;
 }
@@ -117,7 +131,7 @@ function run(s: GameState, ticks: number, dt: number, onTick?: (i: number) => vo
 }
 
 console.log("\n── ① 台词本身 ──");
-check("十一步都有话、有催促", GUIDE_STEPS.length === 11 && GUIDE_STEPS.every(x => x.say && x.nudge),
+check("十二步都有话、有催促", GUIDE_STEPS.length === 12 && GUIDE_STEPS.every(x => x.say && x.nudge),
   `${GUIDE_STEPS.length} 步`);
 // ★「催」不许是复读——复读零信息，且撞过「逐字复读 4→8/131」那笔账
 check("催促句与原句逐字不同", GUIDE_STEPS.every((x, i) => SAY(i) !== x.nudge), "两步都不同");
@@ -195,6 +209,64 @@ check("第三队那步先叫玩家回陈的频道",
   check("台词请玩家真去试一下（不是「嫌挤就用它」）",
     /试一下|试试/.test(SAY_OF("read_hud")) && SAY_OF("read_hud").includes("收回面板"),
     SAY_OF("read_hud").slice(-30));
+}
+// ★ 用户 09-10：「让玩家打 tag，然后派一个将军去这个 tag 点，让玩家做一次，这样才能
+//   记住，然后要检测玩家是否真做了，然后再开始下一步」。下面把"真做了"钉成机器判据。
+{
+  const st = STEP("send_to_tag");
+  check("派人去旗那步：旗 + 输入框 + 麦克风都在",
+    st.targets!.includes("map:tag") && st.targets!.includes("btn:input")
+    && st.targets!.includes("btn:mic"), st.targets!.join());
+
+  const g = createInitialGameState("tutorial");
+  makeSquad(g, "infantry");
+  const ctx = () => ctxOf(g) as never;
+  placeTag(g);
+  check("只插了旗、没派人 ⇒ 不算完成", !st.done(ctx()), "旗有了，人没动");
+
+  sendToTag(g);
+  check("把人派到旗上 ⇒ 完成", st.done(ctx()), "落点到旗了");
+
+  // ★ 负对照一：派到地图另一头不算——判据要是"只要有落点就算"，这条会绿
+  const g2 = createInitialGameState("tutorial");
+  makeSquad(g2, "infantry"); placeTag(g2); sendToTag(g2, true);
+  const saveG = g;
+  check("派去别处不算完成（落点得真在旗附近）",
+    !(STEP("send_to_tag").done(ctxOf(g2) as never)), "落点 (5,5)");
+
+  // ★ 负对照二：**只看路径终点，不看第一个拐点**。`applyOrders` 里 `unit.target = wps[0]`，
+  //   一支正开往旗子的队，它的 `target` 离旗远得很——图省事读 target 的判据会漏判。
+  const g3 = createInitialGameState("tutorial");
+  makeSquad(g3, "infantry"); placeTag(g3);
+  const tag3 = g3.tags[g3.tags.length - 1];
+  for (const u of [...g3.units.values()].filter(x => x.team === "player" && !x.isPlayerControlled)) {
+    u.target = { x: 5, y: 5 };                       // 第一个拐点：离旗十万八千里
+    u.waypoints = [{ x: 5, y: 5 }, { ...tag3.position }];   // 终点才是旗
+  }
+  check("路上还没到、但终点是旗 ⇒ 算完成（读的是终点不是拐点）",
+    STEP("send_to_tag").done(ctxOf(g3) as never), "target 在 (5,5)，终点在旗");
+
+  // ★ 负对照三：鼠标点得动的那几个（指挥官/卫队）不算——这一步教的是用嘴派人
+  const g4 = createInitialGameState("tutorial");
+  makeSquad(g4, "infantry"); placeTag(g4);
+  const tag4 = g4.tags[g4.tags.length - 1];
+  for (const u of [...g4.units.values()].filter(x => x.isPlayerControlled)) {
+    u.waypoints = [{ ...tag4.position }]; u.target = { ...tag4.position };
+  }
+  check("只把指挥官/卫队挪过去不算（这步教的是用嘴派人）",
+    !STEP("send_to_tag").done(ctxOf(g4) as never), "只动了鼠标那几个");
+
+  // 台词要用**他自己起的旗名**和**他真有的队长**
+  const saySend = resolveSay(st.say, ctxOf(saveG) as never);
+  check("台词用玩家自己起的旗名", saySend.includes(saveG.tags[0].name),
+    `旗名「${saveG.tags[0].name}」`);
+  check("台词点名玩家真有的队长", saySend.includes(saveG.squads[0].leaderName),
+    `点名了 ${saveG.squads[0].leaderName}`);
+  check("台词里没有 markdown 星号", !/\*/.test(saySend), "无星号");
+  // 没旗没队长时也得说得出人话
+  const g0 = createInitialGameState("tutorial");
+  const say0 = resolveSay(st.say, ctxOf(g0) as never);
+  check("没旗没队长时也说得出人话", !/undefined|null/.test(say0) && say0.length > 20, "兜底正常");
 }
 check("插旗那步提醒了别跟已有地名重名", /重样|重名/.test(SAY_OF("place_tag")), "有提醒");
 // ★ 用户 09-08：起名要给个例子，别让玩家对着空框想
@@ -337,6 +409,7 @@ console.log("\n── ④ 两队都编完：引导走完，从此闭嘴 ──")
     if (i === 76) makeSquad(s, "artillery");            // 第三队（模拟艾米莉造的兵）
     if (i === 92) mergeSquads(s);                       // 合并
     if (i === 106) placeTag(s);
+    if (i === 112) sendToTag(s);        // 派个人去那面旗（新的一步）
     if (i === 120) capture(s, "tut_beacon");
     if (i === 38) capture(s, "tut_enemy_post");
   });
@@ -346,7 +419,7 @@ console.log("\n── ④ 两队都编完：引导走完，从此闭嘴 ──")
   const before = said.length;
   const after = run(s, 30, 1, undefined, g);
   check("走完后不再说话", after.said.length === 0, `又说了 ${after.said.length} 句`);
-  check("全程＝开场＋后十步＋结束语", before === 12, `${before} 句`);
+  check("全程＝开场＋后十一步＋结束语", before === 13, `${before} 句`);
   // ★ 结束语是承重的：手把手引导会把玩家训练成"等指令"，必须显式解除
   check("结束语说了", said.includes(OUTRO_LINE), OUTRO_LINE.slice(0, 20) + "…");
   check("结束语只说一次", said.filter(x => x === OUTRO_LINE).length === 1,
@@ -374,6 +447,7 @@ console.log("\n── ④b 倒着做：先编坦克再编步兵（实机抓出�
     if (i === 76) makeSquad(s, "artillery");
     if (i === 92) mergeSquads(s);
     if (i === 106) placeTag(s);
+    if (i === 112) sendToTag(s);        // 派个人去那面旗（新的一步）
     if (i === 120) capture(s, "tut_beacon");
     if (i === 136) capture(s, "tut_enemy_post");
   });
@@ -392,7 +466,7 @@ console.log("\n── ⑤ 玩家抢跑：陈还没开口他就编好了 ──")
   makeSquad(s, "light_tank");
   talk("logistics"); openArsenal(); talk("ops");
   popOut(); closePanel();                              // 顶栏那步的来回也提前做完
-  makeSquad(s, "artillery"); mergeSquads(s); placeTag(s);
+  makeSquad(s, "artillery"); mergeSquads(s); placeTag(s); sendToTag(s);
   capture(s, "tut_beacon"); capture(s, "tut_enemy_post");
   const { g, said } = run(s, 170, 1);
   check("抢跑也能直接走完", g.index >= GUIDE_STEPS.length, `index=${g.index}`);
@@ -453,6 +527,10 @@ console.log("\n── ⑥ 要点亮的目标：跟着步骤生灭，不常驻 �
   check("⑦ 插旗：输入框在闪", currentTargets(g).includes("btn:input" as never), currentTargets(g).join());
 
   placeTag(s); step();
+  // ★ 新的一步：旗插好了要真派人去一趟。旗自己得亮——否则"去那面旗"指的是哪面？
+  check("⑦b 派人去旗：那面旗在闪", has("map:tag") && has("btn:input"), currentTargets(g).join());
+
+  sendToTag(s); step();
   check("⑧ 烽火台：烽火台 + 输入框/麦克风", has("fac:beacon") && has("btn:input"),
     currentTargets(g).join());
 
