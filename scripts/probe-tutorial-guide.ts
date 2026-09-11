@@ -204,11 +204,15 @@ check("第三队那步先叫玩家回陈的频道",
   check("压根没碰过也不卡死（教学关不造门槛）", st.done(mk(41, false, false)), "t=41 没碰过");
   check("这步开始催（不再是纯时间步）", (st.nudgeAfterSec ?? 9999) < 60, `${st.nudgeAfterSec}s`);
   // 催促句要在两种状态下都说得通：没弹的照着弹，弹出去愣住的知道怎么关
-  check("催促句两种状态都说得通（弹出/收回都点了名）",
-    st.nudge.includes("弹出面板") && st.nudge.includes("收回面板"), st.nudge.slice(0, 30) + "…");
+  check("催促句两种状态都说得通（弹出怎么弹、关掉怎么关）",
+    st.nudge.includes("弹出面板") && /关掉/.test(st.nudge), st.nudge.slice(0, 30) + "…");
   check("台词请玩家真去试一下（不是「嫌挤就用它」）",
-    /试一下|试试/.test(SAY_OF("read_hud")) && SAY_OF("read_hud").includes("收回面板"),
+    /试一下|试试/.test(SAY_OF("read_hud")) && /关掉/.test(SAY_OF("read_hud")),
     SAY_OF("read_hud").slice(-30));
+  // ★ 用户 09-11：「不要说收回面板，直接让玩家关掉窗口」——他人就在那扇窗里，
+  //   让他回头找背后主窗上的一颗键，别扭。
+  check("不再让玩家去点「收回面板」那颗键",
+    !SAY_OF("read_hud").includes("收回面板") && !st.nudge.includes("收回面板"), "已改成关窗口");
 }
 // ★ 用户 09-10：「让玩家打 tag，然后派一个将军去这个 tag 点，让玩家做一次，这样才能
 //   记住，然后要检测玩家是否真做了，然后再开始下一步」。下面把"真做了"钉成机器判据。
@@ -274,6 +278,9 @@ check("插旗那步给了名字例子", /「[^」]+」/.test(SAY_OF("place_tag")
 // ★ 文案红线：阵型词必须是引擎真认的（FormationStyle 的 wedge/column、
 //   isAllFrontHint 的「全军」）。原稿写过查无出处的「全力进攻」。
 const POST = SAY_OF("take_post");
+// ★ 用户 09-11：「让 Aiden（玩家指定的将军）全员进攻敌军哨站」——示范句要点名真将军
+check("打哨站示范句＝点名真将军 + 全员进攻",
+  /让[^，。]{1,12}全员进攻敌军哨站/.test(POST), (POST.match(/让[^，。]{1,20}/) ?? [""])[0]);
 check("阵型示范用的是真词", /楔形阵/.test(POST) && /长蛇阵/.test(POST)
   && /全军/.test(POST) && !/全力进攻/.test(POST), "楔形/长蛇/全军");
 // ★ 台词里不许有 markdown（面板不渲染，星号会原样上屏）——本轮又犯过一次
@@ -283,8 +290,8 @@ check("第三队那步说明了要先造兵（否则是死结）",
   /艾米莉/.test(SAY_OF("squad_3")) && /艾米莉/.test(STEP("squad_3").nudge),
   SAY_OF("squad_3").slice(0, 26) + "…");
 // ★ 打哨站那步要讲清怎么算赢，并给"两个队长一起上"的示范
-check("最后一步讲了胜负条件 + 给了双队长示范",
-  /算赢|OBJECTIVES/.test(POST) && /和|一起/.test(POST), POST.slice(0, 30) + "…");
+check("最后一步讲了胜负条件 + 说得出「再加一个人」",
+  /算赢|OBJECTIVES/.test(POST) && /一起|也说上/.test(POST), POST.slice(0, 30) + "…");
 // ★ 合并那句必须点名上级是谁（用户 09-08：写「上级那个人」玩家会纳闷是谁）
 check("合并那步的台词能把上级名字说出来", typeof STEP("merge_squads").say === "function",
   typeof STEP("merge_squads").say);
