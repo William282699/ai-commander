@@ -11,8 +11,10 @@ import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "@ai-commander/shared";
 
 const SCROLL_SPEED = 400; // pixels per second
 const ZOOM_SPEED = 0.1;
-/** Dynamic min zoom: small enough to see the full map without blank edges */
-function getMinZoom(canvasW: number, canvasH: number, mapW: number, mapH: number): number {
+/** Dynamic min zoom: small enough to see the full map without blank edges.
+ *  ★ 导出给开局镜头用：正式局要以**全景**开场（用户 09-11），而"能拉多远"这件事
+ *  只该有一个真相源——写第二份的话，玩家滚一格滚轮镜头就跳一下。 */
+export function getMinZoom(canvasW: number, canvasH: number, mapW: number, mapH: number): number {
   const fitW = canvasW / (mapW * TILE_SIZE);
   const fitH = canvasH / (mapH * TILE_SIZE);
   // Use max so the map fills the viewport completely (no blank strips);

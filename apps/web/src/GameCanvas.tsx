@@ -23,10 +23,12 @@ import {
   setupInputListeners,
   processKeyboardCamera,
   centerCameraOn,
+  getMinZoom,
   screenToTile,
   isBoxSelection,
 } from "./input";
 import { FRONT_CAMERA_TARGETS, EL_ALAMEIN_CAMERA_TARGETS, TUTORIAL_CAMERA_TARGETS } from "@ai-commander/shared";
+import { campaignBriefing } from "./campaignBriefing";
 
 /** URL → scenarioId 的**唯一**一处解析。
  *  原本 `handleRestart` 与初始化各抄了一份同样的三元表达式；加教学关时
@@ -1023,6 +1025,27 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     panelDetachedRef.current = !!panelDetached;
     if (panelDetached) poppedOutOnceRef.current = true;
   }, [panelDetached]);
+  /** 正式局的开场简报——**只说不卡**（用户 09-11）。
+   *  和教学关那套状态机没有任何共用：没有 done、没有催促、没有目标高亮，
+   *  几句话说完 interval 自己停掉。再手把手一次，就把"等指令"那毛病教回来了。 */
+  useEffect(() => {
+    if (scenarioFromUrl() === "tutorial") return;
+    let lines: ReturnType<typeof campaignBriefing> | null = null;
+    let idx = 0;
+    const id = setInterval(() => {
+      const st = stateRef.current;
+      if (!st || st.gameOver) return;
+      if (lines === null) lines = campaignBriefing(st);     // 等 state 就位再算，别对着空状态编
+      if (idx >= lines.length) { clearInterval(id); return; }
+      const line = lines[idx];
+      if (st.time < line.atSec) return;                    // 按**游戏时间**排期：暂停时不会自己往下念
+      addMessage("info", line.text, st.time, "combat", undefined, "proactive", undefined,
+        utteranceFor("combat", "proactive"));
+      idx++;
+    }, 500);
+    return () => clearInterval(id);
+  }, []);
+
   const guideRef = useRef<GuideState | null>(null);
   useEffect(() => {
     if (scenarioFromUrl() !== "tutorial") return;
@@ -1581,7 +1604,18 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     // Camera: center on player HQ
     const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
     cameraRef.current = camera; // live object — input listeners mutate it in place
-    const hqCenter = scenarioId === "el_alamein" ? { x: 430, y: 90 }
+    // ★ 正式局以**全景**开场（用户 09-11：「刚进入游戏的时候，最好是全景地图，
+    //   现在是进入游戏后聚焦在我方这里」）。缩到玩家自己能拉到的最远那一档——
+    //   `getMinZoom` 就是滚轮的下限，用同一个数，开局视野与他滚到底看到的一致。
+    //   ⚠ 顺序敏感：`centerCameraOn` 要拿 `camera.zoom` 算半屏，必须先设 zoom。
+    if (scenarioId === "el_alamein") {
+      camera.zoom = getMinZoom(canvas.width, canvas.height,
+        initialState.mapWidth, initialState.mapHeight);
+    }
+    const hqCenter = scenarioId === "el_alamein"
+      // 全景时对准要紧那堆东西的中点（四个目标 y30–220、三个前哨 y35–155），
+      // 不是地图几何中心——底下那几十格是空沙漠，白给。
+      ? { x: 250, y: 125 }
       // ★ 不是 HQ(14,40)：审核实测 900×700 / 1000×800 画布下，镜头被 clampCamera
       //   顶到 camera.x=0，可视 x∈[0,31.3]，而玩家的兵在 x=32~35 ⇒ **开局一个
       //   自己的兵都看不见**。往东挪到两坨兵中间，HQ 与两坨同屏。
