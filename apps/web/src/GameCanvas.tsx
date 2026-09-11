@@ -1013,6 +1013,16 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
   /** 参谋是不是正在回话。引导拿它决定"先别说下一句"。 */
   const advisorBusyRef = useRef(false);
   const onAdvisorBusy = useCallback((busy: boolean) => { advisorBusyRef.current = busy; }, []);
+
+  /** 面板弹没弹出去。`panelDetached` 是 prop，而引导那个 interval 的依赖是 `[]`
+   *  ⇒ 闭包里读到的永远是第一帧的值，必须过一道 ref 才拿得到新鲜的。
+   *  `poppedOutOnceRef` 拉出去过一次就不再翻回来——判「弹出→关上」这个来回用它。 */
+  const panelDetachedRef = useRef(false);
+  const poppedOutOnceRef = useRef(false);
+  useEffect(() => {
+    panelDetachedRef.current = !!panelDetached;
+    if (panelDetached) poppedOutOnceRef.current = true;
+  }, [panelDetached]);
   const guideRef = useRef<GuideState | null>(null);
   useEffect(() => {
     if (scenarioFromUrl() !== "tutorial") return;
@@ -1040,7 +1050,9 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         playerActedSince: (t) => lastPlayerActionRef.current > t,
         playerSawArsenal: () => panelTabSeenRef.current.has("logistics"),
         advisorBusy: () => advisorBusyRef.current,
-        // 时间步（"读一眼顶栏"那种没有动作的）靠它自己走完
+        panelDetached: () => panelDetachedRef.current,
+        playerPoppedOutPanel: () => poppedOutOnceRef.current,
+        // 读一眼顶栏那步靠它兜底（窗一直开着 / 压根没碰 都不会卡死）
         sinceStepStart: st.time - (guideRef.current?.stepStartedAt ?? st.time),
       }, st.time);
       guideRef.current = next;

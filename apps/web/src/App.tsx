@@ -303,6 +303,9 @@ export default function App() {
         {panelDetached && (
           <button
             className="hud-btn hud-btn-ghost hud-btn-sm"
+            // ★ 弹出去之后「弹出面板」这颗键就不渲染了，脉冲得跟着挪到「收回面板」上——
+            //   否则引导让他"看完关上"，屏上却没有一样东西在亮（家法：提到什么就得亮什么）。
+            data-guide-pulse={guideTargets.includes("btn:popout") ? "on" : "off"}
             onClick={handleReattach}
           >
             收回面板
