@@ -3,6 +3,7 @@ import { GameCanvas } from "./GameCanvas";
 import { ChatPanel } from "./ChatPanel";
 import { TutorialOverlay } from "./TutorialOverlay";
 import { IntroGate } from "./IntroGate";
+import { getVoiceVolume, setVoiceVolume, getSfxVolume, setSfxVolume, applyStoredAudioSettings } from "./audioSettings";
 import type { GameState } from "@ai-commander/shared";
 import type { GameBridge } from "./GameCanvas";
 
@@ -46,6 +47,58 @@ type IntroMode = "gate" | "manual" | "none";
 function initialIntroMode(): IntroMode {
   if (!IS_MAIN_CAMPAIGN) return "none";
   return FORCE_INTRO || !introSeen() ? "gate" : "none";
+}
+
+
+/** 音量：参谋的嗓子 / 战场的动静，两条分开。
+ *  ★ 为什么不做成一条总音量：想压住炮声就得连陈的话一起压掉，而他说的话是主界面。
+ *  ★ 为什么塞在顶栏而不是做个设置页：家法「对话是唯一界面」——能不新开一屏就不开。
+ *    这不是游戏玩法的旋钮，是"太吵了"的即时开关，得一步够得着。 */
+function VolumeControl() {
+  const [open, setOpen] = useState(false);
+  const [voice, setVoice] = useState(getVoiceVolume);
+  const [sfx, setSfx] = useState(getSfxVolume);
+  useEffect(() => { applyStoredAudioSettings(); }, []);
+  const icon = voice === 0 && sfx === 0 ? "🔇" : "🔊";
+  const row = (label: string, v: number, on: (n: number) => void) => (
+    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, whiteSpace: "nowrap" }}>
+      <span style={{ width: 56, color: "var(--hud-text-secondary)" }}>{label}</span>
+      <input
+        type="range" min={0} max={1} step={0.05} value={v}
+        onChange={(e) => on(parseFloat(e.target.value))}
+        style={{ width: 108, accentColor: "var(--hud-accent-cyan)" }}
+      />
+      <span style={{ width: 32, textAlign: "right", color: "var(--hud-text-primary)" }}>
+        {Math.round(v * 100)}%
+      </span>
+    </label>
+  );
+  return (
+    <div style={{ position: "relative" }}>
+      <button
+        className="hud-btn hud-btn-ghost hud-btn-sm"
+        onClick={() => setOpen((o) => !o)}
+        title="音量"
+      >
+        {icon}
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 200,
+            background: "rgba(10, 14, 26, 0.97)",
+            border: "1px solid rgba(0, 212, 255, 0.25)",
+            borderRadius: 4, padding: "10px 12px",
+            display: "flex", flexDirection: "column", gap: 8,
+            boxShadow: "0 6px 24px rgba(0,0,0,0.6)",
+          }}
+        >
+          {row("参谋语音", voice, (n) => { setVoice(n); setVoiceVolume(n); })}
+          {row("战场音效", sfx, (n) => { setSfx(n); setSfxVolume(n); })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function PanelApp() {
@@ -320,6 +373,7 @@ export default function App() {
             弹出面板 ↗
           </button>
         )}
+        <VolumeControl />
 
         {/* Step 5B: scenario win-progress as a horizontal chip group, sharing
             the Money/Fuel/Ammo chip style. Pinned to the far right via

@@ -16,6 +16,7 @@
 //     nativeSpeak() calls play in order without our queue.
 
 import { VOICE_CONFIG, type Persona } from "./voiceConfig";
+import { getVoiceVolume } from "../audioSettings";
 
 const NATIVE_RATE = 1.1;
 
@@ -35,6 +36,7 @@ export function nativeSpeak(text: string, persona: Persona, onStart?: () => void
   const utt = new SpeechSynthesisUtterance(trimmed);
   utt.lang = VOICE_CONFIG[persona].nativeLang;
   utt.rate = NATIVE_RATE;
+  utt.volume = getVoiceVolume();   // 两条播放路同一个真相源
   if (onStart) utt.onstart = () => { try { onStart(); } catch { /* 观察点不许影响播放 */ } };
   window.speechSynthesis.speak(utt);
 }
