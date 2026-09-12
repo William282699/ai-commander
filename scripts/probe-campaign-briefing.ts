@@ -8,7 +8,8 @@
 // 而写死的代价是下一个调平衡的人不会记得回来改台词，屏上从此挂着一句假话。
 // ============================================================
 
-import { createInitialGameState } from "../packages/core/src/index";
+import { createInitialGameState, isCapturableFacilityType } from "../packages/core/src/index";
+import { FACILITY_BONUSES, INCOME_INTERVAL_SEC } from "../packages/shared/src/constants";
 import { campaignBriefing } from "../apps/web/src/campaignBriefing";
 import type { GameState } from "../packages/shared/src/types";
 
@@ -25,7 +26,7 @@ const all = lines.map(l => l.text).join("\n");
 const cfg = s.scenarioWinConfig!;
 
 console.log("\n── ① 说了该说的四件事 ──");
-check("四句都在", lines.length === 4, `${lines.length} 句`);
+check("五句都在", lines.length === 5, `${lines.length} 句`);
 check("① 让他看地图 + 说了颜色", /蓝的是咱们/.test(all) && /红的是敌人/.test(all),
   lines[0]?.text.slice(0, 26) + "…");
 check("② 说了赢法", /就赢了/.test(all) && /OBJECTIVES/.test(all), "有赢法");
@@ -64,6 +65,30 @@ check("兵营名＝地图上真有的那个", all.includes(barracks.name), barra
   const hq = [...s.facilities.values()].find(f => f.team === "player" && f.type === "headquarters")!;
   check("兵营指路的原点是我军总部（不是玩家没听过的那个）",
     all.includes(`挨着${hq.name}`), hq.name);
+}
+
+console.log("\n── ①b 占点给什么好处，也得说一声（用户 09-12）──");
+{
+  const lPay = lines.find(l => /占点不白占/.test(l.text))!;
+  check("有这么一句", !!lPay, lPay ? lPay.text.slice(0, 20) + "…" : "★缺席");
+  check("说了占下来会开雾", /雾/.test(lPay.text) && /散/.test(lPay.text), "说了");
+  // ★ 数字必须来自 FACILITY_BONUSES，不是手打的
+  const bonuses = Object.entries(FACILITY_BONUSES)
+    .filter(([t]) => isCapturableFacilityType(t as never))
+    .map(([, b]) => b);
+  const richest = Math.max(...bonuses.map(b => b.money ?? 0));
+  check("报的钱数＝产出表里最肥那档", lPay.text.includes(`$${richest}`), `$${richest}`);
+  check("结算周期＝引擎的那个常量", lPay.text.includes(`每${INCOME_INTERVAL_SEC}秒`),
+    `${INCOME_INTERVAL_SEC}s`);
+  check("报的设施名是这张图上真有的",
+    [...s.facilities.values()].some(f => lPay.text.includes(f.name)), "对得上");
+  // 改产出表 ⇒ 这句话必须跟着变（写死的在这儿露馅）
+  const g = createInitialGameState("el_alamein");
+  const savedRepair = { ...FACILITY_BONUSES.repair_station };
+  FACILITY_BONUSES.repair_station = { money: 999, fuel: 7 };
+  const t = campaignBriefing(g).map(l => l.text).join("\n");
+  FACILITY_BONUSES.repair_station = savedRepair;
+  check("把某类产出改成 $999 ⇒ 台词跟着说 999", t.includes("$999"), "跟着变了");
 }
 
 console.log("\n── ②b 说到哪几个点，那几个点就得闪（用户 09-12）──");

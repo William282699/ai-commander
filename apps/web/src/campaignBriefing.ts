@@ -16,6 +16,8 @@
 // ============================================================
 
 import type { GameState, Facility } from "@ai-commander/shared";
+import { FACILITY_BONUSES, INCOME_INTERVAL_SEC } from "@ai-commander/shared";
+import { isCapturableFacilityType } from "@ai-commander/core";
 
 export interface BriefingLine {
   /** 陈说的话 */
@@ -58,6 +60,35 @@ function whereIs(state: GameState, fac: Facility): string {
   const ew = fac.position.x > state.mapWidth / 2 ? "东" : "西";
   const ns = fac.position.y > state.mapHeight / 2 ? "南" : "北";
   return `在地图${ew}${ns}角`;
+}
+
+
+/** 占下一个点到底给什么。**全部从 `FACILITY_BONUSES` 现算**，不写死——
+ *  改平衡的人只动那张表，这句话自己跟着变。
+ *  只报这张图上真有的、且真给钱的那几类；一个都没有就不提钱，免得空口许愿。 */
+function capturePayoffPhrase(state: GameState): string | null {
+  type Row = { name: string; money: number; extra: string };
+  const seen = new Set<string>();
+  const rows: Row[] = [];
+  for (const f of state.facilities.values()) {
+    if (!isCapturableFacilityType(f.type) || seen.has(f.type)) continue;
+    const b = FACILITY_BONUSES[f.type];
+    if (!b) continue;
+    seen.add(f.type);
+    const extras: string[] = [];
+    if (b.fuel) extras.push(`${b.fuel}油`);
+    if (b.ammo) extras.push(`${b.ammo}弹`);
+    if (b.intel) extras.push(`${b.intel}情报`);
+    rows.push({ name: f.name, money: b.money ?? 0, extra: extras.join("、") });
+  }
+  if (rows.length === 0) return null;
+  // 最肥的排前面——玩家先记住的该是最值得抢的那个
+  rows.sort((x, y) => (y.money + y.extra.length) - (x.money + x.extra.length));
+  const fmt = (r: Row) => {
+    const bits = [r.money > 0 ? `$${r.money}` : "", r.extra].filter(Boolean).join("＋");
+    return `${r.name}那种每回进账 ${bits}`;
+  };
+  return rows.slice(0, 2).map(fmt).join("，");
 }
 
 /**
@@ -111,9 +142,21 @@ export function campaignBriefing(state: GameState): BriefingLine[] {
     });
   }
 
-  if (barracks) {
+  // ★ 用户 09-12：「需要告知玩家，占领哨站或者其他的比如说烽火台，可以开迷雾，
+  //   有的能增加钱，也说一声」。这是全场最重要的正反馈，之前一个字没提。
+  const payoff = capturePayoffPhrase(state);
+  if (payoff) {
     lines.push({
       atSec: 26,
+      text: `占点不白占：旗子一翻，那一片的雾当场就散开，等于白得一双眼睛。`
+          + `有的点还自带产出，每${INCOME_INTERVAL_SEC}秒结一次账——${payoff}。`
+          + `所以抢点既是记分，也是买卖：占得早，后面兵就造得起。`,
+    });
+  }
+
+  if (barracks) {
+    lines.push({
+      atSec: payoff ? 34 : 26,
       facilityIds: [barracks.id],
       text: `兵不够就找艾米莉，新兵从闪着的那个${barracks.name}出来，${whereIs(state, barracks)}。`
           + `打法您定，不用等我开口——想问什么随时喊我。`,
