@@ -3081,6 +3081,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     e.stopPropagation();
+    // ★ 中文输入法还在选字的时候，这个 Enter 是**给输入法的**，不是给我们的。
+    //   用户 2026-09-12 实拍：打 Aiden，候选还浮在输入法里没落进框，一按回车
+    //   整条空/半截的话就发出去了。浏览器对 composing 中的按键报 isComposing=true
+    //   （老浏览器只给 keyCode 229），两个都认，谁先到算谁。
+    if ((e.nativeEvent as KeyboardEvent).isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendCommand();
