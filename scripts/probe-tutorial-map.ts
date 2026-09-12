@@ -27,7 +27,7 @@ import { processAutoBehavior } from "../packages/core/src/autoBehavior";
 import { updateFog } from "../packages/core/src/fog";
 import { tick } from "../packages/core/src/sim";
 import { buildDigestForChannel } from "../apps/web/src/digestHelper";
-import { centerCameraOn } from "../apps/web/src/input";
+import { centerCameraOn, getMinZoom } from "../apps/web/src/input";
 import type { GameState, Unit, UnitType } from "../packages/shared/src/types";
 import { TILE_SIZE } from "../packages/shared/src/constants";
 
@@ -226,6 +226,47 @@ if (TRIPWIRE) {
   let ok = false;
   for (let t = 0; t < 400; t++) { processEconomy(g, 1); if (g.facilities.get("tut_enemy_post")!.team === "player") { ok = true; break; } }
   console.log(`  ${!ok ? "✅" : "❌"} 摘掉谓词修复后坦克应占不下来 — ${ok ? "★仍占下了，判据抓不住病" : "确实占不下（判据会红）"}`);
+}
+
+// ────────────────────────────────────────────────
+console.log("\n── ⑦ 右边被操作台盖住那条：拉得出来吗（用户 09-11 实拍）──");
+// 画布是整幅铺开的、操作台浮在它上面 ⇒ "画出来的"比"看得见的"宽 460。
+// 镜头的下限与边界要是按画布宽算，地图最右边那条**永远**躲在面板底下，怎么拖都没用。
+{
+  const CW = 1440, CH = 790, DOCK = 460;
+  const rightEdgeScreenX = (cam: { x: number; zoom: number }, mapW: number) =>
+    (mapW * TILE_SIZE - cam.x) * cam.zoom;
+
+  // 都先缩到各自的下限，再往右拖到头
+  const mk = (inset: number) => {
+    const c = { x: 0, y: 0, zoom: getMinZoom(CW - inset, CH, s.mapWidth, s.mapHeight) };
+    centerCameraOn(c, 1e6, s.mapHeight / 2, CW, CH, s.mapWidth, s.mapHeight, inset);
+    return c;
+  };
+  const bad = mk(0);        // 旧行为：假装整幅画布都看得见
+  const good = mk(DOCK);    // 新行为：只认露在外面那条
+
+  check("★旧算法：拖到头，地图右边界还压在面板底下",
+    rightEdgeScreenX(bad, s.mapWidth) > CW - DOCK + 1,
+    `右边界落在 x=${Math.round(rightEdgeScreenX(bad, s.mapWidth))}，面板左边在 ${CW - DOCK}`);
+  check("新算法：拖到头，地图右边界正好顶到面板左边",
+    Math.abs(rightEdgeScreenX(good, s.mapWidth) - (CW - DOCK)) < 1.5,
+    `右边界落在 x=${Math.round(rightEdgeScreenX(good, s.mapWidth))}，面板左边在 ${CW - DOCK}`);
+
+  // 镜头跳转也一样：对准的点该落在**看得见那块**的中间，不是画布中间
+  const c2 = { x: 0, y: 0, zoom: 1 };
+  centerCameraOn(c2, 60, 40, CW, CH, s.mapWidth, s.mapHeight, DOCK);
+  const targetScreenX = (60 * TILE_SIZE - c2.x) * c2.zoom;
+  check("镜头跳转对准的是露出来那块的中点",
+    Math.abs(targetScreenX - (CW - DOCK) / 2) < 1.5,
+    `目标落在 x=${Math.round(targetScreenX)}，露出来那块的中点是 ${(CW - DOCK) / 2}`);
+
+  // 面板收起/弹出时 inset=0，行为必须回到原样（别把没盖住的情况也当成盖住）
+  const c3 = { x: 0, y: 0, zoom: 1 };
+  centerCameraOn(c3, 60, 40, CW, CH, s.mapWidth, s.mapHeight, 0);
+  check("面板收起(inset=0)时回到画布中点，不留空条",
+    Math.abs((60 * TILE_SIZE - c3.x) * c3.zoom - CW / 2) < 1.5,
+    `目标落在 x=${Math.round((60 * TILE_SIZE - c3.x) * c3.zoom)}`);
 }
 
 console.log(`\n${fail === 0 ? "✅" : "❌"} ${pass} 过 / ${fail} 败\n`);

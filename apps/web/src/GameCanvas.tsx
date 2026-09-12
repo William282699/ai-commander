@@ -1601,7 +1601,22 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
 
-    // Camera: center on player HQ
+    // Input — use ref so it's accessible outside useEffect
+    const input = inputRef.current;
+    input.mapWidth = initialState.mapWidth;
+    input.mapHeight = initialState.mapHeight;
+    // ★ 右边那块操作台盖住多少画布——**量 DOM，不照抄 460**：收起/弹出/改宽度都自动跟上。
+    //   变化很稀（收起、弹出、改窗口），2Hz 够了，不值得每帧 getBoundingClientRect。
+    const measureInset = () => {
+      const dock = document.querySelector('[data-hud-dock="1"]') as HTMLElement | null;
+      const w = dock && dock.offsetParent !== null ? dock.getBoundingClientRect().width : 0;
+      // 画布是 CSS 像素铺满的，canvas.width 与它 1:1（resize 里就是这么设的）
+      input.insetRight = Math.min(w, canvas.width * 0.6);
+    };
+    measureInset();
+    const insetTimer = setInterval(measureInset, 500);
+
+    // Camera: center on player HQ（★ 必须排在 input 之后——开局镜头要用 insetRight）
     const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
     cameraRef.current = camera; // live object — input listeners mutate it in place
     // ★ 正式局以**全景**开场（用户 09-11：「刚进入游戏的时候，最好是全景地图，
@@ -1609,7 +1624,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     //   `getMinZoom` 就是滚轮的下限，用同一个数，开局视野与他滚到底看到的一致。
     //   ⚠ 顺序敏感：`centerCameraOn` 要拿 `camera.zoom` 算半屏，必须先设 zoom。
     if (scenarioId === "el_alamein") {
-      camera.zoom = getMinZoom(canvas.width, canvas.height,
+      camera.zoom = getMinZoom(canvas.width - input.insetRight, canvas.height,
         initialState.mapWidth, initialState.mapHeight);
     }
     const hqCenter = scenarioId === "el_alamein"
@@ -1621,12 +1636,9 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       //   自己的兵都看不见**。往东挪到两坨兵中间，HQ 与两坨同屏。
       : scenarioId === "tutorial" ? { x: 26, y: 40 }
       : { x: 100, y: 7 };
-    centerCameraOn(camera, hqCenter.x, hqCenter.y, canvas.width, canvas.height, initialState.mapWidth, initialState.mapHeight);
+    centerCameraOn(camera, hqCenter.x, hqCenter.y, canvas.width, canvas.height,
+      initialState.mapWidth, initialState.mapHeight, input.insetRight);
 
-    // Input — use ref so it's accessible outside useEffect
-    const input = inputRef.current;
-    input.mapWidth = initialState.mapWidth;
-    input.mapHeight = initialState.mapHeight;
     const cleanup = setupInputListeners(canvas, camera, input);
 
     // Fronts array (ordered 1-5 for hotkey mapping) — `let` so restart can refresh
@@ -1695,6 +1707,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
               canvas.height,
               input.mapWidth,
               input.mapHeight,
+              input.insetRight,   // 跳过去的点要落在看得见那块的中间，别摆到操作台底下
             );
           }
         }
@@ -2657,6 +2670,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       cleanup();
       cameraRef.current = null;
       window.removeEventListener("resize", resize);
+      clearInterval(insetTimer);
     };
   }, []);
 

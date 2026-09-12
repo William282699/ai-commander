@@ -86,6 +86,11 @@ export interface InputState {
   // --- Scenario map dimensions (set at init, used for camera clamp + minimap) ---
   mapWidth: number;
   mapHeight: number;
+  /** 右边那块操作台**盖住的画布宽度**（收起/弹出时为 0）。
+   *  ★ 画布是整幅铺开的、面板浮在它上面（`panelStyle` 是 absolute right:0 width:460），
+   *  所以"画出来的"比"看得见的"宽一条。镜头的下限与边界都得按**看得见的**算——
+   *  否则缩到最小，地图最右边那条永远躲在面板底下，怎么拖都拖不出来（用户 09-11 实拍）。 */
+  insetRight: number;
 }
 
 export function createInputState(): InputState {
@@ -117,6 +122,7 @@ export function createInputState(): InputState {
     pendingTag: null,
     mapWidth: MAP_WIDTH,
     mapHeight: MAP_HEIGHT,
+    insetRight: 0,
   };
 }
 
@@ -173,7 +179,8 @@ export function setupInputListeners(
     e.preventDefault();
     const dir = e.deltaY < 0 ? 1 : -1;
     const oldZoom = camera.zoom;
-    const minZoom = getMinZoom(canvas.width, canvas.height, input.mapWidth, input.mapHeight);
+    // 滚轮能拉到多远，也按**看得见的**那块算（否则拉到底右边那条还在面板底下）
+    const minZoom = getMinZoom(canvas.width - input.insetRight, canvas.height, input.mapWidth, input.mapHeight);
     camera.zoom = Math.max(minZoom, Math.min(MAX_ZOOM, camera.zoom + dir * ZOOM_SPEED));
 
     // Zoom toward mouse position
@@ -182,7 +189,7 @@ export function setupInputListeners(
     const my = e.clientY - rect.top;
     camera.x += mx / oldZoom - mx / camera.zoom;
     camera.y += my / oldZoom - my / camera.zoom;
-    clampCamera(camera, canvas.width, canvas.height, input.mapWidth, input.mapHeight);
+    clampCamera(camera, canvas.width, canvas.height, input.mapWidth, input.mapHeight, input.insetRight);
   };
 
   // Track right-click drag distance for command vs pan detection
@@ -279,7 +286,7 @@ export function setupInputListeners(
       const dy = (e.clientY - input.dragStartY) / camera.zoom;
       camera.x = input.cameraStartX - dx;
       camera.y = input.cameraStartY - dy;
-      clampCamera(camera, canvas.width, canvas.height, input.mapWidth, input.mapHeight);
+      clampCamera(camera, canvas.width, canvas.height, input.mapWidth, input.mapHeight, input.insetRight);
     }
   };
 
@@ -413,7 +420,7 @@ export function processKeyboardCamera(
     if (input.mouseY > canvasHeight - EDGE_SCROLL_MARGIN) camera.y += edgeSpeed;
   }
 
-  clampCamera(camera, canvasWidth, canvasHeight, input.mapWidth, input.mapHeight);
+  clampCamera(camera, canvasWidth, canvasHeight, input.mapWidth, input.mapHeight, input.insetRight);
 }
 
 /**
@@ -427,14 +434,18 @@ export function centerCameraOn(
   canvasHeight: number,
   mapW: number = MAP_WIDTH,
   mapH: number = MAP_HEIGHT,
+  insetRight = 0,
 ): void {
-  camera.x = tileX * TILE_SIZE - canvasWidth / camera.zoom / 2;
+  // ★ 对准的是**看得见那块**的中点，不是画布中点——否则"镜头跳到中央前哨"
+  //   会把它摆到操作台底下去。
+  camera.x = tileX * TILE_SIZE - (canvasWidth - insetRight) / camera.zoom / 2;
   camera.y = tileY * TILE_SIZE - canvasHeight / camera.zoom / 2;
-  clampCamera(camera, canvasWidth, canvasHeight, mapW, mapH);
+  clampCamera(camera, canvasWidth, canvasHeight, mapW, mapH, insetRight);
 }
 
-function clampCamera(camera: Camera, canvasWidth: number, canvasHeight: number, mapW: number = MAP_WIDTH, mapH: number = MAP_HEIGHT): void {
-  const maxX = mapW * TILE_SIZE - canvasWidth / camera.zoom;
+function clampCamera(camera: Camera, canvasWidth: number, canvasHeight: number, mapW: number = MAP_WIDTH, mapH: number = MAP_HEIGHT, insetRight = 0): void {
+  // 能看见的那条才算数：右边被操作台盖掉多少，镜头就该多往右走多少
+  const maxX = mapW * TILE_SIZE - (canvasWidth - insetRight) / camera.zoom;
   const maxY = mapH * TILE_SIZE - canvasHeight / camera.zoom;
   camera.x = Math.max(0, Math.min(maxX, camera.x));
   camera.y = Math.max(0, Math.min(maxY, camera.y));

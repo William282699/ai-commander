@@ -3738,7 +3738,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           {collapsed ? "◀" : "▶"}
         </button>
       )}
-    <div style={embeddedPanelStyle}>
+    {/* ★ data-hud-dock：GameCanvas 靠它量"右边被盖住多少"（镜头下限与边界要用）。
+        量 DOM 而不是照抄 460——收起/弹出/换宽度都自动跟上，不会两处数字打架。 */}
+    <div style={embeddedPanelStyle} data-hud-dock="1">
       {/* ── Top: Commander selection bar ── */}
       <div style={commanderBarStyle}>
         {COMMANDERS.map((cmd) => {
