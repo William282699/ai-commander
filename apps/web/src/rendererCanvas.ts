@@ -632,6 +632,34 @@ const FACTION_GLOW_RX = 1.55;        // 比本体圈大这么多倍
 const FACTION_GLOW_ALPHA = 0.16;     // 压得很淡，是"晕"不是第二个圈
 
 /**
+ * 缩远了，阵营圈的外晕要让路。
+ *
+ * ★ 病根是 `baseUnitSize` 那个 **8px 地板**：全景下一格只有 3px，圈却仍按 8px 起算
+ *   ⇒ ringRx=11.2、glowRx=17.4，**一个兵糊出 35px 宽的光斑**。几十个兵连成一片，
+ *   把自家据点的蓝旗整个盖住（用户 2026-09-12 实拍：「我军的蓝旗看不清楚，
+ *   因为蓝色光圈太大了」）。
+ * ★ 两手一起治：
+ *   ① 地板改成「最多一格宽」——圈再也不会比它站的那格还大；
+ *   ② 外晕（那圈 1.55× 的散光）随格子变小线性淡出，格子小到 6px 就完全不画。
+ *      **本体圈不淡**：那是唯一的敌我色标，缩多远都得留着。
+ */
+/** 引导圈在屏幕上的最小半径。缩到全景时格子只有两三个像素，圈得自己撑住。 */
+const GUIDE_RING_MIN_RX = 14;
+const GLOW_FADE_TILE_PX = 14;
+const GLOW_HIDE_TILE_PX = 6;
+export function factionGlowScale(tileScreenSize: number): number {
+  if (tileScreenSize >= GLOW_FADE_TILE_PX) return 1;
+  if (tileScreenSize <= GLOW_HIDE_TILE_PX) return 0;
+  return (tileScreenSize - GLOW_HIDE_TILE_PX) / (GLOW_FADE_TILE_PX - GLOW_HIDE_TILE_PX);
+}
+
+/** 单位圈的基准尺寸。地板存在是为了小图标也有个看得见的圈，但**不许超过一格**
+ *  ——超过就是在别人的地盘上画画。 */
+export function unitRingBase(tileScreenSize: number): number {
+  return Math.max(Math.min(8, tileScreenSize), tileScreenSize * 0.7);
+}
+
+/**
  * The selection ring sits just outside the faction base, as a multiple of it.
  * It used to be `unitSize / 2 + 3` — 14px against a 44px-wide tank sprite — so
  * a selected tank showed no ring at all and the player got no confirmation the
@@ -709,7 +737,7 @@ export function renderGuideHighlights(
 ): void {
   if (!guide) return;
   const tileScreenSize = TILE_SIZE * camera.zoom;
-  const baseUnitSize = Math.max(8, tileScreenSize * 0.7);
+  const baseUnitSize = unitRingBase(tileScreenSize);
 
   if (guide.tagIds?.size && tags) {
     for (const tag of tags) {
@@ -727,7 +755,10 @@ export function renderGuideHighlights(
       if (!guide.facilityIds.has(fac.id)) continue;
       const sx = (fac.position.x * TILE_SIZE - camera.x) * camera.zoom + tileScreenSize / 2;
       const sy = (fac.position.y * TILE_SIZE - camera.y) * camera.zoom + tileScreenSize / 2;
-      drawGuideRing(ctx, sx, sy, tileScreenSize * 1.25, gameTime);
+      // ★ 圈有**最小屏幕尺寸**：全景下一格才 2.4px，纯按格算的话圈只有 6px 宽，
+      //   等于没闪（用户 09-12 要的就是"我一眼能找到它们"）。旗子本身也是这么做的
+      //   （`drawFlag` 的旗杆高 `Math.max(16, 24*zoom)`）——两者一起才认得出来。
+      drawGuideRing(ctx, sx, sy, Math.max(GUIDE_RING_MIN_RX, tileScreenSize * 1.25), gameTime);
     }
   }
   if (guide.unitIds?.size) {
@@ -753,7 +784,7 @@ export function renderUnits(
   guide?: GuideHighlight,
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
-  const baseUnitSize = Math.max(8, tileScreenSize * 0.7);
+  const baseUnitSize = unitRingBase(tileScreenSize);
 
   // Build id → unit lookup once per frame so sprite turrets can resolve their
   // attackTarget. Out-of-view targets just won't be in the map and the turret
@@ -829,10 +860,13 @@ export function renderUnits(
     // 外晕先画（在本体圈之下），让阵营色从边缘化开，不是一条硬边。
     const glowRx = ringRx * FACTION_GLOW_RX;
     const glowRy = glowRx * FACTION_RING_FLATTEN;
-    ctx.beginPath();
-    ctx.ellipse(cx, cy + glowRy * FACTION_RING_DROP, glowRx, glowRy, 0, 0, Math.PI * 2);
-    ctx.fillStyle = factionColor(isPlayer, FACTION_GLOW_ALPHA);
-    ctx.fill();
+    const glowScale = factionGlowScale(tileScreenSize);
+    if (glowScale > 0) {
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + glowRy * FACTION_RING_DROP, glowRx, glowRy, 0, 0, Math.PI * 2);
+      ctx.fillStyle = factionColor(isPlayer, FACTION_GLOW_ALPHA * glowScale);
+      ctx.fill();
+    }
 
     ctx.beginPath();
     ctx.ellipse(cx, cy + ringRy * FACTION_RING_DROP, ringRx, ringRy, 0, 0, Math.PI * 2);

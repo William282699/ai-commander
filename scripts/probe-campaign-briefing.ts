@@ -66,6 +66,34 @@ check("兵营名＝地图上真有的那个", all.includes(barracks.name), barra
     all.includes(`挨着${hq.name}`), hq.name);
 }
 
+console.log("\n── ②b 说到哪几个点，那几个点就得闪（用户 09-12）──");
+{
+  const objIds = s.captureObjectives ?? [];
+  const keepIds = cfg.friendlyKeypoints ?? [];
+  const byText = (kw: string) => lines.find(l => l.text.includes(kw))!;
+  const lObj = byText("插红旗"), lKeep = byText("蓝旗"), lBar = byText("艾米莉");
+
+  check("讲敌军据点那句 ⇒ 四面红旗全在闪名单里",
+    JSON.stringify(lObj.facilityIds) === JSON.stringify(objIds),
+    (lObj.facilityIds ?? []).join());
+  check("讲我方前哨那句 ⇒ 三面蓝旗全在闪名单里",
+    JSON.stringify(lKeep.facilityIds) === JSON.stringify(keepIds),
+    (lKeep.facilityIds ?? []).join());
+  check("讲兵营那句 ⇒ 闪的正是那个兵营",
+    JSON.stringify(lBar.facilityIds) === JSON.stringify([barracks.id]), barracks.id);
+  check("开场那句不点亮任何东西（那句说的是整张图）",
+    !(lines[0].facilityIds?.length), String(lines[0].facilityIds));
+  // ★ 闪的必须是**地图上真有的**设施——名单写错了屏上什么都不会亮，且悄无声息
+  check("要闪的 id 在设施表里都查得到",
+    lines.every(l => (l.facilityIds ?? []).every(id => s.facilities.has(id))),
+    "全部命中");
+  // ★ 台词得说"旗"和"闪"——不然玩家不知道该看哪儿、看的是什么
+  check("台词点出了红旗/蓝旗（旗是真画的，不是修辞）",
+    lObj.text.includes("红旗") && lKeep.text.includes("蓝旗"), "都点了");
+  check("台词点出了「闪」，玩家才知道去看地图",
+    [lObj, lKeep, lBar].every(l => /闪/.test(l.text)), "三句都说了");
+}
+
 console.log("\n── ③ 换个配置，台词得跟着变（写死的在这儿露馅）──");
 {
   const g = createInitialGameState("el_alamein");
@@ -89,7 +117,7 @@ console.log("\n── ③ 换个配置，台词得跟着变（写死的在这儿
   g.scenarioWinConfig!.friendlyKeypoints = g.scenarioWinConfig!.friendlyKeypoints.slice(0, 2);
   g.scenarioWinConfig!.maxFriendlyKeypointsLost = 2;
   const t = campaignBriefing(g).map(l => l.text).join("\n");
-  check("前哨砍成 2 个 ⇒ 台词说 2 个", t.includes("这2个前哨"), "跟着变了");
+  check("前哨砍成 2 个 ⇒ 台词说 2 个", t.includes("这2个闪着的蓝旗"), "跟着变了");
 }
 
 console.log("\n── ④ 没有胜负配置的图：不许硬说 ──");

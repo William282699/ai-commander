@@ -22,6 +22,11 @@ export interface BriefingLine {
   text: string;
   /** 开局后第几游戏秒说它（用游戏时间，暂停时不会自己往下念） */
   atSec: number;
+  /** 说这句时**地图上要跟着闪**的设施。
+   *  ★ 家法：引导提到什么，什么就得自己亮（用户 09-08 立、09-12 在正式局重申：
+   *  「说红色的四个点…这时候四个红旗需要闪烁，同理，我方介绍 3 个蓝旗据点和兵营
+   *  的时候，也要闪烁」）。光报名字等于让玩家拿着名单满图找。 */
+  facilityIds?: string[];
 }
 
 /** 蓝＝我方、红＝敌军。**这不是文案作者的记忆，是渲染层真在用的两个色**
@@ -63,10 +68,10 @@ export function campaignBriefing(state: GameState): BriefingLine[] {
   const cfg = state.scenarioWinConfig;
   if (!cfg) return [];
 
-  const objs = (state.captureObjectives ?? [])
-    .map((id) => nameOf(state, id)).filter((n): n is string => !!n);
-  const keeps = (cfg.friendlyKeypoints ?? [])
-    .map((id) => nameOf(state, id)).filter((n): n is string => !!n);
+  const objIds = (state.captureObjectives ?? []).filter((id) => state.facilities.has(id));
+  const keepIds = (cfg.friendlyKeypoints ?? []).filter((id) => state.facilities.has(id));
+  const objs = objIds.map((id) => nameOf(state, id)!) ;
+  const keeps = keepIds.map((id) => nameOf(state, id)!);
   const need = cfg.requiredCapturedObjectives;
   const mins = Math.round(cfg.timeLimitSec / 60);
   const barracks = [...state.facilities.values()]
@@ -83,7 +88,10 @@ export function campaignBriefing(state: GameState): BriefingLine[] {
   if (objs.length > 0) {
     lines.push({
       atSec: 10,
-      text: `西边红的那${objs.length}个点是要拿的：${objs.join("、")}。`
+      facilityIds: objIds,
+      // ★「插红旗的」不是修辞：胜负点是真插旗的（`renderFacilities` 给
+      //   captureObjectives + friendlyKeypoints 画旗杆，旗色恒等 fac.team）。
+      text: `正在闪的那${objs.length}个插红旗的据点，是要拿的：${objs.join("、")}。`
           + `占下其中${need}个，这仗就赢了——顶上「OBJECTIVES」记的就是这个数。`,
     });
   }
@@ -96,7 +104,8 @@ export function campaignBriefing(state: GameState): BriefingLine[] {
       : `丢满${cfg.maxFriendlyKeypointsLost}个就算输`;
     lines.push({
       atSec: 18,
-      text: `咱们自己这${keeps.length}个前哨得看住：${keeps.join("、")}。${loseRule}，`
+      facilityIds: keepIds,
+      text: `再看这${keeps.length}个闪着的蓝旗，是咱们自己的前哨，得看住：${keeps.join("、")}。${loseRule}，`
           + `不过丢一个结算就少一分，能守还是守住。全场${mins}分钟，`
           + `到点按占了几个、丢了几个算账。`,
     });
@@ -105,7 +114,8 @@ export function campaignBriefing(state: GameState): BriefingLine[] {
   if (barracks) {
     lines.push({
       atSec: 26,
-      text: `兵不够就找艾米莉，新兵从${barracks.name}出来，${whereIs(state, barracks)}。`
+      facilityIds: [barracks.id],
+      text: `兵不够就找艾米莉，新兵从闪着的那个${barracks.name}出来，${whereIs(state, barracks)}。`
           + `打法您定，不用等我开口——想问什么随时喊我。`,
     });
   }

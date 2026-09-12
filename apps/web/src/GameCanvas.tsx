@@ -1032,18 +1032,34 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     if (scenarioFromUrl() === "tutorial") return;
     let lines: ReturnType<typeof campaignBriefing> | null = null;
     let idx = 0;
+    /** 这一句点亮的东西什么时候熄。用户 09-12：说到哪几个点，那几个点就得闪。 */
+    let dimAt: number | null = null;
+    const BRIEF_HOLD_SEC = 8;
+    const clearHighlight = () => {
+      guideHighlightRef.current = { unitIds: new Set(), facilityIds: new Set(), tagIds: new Set() };
+    };
     const id = setInterval(() => {
       const st = stateRef.current;
       if (!st || st.gameOver) return;
       if (lines === null) lines = campaignBriefing(st);     // 等 state 就位再算，别对着空状态编
-      if (idx >= lines.length) { clearInterval(id); return; }
+      if (dimAt !== null && st.time >= dimAt) { clearHighlight(); dimAt = null; }
+      if (idx >= lines.length) {
+        if (dimAt === null) clearInterval(id);              // 话说完、灯也灭了，才收摊
+        return;
+      }
       const line = lines[idx];
       if (st.time < line.atSec) return;                    // 按**游戏时间**排期：暂停时不会自己往下念
       addMessage("info", line.text, st.time, "combat", undefined, "proactive", undefined,
         utteranceFor("combat", "proactive"));
+      if (line.facilityIds?.length) {
+        guideHighlightRef.current = {
+          unitIds: new Set(), tagIds: new Set(), facilityIds: new Set(line.facilityIds),
+        };
+        dimAt = st.time + BRIEF_HOLD_SEC;
+      }
       idx++;
     }, 500);
-    return () => clearInterval(id);
+    return () => { clearInterval(id); clearHighlight(); };
   }, []);
 
   const guideRef = useRef<GuideState | null>(null);

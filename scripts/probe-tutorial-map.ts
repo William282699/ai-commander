@@ -28,6 +28,7 @@ import { updateFog } from "../packages/core/src/fog";
 import { tick } from "../packages/core/src/sim";
 import { buildDigestForChannel } from "../apps/web/src/digestHelper";
 import { centerCameraOn, getMinZoom } from "../apps/web/src/input";
+import { factionGlowScale, unitRingBase } from "../apps/web/src/rendererCanvas";
 import type { GameState, Unit, UnitType } from "../packages/shared/src/types";
 import { TILE_SIZE } from "../packages/shared/src/constants";
 
@@ -267,6 +268,37 @@ console.log("\n── ⑦ 右边被操作台盖住那条：拉得出来吗（用
   check("面板收起(inset=0)时回到画布中点，不留空条",
     Math.abs((60 * TILE_SIZE - c3.x) * c3.zoom - CW / 2) < 1.5,
     `目标落在 x=${Math.round((60 * TILE_SIZE - c3.x) * c3.zoom)}`);
+}
+
+// ────────────────────────────────────────────────
+console.log("\n── ⑧ 全景下阵营光晕别糊住旗子（用户 09-12 实拍）──");
+// 「我军的蓝旗看不清楚，因为蓝色光圈太大了」。病根是圈的 8px 地板：
+// 全景下一格才 3px，圈却按 8px 起算 ⇒ 一个兵糊 35px 光斑，几十个连成一片。
+{
+  const t = (zoom: number) => TILE_SIZE * zoom;
+  const glowW = (zoom: number) =>
+    unitRingBase(t(zoom)) * 1.4 * 1.55 * 2 * factionGlowScale(t(zoom));
+
+  // ★ 先钉住"没改坏正常玩的观感"——这是本刀最大的风险。
+  //   拿**旧公式**当对照：正常游玩那一段两者必须逐字相等。
+  const OLD = (zoom: number) => Math.max(8, t(zoom) * 0.7) * 1.4 * 1.55 * 2;
+  for (const z of [1, 0.8, 0.6, 0.5]) {
+    check(`正常缩放(zoom=${z})外晕与旧公式逐字相等`,
+      Math.abs(glowW(z) - OLD(z)) < 0.01 && factionGlowScale(t(z)) === 1,
+      `新 ${glowW(z).toFixed(1)} / 旧 ${OLD(z).toFixed(1)}`);
+  }
+  check("★缩远了才不一样（否则这刀等于没做）", glowW(0.15) < OLD(0.15),
+    `新 ${glowW(0.15).toFixed(1)} / 旧 ${OLD(0.15).toFixed(1)}`);
+
+  check("全景(zoom=0.09)外晕彻底不画", glowW(0.09) === 0, `${glowW(0.09).toFixed(0)}px`);
+  check("教学关全景(zoom=0.28)外晕收到一格上下", glowW(0.28) < t(0.28) * 2.2,
+    `${glowW(0.28).toFixed(0)}px vs 一格 ${t(0.28).toFixed(1)}px`);
+  // ★ 本体圈**不许**跟着消失——那是唯一的敌我色标
+  check("圈的基准尺寸永不超过一格宽（超了就是占别人地盘）",
+    [1, 0.5, 0.28, 0.15, 0.09].every(z => unitRingBase(t(z)) <= Math.max(t(z), t(z) * 0.7) + 0.01),
+    [1, 0.5, 0.28, 0.09].map(z => `${z}:${unitRingBase(t(z)).toFixed(1)}/${t(z).toFixed(1)}`).join(" "));
+  check("缩到最远本体圈仍然存在（敌我色标不能没）", unitRingBase(t(0.09)) > 0,
+    `${unitRingBase(t(0.09)).toFixed(1)}px`);
 }
 
 console.log(`\n${fail === 0 ? "✅" : "❌"} ${pass} 过 / ${fail} 败\n`);
