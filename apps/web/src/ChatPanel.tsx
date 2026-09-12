@@ -1299,11 +1299,17 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   }, [feedTick, getState, buildSpeakCtx, releaseOne]);
 
   // Auto-scroll to bottom on new messages
+  //
+  // ★ 依赖里必须有 `effectiveTab`（用户 2026-09-12 实拍：「点开编制，再点回通讯，
+  //   就直接加载到最上面的对话」）。原因：切到编制页时这个滚动容器**整个卸载**，
+  //   切回来是新挂的一个，`scrollTop` 自然是 0；而这期间 `displayMessages.length`
+  //   一条没变 ⇒ 这个 effect 不触发 ⇒ 停在最顶上，长官得自己往下拖到今天。
+  //   形状是"判据只盯着内容变没变，没盯着它自己有没有被重建"。
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [displayMessages.length]);
+  }, [displayMessages.length, effectiveTab]);
 
   // 动画R2 步 2：呼叫行是渲染态插进流末尾的，displayMessages.length 不变 →
   // 上面那个滚底 effect 不会为它触发，长会话里行会落在视野外。复用同一句滚底，
