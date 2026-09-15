@@ -163,5 +163,16 @@ export function campaignBriefing(state: GameState): BriefingLine[] {
     });
   }
 
+  // ★ 用户 09-13：「介绍完事后，最后加一句，现在我们全军待命，等待您的指示」。
+  //   这一句是**交棒**：前面几句都在交代规则，听完容易愣在那儿等下一条指令；
+  //   收在"等您一句话"上，球才算真的踢回给长官（同教学关结束语那条职责，
+  //   收口段 §4.3）。人数现算——写死的话，改编制的人不会记得回来改台词。
+  const myUnits = [...state.units.values()].filter((u) => u.team === "player").length;
+  lines.push({
+    atSec: (lines[lines.length - 1]?.atSec ?? 26) + 8,
+    text: `报告完毕。全军${myUnits}支部队都在各自位置上，原地待命——`
+        + `等您一句话，长官。`,
+  });
+
   return lines;
 }

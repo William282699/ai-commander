@@ -26,15 +26,41 @@ const all = lines.map(l => l.text).join("\n");
 const cfg = s.scenarioWinConfig!;
 
 console.log("\n── ① 说了该说的四件事 ──");
-check("五句都在", lines.length === 5, `${lines.length} 句`);
+check("六句都在", lines.length === 6, `${lines.length} 句`);
 check("① 让他看地图 + 说了颜色", /蓝的是咱们/.test(all) && /红的是敌人/.test(all),
   lines[0]?.text.slice(0, 26) + "…");
 check("② 说了赢法", /就赢了/.test(all) && /OBJECTIVES/.test(all), "有赢法");
 check("③ 说了输法 + 时限", /算输/.test(all) && /分钟/.test(all), "有输法");
 check("④ 说了兵营在哪", /兵营/.test(all) && /艾米莉/.test(all), "有兵营");
 // ★ 收口段 §4.3：正式局不许再手把手。这几句的最后一句必须把话语权交回去
-check("最后一句把话语权交回玩家", /不用等我|您定|随时/.test(lines[lines.length - 1].text),
-  lines[lines.length - 1].text.slice(-22));
+// ★ 用户 09-13：「介绍完事后，最后加一句，现在我们全军待命，等待您的指示」。
+//   这一句是交棒——前面都在交代规则，听完容易愣着等下一条指令；收在"等您一句话"上，
+//   球才算真的踢回给长官。
+{
+  const last = lines[lines.length - 1];
+  check("最后一句是「全军待命，等您发话」", /待命/.test(last.text) && /等您/.test(last.text),
+    last.text.slice(-18));
+  // ★ 判"现算"要**改了状态看它变不变**，不是把同一个式子再算一遍——
+  //   后者连写死的常量都能绿（同"判据要测效果不测措辞"那一族）。
+  const real = [...s.units.values()].filter(u => u.team === "player").length;
+  check("报的兵力＝这张图上真有的我方单位数", last.text.includes(`全军${real}支部队`),
+    `${real} 支`);
+  {
+    const g = createInitialGameState("el_alamein");
+    let cut = 0;
+    for (const [id, u] of [...g.units]) {
+      if (u.team === "player" && cut < 10) { g.units.delete(id); cut++; }
+    }
+    const t = campaignBriefing(g).map(l => l.text).join("\n");
+    check("砍掉 10 个兵 ⇒ 台词跟着少 10",
+      t.includes(`全军${real - 10}支部队`) && !t.includes(`全军${real}支部队`),
+      `${real} → ${real - 10}`);
+  }
+  check("交回话语权那句还在（别被新收尾顶掉）",
+    lines.some(l => /不用等我|您定|随时/.test(l.text)), "还在");
+  check("收尾那句不点亮任何设施（它说的是全军，不是某个点）",
+    !(last.facilityIds?.length), String(last.facilityIds));
+}
 check("排期是递增的（不会四句一起糊上来）",
   lines.every((l, i) => i === 0 || l.atSec > lines[i - 1].atSec),
   lines.map(l => l.atSec + "s").join(" → "));
