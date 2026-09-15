@@ -164,7 +164,14 @@ function readSecParam(name: string, fallback: number | null): number | null {
 const TTS_PREF_KEY = "voice.ttsEnabled";
 const RADIO_PROMPTED_KEY = "voice.radioPrompted";
 function readTtsPref(): boolean {
-  try { return window.localStorage.getItem(TTS_PREF_KEY) === "1"; } catch { return false; }
+  // ★ 默认**开着**（用户 2026-09-13：「这个音响，能不能确保最开始是开着的？」）。
+  //   原来读不到就当关 ⇒ 新玩家第一次进来是哑的，而"参谋会主动跟你讲话"正是本作
+  //   要验证的那件事——默认哑掉等于把核心体验藏起来。
+  //   只有玩家**明确关过**（存了 "0"）才关；读不到、存储不可用，都当开。
+  try {
+    const raw = window.localStorage.getItem(TTS_PREF_KEY);
+    return raw === null ? true : raw === "1";
+  } catch { return true; }
 }
 function writeTtsPref(v: boolean): void {
   try { window.localStorage.setItem(TTS_PREF_KEY, v ? "1" : "0"); } catch { /* 记不住就记不住 */ }
