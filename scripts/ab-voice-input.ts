@@ -429,12 +429,50 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
   const SPOKEN = "让G13那队顶上去，十七秒到。";
 
   const typed = planVoiceSpeech({ voiceTurn: false, spoken: SPOKEN, prose: PROSE });
+  // ★本条已刷新一次（retreat-scope 刀B，2026-09-20，计划 §B.2「办法一」，用户已定）。
+  //   旧契约：打字回合 speakProseWhileStreaming=true、finalUtterance=""（边流边念）。
+  //   为什么必须改（单因可归）：流式那一刻还不知道这回合会不会动兵——模型先写
+  //   正文、后写 JSON，"咨询还是执行"要等 options 事件才知道。边流边念 ⇒ 会动兵
+  //   的回合，耳朵在引擎跑**之前**就把方案念出去了，后面纠正也收不回来。
+  //   办法一＝流式期间只收不念，裁决完再整段放出。**代价如实登记**：咨询的
+  //   内容一字不差，但开口时间晚到"回复写完＋裁决"那一刻（手感损失，非零成本）。
+  //   规矩照旧：快照只在「单因可归 + 主审签字」时刷；这一刷的签字是计划 §5。
   check(
-    "S1 ★打字回合逐字等价于分层之前：边流边念正文、回执照旧出声★",
-    typed.route === "typed" && typed.speakProseWhileStreaming === true &&
-      typed.finalUtterance === "" && typed.speakExecReceipt === true,
+    "S1 ★打字回合（刀B 办法一后）：流式期间不出声，整段等裁决完再念，回执照旧出声★",
+    typed.route === "typed" && typed.speakProseWhileStreaming === false &&
+      typed.finalUtterance === PROSE && typed.speakExecReceipt === true,
     JSON.stringify(typed),
   );
+  // ── 刀B 新契约：会动兵的回合，这一层一声不出（四条路由一视同仁）──
+  {
+    const cases: Array<[string, Parameters<typeof planVoiceSpeech>[0]]> = [
+      ["typed", { voiceTurn: false, prose: PROSE }],
+      ["spoken", { voiceTurn: true, spoken: SPOKEN, prose: PROSE }],
+      ["prose_fallback", { voiceTurn: true, prose: PROSE }],
+    ];
+    for (const [name, input] of cases) {
+      const off = planVoiceSpeech({ ...input, execTurn: false });
+      const on = planVoiceSpeech({ ...input, execTurn: true });
+      check(
+        `X1 ${name} ★会动兵 ⇒ 这一段不进耳朵，且回执必出声（耳朵只剩真结果那一声）★`,
+        on.route === off.route && on.finalUtterance === "" && on.speakExecReceipt === true,
+        JSON.stringify(on),
+      );
+      check(
+        `X2 ${name} ★摘刀负对照：不会动兵时逐字回到刀B 之前的取值（execTurn 只在动兵那一格生效）★`,
+        off.finalUtterance.length > 0 && JSON.stringify(off) === JSON.stringify(planVoiceSpeech(input)),
+        JSON.stringify(off),
+      );
+    }
+    // silent_echo（双层复读）本来就不出声，execTurn 不许把它弄出声来
+    const HEARD_X = "两个步兵去阿拉曼，剩下的守住烽火台";
+    const echoExec = planVoiceSpeech({ voiceTurn: true, spoken: HEARD_X + "。", prose: HEARD_X + "。", heard: HEARD_X, execTurn: true });
+    check(
+      "X3 silent_echo + 会动兵 ⇒ 仍旧不出声，回执照旧（execTurn 不制造第三声）",
+      echoExec.route === "silent_echo" && echoExec.finalUtterance === "" && echoExec.speakExecReceipt === true,
+      JSON.stringify(echoExec),
+    );
+  }
   check(
     "S2 ★打字回合连模型交回了 spoken 都不改道（用户钉死的边界：打字路径零改动）★",
     JSON.stringify(planVoiceSpeech({ voiceTurn: false, spoken: SPOKEN, prose: PROSE })) ===

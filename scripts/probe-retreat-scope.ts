@@ -22,7 +22,10 @@ import { tick } from "../packages/core/src/sim";
 import { processEnemyAI } from "../packages/core/src/enemyAI";
 import { processDefensiveAI } from "../packages/core/src/scenario/elAlamein/defensiveAI";
 import { processPressureDirector } from "../packages/core/src/scenario/elAlamein/pressureDirector";
-import type { GameState, Unit, Squad, Intent, ScenarioId } from "@ai-commander/shared";
+import type { GameState, Unit, Squad, Intent, ScenarioId, Order } from "@ai-commander/shared";
+import { buildExecReceipt, type DispatchSlice } from "../apps/web/src/execReceipt";
+import { planVoiceSpeech } from "../apps/web/src/voiceSpeech";
+import { readFileSync } from "fs";
 
 // ── 0. Harness ──
 
@@ -322,12 +325,257 @@ function knifeA(negctl: boolean): void {
   }
 }
 
+
+// ════════════════════════════════════════════════════════════
+// 刀 B：屏上和耳朵，都按**实际下令结果**说
+// ════════════════════════════════════════════════════════════
+//
+// 根因两层（计划 §B.1）：
+//   ① 计划 ≠ 执行。applyOrders 对每条 order 的 unitIds 还要过四道过滤，
+//      而它过去返回 void ⇒ "计划选中 8 个、实际只对 5 个下了令"外界无从得知。
+//   ② 真相源有两个。耳朵拿 data.brief（执行前的方案标题），屏上拿 result.log
+//      （计划日志）——两边都早于执行。
+//
+// 本段判据只认 ApplyResult 与 buildExecReceipt 的**结构化事实**，不做字符串
+// 匹配数字（家法：判据要测效果不测措辞）。唯一的字符串判据是"不许出现的东西"
+// ——落点名不许出现在"没有执行"那句里，那是效果级的。
+
+/** 把一条 retreat 意图解析出来，连同回执要用的 slice。 */
+function planRetreatSlice(state: GameState, intent: Intent): { orders: Order[]; slice: DispatchSlice } {
+  const r = resolveIntent(intent, state, state.style);
+  return {
+    orders: r.orders,
+    slice: { action: intent.type, destinationName: r.destinationName, orderIndexes: r.orders.map((_, k) => k) },
+  };
+}
+
+function knifeB(negctl: boolean): void {
+  console.log("\n== 刀 B：屏上和耳朵，都按实际下令结果说 ==");
+
+  const retreatIntent = { type: "retreat", fromFront: "front_south", targetFacility: "ea_player_south_post", quantity: "all" } as Intent;
+
+  // ── B1 全成：报实际数与实际落点名 ──
+  {
+    const { state, ids } = southArmy();
+    const post = state.facilities.get("ea_player_south_post")!;
+    const { orders, slice } = planRetreatSlice(state, retreatIntent);
+    const res = applyOrders(state, orders);
+    const receipt = buildExecReceipt(res, [slice]);
+    check("B1 全成：ApplyResult 的 appliedUnitIds 就是这 4 个人（逐 id 比对）",
+      res.appliedUnitIds.length === ids.length && res.appliedUnitIds.every((id) => ids.includes(id)),
+      `applied=${JSON.stringify(res.appliedUnitIds)}`);
+    check("B1b 回执四项：人数=实际生效数、落点=引擎真送去的地方、成败=applied",
+      receipt.facts.length === 1 &&
+      receipt.facts[0].appliedCount === ids.length &&
+      receipt.facts[0].rejectedCount === 0 &&
+      receipt.facts[0].destinationName === post.name &&
+      receipt.outcome === "applied",
+      JSON.stringify(receipt.facts));
+    check("B1c 回执里出现落点名",
+      receipt.lines.join("").includes(post.name), receipt.lines.join(" "));
+  }
+
+  // ── B2 ★部分执行：计划选中 4 个、实际只对 2 个下了令 ──
+  //    真实形状：模型生成那几秒里玩家右键接管了两支（manualOverride），
+  //    或者人死了。解析器选人时它们还是可调的，applyOrders 才把它们挡下。
+  {
+    const { state, ids } = southArmy();
+    const { orders, slice } = planRetreatSlice(state, retreatIntent);
+    const plannedCount = orders.reduce((n, o) => n + o.unitIds.length, 0);
+    // 解析之后、执行之前：两支被手动接管
+    state.units.get(ids[2])!.manualOverride = true;
+    state.units.get(ids[3])!.manualOverride = true;
+    const res = applyOrders(state, orders);
+    const receipt = buildExecReceipt(res, [slice]);
+    check("B2 台架自证：计划确实选中了 4 个（否则下面这条证明不了什么）",
+      plannedCount === 4, `planned=${plannedCount}`);
+    check("B2b ★报的是实际生效那个数，不是计划数★",
+      receipt.facts[0].appliedCount === 2 && receipt.facts[0].appliedCount !== plannedCount,
+      JSON.stringify(receipt.facts));
+    check("B2c 没接到命令的 2 个如实记账，带原因",
+      receipt.facts[0].rejectedCount === 2 &&
+      res.perOrder.flatMap((o) => o.rejected).every((r) => r.reason === "manual_override"),
+      JSON.stringify(res.perOrder.flatMap((o) => o.rejected)));
+    check("B2d 结局是「部分」，不是「全成」",
+      receipt.outcome === "partial", receipt.outcome);
+  }
+
+  // ── B3 ★一个都没执行：明说没有执行 + 原因，**不出现落点名** ──
+  {
+    const { state, ids } = southArmy();
+    const post = state.facilities.get("ea_player_south_post")!;
+    const { orders, slice } = planRetreatSlice(state, retreatIntent);
+    for (const id of ids) state.units.get(id)!.manualOverride = true;
+    const res = applyOrders(state, orders);
+    const receipt = buildExecReceipt(res, [slice]);
+    check("B3 全被挡下：applied=0，结局 none",
+      res.appliedUnitIds.length === 0 && receipt.outcome === "none",
+      JSON.stringify(res.appliedUnitIds));
+    check("B3b ★回执里不出现落点名（不许说「撤回南线前哨」）★",
+      !receipt.lines.join("").includes(post.name), receipt.lines.join(" "));
+    check("B3c 回执明说没有执行，并带上原因",
+      receipt.lines.length === 1 && receipt.lines[0].includes("没有执行") && receipt.lines[0].includes("手动接管"),
+      receipt.lines.join(" "));
+  }
+
+  // ── B4 重复下令：第三类结局（既不算新派兵，也不算失败）──
+  {
+    const { state, ids } = southArmy();
+    const target = { x: 355, y: 150 };
+    const mkOrders = (): Order[] => ids.map((id) => ({
+      unitIds: [id], action: "defend" as const, target, priority: "medium" as const,
+      crisisFrontId: "front_south",
+    }));
+    applyOrders(state, mkOrders());
+    const firstOrderObjects = ids.map((id) => state.units.get(id)!.orders[0]);
+    const res2 = applyOrders(state, mkOrders());
+    const slice2: DispatchSlice = { action: "defend", destinationName: "南线前哨", orderIndexes: [0, 1, 2, 3] };
+    const receipt2 = buildExecReceipt(res2, [slice2]);
+    check("B4 再说一遍同一条命令 ⇒ 全部落在 alreadyDoing",
+      res2.alreadyDoingUnitIds.length === ids.length && res2.appliedUnitIds.length === 0,
+      `already=${res2.alreadyDoingUnitIds.length} applied=${res2.appliedUnitIds.length}`);
+    check("B4b ★三个都不许：不算新派兵、不算失败、不重建任务★",
+      receipt2.outcome === "already_doing" &&
+      receipt2.facts[0].appliedCount === 0 &&
+      receipt2.facts[0].rejectedCount === 0 &&
+      ids.every((id, i) => state.units.get(id)!.orders[0] === firstOrderObjects[i]),
+      JSON.stringify(receipt2.facts));
+    check("B4c 回执说「已经在」，不说「已下令」",
+      receipt2.lines.every((l) => l.includes("已经在") && !l.includes("已下令")),
+      receipt2.lines.join(" "));
+  }
+
+  // ── B5 多意图一成一败：两句各自对应 ──
+  {
+    const { state, ids } = southArmy();
+    // 第二批人在北线，专门给它造"全被接管"
+    const northIds: number[] = [];
+    for (let i = 0; i < 3; i++) northIds.push(addUnit(state, 300 + i * 2, 30).id);
+    const a = planRetreatSlice(state, retreatIntent);
+    const b = planRetreatSlice(state, { type: "retreat", fromFront: "front_coastal", targetFacility: "ea_player_coastal_post", quantity: "all" } as Intent);
+    const allOrders = [...a.orders, ...b.orders];
+    const slices: DispatchSlice[] = [
+      { ...a.slice, orderIndexes: a.orders.map((_, k) => k) },
+      { ...b.slice, orderIndexes: b.orders.map((_, k) => a.orders.length + k) },
+    ];
+    for (const id of northIds) state.units.get(id)!.manualOverride = true;
+    const res = applyOrders(state, allOrders);
+    const receipt = buildExecReceipt(res, slices);
+    check("B5 两条意图两句回执，各报各的",
+      receipt.lines.length === 2 &&
+      receipt.facts[0].appliedCount === ids.length && receipt.facts[0].outcome === "applied" &&
+      receipt.facts[1].appliedCount === 0 && receipt.facts[1].outcome === "none",
+      JSON.stringify(receipt.facts));
+    check("B5b 失败那句不带它的落点名（另一句照常带）",
+      !receipt.lines[1].includes("北线前哨") && receipt.lines[0].includes("南线前哨"),
+      receipt.lines.join(" | "));
+  }
+
+  // ── B6 ★屏与耳同源：同一次调用、同一份字符串 ──
+  {
+    const { state } = southArmy();
+    const { orders, slice } = planRetreatSlice(state, retreatIntent);
+    const receipt = buildExecReceipt(applyOrders(state, orders), [slice]);
+    check("B6 耳朵那段就是屏上那几行连起来（四项一致是构造保证，不是事后比对）",
+      receipt.spokenText === receipt.lines.join(" ") && receipt.lines.length > 0,
+      receipt.spokenText);
+  }
+
+  // ── B7 ★只宣称「下令」，绝不宣称「抵达」──
+  {
+    const { state } = southArmy();
+    const { orders, slice } = planRetreatSlice(state, retreatIntent);
+    const receipt = buildExecReceipt(applyOrders(state, orders), [slice]);
+    const forbidden = ["抵达", "已到", "到达", "已经到"];
+    check("B7 回执不出现「抵达/已到/到达」（ApplyResult 只证明命令下出去了）",
+      forbidden.every((w) => !receipt.spokenText.includes(w)), receipt.spokenText);
+  }
+
+  // ── B8 负对照：咨询回合朗读**内容**金样不变（时机另行登记）──
+  {
+    const PROSE = "南线现在有 12 个人，其中 4 个在修理厂附近。";
+    const consult = planVoiceSpeech({ voiceTurn: false, prose: PROSE, execTurn: false });
+    check("B8 打字咨询：念的还是那一整段正文，一字不差（改的是时机，不是内容）",
+      consult.finalUtterance === PROSE, consult.finalUtterance);
+    const voiceConsult = planVoiceSpeech({ voiceTurn: true, spoken: "南线十二个人。", prose: PROSE, execTurn: false });
+    check("B8b 语音咨询一个字不动：仍旧念 spoken、回执仍不单独出声",
+      voiceConsult.route === "spoken" && voiceConsult.finalUtterance === "南线十二个人。" &&
+      voiceConsult.speakExecReceipt === false, JSON.stringify(voiceConsult));
+  }
+
+  // ── B9 源码级：三条出声路径与两处渲染都挂在同一份结果上 ──
+  //    （纯函数全绿而真机照旧念方案标题——这一条防的就是"忘了接"。）
+  {
+    const panelSrc = readFileSync("apps/web/src/ChatPanel.tsx", "utf8")
+      .split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
+    check("B9 执行回执的两个出口（上屏 / 出声）取的是同一次 buildExecReceipt 的结果",
+      panelSrc.split("buildExecReceipt(").length - 1 === 2 &&
+      panelSrc.includes("execReceipt.lines") &&
+      panelSrc.includes("speak(`${voiceConfirm} ${execReceipt.spokenText}`"),
+      `buildExecReceipt 出现 ${panelSrc.split("buildExecReceipt(").length - 1} 次`);
+    check("B9b ★计划日志不许再上屏（`执行: ${result.log}` 全仓归零）★",
+      !panelSrc.includes("`执行: ${result.log}`"));
+    check("B9c ★执行前不许再打方案标题（cleanLabel 只进诊断）★",
+      !panelSrc.includes("${voiceConfirm} ${cleanLabel}") &&
+      !panelSrc.includes("Executing ${letter}"),
+      "");
+    check("B9d 播报源不是 data.brief：sayToEar 收到 execTurn，会动兵就不念",
+      panelSrc.includes("sayToEar((data.brief as string) || \"\", willExecute)"));
+  }
+
+  // ── 绊索（计划 §B.4 第 7、8、9 条）──
+  if (negctl) {
+    console.log("\n-- negctl：三种坏取数打新引擎，必须真 FAIL --");
+    let red = 0;
+    const { state, ids } = southArmy();
+    const { orders, slice } = planRetreatSlice(state, retreatIntent);
+    const plannedCount = orders.reduce((n, o) => n + o.unitIds.length, 0);
+    state.units.get(ids[2])!.manualOverride = true;
+    state.units.get(ids[3])!.manualOverride = true;
+    const res = applyOrders(state, orders);
+    const real = buildExecReceipt(res, [slice]);
+    {
+      // 绊索 8：播报源改回 ResolveResult（"计划选中的人"）⇒ 报 4 不报 2
+      const fakePerOrder = orders.map((o, i) => ({
+        orderIndex: i, action: o.action, appliedUnitIds: [...o.unitIds],
+        alreadyDoingUnitIds: [], rejected: [],
+      }));
+      const planReceipt = buildExecReceipt(
+        { perOrder: fakePerOrder, appliedUnitIds: orders.flatMap((o) => o.unitIds), alreadyDoingUnitIds: [], rejectedUnitIds: [] },
+        [slice]);
+      const same = planReceipt.facts[0].appliedCount === real.facts[0].appliedCount;
+      console.log(`  ${same ? "GREEN(坏)" : "RED(好)"} negctl-B1 用计划人数造回执（${planReceipt.facts[0].appliedCount} vs 真 ${real.facts[0].appliedCount}）`);
+      if (!same) red++;
+    }
+    {
+      // 绊索 7：播报源改回 data.brief（方案标题）⇒ 全不执行时照样说"撤回 X"
+      const { state: s3, ids: ids3 } = southArmy();
+      const post = s3.facilities.get("ea_player_south_post")!;
+      const p3 = planRetreatSlice(s3, retreatIntent);
+      for (const id of ids3) s3.units.get(id)!.manualOverride = true;
+      const r3 = buildExecReceipt(applyOrders(s3, p3.orders), [p3.slice]);
+      const briefStyle = `让南线的部队撤回${post.name}`; // data.brief 那一版
+      const same = r3.lines.join("").includes(post.name);
+      console.log(`  ${same ? "GREEN(坏)" : "RED(好)"} negctl-B2 brief 那版会说「${briefStyle}」，真回执说的是「${r3.lines[0]}」`);
+      if (!same) red++;
+    }
+    {
+      // 绊索 9：只改屏不改耳 ⇒ 耳朵那半与屏上不同源
+      const same = real.spokenText !== real.lines.join(" ");
+      console.log(`  ${same ? "GREEN(坏)" : "RED(好)"} negctl-B3 屏与耳不同源`);
+      if (!same) red++;
+    }
+    check("negctl 三条坏取数全部真 FAIL（判据有牙）", red === 3, `只红了 ${red}/3`);
+  }
+}
+
 // ── main ──
 
 const knifeArg = (process.argv.find((a) => a.startsWith("--knife=")) ?? "--knife=all").split("=")[1];
 const negctl = process.argv.includes("--negctl");
 
 if (knifeArg === "a" || knifeArg === "all") knifeA(negctl);
+if (knifeArg === "b" || knifeArg === "all") knifeB(negctl);
 
 console.log(failCount === 0 ? `\nALL PASS (${checkCount} 条)` : `\n${failCount}/${checkCount} FAILURES`);
 process.exit(failCount === 0 ? 0 : 1);

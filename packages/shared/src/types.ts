@@ -273,6 +273,41 @@ export interface Order {
   actionId?: string;
 }
 
+// --- Order execution result (retreat-scope 刀B) ---
+//
+// 为什么必须有这个类型：`applyOrders` 过去返回 `void`，而它对每条 order 的
+// unitIds 还要再过四道过滤（单位不在了 / 不是我方 / 指挥官亲兵 / 已被手动接管）。
+// 「计划选中 8 个、实际只对 5 个下了令」在旧结构里**外界无从得知**，于是屏上
+// 和耳朵只能照着"计划"报数——换了个位置的假确认。
+//
+// 三类结局必须分开，不许合并：
+//   applied      真对它下了令
+//   alreadyDoing 它已经在执行等价的命令（幂等跳过）——不算新派兵，**也不算失败**
+//   rejected     没接到命令，且带原因
+export type OrderRejectReason =
+  | "unit_gone"           // 单位不在了（阵亡 / 已移除）
+  | "not_player_unit"     // 不是我方单位
+  | "player_controlled"   // 指挥官亲兵，非玩家亲自下令不动它
+  | "manual_override";    // 已被玩家手动接管
+
+export interface ApplyOrderOutcome {
+  /** 在传入的 orders 数组里的下标——调用方据此把结果对回自己的意图。 */
+  orderIndex: number;
+  action: OrderAction;
+  appliedUnitIds: number[];
+  /** 幂等跳过：已经在执行等价命令。第三类结局，不许塞进 rejected 冒充失败。 */
+  alreadyDoingUnitIds: number[];
+  rejected: { unitId: number; reason: OrderRejectReason }[];
+}
+
+export interface ApplyResult {
+  perOrder: ApplyOrderOutcome[];
+  /** 全批汇总（去重）——播报层取数只取这里，不在 UI 里重算一遍。 */
+  appliedUnitIds: number[];
+  alreadyDoingUnitIds: number[];
+  rejectedUnitIds: number[];
+}
+
 // --- Production ---
 
 export interface ProductionOrder {

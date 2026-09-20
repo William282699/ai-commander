@@ -39,6 +39,7 @@ import { TelegraphKey } from "./TelegraphKey";
 import { MicIcon, HornIcon } from "./InputRailIcons";
 // spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
 import { planVoiceSpeech } from "./voiceSpeech";
+import { buildExecReceipt, type DispatchSlice } from "./execReceipt";
 import { setPlaybackObserver } from "./tts";
 import { shouldRecordSpeechDiag, type ReleaseMark } from "./speechDiagGate";
 import {
@@ -1732,21 +1733,40 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
       const allOrders: ReturnType<typeof resolveIntent>["orders"] = [];
       const reserved = new Set<number>();
+      // 刀B：与主路同一条链——意图 → order 下标 + 落点名 → ApplyResult → 回执。
+      // 这条路自 6a 起休眠，但它是**另一个** applyOrders 调用点：留着旧写法
+      // 等于留一张"计划当结果报"的备用脸。
+      const slices: DispatchSlice[] = [];
 
       for (const intent of intents) {
         const result = resolveIntent(intent, state, state.style, reserved);
         if (result.degraded) {
           addMessage("warning", result.log, state.time, thread.channel, undefined, "command_ack");
         } else {
-          addMessage("info", `执行: ${result.log}`, state.time, thread.channel, undefined, "command_ack");
+          state.diagnostics.push({ time: state.time, code: "PLAN_LOG", message: result.log });
         }
         for (const id of result.assignedUnitIds) reserved.add(id);
+        if (result.orders.length > 0) {
+          const base = allOrders.length;
+          slices.push({
+            action: intent.type,
+            destinationName: result.destinationName,
+            orderIndexes: result.orders.map((_, k) => base + k),
+          });
+        }
         allOrders.push(...result.orders);
       }
 
       if (allOrders.length > 0) {
-        addMessage("info", `Roger. Executing ${letter}: ${cleanLabel}`, state.time, thread.channel, undefined, "command_ack");
-        applyOrders(state, allOrders);
+        state.diagnostics.push({ time: state.time, code: "EXEC_PLAN_LABEL", message: `${letter}: ${cleanLabel}` });
+        const applyRes = applyOrders(state, allOrders);
+        const execReceipt = buildExecReceipt(applyRes, slices);
+        for (const line of execReceipt.lines) {
+          addMessage(
+            execReceipt.outcome === "none" ? "warning" : "info",
+            line, state.time, thread.channel, undefined, "command_ack",
+          );
+        }
         resolveThread(thread.id);
       }
     } finally {
@@ -2208,14 +2228,22 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // 调用点只有两处，且互斥（第一处走完就 return）：合同判决路一处、
       // 其余全部分支合用一处。放在这里而不是更早，是因为 stale 那一格的规矩是
       // 「displays NOTHING and writes NOTHING」——它也不该出声。
-      const sayToEar = (prose: string) => {
+      //
+      // ★刀B（办法一）改了两件事：
+      //   ① 打字回合也走这里。流式期间不再边流边念（voiceSpeech 的 typed 分支
+      //      已改判），正文缓在 accumulatedText 里，到这一刻才整段放出去。
+      //   ② 多认一个输入 `execTurn`：会动兵的回合，这一段（spoken/正文）一声
+      //      不出——它是引擎跑**之前**写的那一版，照念就是假确认。耳朵等
+      //      `ApplyResult` 出来的执行回执（handleApprove 里那一声）。
+      const sayToEar = (prose: string, execTurn: boolean) => {
         const plan = planVoiceSpeech({
           voiceTurn: isVoiceTurn,
           spoken: typeof data?.spoken === "string" ? data.spoken : undefined,
           prose,
           heard,   // 引擎闸的尺：要念的那段若整句复读它，就不许念
+          execTurn,
         });
-        if (isVoiceTurn && ttsEnabled && plan.finalUtterance) {
+        if (ttsEnabled && plan.finalUtterance) {
           speak(plan.finalUtterance, ttsPersona);
           flush(ttsPersona); // 非流兜底路后面没有 flush，末句不许卡在句子缓冲里
         }
@@ -2284,7 +2312,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           addMessage(verdict === "protocol_failure" ? "warning" : "info", line, state.time, ch, undefined, "command_ack", undefined, replyMark(ch));
           pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
           // 语音说「可以」批准就走这条路：耳朵拿到的是 spoken，缺席则是这句判词。
-          const decisionPlan = sayToEar(line);
+          // 刀B：这条路**会执行**旧合同时，判词也不念——耳朵等执行回执。
+          //   v2 把这条路排除在外是错的：它和流式那两条是同一个病（先说、后执行）。
+          const willExecuteOldContract = route.executeOldContract && pcSameEpoch != null;
+          const decisionPlan = sayToEar(line, willExecuteOldContract);
           if (route.executeOldContract && pcSameEpoch) {
             handleApprove(pcSameEpoch.opt, 0, "auto", pcSameEpoch.execCtx, pcSameEpoch.data, decisionPlan.speakExecReceipt);
           }
@@ -2293,9 +2324,41 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         // amend / unrelated / no_pending → normal flow below (amend's old
         // contract is already cleared: ONLY the new intents may execute).
       }
+      // ── 刀B：这一回合到底会不会动兵，必须在耳朵开口之前就算出来 ──
+      //
+      // 闸与桶原本算在下面那个 actionable 分支里，而耳朵在这一行就开口了——
+      // 于是"先说、后执行"是结构决定的，不是谁忘了改。把判定提到开口之前，
+      // 下面的分支**直接用这三个值，不再算第二遍**（算两遍就会漂）。
+      // ★控制流逐字保持：willExecute 的公式与下面的分支条件一模一样
+      //   （gate.auto 捷径在前、decideBucket 在后），本刀不趁机改闸。
+      const optionsArr = Array.isArray(data.options) ? (data.options as AdvisorOption[]) : [];
+      const actionableTurn =
+        !data.error &&
+        !(typeof data.responseType === "string" && (data.responseType as string).toUpperCase() === "NOOP") &&
+        optionsArr.length > 0;
+      const execGate: { auto: boolean; reason?: string; playerNamedSquad?: boolean } = actionableTurn
+        // ④ 语音回合喂 heard——闸靠正则在长官的话里找锚（番号/领队名/「选中」），
+        //   没有文本它会把每一句都当成"长官没点名"。
+        ? canAutoExecute(optionsArr[0], isVoiceTurn ? heard : userMsg, state, [], isGroupChat, COMMANDER_REFS)
+        : { auto: false };
+      const execOpt0 = actionableTurn ? optionsArr[0] : undefined;
+      const execStaleRefs = actionableTurn ? detectStaleSquadRefs(optionsArr, state, COMMANDER_REFS) : [];
+      const execBucket = actionableTurn
+        ? decideBucket({
+            gate: execGate,
+            hasOption: execOpt0 != null,
+            staleRefCount: execStaleRefs.length,
+            voiceTurn: isVoiceTurn,
+            heardPresent: heard.length > 0,
+          })
+        : "B";
+      const willExecute =
+        actionableTurn &&
+        ((execGate.auto && optionsArr.length >= 1) || (execBucket === "A" && execOpt0 != null));
+
       // 其余全部分支（error / NOOP / 空 options / 正常命令）合用这一处：它们
       // 屏上显示的都是 data.brief（或它为空时各自的兜底行），所以耳朵听的也是它。
-      const speechPlan = sayToEar((data.brief as string) || "");
+      const speechPlan = sayToEar((data.brief as string) || "", willExecute);
       if (data.error) {
         setError(data.error as string);
         setResponse(null);
@@ -2359,12 +2422,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
         }
 
-        const gate: { auto: boolean; reason?: string; playerNamedSquad?: boolean } =
-          (Array.isArray(data.options) && data.options.length >= 1)
-          // ④ 语音回合喂 heard——闸靠正则在长官的话里找锚（番号/领队名/「选中」），
-          //   没有文本它会把每一句都当成"长官没点名"。
-          ? canAutoExecute((data.options as AdvisorOption[])[0], isVoiceTurn ? heard : userMsg, state, [], isGroupChat, COMMANDER_REFS)
-          : { auto: false };
+        // 刀B：闸已在耳朵开口之前算过（willExecute 那一段）。这里**复用**，
+        // 不再算第二遍——两处各算一遍就会漂，而播报的诚实性正押在"说的和做的
+        // 是同一个判定"上。
+        const gate = execGate;
 
         const requestId = crypto.randomUUID();
         const execCtx: ExecContext = { channel: ch, threadId: activeThreadOnChannel?.id, requestId, escalateId };
@@ -2375,7 +2436,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           setTimeout(() => handleApprove(autoData.options[0], 0, "auto", execCtx, autoData, speechPlan.speakExecReceipt), 0);
         } else {
           const reason = gate.reason;
-          const opt0 = Array.isArray(data.options) ? (data.options as AdvisorOption[])[0] : undefined;
+          const opt0 = execOpt0; // 刀B：与 willExecute 同一份候选，不另取
           if (reason) {
             const intent0 = opt0?.intents?.[0] ?? opt0?.intent;
             console.log(`[P1 gate] no-auto reason=${reason}`, {
@@ -2394,7 +2455,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
           // Safety net stays: a brief that references squads which died in-flight must
           // never blind-execute — it disqualifies bucket A and falls through to ask/warn.
-          const staleRefs = detectStaleSquadRefs(data.options as AdvisorOption[] | undefined, state, COMMANDER_REFS);
+          const staleRefs = execStaleRefs;
 
           // Bucket A — clear command, player named no squad of their own → the advisor
           // picked. Auto-execute the recommended option; the persona's own reply and
@@ -2413,13 +2474,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           // 那条新安全行为的落点，留在闭包里就没有任何机器断言看得见它。
           // voiceTurn/heardPresent 由步 3 的语音回合接线喂进来；打字回合两者恒 false，
           // decideBucket 逐字等价于原来这两行。
-          const bucket = decideBucket({
-            gate,
-            hasOption: opt0 != null,
-            staleRefCount: staleRefs.length,
-            voiceTurn: isVoiceTurn,
-            heardPresent: heard.length > 0,
-          });
+          const bucket = execBucket;
 
           // `&& opt0` 只为让 TS 收窄类型——decideBucket 判到 "A" 时 hasOption 必为真，
           // 语义上是重复的，不是第二道判定。
@@ -2593,6 +2648,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
               accumulatedText += event.content;
               setStreamingText(accumulatedText);
               // 语音回合正文不进耳朵（它是写给眼睛的那一版）——耳朵等 spoken。
+              // ★刀B（办法一）起，**打字回合也不在这里出声**：流式这一刻还不知道
+              //   这回合会不会动兵（模型先写正文、后写 JSON），念出去就收不回来。
+              //   正文改由 accumulatedText 缓着，裁决完在 sayToEar 整段放出。
+              //   这一行保留着不删：它是"边流边念"唯一的接线口，将来若改用
+              //   服务端先报回合类型（办法二），翻 planVoiceSpeech 一个字段即可复活。
               if (ttsEnabled && sendPlan.speakProseWhileStreaming) speak(event.content, ttsPersona);
             } else if (event.type === "options") {
               gotOptions = true;
@@ -2696,7 +2756,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       return;
     }
 
-    const letter = ["A", "B", "C"][idx] ?? "?";
+    // 刀B：A/B/C 那个字母不再上屏（卡片早已砍掉，而它只出现在那句执行前的
+    // 方案标题里）。方案标题本身留着进诊断，供对账用。
     const cleanLabel = opt.label.replace(/^[ABC]:\s*/, '');
     const intents = opt.intents ?? [opt.intent];
 
@@ -2847,6 +2908,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // and its ticket is not burned, so the proposal stays usable (the degraded
     // warning above is already the honest word about what happened).
     const settled: { ticket: EscalationTicket; dispatched: number; mode: "moved" | "in_place" }[] = [];
+    // 刀B：意图 → 它的 order 下标 + 落点名。执行回执唯一的取数口。
+    const slices: DispatchSlice[] = [];
     for (const intent of intents) {
       // v4 刀2b: a ticket's frozen roster wins over the box-select snapshot —
       // the player approved THAT batch, not whatever is currently framed.
@@ -2855,10 +2918,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         ticketRosters.get(intent) ?? selectedIdsSnapshotRef.current,
       );
       if (result.degraded) {
+        // 失败理由照旧上屏：它说的是"这条意图没能变成命令"，不是执行结果，
+        // 本来就诚实（此处一个字节不动）。
         degradedCount++;
         addMessage("warning", result.log, state.time, ch, undefined, "command_ack");
       } else {
-        addMessage("info", `执行: ${result.log}`, state.time, ch, undefined, "command_ack");
+        // ★刀B：`执行: ${result.log}` 不许再上屏。它来自执行**之前**的计划——
+        //   计划选中 8 个、applyOrders 的四道过滤只放行 5 个，留着它就会出现
+        //   "屏上 8 个、耳朵 5 个"。计划日志降为对账用的诊断，玩家面前的执行
+        //   回执一律等 ApplyResult（见下面 buildExecReceipt 那一段）。
+        state.diagnostics.push({
+          time: state.time,
+          code: "PLAN_LOG",
+          message: result.log,
+        });
       }
       const boundTicket = ticketByIntent.get(intent);
       if (boundTicket && result.orders.length > 0) {
@@ -2870,6 +2943,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       }
       for (const id of result.assignedUnitIds) reserved.add(id);
       allAssignedUnitIds.push(...result.assignedUnitIds);
+      // 刀B：记下这条意图占了 allOrders 的哪几格，外加**引擎真送他们去的地方**。
+      // applyOrders 按下标回报结果，回执据此逐条意图对账——不靠猜、不靠合并。
+      if (result.orders.length > 0) {
+        const base = allOrders.length;
+        slices.push({
+          action: intent.type,
+          destinationName: result.destinationName,
+          orderIndexes: result.orders.map((_, k) => base + k),
+        });
+      }
       allOrders.push(...result.orders);
     }
 
@@ -2892,18 +2975,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // Pick personality-appropriate voice confirmation
       const approveCommander = COMMANDERS.find(c => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
       const voiceConfirm = pickVoiceConfirm(approveCommander);
-      if (mode === "auto") {
-        addMessage("info", `${voiceConfirm} ${cleanLabel}`, state.time, ch, undefined, "command_ack");
-      } else {
-        addMessage("info", `${voiceConfirm} Executing ${letter}: ${cleanLabel}`, state.time, ch, undefined, "command_ack");
-      }
-      // TTS readback of confirmation (its own short stream — speak()
-      // detects persona switch from any prior stream and cancels cleanly).
-      // spoken 层 R2：spoken 在场的语音回合里这一声并进 spoken 了（见
-      // voiceSpeech.ts 的序列注释）——屏上那行照写，只是不再念第三遍。
-      if (ttsEnabled && speakReceipt) {
-        speak(voiceConfirm, approveCommander);
-      }
+      // ★刀B：`${voiceConfirm} ${cleanLabel}` 这一行原先打在 applyOrders **之前**，
+      //   而 cleanLabel 是模型写的方案标题——「让北线部队撤回前哨」。四道过滤把
+      //   人全挡住时，屏上照样留着这句，正是"没司令感"那笔账的同一张脸。
+      //   现在它拆成两半：`voiceConfirm`（应答，不宣称结果）留在这儿，
+      //   方案标题连同人数/落点一起并进执行后的回执。
+      //   方案标题进诊断（EXEC_PLAN_LABEL）留作对账，不再当执行回执用。
+      addMessage("info", voiceConfirm, state.time, ch, undefined, "command_ack");
+      state.diagnostics.push({ time: state.time, code: "EXEC_PLAN_LABEL", message: cleanLabel });
       // H1 (§8 手测 03:15): read BEFORE applyOrders — that call overwrites
       // state/orders, after which every unit looks equally busy on the NEW
       // task and "what did we tear them off" is unrecoverable. Judgment is in
@@ -2911,7 +2990,31 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const committedPull = describeCommittedPull(state, allAssignedUnitIds);
 
       const diagsBefore = new Set(state.diagnostics);
-      applyOrders(state, allOrders);
+      const applyRes = applyOrders(state, allOrders);
+
+      // ── ★刀B 的落点：执行回执。文字与声音共用**这同一个字符串** ──
+      //
+      // 取数只认 `applyRes`（执行层真对谁下了令），不认 result.assignedUnitIds
+      // （那是"计划选中的人"，还要再过四道过滤），更不认 data.brief。
+      // 「人数/对象/目的地/成败」四项一致因此是构造保证，不是事后比对。
+      // 措辞只说"下令"，不说"抵达"——到没到由战场自己说。
+      const execReceipt = buildExecReceipt(applyRes, slices);
+      for (const line of execReceipt.lines) {
+        addMessage(
+          execReceipt.outcome === "none" ? "warning" : "info",
+          line, state.time, ch, undefined, "command_ack",
+        );
+        // 喂给模型的上下文与**真正播报出去的那句**同步。旧写法只推 data.brief
+        // ——那是执行之前的方案标题，于是下一轮模型记得的是它以为发生的事。
+        pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
+      }
+      // 耳朵：会动兵的回合，上面那一层（spoken/正文）已经一声不出，这里才是
+      // 这一轮唯一的一声——而且它念的是真结果。屏上那句 voiceConfirm 一起念，
+      // 免得耳朵从"数字"开头。
+      if (ttsEnabled && speakReceipt && execReceipt.spokenText) {
+        speak(`${voiceConfirm} ${execReceipt.spokenText}`, approveCommander);
+        flush(approveCommander);
+      }
 
       // v4 刀2b: burn AFTER the orders are actually applied — a ticket that
       // failed to produce orders must stay usable. One-shot from here on: the

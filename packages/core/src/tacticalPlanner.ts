@@ -37,6 +37,11 @@ export interface ResolveResult {
   degraded: boolean;
   /** Unit IDs assigned by this resolve (for reserved-set tracking in multi-intent). */
   assignedUnitIds: number[];
+  /** retreat-scope 刀B: 这批人**实际被送去的地方**的真名（空串＝没有可宣称的地名）。
+   *  必填、不给默认值——播报层要报落点名，而落点名只有解析器知道：撤退那条路
+   *  一旦丢弃了目的地，真正的落点是「安全区域」而不是 intent 上写的那个地名，
+   *  从 intent 反推就会报错地方。给默认值等于允许"忘了填"静默变成空名。 */
+  destinationName: string;
 }
 
 // ── Supported intents (Day 7 base + Day 9 economy) ──
@@ -217,7 +222,7 @@ function resolveIntentInner(
   if (!isIntentSupported(intent.type)) {
     const msg = `意图类型 "${intent.type}" 尚未实现，已跳过`;
     pushDiagnostic(state, "UNSUPPORTED_INTENT", msg);
-    return { orders: [], log: msg, degraded: true };
+    return { orders: [], log: msg, degraded: true, destinationName: "" };
   }
 
   // P1.F: apply formation override sticky to squad BEFORE per-type handlers run.
@@ -256,6 +261,7 @@ function resolveIntentInner(
         orders: [],
         log: `未知意图: ${intent.type}`,
         degraded: true,
+        destinationName: "",
       };
   }
 }
@@ -427,18 +433,18 @@ function resolveAttack(
       case "no_target": {
         const msg = "无法确定攻击目标位置";
         pushDiagnostic(state, "NO_VISIBLE_TARGET", msg);
-        return { orders: [], log: msg, degraded: true };
+        return { orders: [], log: msg, degraded: true, destinationName: "" };
       }
       case "no_source": {
         pushDiagnostic(state, "NO_AVAILABLE_UNITS", plan.error);
-        return { orders: [], log: plan.error, degraded: true };
+        return { orders: [], log: plan.error, degraded: true, destinationName: "" };
       }
       case "no_units":
-        return { orders: [], log: "无可用单位执行进攻", degraded: true };
+        return { orders: [], log: "无可用单位执行进攻", degraded: true, destinationName: "" };
       case "impassable": {
         const msg = "目标地形不可达，无可用单位执行进攻";
         pushDiagnostic(state, "IMPASSABLE_TARGET", msg);
-        return { orders: [], log: msg, degraded: true };
+        return { orders: [], log: msg, degraded: true, destinationName: "" };
       }
     }
   }
@@ -468,7 +474,7 @@ function resolveAttack(
     if (spread.degradedCount > 0) {
       log += ` (${spread.degradedCount} 个已调整目标)`;
     }
-    return { orders: spread.orders, log, degraded: false };
+    return { orders: spread.orders, log, degraded: false, destinationName: fac.name };
   }
 
   // Phase C: tag orders with crisisFrontId for reinforcement dedup.
@@ -488,7 +494,7 @@ function resolveAttack(
     log += ` (${spread.skippedCount} 个无法到达已跳过)`;
   }
 
-  return { orders: spread.orders, log, degraded: false };
+  return { orders: spread.orders, log, degraded: false, destinationName: describeTargetForLog(intent, state) };
 }
 
 // ── Command-Preflight V1: pure preview of a high-impact dispatch ──
@@ -573,7 +579,7 @@ function resolveDefend(
   const target = resolveTarget(intent, state);
   const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
-    return { orders: [], log: source.error, degraded: true };
+    return { orders: [], log: source.error, degraded: true, destinationName: "" };
   }
 
   let units = source.units;
@@ -605,7 +611,7 @@ function resolveDefend(
   }
 
   if (units.length === 0) {
-    return { orders: [], log: "无可用单位执行防御", degraded: true };
+    return { orders: [], log: "无可用单位执行防御", degraded: true, destinationName: "" };
   }
 
   // ④ passability degradation for defend target
@@ -615,13 +621,13 @@ function resolveDefend(
       undefined, intent.routeId, intent.routeIds,
     );
     if (spread.orders.length === 0) {
-      return { orders: [], log: "目标地形不可达，无可用单位执行防御", degraded: true };
+      return { orders: [], log: "目标地形不可达，无可用单位执行防御", degraded: true, destinationName: "" };
     }
     let log = `${spread.orders.length} 个单位前往${describeTargetForLog(intent, state)}设防`;
     if (spread.degradedCount > 0) {
       log += ` (${spread.degradedCount} 个已调整位置)`;
     }
-    return { orders: spread.orders, log, degraded: false };
+    return { orders: spread.orders, log, degraded: false, destinationName: describeTargetForLog(intent, state) };
   }
 
   // No target: defend in place
@@ -631,7 +637,8 @@ function resolveDefend(
     target: null,
     priority: mapUrgency(intent.urgency),
   }];
-  return { orders, log: `${units.length} 个单位就地设防`, degraded: false };
+  // 就地设防：没有"去处"可以宣称——空串，播报层据此不说"前往某地"。
+  return { orders, log: `${units.length} 个单位就地设防`, degraded: false, destinationName: "" };
 }
 
 // ── Retreat planning (dispatch-scope-v1 2b): same ONE-pipeline pattern as
@@ -786,11 +793,11 @@ function resolveRetreat(
   if (!plan.ok) {
     switch (plan.fail) {
       case "no_source":
-        return { orders: [], log: plan.error, degraded: true };
+        return { orders: [], log: plan.error, degraded: true, destinationName: "" };
       case "no_units":
-        return { orders: [], log: "无可用单位执行撤退", degraded: true };
+        return { orders: [], log: "无可用单位执行撤退", degraded: true, destinationName: "" };
       case "impassable":
-        return { orders: [], log: "撤退目标地形不可达，无可执行命令", degraded: true };
+        return { orders: [], log: "撤退目标地形不可达，无可执行命令", degraded: true, destinationName: "" };
     }
   }
 
@@ -803,6 +810,9 @@ function resolveRetreat(
     orders: plan.orders,
     log: `命令 ${plan.orders.length} 个单位撤退至${dest}${skipNote}`,
     degraded: false,
+    // 刀B：落点名取的是 `dest` 这一个变量——**引擎真送他们去的地方**。
+    // 目的地被丢弃时它就是「安全区域」，绝不回头去念 intent 上那个地名。
+    destinationName: dest,
   };
 }
 
@@ -815,12 +825,12 @@ function resolveRecon(
 ): Omit<ResolveResult, "assignedUnitIds"> {
   const target = resolveTarget(intent, state);
   if (!target) {
-    return { orders: [], log: "无法确定侦察目标位置", degraded: true };
+    return { orders: [], log: "无法确定侦察目标位置", degraded: true, destinationName: "" };
   }
 
   const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
-    return { orders: [], log: source.error, degraded: true };
+    return { orders: [], log: source.error, degraded: true, destinationName: "" };
   }
 
   let units = source.units;
@@ -868,7 +878,7 @@ function resolveRecon(
   }
 
   if (selected.length === 0) {
-    return { orders: [], log: "无可用单位执行侦察", degraded: true };
+    return { orders: [], log: "无可用单位执行侦察", degraded: true, destinationName: "" };
   }
 
   // ④ passability degradation (no spread for recon — units scout independently)
@@ -878,14 +888,14 @@ function resolveRecon(
   );
 
   if (spread.orders.length === 0) {
-    return { orders: [], log: "侦察目标不可达", degraded: true };
+    return { orders: [], log: "侦察目标不可达", degraded: true, destinationName: "" };
   }
 
   let log = `派出 ${spread.orders.length} 个单位侦察${describeTargetForLog(intent, state)}`;
   if (spread.degradedCount > 0) {
     log += ` (${spread.degradedCount} 个已调整目标)`;
   }
-  return { orders: spread.orders, log, degraded: false };
+  return { orders: spread.orders, log, degraded: false, destinationName: describeTargetForLog(intent, state) };
 }
 
 function resolveHold(
@@ -897,7 +907,7 @@ function resolveHold(
 ): Omit<ResolveResult, "assignedUnitIds"> {
   const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
-    return { orders: [], log: source.error, degraded: true };
+    return { orders: [], log: source.error, degraded: true, destinationName: "" };
   }
 
   let units = source.units;
@@ -915,7 +925,7 @@ function resolveHold(
   units = units.slice(0, count);
 
   if (units.length === 0) {
-    return { orders: [], log: "无可用单位执行原地待命", degraded: true };
+    return { orders: [], log: "无可用单位执行原地待命", degraded: true, destinationName: "" };
   }
 
   const orders: Order[] = [
@@ -931,6 +941,7 @@ function resolveHold(
     orders,
     log: `命令 ${units.length} 个单位原地待命`,
     degraded: false,
+    destinationName: "", // 原地待命：没有去处
   };
 }
 
@@ -946,7 +957,7 @@ function resolveProduce(
       ? `未知单位类型: ${unitType}`
       : "生产命令未指定单位类型";
     pushDiagnostic(state, "PRODUCE_FAIL", msg);
-    return { orders: [], log: msg, degraded: true };
+    return { orders: [], log: msg, degraded: true, destinationName: "" };
   }
   // 嘴也要诚实（LEDGER §P5）：引擎入口会拒绝 cost=0/buildTime=0 的英雄单位，
   // 台词就不能先宣布「生产指挥官 ×3」——resolver 的 log 在执行前就上屏，
@@ -954,7 +965,7 @@ function resolveProduce(
   if (!isProducibleUnitType(unitType)) {
     const msg = `${UNIT_DISPLAY_NAME[unitType]}不是能生产的单位`;
     pushDiagnostic(state, "PRODUCE_FAIL", msg);
-    return { orders: [], log: msg, degraded: true };
+    return { orders: [], log: msg, degraded: true, destinationName: "" };
   }
 
   // emily-production-v1: budget mode → ONE Order carrying the budget; the
@@ -980,6 +991,7 @@ function resolveProduce(
         ? `全力生产${UNIT_DISPLAY_NAME[unitType]}`
         : `按预算生产${UNIT_DISPLAY_NAME[unitType]}`,
       degraded: false,
+      destinationName: "", // 经济单：没有战场落点可宣称
     };
   }
 
@@ -1003,6 +1015,7 @@ function resolveProduce(
     orders,
     log: `生产${UNIT_DISPLAY_NAME[unitType]} ×${count}`,
     degraded: false,
+    destinationName: "", // 经济单：没有战场落点可宣称
   };
 }
 
@@ -1016,7 +1029,7 @@ function resolveTrade(
       ? `未知交易类型: ${tradeAction}`
       : "交易命令未指定交易类型";
     pushDiagnostic(state, "TRADE_FAIL", msg);
-    return { orders: [], log: msg, degraded: true };
+    return { orders: [], log: msg, degraded: true, destinationName: "" };
   }
 
   const orders: Order[] = [{
@@ -1032,6 +1045,7 @@ function resolveTrade(
     orders,
     log: `下达交易命令: ${tradeAction}`,
     degraded: false,
+    destinationName: "", // 经济单：没有战场落点可宣称
   };
 }
 
@@ -1053,7 +1067,7 @@ function resolvePatrol(
   const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
     pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
-    return { orders: [], log: source.error, degraded: true };
+    return { orders: [], log: source.error, degraded: true, destinationName: "" };
   }
 
   let units = source.units;
@@ -1075,7 +1089,7 @@ function resolvePatrol(
   if (selected.length === 0) {
     const msg = "无可用单位执行巡逻";
     pushDiagnostic(state, "NO_AVAILABLE_UNITS", msg);
-    return { orders: [], log: msg, degraded: true };
+    return { orders: [], log: msg, degraded: true, destinationName: "" };
   }
 
   // Day 9.5: resolve patrol radius
@@ -1116,6 +1130,7 @@ function resolvePatrol(
     orders,
     log: `巡逻任务已下达: ${selected.length} 个单位在 (${centerTileX},${centerTileY}) 半径${radius} 范围巡逻`,
     degraded: false,
+    destinationName: describeTargetForLog(intent, state),
   };
 }
 
@@ -1189,21 +1204,21 @@ function resolveSabotage(
       case "no_facility_hint": {
         const msg = "破坏命令未指定目标设施";
         pushDiagnostic(state, "SABOTAGE_NO_TARGET", msg);
-        return { orders: [], log: msg, degraded: true };
+        return { orders: [], log: msg, degraded: true, destinationName: "" };
       }
       case "no_facility_pos": {
         const msg = `无法定位目标设施: ${intent.targetFacility}`;
         pushDiagnostic(state, "SABOTAGE_NO_TARGET", msg);
-        return { orders: [], log: msg, degraded: true };
+        return { orders: [], log: msg, degraded: true, destinationName: "" };
       }
       case "no_source": {
         pushDiagnostic(state, "NO_AVAILABLE_UNITS", plan.error);
-        return { orders: [], log: plan.error, degraded: true };
+        return { orders: [], log: plan.error, degraded: true, destinationName: "" };
       }
       case "no_units":
-        return { orders: [], log: "无可用单位执行破坏任务", degraded: true };
+        return { orders: [], log: "无可用单位执行破坏任务", degraded: true, destinationName: "" };
       case "impassable":
-        return { orders: [], log: "目标地形不可达，无法执行破坏", degraded: true };
+        return { orders: [], log: "目标地形不可达，无法执行破坏", degraded: true, destinationName: "" };
     }
   }
 
@@ -1233,7 +1248,7 @@ function resolveSabotage(
   if (spread.degradedCount > 0) {
     log += ` (${spread.degradedCount} 个已调整目标)`;
   }
-  return { orders: spread.orders, log, degraded: false };
+  return { orders: spread.orders, log, degraded: false, destinationName: fac?.name ?? facilityHint };
 }
 
 function resolveCapture(
@@ -1258,13 +1273,13 @@ function resolveCapture(
   if (!target) {
     const msg = `占领命令无法定位目标: ${intent.targetFacility ?? intent.toFront ?? "未指定"}`;
     pushDiagnostic(state, "CAPTURE_NO_TARGET", msg);
-    return { orders: [], log: msg, degraded: true };
+    return { orders: [], log: msg, degraded: true, destinationName: "" };
   }
 
   const source = resolveSourceUnits(intent, state, exclude, selectedUnitIds);
   if (source.error) {
     pushDiagnostic(state, "NO_AVAILABLE_UNITS", source.error);
-    return { orders: [], log: source.error, degraded: true };
+    return { orders: [], log: source.error, degraded: true, destinationName: "" };
   }
 
   let units = source.units;
@@ -1290,7 +1305,7 @@ function resolveCapture(
   units = sortByDistance(units, target).slice(0, count);
 
   if (units.length === 0) {
-    return { orders: [], log: "无可用单位执行占领任务", degraded: true };
+    return { orders: [], log: "无可用单位执行占领任务", degraded: true, destinationName: "" };
   }
 
   // Move units to facility and set up capture (uses attack_move to handle hostiles en route)
@@ -1300,7 +1315,7 @@ function resolveCapture(
   );
 
   if (spread.orders.length === 0) {
-    return { orders: [], log: "目标地形不可达，无法执行占领", degraded: true };
+    return { orders: [], log: "目标地形不可达，无法执行占领", degraded: true, destinationName: "" };
   }
 
   // Mark orders with targetFacilityId so the economy layer picks up capture proximity
@@ -1327,7 +1342,7 @@ function resolveCapture(
   if (spread.degradedCount > 0) {
     log += ` (${spread.degradedCount} 个已调整目标)`;
   }
-  return { orders: spread.orders, log, degraded: false };
+  return { orders: spread.orders, log, degraded: false, destinationName: facilityName || "" };
 }
 
 /** Find a facility by id, type, name, or tag (returns full Facility or undefined). */

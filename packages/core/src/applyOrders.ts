@@ -3,7 +3,7 @@
 // All orders flow through here → mutate GameState
 // ============================================================
 
-import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask } from "@ai-commander/shared";
+import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask, ApplyResult, ApplyOrderOutcome, OrderRejectReason } from "@ai-commander/shared";
 import { TRADE_COSTS, UNIT_STATS, UNIT_DISPLAY_NAME, isProducibleUnitType } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
 import { findPath, clearPathCache } from "./pathfinding";
@@ -38,10 +38,31 @@ function computeGroupPath(units: Unit[], target: Position, state: GameState): Po
 /**
  * Apply a batch of orders to the game state.
  * This is the ONLY entry point for modifying unit behavior.
+ *
+ * retreat-scope 刀B: it now REPORTS what it actually did. The four filters
+ * below silently dropped units, and this function returned `void` — so every
+ * player-facing receipt upstream had to recite the PLAN ("8 个单位撤退至…")
+ * even when only five of them ever got the order. 文字、声音、台账三者从此
+ * 共用这一份结果，不再各自取数。
  */
-export function applyOrders(state: GameState, orders: Order[]): void {
-  for (const order of orders) {
-    // Economy orders are state-level, not unit-level
+export function applyOrders(state: GameState, orders: Order[]): ApplyResult {
+  const perOrder: ApplyOrderOutcome[] = [];
+
+  for (let orderIndex = 0; orderIndex < orders.length; orderIndex++) {
+    const order = orders[orderIndex];
+    const outcome: ApplyOrderOutcome = {
+      orderIndex,
+      action: order.action,
+      appliedUnitIds: [],
+      alreadyDoingUnitIds: [],
+      rejected: [],
+    };
+    perOrder.push(outcome);
+
+    // Economy orders are state-level, not unit-level. They carry no unitIds,
+    // so the outcome stays empty — affordability failures are already voiced
+    // from state.diagnostics (PRODUCE_FAIL / TRADE_FAIL) and are not a
+    // per-unit fact this result can speak to.
     if (order.action === "produce" || order.action === "trade") {
       handleEconomyOrder(order, "player", state);
       continue;
@@ -51,11 +72,20 @@ export function applyOrders(state: GameState, orders: Order[]): void {
     const eligibleUnits: Unit[] = [];
     for (const unitId of order.unitIds) {
       const unit = state.units.get(unitId);
-      if (!unit) continue;
-      if (unit.team !== "player") continue;
-      if (unit.isPlayerControlled && !order.isPlayerCommand) continue;
-      if (unit.manualOverride && !order.provisional && !order.isPlayerCommand) continue;
-      eligibleUnits.push(unit);
+      const reason: OrderRejectReason | null =
+        // 刀B 收紧一处（1 行语义，故意为之）：`state === "dead"` 也算"不在了"。
+        // 尸体在 sim 的下一拍才从表里删掉，中间这一帧它会照收命令、照进计数——
+        // 于是回执报"已下令 4 个"，其中一个是死人。回执诚实的前提是计数诚实。
+        !unit || unit.state === "dead" ? "unit_gone"
+        : unit.team !== "player" ? "not_player_unit"
+        : unit.isPlayerControlled && !order.isPlayerCommand ? "player_controlled"
+        : unit.manualOverride && !order.provisional && !order.isPlayerCommand ? "manual_override"
+        : null;
+      if (reason) {
+        outcome.rejected.push({ unitId, reason });
+        continue;
+      }
+      eligibleUnits.push(unit!);
     }
 
     // Compute shared A* path for the group (leader = unit closest to centroid)
@@ -68,15 +98,37 @@ export function applyOrders(state: GameState, orders: Order[]): void {
     }
 
     for (const unit of eligibleUnits) {
-      applyOrderToUnit(unit, effectiveOrder, state);
+      const outcomeKind = applyOrderToUnit(unit, effectiveOrder, state);
+      if (outcomeKind === "already_doing") outcome.alreadyDoingUnitIds.push(unit.id);
+      else outcome.appliedUnitIds.push(unit.id);
     }
   }
+
+  return summarizeApply(perOrder);
+}
+
+/** Roll the per-order rows up into the three de-duplicated batch totals. */
+function summarizeApply(perOrder: ApplyOrderOutcome[]): ApplyResult {
+  const applied = new Set<number>();
+  const already = new Set<number>();
+  const rejected = new Set<number>();
+  for (const o of perOrder) {
+    for (const id of o.appliedUnitIds) applied.add(id);
+    for (const id of o.alreadyDoingUnitIds) already.add(id);
+    for (const r of o.rejected) rejected.add(r.unitId);
+  }
+  return {
+    perOrder,
+    appliedUnitIds: [...applied],
+    alreadyDoingUnitIds: [...already],
+    rejectedUnitIds: [...rejected],
+  };
 }
 
 /**
  * Replace provisional (local-guess) orders with LLM-refined orders.
  */
-export function replaceProvisionalOrders(state: GameState, newOrders: Order[]): void {
+export function replaceProvisionalOrders(state: GameState, newOrders: Order[]): ApplyResult {
   // Clear provisional orders from all player units
   state.units.forEach(unit => {
     if (unit.team === "player" && !unit.manualOverride) {
@@ -84,7 +136,7 @@ export function replaceProvisionalOrders(state: GameState, newOrders: Order[]): 
     }
   });
   // Apply new orders
-  applyOrders(state, newOrders);
+  return applyOrders(state, newOrders);
 }
 
 /**
@@ -92,7 +144,7 @@ export function replaceProvisionalOrders(state: GameState, newOrders: Order[]): 
  * Sets manualOverride=true on affected units and bypasses the
  * override check so the order always applies.
  */
-export function applyPlayerCommands(state: GameState, orders: Order[]): void {
+export function applyPlayerCommands(state: GameState, orders: Order[]): ApplyResult {
   // Mark selected units as manual override first
   for (const order of orders) {
     for (const unitId of order.unitIds) {
@@ -106,7 +158,7 @@ export function applyPlayerCommands(state: GameState, orders: Order[]): void {
 
   // Route through the normal entrypoint using a player-command flag.
   const taggedOrders = orders.map((order) => ({ ...order, isPlayerCommand: true }));
-  applyOrders(state, taggedOrders);
+  return applyOrders(state, taggedOrders);
 }
 
 /**
@@ -420,7 +472,9 @@ function findOrCreatePatrolTask(
   return id;
 }
 
-function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
+type UnitApplyOutcome = "applied" | "already_doing";
+
+function applyOrderToUnit(unit: Unit, order: Order, state: GameState): UnitApplyOutcome {
   // Phase C: idempotency check for crisis reinforcement orders.
   // If the unit is already executing a reinforcement order for the same front
   // with the same action and a nearby target, skip the re-dispatch.
@@ -432,7 +486,9 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
       const dx = current.target.x - order.target.x;
       const dy = current.target.y - order.target.y;
       if (dx * dx + dy * dy < 25) { // within 5 tiles
-        return; // already executing equivalent reinforcement — skip
+        // 刀B 第三类结局：已经在执行等价命令。既不是新派兵，也不是失败——
+        // 报「这批兵已经在执行」，且不重建任务、不清旧任务。
+        return "already_doing";
       }
     }
   }
@@ -563,4 +619,6 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
 
     // produce / trade never reach here — intercepted above
   }
+
+  return "applied";
 }
