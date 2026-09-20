@@ -24,6 +24,7 @@ import type {
 } from "@ai-commander/shared";
 import { getUnitCategory, UNIT_STATS, UNIT_DISPLAY_NAME, TRADE_COSTS, collectUnitsUnder, isDispatchablePlayerUnit, isFootUnit, isProducibleUnitType } from "@ai-commander/shared";
 import { canUnitEnterTile } from "./sim";
+import { usesGroundCaptureRules } from "./economy";
 import { frontDestinationFor, type FrontDestinationMode } from "./frontDestination";
 import { createMission } from "./missions";
 import { getFormationOffset, computeHeading, type FormationStyle } from "./formation";
@@ -1263,14 +1264,15 @@ function resolveCapture(
   let units = source.units;
   // Scenario-aware capture doctrine. Must match economy.ts::tickFacilityCapture
   // line 118-126 — the *actual* game-engine rule that decides who can capture:
-  //   - El Alamein: any GROUND unit (infantry + armor + commanders)
-  //   - Default:   infantry only
+  //   - 正式规则（el_alamein / tutorial / 将来的图）: any GROUND unit
+  //   - dual_island 遗留原型:                        infantry only
+  //   ★ 读的必须是 economy.ts 那个**同一个谓词**——两边分家过一次：
+  //     教学关上 planner 派得出坦克、引擎却判它占不了点，回执还说"已派出"。
   // Previously this resolver hard-preferred infantry in ALL scenarios, which on
   // El Alamein shrank a tank-heavy squad (e.g. Blake) to 0-2 lone infantry and
   // effectively made "Blake capture X" dispatch a single token soldier while
   // the real combat force sat idle.
-  const isElAlamein = state.scenarioId === "el_alamein";
-  if (isElAlamein) {
+  if (usesGroundCaptureRules(state)) {
     // Air/naval can't stand on a facility — filter to ground only.
     units = units.filter((u) => getUnitCategory(u.type) === "ground");
   } else {

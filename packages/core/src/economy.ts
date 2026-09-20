@@ -46,6 +46,24 @@ export function isCapturableFacilityType(type: FacilityType): boolean {
   return !NON_CAPTURABLE.includes(type);
 }
 
+/** 谁能占点：**任何陆军单位**（步兵/装甲/指挥官/卫队），还是**只有步兵**。
+ *
+ *  极性有意取「非 dual_island」而不是「是 el_alamein / 是 tutorial」：
+ *  dual_island 是遗留原型，正式局规则才是默认——这样**将来每加一张图都自动
+ *  跟正式局一致**，不用记得回来改。三处枚举（本函数早先的形状）正是家法
+ *  反复判过的病，且每加一张图要改三处。
+ *
+ *  ★ 这条不是理论问题：教学关原本掉在"只有步兵"那侧，玩家那 3 辆轻坦
+ *  **永远打不下过关目标**，而且 `unit.type === "infantry"` 连指挥官和卫队
+ *  也一起挡掉了——教学关里唯一鼠标点得动的那 5 个单位恰恰占不了点。
+ *
+ *  唯一真相源：`countCaptureContenders` 是引擎结算与 `reportSignals` 反馈层
+ *  共同的入口，所以改这一处等于两层一起改；`tacticalPlanner` 的选兵偏好
+ *  必须读同一个谓词，否则"派得出去"与"占得下来"会再次分家。 */
+export function usesGroundCaptureRules(state: GameState): boolean {
+  return state.scenarioId !== "dual_island";
+}
+
 // ── Helper: is a unit "mechanized" (consumes fuel to move)? ──
 
 /**
@@ -130,14 +148,13 @@ export function countCaptureContenders(
   state: GameState,
   fac: Facility,
 ): { player: number; enemy: number } {
-  // El Alamein: all ground units can capture; default: infantry only
-  const isElAlamein = state.scenarioId === "el_alamein";
+  const groundRules = usesGroundCaptureRules(state);
   let playerInf = 0;
   let enemyInf = 0;
 
   state.units.forEach((unit) => {
     if (unit.hp <= 0 || unit.state === "dead") return;
-    const canCapture = isElAlamein
+    const canCapture = groundRules
       ? getUnitCategory(unit.type) === "ground"
       : unit.type === "infantry";
     if (!canCapture) return;

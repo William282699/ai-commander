@@ -3,6 +3,7 @@ import {
   renderTerrain,
   renderMinimap,
   renderFacilities,
+  renderGuideHighlights,
   renderFacilityCaptureOverlays,
   renderFrontLabels,
   renderRouteLabels,
@@ -22,10 +23,22 @@ import {
   setupInputListeners,
   processKeyboardCamera,
   centerCameraOn,
+  getMinZoom,
   screenToTile,
   isBoxSelection,
 } from "./input";
-import { FRONT_CAMERA_TARGETS, EL_ALAMEIN_CAMERA_TARGETS } from "@ai-commander/shared";
+import { FRONT_CAMERA_TARGETS, EL_ALAMEIN_CAMERA_TARGETS, TUTORIAL_CAMERA_TARGETS } from "@ai-commander/shared";
+import { campaignBriefing } from "./campaignBriefing";
+
+/** URL → scenarioId 的**唯一**一处解析。
+ *  原本 `handleRestart` 与初始化各抄了一份同样的三元表达式；加教学关时
+ *  漏改任一处，都会变成"开局是教学图、重开变回阿拉曼"。 */
+function scenarioFromUrl(): ScenarioId {
+  const p = new URLSearchParams(window.location.search).get("scenario");
+  if (p === "dual_island") return "dual_island";
+  if (p === "tutorial") return "tutorial";
+  return "el_alamein";
+}
 import { createInitialGameState } from "@ai-commander/core";
 import {
   tick,
@@ -76,10 +89,12 @@ import {
   resetPressureDirector,
 } from "@ai-commander/core";
 import type { FacilitySituationType, AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot, StrategicSituation, ViewportGeometry } from "@ai-commander/core";
-import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, ReportEventType, TaskPriority, CrisisEvent } from "@ai-commander/shared";
+import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, ReportEventType, TaskPriority, CrisisEvent, ScenarioId } from "@ai-commander/shared";
 import { TILE_SIZE } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, availableLeaderProfiles, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import type { LeaderProfile } from "@ai-commander/shared";
+import { advanceGuide, initialGuideState, openingLine, currentTargets,
+  type GuideState, type GuideTarget } from "./tutorialGuide";
 import { ChatPanel } from "./ChatPanel";
 import { TaskBar } from "./TaskBar";
 import * as messageStoreModule from "./messageStore";
@@ -831,6 +846,18 @@ export interface GameBridge {
   getViewport: () => ViewportGeometry | null;
   onCreateSquad: (owner: "chen" | "marcus" | "emily", choice?: { leaderName: string | null }) => void;
   canCreateSquad: () => boolean;
+  /** 教学引导：当前这一步要点亮的**所有**目标（按钮 + 地图上的东西）。
+   *  走桥而不是模块级变量——弹出面板是**另一个 window**，模块级过不去。 */
+  getGuideTargets: () => readonly GuideTarget[];
+  /** ChatPanel 真把玩家那句话发出去时喊一声（教学关判"跟这个参谋说过话没有"用）。
+   *  ★ 不能靠嗅 messageStore：编队等引擎日志也记成 `source="player"`
+   *  （`GameCanvas.tsx:1254` 那条 `新建分队…` 就落在 ops 频道），
+   *  嗅出来的结果是"玩家还没跟马克斯说话就算说过了"——实机当场撞到。 */
+  onPlayerSpoke: (ch: Channel) => void;
+  /** 玩家点开第二页签时喊一声（教学关判"看没看军械"用）。 */
+  onOpenPanelTab: (ch: Channel) => void;
+  /** 参谋正在回话——教学引导据此推迟下一句。 */
+  onAdvisorBusy: (busy: boolean) => void;
   getAssignableLeaders: () => LeaderProfile[];
   onDeclareWar: () => void;
   onSelectUnits: (unitIds: number[]) => void;
@@ -963,6 +990,182 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     }, 500);
     return () => clearInterval(id);
   }, []);
+
+  // ── 教学关引导（步 3）──────────────────────────────────
+  // 只在教学图跑。判定读引擎状态（数 squads），台词走陈的频道＋出声标记，
+  // 不做任何浮层／步骤条（家法「对话是唯一界面」）。逻辑全在 tutorialGuide.ts
+  // 的纯函数里，这里只负责按拍调用它、把要说的话递给消息层。
+  /** 玩家最后一次"动过手"的游戏时间（发命令/编队/右键派兵）。
+   *  引导用它判断"他是卡住了还是正在做"——正在做的人不该被催。 */
+  const lastPlayerActionRef = useRef(0);
+  const markPlayerAction = useCallback(() => {
+    const st = stateRef.current;
+    if (st) lastPlayerActionRef.current = st.time;
+  }, []);
+  const onPlayerSpoke = useCallback((ch: Channel) => {
+    spokeChannelsRef.current.add(ch);
+    markPlayerAction();
+  }, [markPlayerAction]);
+  /** 玩家点开过第二页签的频道集合（教学关只关心 logistics＝军械）。 */
+  const panelTabSeenRef = useRef<Set<Channel>>(new Set());
+  const onOpenPanelTab = useCallback((ch: Channel) => {
+    panelTabSeenRef.current.add(ch);
+    markPlayerAction();
+  }, [markPlayerAction]);
+  /** 参谋是不是正在回话。引导拿它决定"先别说下一句"。 */
+  const advisorBusyRef = useRef(false);
+  const onAdvisorBusy = useCallback((busy: boolean) => { advisorBusyRef.current = busy; }, []);
+
+  /** 面板弹没弹出去。`panelDetached` 是 prop，而引导那个 interval 的依赖是 `[]`
+   *  ⇒ 闭包里读到的永远是第一帧的值，必须过一道 ref 才拿得到新鲜的。
+   *  `poppedOutOnceRef` 拉出去过一次就不再翻回来——判「弹出→关上」这个来回用它。 */
+  const panelDetachedRef = useRef(false);
+  const poppedOutOnceRef = useRef(false);
+  useEffect(() => {
+    panelDetachedRef.current = !!panelDetached;
+    if (panelDetached) poppedOutOnceRef.current = true;
+  }, [panelDetached]);
+  /** 正式局的开场简报——**只说不卡**（用户 09-11）。
+   *  和教学关那套状态机没有任何共用：没有 done、没有催促、没有目标高亮，
+   *  几句话说完 interval 自己停掉。再手把手一次，就把"等指令"那毛病教回来了。 */
+  useEffect(() => {
+    if (scenarioFromUrl() === "tutorial") return;
+    let lines: ReturnType<typeof campaignBriefing> | null = null;
+    let idx = 0;
+    /** 这一句点亮的东西什么时候熄。用户 09-12：说到哪几个点，那几个点就得闪。 */
+    let dimAt: number | null = null;
+    const BRIEF_HOLD_SEC = 8;
+    const clearHighlight = () => {
+      guideHighlightRef.current = { unitIds: new Set(), facilityIds: new Set(), tagIds: new Set() };
+    };
+    const id = setInterval(() => {
+      const st = stateRef.current;
+      if (!st || st.gameOver) return;
+      if (lines === null) lines = campaignBriefing(st);     // 等 state 就位再算，别对着空状态编
+      if (dimAt !== null && st.time >= dimAt) { clearHighlight(); dimAt = null; }
+      if (idx >= lines.length) {
+        if (dimAt === null) clearInterval(id);              // 话说完、灯也灭了，才收摊
+        return;
+      }
+      const line = lines[idx];
+      if (st.time < line.atSec) return;                    // 按**游戏时间**排期：暂停时不会自己往下念
+      addMessage("info", line.text, st.time, "combat", undefined, "proactive", undefined,
+        utteranceFor("combat", "proactive"));
+      if (line.facilityIds?.length) {
+        guideHighlightRef.current = {
+          unitIds: new Set(), tagIds: new Set(), facilityIds: new Set(line.facilityIds),
+        };
+        dimAt = st.time + BRIEF_HOLD_SEC;
+      }
+      idx++;
+    }, 500);
+    return () => { clearInterval(id); clearHighlight(); };
+  }, []);
+
+  const guideRef = useRef<GuideState | null>(null);
+  useEffect(() => {
+    if (scenarioFromUrl() !== "tutorial") return;
+    const sayAsChen = (text: string, t: number) => {
+      // from 留空让 addMessage 按频道自己推导（闸②要求标记与 from 互证）
+      addMessage("info", text, t, "combat", undefined, "proactive", undefined,
+        utteranceFor("combat", "proactive"));
+    };
+    const id = setInterval(() => {
+      const st = stateRef.current;
+      if (!st || st.gameOver) return;
+      if (guideRef.current === null) {
+        // 开场第一句：等 state 真的就位再说，别对着空状态开口
+        guideRef.current = initialGuideState(st.time);
+        recomputeGuideHighlight(st);
+        sayAsChen(openingLine(), st.time);
+        return;
+      }
+      recomputeGuideHighlight(st);
+      const { say, next } = advanceGuide(guideRef.current, {
+        state: st,
+        // 判松：这个频道里有过一条 source="player" 的消息就算说过话。
+        // 走 messageStore 的公开读法，它自带跨窗口委托（弹出面板也数得到）。
+        playerSpokeIn: (ch) => spokeChannelsRef.current.has(ch),
+        playerActedSince: (t) => lastPlayerActionRef.current > t,
+        playerSawArsenal: () => panelTabSeenRef.current.has("logistics"),
+        advisorBusy: () => advisorBusyRef.current,
+        panelDetached: () => panelDetachedRef.current,
+        playerPoppedOutPanel: () => poppedOutOnceRef.current,
+        // 读一眼顶栏那步靠它兜底（窗一直开着 / 压根没碰 都不会卡死）
+        sinceStepStart: st.time - (guideRef.current?.stepStartedAt ?? st.time),
+      }, st.time);
+      guideRef.current = next;
+      if (say) sayAsChen(say, st.time);
+    }, 500);
+    return () => clearInterval(id);
+  }, []);
+
+  /** 脉冲绑引导这一步的生死：步骤一完成 `currentTargets` 自然变空，
+   *  引导走完也是空——不做常驻 affordance（照喇叭键那条先例）。 */
+  const getGuideTargets = useCallback(() => currentTargets(guideRef.current), []);
+
+  /** 把这一步的目标翻译成**地图上要画圈的那些东西**（渲染层每帧读它）。
+   *  ★ `units:unsquadded` 是**当场算**的，不写死兵种／不写死 id——玩家先编哪一坨
+   *  都行（"台词钉死顺序"那个 bug 就是这么来的），而且编完一坨它自动只剩另一坨。 */
+  const guideHighlightRef = useRef<{ unitIds: Set<number>; facilityIds: Set<string>;
+    tagIds: Set<string> }>({ unitIds: new Set(), facilityIds: new Set(), tagIds: new Set() });
+  const FAC_OF_TARGET: Record<string, string> = {
+    "fac:barracks": "tut_player_barracks",
+    "fac:beacon": "tut_beacon",
+    "fac:enemy_post": "tut_enemy_post",
+  };
+  /** 把散兵按位置分坨，返回**最靠北那一坨**的 id。
+   *  单链：两个兵相距 ≤ CLUSTER_TILES 就算同一坨（教学图两坨隔 11 格，够分开）。 */
+  const CLUSTER_TILES = 8;
+  function firstClusterOf(free: { id: number; x: number; y: number }[]): number[] {
+    if (free.length === 0) return [];
+    const rest = [...free].sort((a, b) => a.y - b.y);   // 从北往南
+    const seed = rest.shift()!;
+    const cluster = [seed];
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (let i = rest.length - 1; i >= 0; i--) {
+        const u = rest[i];
+        if (cluster.some((c) => Math.hypot(c.x - u.x, c.y - u.y) <= CLUSTER_TILES)) {
+          cluster.push(u); rest.splice(i, 1); grew = true;
+        }
+      }
+    }
+    return cluster.map((u) => u.id);
+  }
+
+  const recomputeGuideHighlight = useCallback((st: GameState) => {
+    const tg = currentTargets(guideRef.current);
+    const unitIds = new Set<number>();
+    const facilityIds = new Set<string>();
+    const tagIds = new Set<string>();
+    for (const t of tg) {
+      if (t === "map:tag") { for (const tag of st.tags) tagIds.add(tag.id); continue; }
+      if (t === "units:unsquadded") {
+        const inSquad = new Set<number>();
+        for (const sq of st.squads) for (const id of sq.unitIds) inSquad.add(id);
+        const free: { id: number; x: number; y: number }[] = [];
+        st.units.forEach((u) => {
+          // 鼠标点得动的那几个（指挥官/卫队）编不进队，别亮它们误导人
+          if (u.team !== "player" || u.isPlayerControlled) return;
+          if (u.hp <= 0 || u.state === "dead") return;
+          if (!inSquad.has(u.id)) free.push({ id: u.id, x: u.position.x, y: u.position.y });
+        });
+        // ★ 用户 2026-09-08：**一次只亮一坨**。全亮的话玩家不知道该框哪个，
+        //   而台词说的是"那批兵"（单数）——说一批、亮两批，自相矛盾。
+        //   做法＝单链聚类（≤CLUSTER_TILES 算同一坨），只取**最靠北**那坨；
+        //   编完它之后剩下的那坨自动变成"最靠北"，不用记状态、也不写死兵种。
+        for (const id of firstClusterOf(free)) unitIds.add(id);
+      } else if (FAC_OF_TARGET[t]) {
+        facilityIds.add(FAC_OF_TARGET[t]);
+      }
+    }
+    guideHighlightRef.current = { unitIds, facilityIds, tagIds };
+  }, []);
+
+  /** 玩家真开过口的频道。只由 ChatPanel 的发送路径写入。 */
+  const spokeChannelsRef = useRef<Set<Channel>>(new Set());
 
   const handleTaskCancel = useCallback((taskId: string) => {
     const state = stateRef.current;
@@ -1129,6 +1332,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     if (!state) return;
     const ids = inputRef.current.selectedUnitIds;
     if (ids.length === 0) return;
+    markPlayerAction();   // 教学引导：编队算动手，别在他操作时催他
 
     // Filter: player + alive
     const validIds = ids.filter((id) => {
@@ -1259,6 +1463,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       getViewport,
       onCreateSquad: handleCreateSquad,
       canCreateSquad,
+      getGuideTargets,
+      onPlayerSpoke,
+      onOpenPanelTab,
+      onAdvisorBusy,
       getAssignableLeaders,
       onDeclareWar: handleDeclareWar,
       onSelectUnits: handleSelectUnits,
@@ -1325,9 +1533,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
   }, [facilityMenu]);
 
   const handleRestart = useCallback(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const scenarioParam = urlParams.get("scenario");
-    const sid = scenarioParam === "dual_island" ? "dual_island" as const : "el_alamein" as const;
+    const sid = scenarioFromUrl();
     const newState = createInitialGameState(sid);
     stateRef.current = newState;
     gameOverDetectedRef.current = false;
@@ -1383,8 +1589,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
 
     // Create game state — El Alamein is the default; only ?scenario=dual_island opts out.
     const urlParams = new URLSearchParams(window.location.search);
-    const scenarioParam = urlParams.get("scenario");
-    const scenarioId = scenarioParam === "dual_island" ? "dual_island" as const : "el_alamein" as const;
+    const scenarioId = scenarioFromUrl();
     const noFog = urlParams.get("nofog") === "1";
     const initialState = createInitialGameState(scenarioId);
     stateRef.current = initialState;
@@ -1412,23 +1617,51 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     // Expose state getter to parent (for top bar etc)
     onStateReady?.(() => stateRef.current);
 
-    // Camera: center on player HQ
-    const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
-    cameraRef.current = camera; // live object — input listeners mutate it in place
-    const hqCenter = scenarioId === "el_alamein" ? { x: 430, y: 90 } : { x: 100, y: 7 };
-    centerCameraOn(camera, hqCenter.x, hqCenter.y, canvas.width, canvas.height, initialState.mapWidth, initialState.mapHeight);
-
     // Input — use ref so it's accessible outside useEffect
     const input = inputRef.current;
     input.mapWidth = initialState.mapWidth;
     input.mapHeight = initialState.mapHeight;
+    // ★ 右边那块操作台盖住多少画布——**量 DOM，不照抄 460**：收起/弹出/改宽度都自动跟上。
+    //   变化很稀（收起、弹出、改窗口），2Hz 够了，不值得每帧 getBoundingClientRect。
+    const measureInset = () => {
+      const dock = document.querySelector('[data-hud-dock="1"]') as HTMLElement | null;
+      const w = dock && dock.offsetParent !== null ? dock.getBoundingClientRect().width : 0;
+      // 画布是 CSS 像素铺满的，canvas.width 与它 1:1（resize 里就是这么设的）
+      input.insetRight = Math.min(w, canvas.width * 0.6);
+    };
+    measureInset();
+    const insetTimer = setInterval(measureInset, 500);
+
+    // Camera: center on player HQ（★ 必须排在 input 之后——开局镜头要用 insetRight）
+    const camera: Camera = { x: 0, y: 0, zoom: 1.0 };
+    cameraRef.current = camera; // live object — input listeners mutate it in place
+    // ★ 正式局以**全景**开场（用户 09-11：「刚进入游戏的时候，最好是全景地图，
+    //   现在是进入游戏后聚焦在我方这里」）。缩到玩家自己能拉到的最远那一档——
+    //   `getMinZoom` 就是滚轮的下限，用同一个数，开局视野与他滚到底看到的一致。
+    //   ⚠ 顺序敏感：`centerCameraOn` 要拿 `camera.zoom` 算半屏，必须先设 zoom。
+    if (scenarioId === "el_alamein") {
+      camera.zoom = getMinZoom(canvas.width - input.insetRight, canvas.height,
+        initialState.mapWidth, initialState.mapHeight);
+    }
+    const hqCenter = scenarioId === "el_alamein"
+      // 全景时对准要紧那堆东西的中点（四个目标 y30–220、三个前哨 y35–155），
+      // 不是地图几何中心——底下那几十格是空沙漠，白给。
+      ? { x: 250, y: 125 }
+      // ★ 不是 HQ(14,40)：审核实测 900×700 / 1000×800 画布下，镜头被 clampCamera
+      //   顶到 camera.x=0，可视 x∈[0,31.3]，而玩家的兵在 x=32~35 ⇒ **开局一个
+      //   自己的兵都看不见**。往东挪到两坨兵中间，HQ 与两坨同屏。
+      : scenarioId === "tutorial" ? { x: 26, y: 40 }
+      : { x: 100, y: 7 };
+    centerCameraOn(camera, hqCenter.x, hqCenter.y, canvas.width, canvas.height,
+      initialState.mapWidth, initialState.mapHeight, input.insetRight);
+
     const cleanup = setupInputListeners(canvas, camera, input);
 
     // Fronts array (ordered 1-5 for hotkey mapping) — `let` so restart can refresh
     let frontIds = initialState.fronts.map((f) => f.id);
     // Select camera targets by scenario (no merge — keys like front_center overlap)
-    const cameraTargets = scenarioId === "el_alamein"
-      ? EL_ALAMEIN_CAMERA_TARGETS
+    const cameraTargets = scenarioId === "el_alamein" ? EL_ALAMEIN_CAMERA_TARGETS
+      : scenarioId === "tutorial" ? TUTORIAL_CAMERA_TARGETS
       : FRONT_CAMERA_TARGETS;
 
     // Compute initial fog so first frame shows visibility
@@ -1490,6 +1723,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
               canvas.height,
               input.mapWidth,
               input.mapHeight,
+              input.insetRight,   // 跳过去的点要落在看得见那块的中间，别摆到操作台底下
             );
           }
         }
@@ -2366,6 +2600,11 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         selectedSet,
       );
 
+      // 4.2 教学引导高亮——**必须在迷雾之后**画（顺序是 设施→迷雾→单位）。
+      //     圈原本画在设施里，被迷雾整个盖住，烽火台那一步玩家什么都看不见。
+      renderGuideHighlights(ctx, unitArray, facArray, camera, state.time,
+        guideHighlightRef.current, state.tags);
+
       // 4.5 Capture overlays — drawn above units so a contested forward post is
       // readable even when tanks/infantry crowd the facility sprite.
       renderFacilityCaptureOverlays(ctx, facArray, camera, state.fog);
@@ -2447,6 +2686,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       cleanup();
       cameraRef.current = null;
       window.removeEventListener("resize", resize);
+      clearInterval(insetTimer);
     };
   }, []);
 
@@ -2468,6 +2708,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           getViewport={getViewport}
           onCreateSquad={handleCreateSquad}
           canCreateSquad={canCreateSquad}
+          getGuideTargets={getGuideTargets}
+          onPlayerSpoke={onPlayerSpoke}
+          onOpenPanelTab={onOpenPanelTab}
+          onAdvisorBusy={onAdvisorBusy}
           getAssignableLeaders={getAssignableLeaders}
           onDeclareWar={handleDeclareWar}
           onSelectUnits={handleSelectUnits}
@@ -2692,10 +2936,24 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
                 color: "#94a3b8",
                 fontSize: 13,
               }}>
-                据点 {gameOverInfo.breakdown.capturedObjectives}/3 · 丢失 {gameOverInfo.breakdown.lostKeypoints}/3 · 净分 {gameOverInfo.breakdown.score >= 0 ? "+" : ""}{gameOverInfo.breakdown.score}
+                {/* ★ 分母原本写死 3（LEDGER H2 那笔旧账）——教学关只有 1 个目标、
+                    2 个前哨，会显示成"据点 1/3"。改成从场景的 winCfg 里取。 */}
+                据点 {gameOverInfo.breakdown.capturedObjectives}/{stateRef.current?.scenarioWinConfig?.requiredCapturedObjectives ?? 3} · 丢失 {gameOverInfo.breakdown.lostKeypoints}/{stateRef.current?.scenarioWinConfig?.friendlyKeypoints.length ?? 3} · 净分 {gameOverInfo.breakdown.score >= 0 ? "+" : ""}{gameOverInfo.breakdown.score}
               </div>
             )}
-            <button onClick={handleRestart} className="hud-btn hud-btn-primary hud-btn-lg" style={{ marginTop: 20 }}>
+            {/* 教学关打赢 ⇒ 主按钮是「进入正式战役」，不是「再来一局」。
+                ★ 用的是**本来就有的结算屏**，不新造弹窗：家法「对话是唯一界面」
+                针对的是对话流里的确认件，不是这块已经存在的收尾屏；而换场景
+                是一次整页跳转，非得有个可点的东西不可（陈说一句解除引导的话
+                由 OUTRO_LINE 在对话里负责，两边各干各的）。 */}
+            {scenarioFromUrl() === "tutorial" && gameOverInfo.isVictory && (
+              <button
+                onClick={() => { window.location.search = ""; }}
+                className="hud-btn hud-btn-primary hud-btn-lg"
+                style={{ marginTop: 20 }}
+              >进入正式战役 ▶</button>
+            )}
+            <button onClick={handleRestart} className="hud-btn hud-btn-primary hud-btn-lg" style={{ marginTop: 20, marginLeft: 10 }}>
               再来一局
             </button>
           </div>

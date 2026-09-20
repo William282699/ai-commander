@@ -131,7 +131,8 @@ export function checkGameOver(state: GameState, dt: number): void {
       state.facilities.get(id)?.team === "player",
     ).length;
     if (capturedCount >= winCfg.requiredCapturedObjectives) {
-      endGame(state, "player", `已夺取 ${capturedCount} 处据点 — 阿拉曼大捷！`);
+      endGame(state, "player",
+        `已夺取 ${capturedCount} 处据点 — ${winCfg.victoryLabel ?? "阿拉曼大捷！"}`);
       return;
     }
     // Defeat: friendly keypoints lost (missing OR hp<=0 OR team flipped to non-player)

@@ -2,6 +2,7 @@ import { useRef, useState, useEffect, useCallback } from "react";
 import { GameCanvas } from "./GameCanvas";
 import { ChatPanel } from "./ChatPanel";
 import { TutorialOverlay } from "./TutorialOverlay";
+import { IntroGate } from "./IntroGate";
 import type { GameState } from "@ai-commander/shared";
 import type { GameBridge } from "./GameCanvas";
 
@@ -16,9 +17,37 @@ function formatTime(sec: number): string {
 
 const isPanelMode = new URLSearchParams(window.location.search).get("mode") === "panel";
 
-// El Alamein is the default scenario (only ?scenario=dual_island opts out). The
-// onboarding tutorial runs on El Alamein, so it shows on the default load too.
-const isTutorialScenario = new URLSearchParams(window.location.search).get("scenario") !== "dual_island";
+// ── 开场闸（教学关 步2）────────────────────────────────────
+// 改之前：`scenario !== "dual_island"` ⇒ **教学关也会弹那 12 张卡**，而那 12 张
+// 卡第一张写的是「阿拉曼前线／30 分钟／4 个据点夺 3 个／3 个前哨全丢就输」——
+// 四个数字对教学关**全是错的**（教学关是 1 个目标、1 个哨站，且那条败北条件
+// 永不触发）。所以闸必须按场景分三路，不能再二选一。
+const SCENARIO_PARAM = new URLSearchParams(window.location.search).get("scenario");
+const IS_TUTORIAL_MAP = SCENARIO_PARAM === "tutorial";
+const IS_DUAL_ISLAND = SCENARIO_PARAM === "dual_island";
+/** 正式局（默认场景）。只有它才弹开场闸。 */
+const IS_MAIN_CAMPAIGN = !IS_TUTORIAL_MAP && !IS_DUAL_ISLAND;
+
+/** 看过就不再弹（审核提过：现在没有任何"看过"记忆，每次开局都重放 12 张卡，
+ *  测试者玩两局要读 24 张）。`?intro=1` 强制弹回来，手测/试玩用。 */
+const INTRO_SEEN_KEY = "aic_intro_seen_v1";
+const FORCE_INTRO = new URLSearchParams(window.location.search).get("intro") === "1";
+
+function introSeen(): boolean {
+  // localStorage 在无痕窗口/禁用站点数据时会直接抛，不能裸读。
+  try { return window.localStorage.getItem(INTRO_SEEN_KEY) === "1"; } catch { return false; }
+}
+function markIntroSeen(): void {
+  try { window.localStorage.setItem(INTRO_SEEN_KEY, "1"); } catch { /* 存不下就每次弹，不致命 */ }
+}
+
+/** 开场屏的三态：闸 → （可选）说明书 → 关掉。教学图与 dual_island 直接 none。 */
+type IntroMode = "gate" | "manual" | "none";
+function initialIntroMode(): IntroMode {
+  if (!IS_MAIN_CAMPAIGN) return "none";
+  return FORCE_INTRO || !introSeen() ? "gate" : "none";
+}
+
 
 function PanelApp() {
   const [bridge, setBridge] = useState<GameBridge | null>(null);
@@ -75,6 +104,10 @@ function PanelApp() {
         getViewport={bridge.getViewport}
         onCreateSquad={bridge.onCreateSquad}
         canCreateSquad={bridge.canCreateSquad}
+        getGuideTargets={bridge.getGuideTargets}
+        onPlayerSpoke={bridge.onPlayerSpoke}
+        onOpenPanelTab={bridge.onOpenPanelTab}
+        onAdvisorBusy={bridge.onAdvisorBusy}
         // 弹出窗里也要能点将：弹窗渲染在按钮所在的那个 window，
         // 所以名单必须通过桥从主窗口取，不能在 GameCanvas 里画。
         getAssignableLeaders={bridge.getAssignableLeaders}
@@ -97,9 +130,22 @@ export default function App() {
 
   const stateGetterRef = useRef<(() => GameState | null) | null>(null);
   const [panelDetached, setPanelDetached] = useState(false);
-  // Onboarding tutorial overlay gate (every El Alamein launch; skippable). When
-  // active, GameCanvas is paused (frozen map, clock stopped) until 开始作战/跳过.
-  const [tutorialActive, setTutorialActive] = useState(isTutorialScenario);
+  // 开场屏。挂着时 GameCanvas 是 paused（地图冻住、钟不走），与改前同一个机制。
+  const [introMode, setIntroMode] = useState<IntroMode>(initialIntroMode);
+
+  // 顶栏那几个 chip 长在 App 里（不在 ChatPanel），所以引导目标得在这儿也读一份。
+  // 1Hz 足够——它只用来决定 OBJECTIVES 那格闪不闪。
+  const [guideTargets, setGuideTargets] = useState<readonly string[]>([]);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const tg = window.__GAME_BRIDGE__?.getGuideTargets?.() ?? [];
+      setGuideTargets((prev) =>
+        prev.length === tg.length && tg.every((t, i) => prev[i] === t) ? prev : [...tg]);
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+  const introActive = introMode !== "none";
+  const dismissIntro = () => { markIntroSeen(); setIntroMode("none"); };
 
   const [topBar, setTopBar] = useState({
     money: 2000,
@@ -222,7 +268,8 @@ export default function App() {
           OPERATIONAL
         </span>
 
-        <div className="hud-topbar__resources">
+        <div className="hud-topbar__resources"
+             data-guide-pulse={guideTargets.includes("hud:resources") ? "on" : "off"}>
           {/* Money */}
           <div className={`hud-resource-chip hud-resource-chip--success`}>
             <span className="hud-resource-chip__label">MONEY</span>
@@ -257,6 +304,9 @@ export default function App() {
         {panelDetached && (
           <button
             className="hud-btn hud-btn-ghost hud-btn-sm"
+            // ★ 弹出去之后「弹出面板」这颗键就不渲染了，脉冲得跟着挪到「收回面板」上——
+            //   否则引导让他"看完关上"，屏上却没有一样东西在亮（家法：提到什么就得亮什么）。
+            data-guide-pulse={guideTargets.includes("btn:popout") ? "on" : "off"}
             onClick={handleReattach}
           >
             收回面板
@@ -265,6 +315,7 @@ export default function App() {
         {!panelDetached && (
           <button
             className="hud-btn hud-btn-ghost hud-btn-sm"
+            data-guide-pulse={guideTargets.includes("btn:popout") ? "on" : "off"}
             onClick={handlePopOut}
           >
             弹出面板 ↗
@@ -279,6 +330,7 @@ export default function App() {
           <div className="hud-topbar__resources" style={{ marginLeft: "auto" }}>
             <div
               className="hud-resource-chip hud-resource-chip--info"
+              data-guide-pulse={guideTargets.includes("hud:objectives") ? "on" : "off"}
               title={`夺下地图上 ${winProgress.pool} 面旗中的任意 ${winProgress.required} 面即胜`}
             >
               <span className="hud-resource-chip__label">OBJECTIVES</span>
@@ -306,10 +358,19 @@ export default function App() {
 
       {/* Main canvas area */}
       <div style={{ flex: 1, position: "relative" }}>
-        <GameCanvas onStateReady={registerStateGetter} panelDetached={panelDetached} paused={tutorialActive} />
+        <GameCanvas onStateReady={registerStateGetter} panelDetached={panelDetached} paused={introActive} />
       </div>
 
-      {tutorialActive && <TutorialOverlay onStart={() => setTutorialActive(false)} />}
+      {introMode === "gate" && (
+        <IntroGate
+          // 进教学＝换场景，必须整页跳转：场景是在 GameCanvas 的 useEffect 里
+          // 按 URL 建的，光改 state 不会重建 GameState。
+          onEnterTutorial={() => { markIntroSeen(); window.location.search = "?scenario=tutorial"; }}
+          onSkip={dismissIntro}
+          onOpenManual={() => setIntroMode("manual")}
+        />
+      )}
+      {introMode === "manual" && <TutorialOverlay onStart={dismissIntro} />}
     </div>
   );
 }

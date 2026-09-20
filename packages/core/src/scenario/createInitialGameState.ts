@@ -26,10 +26,15 @@ import { createFogState } from "../fog";
 import { resetMissionCounter } from "../missions";
 import { generateTerrain, FACILITIES, REGIONS, CHOKEPOINTS, FRONTS } from "@ai-commander/shared";
 import { createElAlameinState } from "./elAlamein";
+import { createTutorialState } from "./tutorial";
 
 // --- Unit factory ---
 
-function createUnit(
+/** 教学关部署复用这一份（`scenario/tutorial/deployment.ts`）。
+ *  ★注意：`elAlamein/deployment.ts:10` 还有一份**逐字节相同**的私有拷贝，
+ *  是本刀之前就有的重复。本刀不动它（承重文件，改它超出范围）——
+ *  但也**没有再抄第三份**：新场景走这个导出。 */
+export function createUnit(
   id: number,
   type: UnitType,
   team: Team,
@@ -78,6 +83,9 @@ export function createInitialGameState(scenarioId: ScenarioId = "dual_island"): 
 
   if (scenarioId === "el_alamein") {
     return createElAlameinState();
+  }
+  if (scenarioId === "tutorial") {
+    return createTutorialState();
   }
   const terrain = generateTerrain();
   const units = new Map<number, Unit>();

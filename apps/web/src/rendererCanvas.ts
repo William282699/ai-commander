@@ -296,6 +296,8 @@ export function renderFacilities(
   camera: Camera,
   captureObjectives?: string[],
   friendlyKeypoints?: string[],
+  guide?: GuideHighlight,
+  gameTime?: number,
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
   // 刀3 fix1: 胜负相关点全插旗 — 4 个夺取目标（占3胜）+ 3 个我方前哨（丢3败）。
@@ -622,6 +624,40 @@ const FACTION_RING_DROP = 0.45;      // nudged down by ry * this, to sit at the 
 const FACTION_RING_LINE = 0.16;      // rim width = rx * this
 const FACTION_RING_FILL_ALPHA = 0.30;
 const FACTION_RING_RIM_ALPHA = 0.95;
+/** 外面那圈晕（"发光"）。**故意做得便宜**：一个额外的 fill，不用 `shadowBlur`
+ *  也不用每帧造渐变——canvas 的 shadow 与 gradient 都是按单位按帧的重开销，
+ *  而「鼠标 1-2 秒卡顿」是 LEDGER 里**还没结的账**（首个外部试玩者的机器）。
+ *  每单位新增 1 次 fill；85 个单位 ⇒ +85 fill/帧。 */
+const FACTION_GLOW_RX = 1.55;        // 比本体圈大这么多倍
+const FACTION_GLOW_ALPHA = 0.16;     // 压得很淡，是"晕"不是第二个圈
+
+/**
+ * 缩远了，阵营圈的外晕要让路。
+ *
+ * ★ 病根是 `baseUnitSize` 那个 **8px 地板**：全景下一格只有 3px，圈却仍按 8px 起算
+ *   ⇒ ringRx=11.2、glowRx=17.4，**一个兵糊出 35px 宽的光斑**。几十个兵连成一片，
+ *   把自家据点的蓝旗整个盖住（用户 2026-09-12 实拍：「我军的蓝旗看不清楚，
+ *   因为蓝色光圈太大了」）。
+ * ★ 两手一起治：
+ *   ① 地板改成「最多一格宽」——圈再也不会比它站的那格还大；
+ *   ② 外晕（那圈 1.55× 的散光）随格子变小线性淡出，格子小到 6px 就完全不画。
+ *      **本体圈不淡**：那是唯一的敌我色标，缩多远都得留着。
+ */
+/** 引导圈在屏幕上的最小半径。缩到全景时格子只有两三个像素，圈得自己撑住。 */
+const GUIDE_RING_MIN_RX = 14;
+const GLOW_FADE_TILE_PX = 14;
+const GLOW_HIDE_TILE_PX = 6;
+export function factionGlowScale(tileScreenSize: number): number {
+  if (tileScreenSize >= GLOW_FADE_TILE_PX) return 1;
+  if (tileScreenSize <= GLOW_HIDE_TILE_PX) return 0;
+  return (tileScreenSize - GLOW_HIDE_TILE_PX) / (GLOW_FADE_TILE_PX - GLOW_HIDE_TILE_PX);
+}
+
+/** 单位圈的基准尺寸。地板存在是为了小图标也有个看得见的圈，但**不许超过一格**
+ *  ——超过就是在别人的地盘上画画。 */
+export function unitRingBase(tileScreenSize: number): number {
+  return Math.max(Math.min(8, tileScreenSize), tileScreenSize * 0.7);
+}
 
 /**
  * The selection ring sits just outside the faction base, as a multiple of it.
@@ -630,6 +666,111 @@ const FACTION_RING_RIM_ALPHA = 0.95;
  * click had landed (first external playtest: "编不了队").
  */
 const SELECTION_RING_GAP = 1.16;
+
+/**
+ * 教学引导的"看这儿"呼吸圈（用户 2026-09-08 提的：引导说到什么，什么就得自己亮，
+ * 不然玩家得满地图找——那正是首次外部试玩里"注意力全被找东西吃掉"的翻版）。
+ *
+ * ★ 为什么画在 canvas 里而不是复用按钮那套 CSS 脉冲：地图上的兵和设施是画出来的，
+ *   DOM 里没有它们的元素。两边的**节奏刻意对齐**（1.6s 一个来回），这样屏边的键
+ *   和地图上的目标看起来是同一件事在闪。
+ * ★ 用 `gameTime` 而不是 `performance.now()` 驱动：游戏暂停时它跟着停，
+ *   不会在冻住的画面上继续呼吸。
+ */
+const GUIDE_RING_PERIOD_SEC = 1.6;
+const GUIDE_RING_COLOR = "255,214,64";     // 琥珀色——与蓝(我方)/红(敌方)/绿(选中)都不撞
+function guideRingAlpha(gameTime: number): number {
+  // 用户 2026-09-08：「闪烁都很轻」⇒ 谷底从 0.35 抬到 0.6，峰值顶到 1.0，
+  // 且不做全灭（全灭那一拍会像掉帧）。
+  return 0.6 + 0.4 * (0.5 + 0.5 * Math.sin((gameTime / GUIDE_RING_PERIOD_SEC) * Math.PI * 2));
+}
+/** 在 (sx,sy) 画一圈呼吸的琥珀色椭圆。rx 是屏幕像素半径。 */
+function drawGuideRing(
+  ctx: CanvasRenderingContext2D, sx: number, sy: number, rx: number, gameTime: number,
+): void {
+  const ry = rx * FACTION_RING_FLATTEN;
+  const a = guideRingAlpha(gameTime);
+  ctx.save();
+  // 外面一圈很淡的晕，让它在杂乱地表上也跳得出来
+  ctx.beginPath();
+  ctx.ellipse(sx, sy, rx * 1.28, ry * 1.28, 0, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(${GUIDE_RING_COLOR},${a * 0.30})`;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(${GUIDE_RING_COLOR},${a})`;
+  ctx.lineWidth = Math.max(3, rx * 0.18);
+  ctx.stroke();
+  // 再描一圈更亮的内线，让它在沙地上也跳得出来
+  ctx.beginPath();
+  ctx.ellipse(sx, sy, rx * 0.88, ry * 0.88, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(255,255,255,${a * 0.45})`;
+  ctx.lineWidth = Math.max(1.5, rx * 0.07);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** 引导要点亮的东西（由 GameCanvas 每帧算好递进来）。空＝什么都不亮。 */
+export interface GuideHighlight {
+  unitIds?: ReadonlySet<number>;
+  facilityIds?: ReadonlySet<string>;
+  /** 玩家自己插的旗（`Tag.id`）。引导让他"派人去那面旗"时，那面旗得自己亮。 */
+  tagIds?: ReadonlySet<string>;
+}
+
+/**
+ * 教学引导的高亮，**单独一遍、画在迷雾之后**。
+ *
+ * ★ 为什么必须自己一遍（用户 2026-09-08 手测："烽火台没有闪烁"）：
+ *   渲染顺序是 设施 → **迷雾** → 单位，圈原本画在设施里 ⇒ 迷雾直接盖住它。
+ *   烽火台正好在未探索区，于是那一步玩家看不到任何提示。
+ *   引导圈是**陈在指路**，不是敌情读数——它本来就该无视雾。
+ */
+export function renderGuideHighlights(
+  ctx: CanvasRenderingContext2D,
+  units: Unit[],
+  facilities: Facility[],
+  camera: Camera,
+  gameTime: number,
+  guide?: GuideHighlight,
+  tags?: Tag[],
+): void {
+  if (!guide) return;
+  const tileScreenSize = TILE_SIZE * camera.zoom;
+  const baseUnitSize = unitRingBase(tileScreenSize);
+
+  if (guide.tagIds?.size && tags) {
+    for (const tag of tags) {
+      if (!guide.tagIds.has(tag.id)) continue;
+      // 旗子是从落点**往上**长的（旗杆 24px），圈往上抬半根杆才套得住它
+      const sx = (tag.position.x * TILE_SIZE - camera.x) * camera.zoom;
+      const sy = (tag.position.y * TILE_SIZE - camera.y) * camera.zoom
+               - Math.max(16, 24 * camera.zoom) * 0.5;
+      drawGuideRing(ctx, sx, sy, tileScreenSize * 1.1, gameTime);
+    }
+  }
+
+  if (guide.facilityIds?.size) {
+    for (const fac of facilities) {
+      if (!guide.facilityIds.has(fac.id)) continue;
+      const sx = (fac.position.x * TILE_SIZE - camera.x) * camera.zoom + tileScreenSize / 2;
+      const sy = (fac.position.y * TILE_SIZE - camera.y) * camera.zoom + tileScreenSize / 2;
+      // ★ 圈有**最小屏幕尺寸**：全景下一格才 2.4px，纯按格算的话圈只有 6px 宽，
+      //   等于没闪（用户 09-12 要的就是"我一眼能找到它们"）。旗子本身也是这么做的
+      //   （`drawFlag` 的旗杆高 `Math.max(16, 24*zoom)`）——两者一起才认得出来。
+      drawGuideRing(ctx, sx, sy, Math.max(GUIDE_RING_MIN_RX, tileScreenSize * 1.25), gameTime);
+    }
+  }
+  if (guide.unitIds?.size) {
+    const ringRx = baseUnitSize * FACTION_RING_RX * 1.5;
+    for (const u of units) {
+      if (!guide.unitIds.has(u.id) || u.hp <= 0) continue;
+      const sx = (u.position.x * TILE_SIZE - camera.x) * camera.zoom;
+      const sy = (u.position.y * TILE_SIZE - camera.y) * camera.zoom;
+      drawGuideRing(ctx, sx, sy + ringRx * FACTION_RING_FLATTEN * FACTION_RING_DROP, ringRx, gameTime);
+    }
+  }
+}
 
 export function renderUnits(
   ctx: CanvasRenderingContext2D,
@@ -640,9 +781,10 @@ export function renderUnits(
   canvasHeight: number,
   gameTime: number,
   selectedUnitIds?: Set<number>,
+  guide?: GuideHighlight,
 ): void {
   const tileScreenSize = TILE_SIZE * camera.zoom;
-  const baseUnitSize = Math.max(8, tileScreenSize * 0.7);
+  const baseUnitSize = unitRingBase(tileScreenSize);
 
   // Build id → unit lookup once per frame so sprite turrets can resolve their
   // attackTarget. Out-of-view targets just won't be in the map and the turret
@@ -715,6 +857,17 @@ export function renderUnits(
     // A coloured base under the feet is the RTS-standard read: it survives
     // overlap, motion, and greyscale (the two hues differ in luminance too).
     ctx.save();
+    // 外晕先画（在本体圈之下），让阵营色从边缘化开，不是一条硬边。
+    const glowRx = ringRx * FACTION_GLOW_RX;
+    const glowRy = glowRx * FACTION_RING_FLATTEN;
+    const glowScale = factionGlowScale(tileScreenSize);
+    if (glowScale > 0) {
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + glowRy * FACTION_RING_DROP, glowRx, glowRy, 0, 0, Math.PI * 2);
+      ctx.fillStyle = factionColor(isPlayer, FACTION_GLOW_ALPHA * glowScale);
+      ctx.fill();
+    }
+
     ctx.beginPath();
     ctx.ellipse(cx, cy + ringRy * FACTION_RING_DROP, ringRx, ringRy, 0, 0, Math.PI * 2);
     ctx.fillStyle = factionColor(isPlayer, FACTION_RING_FILL_ALPHA);

@@ -24,6 +24,7 @@
 //     re-pumps if queue still has work.
 
 import { fetchEdgeMp3 } from "./edgeTts";
+import { getVoiceVolume, onVoiceVolumeChange } from "../audioSettings";
 import { nativeSpeak, nativeCancel } from "./browserNative";
 import { VOICE_CONFIG, type Persona } from "./voiceConfig";
 
@@ -358,6 +359,10 @@ export function setPlaybackObserver(fn: ((text: string, origin: SpeakOrigin) => 
 
 function playAudio(audio: HTMLAudioElement, job: Job): Promise<void> {
   currentAudio = audio;
+  // 参谋嗓门的唯一真相源在 audioSettings；拖滑块时**正在播的这条也跟着变**，
+  // 不然得等下一句才知道调没调对。
+  audio.volume = getVoiceVolume();
+  const unsub = onVoiceVolumeChange((v) => { audio.volume = v; });
   return new Promise<void>((resolve, reject) => {
     // ★真出声判据（勘察档新 HIGH-3，判据家法同形）：这一声原来报在 play() 之前，
     //   于是 autoplay 被拒 / 标签页被静音 / 音量 0 时**照报一声**——任何拿观察者当
@@ -370,6 +375,7 @@ function playAudio(audio: HTMLAudioElement, job: Job): Promise<void> {
       try { playbackObserver?.(job.text, job.origin); } catch { /* 观察点不许影响播放 */ }
     };
     const cleanup = () => {
+      unsub();
       audio.removeEventListener("timeupdate", announce);
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
