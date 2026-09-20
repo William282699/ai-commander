@@ -56,6 +56,14 @@ export interface Intent {
   // Squad-level dispatch (Day 10.5) — takes priority over fromFront
   fromSquad?: string;  // squad ID like "T5", "I3"
 
+  // retreat-scope 刀C — 按**任务**指代那批人（不是按位置、也不是按编制）。
+  //
+  // 「现在守南线的部队」= fromFront（位置）
+  // 「刚从南线派去山脊那批」= fromDispatch（来源／那一次任务）
+  // 两个字段各自独立解析，**不互相兜底、不静默合并**。任务号由引擎生成（M#），
+  // 只从该任务的**活成员**里取人；任务不在了就明确失败，不退化成别的选法。
+  fromDispatch?: string;  // dispatch id like "M3"
+
   // Source & destination (region/front names, NOT coordinates)
   fromFront?: string;
   toFront?: string;

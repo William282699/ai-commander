@@ -3,10 +3,11 @@
 // All orders flow through here → mutate GameState
 // ============================================================
 
-import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask, ApplyResult, ApplyOrderOutcome, OrderRejectReason } from "@ai-commander/shared";
+import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask, ApplyResult, ApplyOrderOutcome, OrderRejectReason, IntentType } from "@ai-commander/shared";
 import { TRADE_COSTS, UNIT_STATS, UNIT_DISPLAY_NAME, isProducibleUnitType } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
 import { findPath, clearPathCache } from "./pathfinding";
+import { recordPlayerDispatch } from "./dispatchLedger";
 
 /**
  * Compute a shared A* path for a group of units heading to the same target.
@@ -104,7 +105,51 @@ export function applyOrders(state: GameState, orders: Order[]): ApplyResult {
     }
   }
 
+  // ── 刀C: 台账登记。**只认 `order.origin`**，不认调用的是哪个函数 ──
+  //
+  // 为什么不能按入口认：`applyPlayerCommands` 是鼠标专用（注释写着 from mouse
+  // interaction，而且它给每个单位盖 `manualOverride = true`），对话派兵走的是
+  // `applyOrders`。按入口记账只有两种坏结局：说话派出去的兵一条都不入账，
+  // 或者把陈派的每个兵都盖上"手动接管"，砸掉现有控制规则。
+  //
+  // 登记用的是 **appliedUnitIds**——真接到命令的那些人。计划选中的不算数。
+  // 幂等跳过（alreadyDoing）那批不摘也不记：它们本来就在执行同一件事。
+  recordLedgerEntries(state, orders, perOrder);
+
   return summarizeApply(perOrder);
+}
+
+/** OrderAction → IntentType。两套枚举大半同名，只有 attack_move 要翻一下。 */
+function intentTypeOfOrder(action: Order["action"]): IntentType {
+  return action === "attack_move" ? "attack" : action;
+}
+
+/** 一句话安排两个任务 ⇒ 两个 group ⇒ **两条记录，各记各的名单**（不合成一条）。 */
+function recordLedgerEntries(state: GameState, orders: Order[], perOrder: ApplyOrderOutcome[]): void {
+  const groups = new Map<string, { meta: NonNullable<Order["dispatchMeta"]>; ids: number[] }>();
+  for (let i = 0; i < orders.length; i++) {
+    const order = orders[i];
+    if (order.origin !== "advisor" && order.origin !== "mouse") continue; // auto / 缺席 ⇒ 不记
+    const applied = perOrder[i]?.appliedUnitIds ?? [];
+    if (applied.length === 0) continue;
+    const meta = order.dispatchMeta ?? {
+      // 没带 meta 的玩家命令（鼠标那条路可以不带）：按单条 order 各记各的。
+      // 动作从 order 自己那一栏翻过来，不硬塞一个"hold"——台账里写一个它
+      // 根本没在做的动作，将来信封上就是一行假话。
+      group: `o${i}`,
+      sourceKind: "selection" as const,
+      sourceKey: "",
+      action: intentTypeOfOrder(order.action),
+      targetName: "",
+    };
+    const key = `${order.origin}|${meta.group}`;
+    const slot = groups.get(key) ?? { meta, ids: [] };
+    for (const id of applied) if (!slot.ids.includes(id)) slot.ids.push(id);
+    groups.set(key, slot);
+  }
+  for (const slot of groups.values()) {
+    recordPlayerDispatch(state, slot.ids, slot.meta);
+  }
 }
 
 /** Roll the per-order rows up into the three de-duplicated batch totals. */
@@ -157,7 +202,13 @@ export function applyPlayerCommands(state: GameState, orders: Order[]): ApplyRes
   }
 
   // Route through the normal entrypoint using a player-command flag.
-  const taggedOrders = orders.map((order) => ({ ...order, isPlayerCommand: true }));
+  // 刀C: 鼠标这条路自己盖 origin —— 调用方（GameCanvas）不必逐处记得。
+  // 手动接管语义一个字不改：上面照旧设 manualOverride。
+  const taggedOrders = orders.map((order) => ({
+    ...order,
+    isPlayerCommand: true,
+    origin: order.origin ?? ("mouse" as const),
+  }));
   return applyOrders(state, taggedOrders);
 }
 

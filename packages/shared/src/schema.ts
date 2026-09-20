@@ -92,6 +92,17 @@ export function sanitizeIntent(raw: unknown): Intent | null {
     }
   }
 
+  // retreat-scope 刀C — fromDispatch（任务号）。
+  // ★ 这一步最容易漏：白名单以外的字段在这里被**静默剥掉**，连报错都没有
+  //   ——引擎端写得再对，模型填的号也到不了。同 fromSquad 一样过 sentinel 滤网。
+  if (typeof obj.fromDispatch === "string" && obj.fromDispatch.trim().length > 0) {
+    const fd = obj.fromDispatch.trim();
+    const DISPATCH_SENTINELS = ["none", "null", "n/a", "undefined", ""];
+    if (!DISPATCH_SENTINELS.includes(fd.toLowerCase())) {
+      intent.fromDispatch = fd;
+    }
+  }
+
   // Optional string fields — strip empty strings to avoid downstream mis-matches
   if (typeof obj.fromFront === "string" && obj.fromFront.trim().length > 0) intent.fromFront = obj.fromFront.trim();
   if (typeof obj.toFront === "string" && obj.toFront.trim().length > 0) intent.toFront = obj.toFront.trim();

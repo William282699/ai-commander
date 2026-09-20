@@ -17,15 +17,19 @@
 //   "期望中心"一律从**生产代码**探出来（单位 defend 探针），不在台架里重算几何。
 // ============================================================
 
-import { createInitialGameState, resolveIntent, applyOrders, updateFog, processAutoBehavior } from "@ai-commander/core";
+import {
+  createInitialGameState, resolveIntent, applyOrders, applyPlayerCommands, updateFog, processAutoBehavior,
+  liveDispatchMembers, findDispatch, activeDispatches, findDispatchAmbiguity,
+} from "@ai-commander/core";
 import { tick } from "../packages/core/src/sim";
 import { processEnemyAI } from "../packages/core/src/enemyAI";
 import { processDefensiveAI } from "../packages/core/src/scenario/elAlamein/defensiveAI";
 import { processPressureDirector } from "../packages/core/src/scenario/elAlamein/pressureDirector";
-import type { GameState, Unit, Squad, Intent, ScenarioId, Order } from "@ai-commander/shared";
+import type { GameState, Unit, Squad, Intent, ScenarioId, Order, DispatchMeta, ApplyResult } from "@ai-commander/shared";
 import { buildExecReceipt, type DispatchSlice } from "../apps/web/src/execReceipt";
 import { planVoiceSpeech } from "../apps/web/src/voiceSpeech";
 import { readFileSync } from "fs";
+import { buildDigestForChannel } from "../apps/web/src/digestHelper";
 
 // ── 0. Harness ──
 
@@ -569,6 +573,373 @@ function knifeB(negctl: boolean): void {
   }
 }
 
+
+// ════════════════════════════════════════════════════════════
+// 刀 C：把「哪条战线」和「哪次任务」分开表达
+// ════════════════════════════════════════════════════════════
+//
+// 根因（计划 §C.1）：`getUnitsOnFront` 是纯几何——「某条战线的部队」＝此刻站在
+// 该线包围盒里的可调单位。部队一开拔就不再"属于"原战线，而玩家心里的
+// 「南线的部队」可能是**位置**，也可能是**来源**。两种指代，一种表达方式。
+//
+// ★ 台架照生产链走：intent → resolveIntent → **盖 origin/dispatchMeta** →
+//   applyOrders → ApplyResult → 回执。少盖一步，台账就不该记——判据要测的
+//   正是"生产里那条链会不会记"。
+
+/** 镜像 ChatPanel 的对话派兵：解析 → 盖来源标记 → 执行 → 回执。 */
+function advisorDispatch(
+  state: GameState,
+  intent: Intent,
+  groupIdx = 0,
+  selectedUnitIds?: readonly number[],
+): { res: ApplyResult; assigned: number[]; destinationName: string; orders: Order[] } {
+  const r = resolveIntent(intent, state, state.style, undefined, selectedUnitIds);
+  const meta: DispatchMeta = {
+    group: `i${groupIdx}`,
+    sourceKind: intent.fromDispatch ? "dispatch" : intent.fromSquad ? "squad" : intent.fromFront ? "front" : "pool",
+    sourceKey: intent.fromDispatch ?? intent.fromSquad ?? intent.fromFront ?? "",
+    action: intent.type,
+    targetName: r.destinationName,
+  };
+  const stamped = r.orders.map((o) => ({ ...o, origin: "advisor" as const, dispatchMeta: meta }));
+  const res = applyOrders(state, stamped);
+  return { res, assigned: r.assignedUnitIds, destinationName: r.destinationName, orders: stamped };
+}
+
+function knifeC(negctl: boolean): void {
+  console.log("\n== 刀 C：把「哪条战线」和「哪次任务」分开表达 ==");
+
+  // ── C0 台架自证：不盖 origin 就不该记账（否则下面每一条都证明不了什么）──
+  {
+    const { state } = southArmy();
+    const r = resolveIntent({ type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent, state, state.style);
+    applyOrders(state, r.orders); // 裸 order，没有 origin
+    check("C0 台架自证：不带 origin 的 order 一条台账都不产生",
+      state.dispatches.length === 0, `dispatches=${state.dispatches.length}`);
+  }
+
+  // ── C13 对话派兵必须入账，且**不盖 manualOverride** ──
+  {
+    const { state, ids } = southArmy();
+    advisorDispatch(state, { type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent);
+    check("C13 通过参谋派一批 ⇒ 台账多一条",
+      state.dispatches.length === 1 && state.dispatches[0].memberIds.length === ids.length,
+      JSON.stringify(state.dispatches.map((d) => [d.id, d.memberIds.length])));
+    check("C13b ★这批兵的 manualOverride 不变（鼠标派兵才置位）★",
+      ids.every((id) => state.units.get(id)!.manualOverride === false));
+    check("C13c 号走 M# 命名空间，不与 G#／分队号冒认",
+      /^M\d+$/.test(state.dispatches[0].id), state.dispatches[0].id);
+  }
+  {
+    // 鼠标那条路：照旧置位，且照旧记账
+    const { state, ids } = southArmy();
+    applyPlayerCommands(state, [{ unitIds: [...ids], action: "attack_move", target: { x: 250, y: 90 }, priority: "medium" }]);
+    check("C13d 鼠标派兵：manualOverride 照旧置位（一个字不改），台账照样记",
+      ids.every((id) => state.units.get(id)!.manualOverride === true) && state.dispatches.length === 1,
+      `dispatches=${state.dispatches.length}`);
+  }
+
+  // ── C1 ★核心：人已离开本线，用任务号指代 ⇒ 调的就是那批人 ──
+  {
+    const { state, ids } = southArmy();
+    // 先派去山脊（跑完整循环让他们真的离开南线框）
+    advisorDispatch(state, { type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent);
+    fullPump(state, 400);
+    const d = state.dispatches[0];
+    const stillOnSouth = resolveIntent({ type: "retreat", fromFront: "front_south", quantity: "all" } as Intent, state, state.style);
+    check("C1 台架自证：他们确实已经离开南线框（否则按位置也找得到，本条不承重）",
+      stillOnSouth.orders.length === 0 && stillOnSouth.degraded,
+      `按位置还能找到 ${stillOnSouth.assignedUnitIds.length} 个`);
+    const live = liveDispatchMembers(state, d).map((u) => u.id).sort((a, b) => a - b);
+    const out = advisorDispatch(state, { type: "retreat", fromDispatch: d.id, targetFacility: "ea_player_south_post", quantity: "all" } as Intent, 1);
+    const applied = [...out.res.appliedUnitIds].sort((a, b) => a - b);
+    check("C1b ★用任务号指代 ⇒ appliedUnitIds 集合等于该任务的活成员（逐 id 比对）★",
+      applied.length === live.length && applied.every((id, i) => id === live[i]),
+      `applied=${JSON.stringify(applied)} live=${JSON.stringify(live)}`);
+    check("C1c 名单没有漏人：当初派出去几个，现在就调回几个",
+      applied.length === ids.length, `${applied.length}/${ids.length}`);
+  }
+
+  // ── C2 换一张图复跑（规则与地名无关）──
+  {
+    const { state, ids } = tutorialArmy();
+    advisorDispatch(state, { type: "attack", fromFront: "tut_front_center", targetFacility: "tut_enemy_post", quantity: "all" } as Intent);
+    fullPump(state, 200);
+    const d = state.dispatches[0];
+    const live = liveDispatchMembers(state, d).map((u) => u.id).sort((a, b) => a - b);
+    const out = advisorDispatch(state, { type: "retreat", fromDispatch: d.id, targetFacility: "tut_player_post", quantity: "all" } as Intent, 1);
+    const applied = [...out.res.appliedUnitIds].sort((a, b) => a - b);
+    check("C2 教学关同样成立",
+      applied.length === live.length && applied.length === ids.length && applied.every((id, i) => id === live[i]),
+      `applied=${applied.length} live=${live.length}`);
+  }
+
+  // ── C3 留守 + 外派并存 ⇒ 问一句（判的是"候选是否唯一"，不是"说没说编号"）──
+  {
+    const { state, ids } = southArmy();
+    ids.push(addUnit(state, 344, 152).id); // 南线上一共 5 个人
+    advisorDispatch(state, {
+      type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: 4,
+    } as Intent);
+    fullPump(state, 400);
+    // ★ 留守的是谁由**引擎**决定（quantity 取的是前 4 个，顺序是引擎的），
+    //   台架不许自己假设是最后加的那个——上一版就是这么假设的，判据当场红。
+    const sent = new Set(state.dispatches[0].memberIds);
+    const stay = ids.find((id) => !sent.has(id))!;
+    const amb = findDispatchAmbiguity(state, { type: "retreat", fromFront: "front_south", quantity: "all" } as Intent);
+    check("C3 留守 1 + 外派 4 ⇒ 判为指代不清，要问一句",
+      amb !== null && amb.length === 2, amb ? JSON.stringify(amb.map((c) => c.label)) : "null");
+    check("C3b 候选逐项列得出来：一条是留守的，一条是那次任务（带号）",
+      !!amb && amb.some((c) => c.kind === "stay" && c.unitIds.length === 1 && c.unitIds[0] === stay) &&
+      amb.some((c) => c.kind === "dispatch" && c.key === state.dispatches[0].id && c.unitIds.length === 4),
+      amb ? JSON.stringify(amb.map((c) => [c.kind, c.key, c.unitIds.length])) : "null");
+    // 回答"派出去那批" ⇒ 撤的是那 4 个，不是留守那 1 个
+    const d = state.dispatches[0];
+    const out = advisorDispatch(state, { type: "retreat", fromDispatch: d.id, targetFacility: "ea_player_south_post", quantity: "all" } as Intent, 1);
+    check("C3c 回答「派出去那批」⇒ 撤的是那 4 个，留守那 1 个没被动",
+      out.res.appliedUnitIds.length === 4 && !out.res.appliedUnitIds.includes(stay) &&
+      [...sent].every((id) => out.res.appliedUnitIds.includes(id)),
+      `applied=${JSON.stringify(out.res.appliedUnitIds)} stay=${stay}`);
+    check("C3d 指代唯一时不问：点名了任务号 ⇒ 不再判为歧义",
+      findDispatchAmbiguity(state, { type: "retreat", fromDispatch: d.id } as Intent) === null);
+  }
+
+  // ── C4 / C16 执行前复查：下令到执行之间死了人，名单重新取过 ──
+  {
+    const { state, ids } = southArmy();
+    advisorDispatch(state, { type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent);
+    fullPump(state, 400);
+    const d = state.dispatches[0];
+    const before = liveDispatchMembers(state, d).length;
+    state.units.delete(ids[0]); // 问完到执行之间，死了一个
+    const out = advisorDispatch(state, { type: "retreat", fromDispatch: d.id, targetFacility: "ea_player_south_post", quantity: "all" } as Intent, 1);
+    const receipt = buildExecReceipt(out.res, [{ action: "retreat", destinationName: out.destinationName, orderIndexes: out.orders.map((_, k) => k) }]);
+    check("C4 名单**现查**：死掉 1 个 ⇒ 实际只调动 before-1 个",
+      out.res.appliedUnitIds.length === before - 1 && !out.res.appliedUnitIds.includes(ids[0]),
+      `applied=${out.res.appliedUnitIds.length} before=${before}`);
+    check("C4b 回执如实报那个真数（不是台账快照里的原始人数）",
+      receipt.facts[0].appliedCount === before - 1, JSON.stringify(receipt.facts));
+  }
+
+  // ── C5 负对照：「Aiden 那队撤回来」逐字节不变（钉 C.2 那条订正）──
+  {
+    const build = () => {
+      nextId = 9000;
+      const s2 = emptyBattlefield("el_alamein");
+      s2.time = 120;
+      const squadIds: number[] = [];
+      for (let i = 0; i < 4; i++) squadIds.push(addUnit(s2, 340 + i * 2, 150).id);
+      addSquad(s2, squadIds, { id: "I1", leaderName: "Aiden" });
+      return { state: s2, ids: squadIds };
+    };
+    const intent = { type: "retreat", fromSquad: "Aiden", targetFacility: "ea_player_south_post", quantity: "all" } as Intent;
+    // 无台账时的落点
+    const a = build();
+    const goldA = ordersKey(resolveIntent(intent, a.state, a.state.style).orders);
+    // 有台账时（同一批人刚被登记过一条任务）
+    const b = build();
+    advisorDispatch(b.state, { type: "attack", fromSquad: "Aiden", toFront: "front_ridge", quantity: "all" } as Intent);
+    // 把他们搬回原位，排除"位置变了"这个干扰项——本条要测的是台账在不在场
+    b.ids.forEach((id, i) => { b.state.units.get(id)!.position = { x: 340 + i * 2, y: 150 }; b.state.units.get(id)!.orders = []; b.state.units.get(id)!.state = "idle"; });
+    const goldB = ordersKey(resolveIntent(intent, b.state, b.state.style).orders);
+    check("C5 ★「Aiden 那队撤回来」走编制路，台账在不在场逐字节相同★",
+      goldA === goldB && b.state.dispatches.length === 1,
+      `A=${goldA.slice(0, 80)} B=${goldB.slice(0, 80)}`);
+  }
+
+  // ── C6 单位被玩家另派 ⇒ 从旧任务摘除 ──
+  {
+    const { state, ids } = southArmy();
+    advisorDispatch(state, { type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent);
+    const d0 = state.dispatches[0];
+    applyPlayerCommands(state, [{ unitIds: [ids[0]], action: "defend", target: { x: 360, y: 150 }, priority: "medium" }]);
+    check("C6 被玩家另派的那个 ⇒ 不在旧任务活成员里了",
+      !liveDispatchMembers(state, d0).some((u) => u.id === ids[0]) &&
+      liveDispatchMembers(state, d0).length === ids.length - 1,
+      `left=${liveDispatchMembers(state, d0).length}`);
+    check("C6b 另派的那个进了新任务（两条记录，不是一条）",
+      state.dispatches.length === 2 && state.dispatches[1].memberIds.includes(ids[0]));
+  }
+
+  // ── C7 ★抵达后转防守 ⇒ 仍在旧任务活成员里（钉 C.4 那条订正）──
+  //    必须跑**完整循环**：sim 在抵达后把命令改写成持久 defend 单、
+  //    autoBehavior 会直接改 state——"看到命令变化就摘"会把他们踢出台账。
+  {
+    const { state, ids } = southArmy();
+    advisorDispatch(state, { type: "retreat", fromFront: "front_south", targetFacility: "ea_player_south_post", quantity: "all" } as Intent);
+    const d0 = state.dispatches[0];
+    fullPump(state, 300);
+    const states = ids.map((id) => state.units.get(id)?.state);
+    check("C7 台架自证：他们确实已经抵达并转成 defending（否则本条不承重）",
+      states.every((st) => st === "defending"), states.join(","));
+    check("C7b ★抵达后转防守、命令被改写 ⇒ 仍在旧任务活成员里★",
+      liveDispatchMembers(state, d0).length === ids.length,
+      `left=${liveDispatchMembers(state, d0).length}/${ids.length}`);
+  }
+
+  // ── C8 敌方 / 自动行为调兵 ⇒ 台账长度不增 ──
+  {
+    const state = createInitialGameState("el_alamein");
+    const before = state.dispatches.length;
+    fullPump(state, 300); // 敌方 AI、防守 AI、导演、autoBehavior 全跑
+    check("C8 跑 300 秒完整循环（敌方/防守/导演/自动行为都动了兵）⇒ 台账一条不增",
+      state.dispatches.length === before, `${before} → ${state.dispatches.length}`);
+  }
+
+  // ── C9 重开一局 ⇒ 台账空（三条场景路都要）──
+  {
+    for (const sc of ["el_alamein", "tutorial", "dual_island"] as const) {
+      const s2 = createInitialGameState(sc);
+      check(`C9 ${sc} 开局台账为空且号从 1 起`,
+        Array.isArray(s2.dispatches) && s2.dispatches.length === 0 && s2.nextDispatchNum === 1,
+        `${JSON.stringify(s2.dispatches)} next=${s2.nextDispatchNum}`);
+    }
+  }
+
+  // ── C10 框选下令 ⇒ 走框选，不查台账 ──
+  {
+    const { state, ids } = southArmy();
+    advisorDispatch(state, { type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent);
+    fullPump(state, 400);
+    const d = state.dispatches[0];
+    const picked = [ids[0], ids[1]];
+    const out = advisorDispatch(state, { type: "retreat", fromDispatch: d.id, targetFacility: "ea_player_south_post", quantity: "all" } as Intent, 1, picked);
+    check("C10 框选优先：同时给了任务号与框选 ⇒ 只动框选的那两个",
+      out.res.appliedUnitIds.length === 2 && out.res.appliedUnitIds.every((id) => picked.includes(id)),
+      JSON.stringify(out.res.appliedUnitIds));
+  }
+
+  // ── C11 不误调：比的是【实际调动名单】与【这次应该调动的名单】──
+  //    （v2 比人数错，v3 比"全军名单"还是错）
+  {
+    const { state, ids } = southArmy();
+    for (let i = 0; i < 6; i++) addUnit(state, 300 + i * 2, 30); // 北线旁观者
+    advisorDispatch(state, { type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent);
+    fullPump(state, 400);
+    const d = state.dispatches[0];
+    const expected = liveDispatchMembers(state, d).map((u) => u.id).sort((a, b) => a - b);
+    const out = advisorDispatch(state, { type: "retreat", fromDispatch: d.id, targetFacility: "ea_player_south_post", quantity: "all" } as Intent, 1);
+    const actual = [...out.res.appliedUnitIds, ...out.res.alreadyDoingUnitIds].sort((a, b) => a - b);
+    check("C11 ★实际调动名单 == 该指代解析出的应调集合（逐 id，不比人数、不比全军）★",
+      actual.length === expected.length && actual.every((id, i) => id === expected[i]) &&
+      actual.every((id) => ids.includes(id)),
+      `actual=${JSON.stringify(actual)} expected=${JSON.stringify(expected)}`);
+  }
+
+  // ── C12 正向案例：全军恰好只剩那一队时，调到全军就是正确结果 ──
+  //    （防止"不得等于全军"这类判据逼着代码犯错）
+  {
+    nextId = 9000;
+    const state = emptyBattlefield("el_alamein");
+    state.time = 120;
+    const only: number[] = [];
+    for (let i = 0; i < 3; i++) only.push(addUnit(state, 340 + i * 2, 150).id);
+    addSquad(state, only, { id: "I1", leaderName: "Aiden" });
+    const out = advisorDispatch(state, { type: "retreat", fromSquad: "Aiden", targetFacility: "ea_player_south_post", quantity: "all" } as Intent);
+    check("C12 全军只剩 Aiden 那一队 ⇒「让 Aiden 撤回来」调到全军**就是对的**",
+      out.res.appliedUnitIds.length === only.length, JSON.stringify(out.res.appliedUnitIds));
+  }
+
+  // ── C14 一句话两个任务 ⇒ 两条记录，名单不混 ──
+  {
+    const { state, ids } = southArmy();
+    const north: number[] = [];
+    for (let i = 0; i < 3; i++) north.push(addUnit(state, 300 + i * 2, 30).id);
+    const r1 = resolveIntent({ type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent, state, state.style);
+    const r2 = resolveIntent({ type: "defend", fromFront: "front_coastal", toFront: "front_center", quantity: "all" } as Intent, state, state.style, new Set(r1.assignedUnitIds));
+    const stamp = (orders: Order[], k: number, dest: string, key: string): Order[] =>
+      orders.map((o) => ({ ...o, origin: "advisor" as const, dispatchMeta: { group: `i${k}`, sourceKind: "front" as const, sourceKey: key, action: k === 0 ? "attack" as const : "defend" as const, targetName: dest } }));
+    applyOrders(state, [...stamp(r1.orders, 0, r1.destinationName, "front_south"), ...stamp(r2.orders, 1, r2.destinationName, "front_coastal")]);
+    check("C14 两个 group ⇒ 两条记录，各记各的名单（不合成一条）",
+      state.dispatches.length === 2 &&
+      state.dispatches[0].memberIds.every((id) => ids.includes(id)) &&
+      state.dispatches[1].memberIds.every((id) => north.includes(id)),
+      JSON.stringify(state.dispatches.map((d) => [d.id, d.action, d.memberIds.length])));
+  }
+
+  // ── C15 重复下令 ⇒ 不新建任务、不清旧任务 ──
+  {
+    const { state, ids } = southArmy();
+    const target = { x: 355, y: 150 };
+    const meta: DispatchMeta = { group: "i0", sourceKind: "front", sourceKey: "front_south", action: "defend", targetName: "南线前哨" };
+    const mk = (): Order[] => ids.map((id) => ({
+      unitIds: [id], action: "defend" as const, target, priority: "medium" as const,
+      crisisFrontId: "front_south", origin: "advisor" as const, dispatchMeta: meta,
+    }));
+    applyOrders(state, mk());
+    const firstId = state.dispatches[0].id;
+    const firstMembers = [...state.dispatches[0].memberIds];
+    applyOrders(state, mk());
+    check("C15 同一条命令再说一遍 ⇒ 台账不新增、旧任务原封不动",
+      state.dispatches.length === 1 && state.dispatches[0].id === firstId &&
+      state.dispatches[0].memberIds.length === firstMembers.length,
+      JSON.stringify(state.dispatches.map((d) => [d.id, d.memberIds.length])));
+  }
+
+  // ── C17 信封：号必须印出来，否则模型永远填不出 fromDispatch ──
+  {
+    const { state } = southArmy();
+    advisorDispatch(state, { type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent);
+    const envelope = buildDigestForChannel(state, "combat");
+    const d = state.dispatches[0];
+    check("C17 ★在役任务进信封（号、去向、还剩几个人）★",
+      envelope.includes("---DISPATCHES---") && envelope.includes(d.id) && envelope.includes("left="),
+      envelope.split("\n").filter((l) => l.includes("DISPATCH") || /^M\d+ /.test(l)).join(" | "));
+    const clean = buildDigestForChannel(createInitialGameState("el_alamein"), "combat");
+    check("C17b 没有在役任务时整节缺席（不印空节）",
+      !clean.includes("---DISPATCHES---"));
+  }
+
+  // ── 绊索（计划 §C.5 的 12、13、14）──
+  if (negctl) {
+    console.log("\n-- negctl：三种坏改法打新引擎，必须真 FAIL --");
+    let red = 0;
+    {
+      // 12：摘掉 fromDispatch 解析（＝把它当成没填）⇒ C1 当场红
+      // ★ 旁观者必须在场：空战场上"全局兜底"恰好等于那批人，比较会恒真
+      //   （上一版就是这么假绿的）。
+      const { state } = southArmy();
+      for (let i = 0; i < 6; i++) addUnit(state, 300 + i * 2, 30);
+      advisorDispatch(state, { type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent);
+      fullPump(state, 400);
+      const d = state.dispatches[0];
+      const withField = resolveIntent({ type: "retreat", fromDispatch: d.id, quantity: "all" } as Intent, state, state.style);
+      const without = resolveIntent({ type: "retreat", quantity: "all" } as Intent, state, state.style);
+      const same = JSON.stringify(withField.assignedUnitIds.sort()) === JSON.stringify(without.assignedUnitIds.sort());
+      console.log(`  ${same ? "GREEN(坏)" : "RED(好)"} negctl-C1 摘掉 fromDispatch（${withField.assignedUnitIds.length} vs 无字段 ${without.assignedUnitIds.length}）`);
+      if (!same) red++;
+    }
+    {
+      // 13：把摘除规则改成"命令一变就摘" ⇒ C7 当场红
+      //     抵达后 sim 会把命令改写成持久 defend 单——按"命令变了"摘人，
+      //     这一刻活成员会掉到 0。
+      const { state, ids } = southArmy();
+      advisorDispatch(state, { type: "retreat", fromFront: "front_south", targetFacility: "ea_player_south_post", quantity: "all" } as Intent);
+      const d0 = state.dispatches[0];
+      fullPump(state, 300);
+      const ordersChanged = ids.filter((id) => state.units.get(id)!.orders[0]?.action === "defend").length;
+      const stillMembers = liveDispatchMembers(state, d0).length;
+      const badRuleWouldKeep = stillMembers - ordersChanged; // "命令一变就摘"剩下的人数
+      const same = badRuleWouldKeep === stillMembers;
+      console.log(`  ${same ? "GREEN(坏)" : "RED(好)"} negctl-C2 「命令一变就摘」会把 ${ordersChanged} 个抵达后转防守的人踢出台账（真规则留了 ${stillMembers} 个）`);
+      if (!same) red++;
+    }
+    {
+      // 14：把两个字段合并成一个（fromDispatch 当 fromFront 用）⇒ C3/C5 当场红
+      const { state } = southArmy();
+      advisorDispatch(state, { type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: "all" } as Intent);
+      fullPump(state, 400);
+      const d = state.dispatches[0];
+      const asDispatch = resolveIntent({ type: "retreat", fromDispatch: d.id, quantity: "all" } as Intent, state, state.style);
+      const asFront = resolveIntent({ type: "retreat", fromFront: d.id, quantity: "all" } as Intent, state, state.style);
+      const same = asDispatch.assignedUnitIds.length === asFront.assignedUnitIds.length;
+      console.log(`  ${same ? "GREEN(坏)" : "RED(好)"} negctl-C3 两个字段合并（按任务 ${asDispatch.assignedUnitIds.length} vs 把号塞进 fromFront ${asFront.assignedUnitIds.length}）`);
+      if (!same) red++;
+    }
+    check("negctl 三条坏改法全部真 FAIL（判据有牙）", red === 3, `只红了 ${red}/3`);
+  }
+}
+
 // ── main ──
 
 const knifeArg = (process.argv.find((a) => a.startsWith("--knife=")) ?? "--knife=all").split("=")[1];
@@ -576,6 +947,7 @@ const negctl = process.argv.includes("--negctl");
 
 if (knifeArg === "a" || knifeArg === "all") knifeA(negctl);
 if (knifeArg === "b" || knifeArg === "all") knifeB(negctl);
+if (knifeArg === "c" || knifeArg === "all") knifeC(negctl);
 
 console.log(failCount === 0 ? `\nALL PASS (${checkCount} 条)` : `\n${failCount}/${checkCount} FAILURES`);
 process.exit(failCount === 0 ? 0 : 1);

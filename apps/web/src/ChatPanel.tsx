@@ -21,6 +21,8 @@ import { VolumePopover } from "./VolumePopover";
 import { ArsenalPanel } from "./ArsenalPanel";
 import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines, isAllFrontHint } from "@ai-commander/core";
 import { spokenNameOf, resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, isKnownForceRef, checkDispatchAuthority, retargetIntentForTicket, ticketDestinationVerdict, describeCommittedPull } from "@ai-commander/core";
+// retreat-scope 刀C — 任务台账（「哪次任务」这一类指代）
+import { findDispatch, liveDispatchMembers, findDispatchAmbiguity, type DispatchCandidate } from "@ai-commander/core";
 import type { CommanderRef, EscalationTicket } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
@@ -31,6 +33,8 @@ import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-com
 import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute, buildProductionOptions } from "@ai-commander/shared";
 import type { ProductionCategoryOptions } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
+// retreat-scope 刀C — 台账登记用的来源标记
+import type { DispatchMeta, DispatchSourceKind } from "@ai-commander/shared";
 import type { LeaderProfile, LeaderPersonality } from "@ai-commander/shared";
 import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, getVoiceOpenDiag, type VoiceRecording, type VoiceCaptureArm } from "./voiceRecorder";
 import { probeVoiceChannels, channelUsesVoiceCapture, isBaselineArm } from "./voiceCapability";
@@ -258,6 +262,20 @@ function softFixTargetFields(
 const HIGH_IMPACT_CONFIRM_WORDS = ["确认", "是", "对", "执行", "同意", "可以", "行", "yes", "ok"];
 const HIGH_IMPACT_CANCEL_WORDS = ["不", "否", "取消", "算了", "no", "cancel"];
 const HIGH_IMPACT_CONFIRM_WINDOW_SEC = 120;
+
+// ── retreat-scope 刀C: 这条意图是**怎么**指出这批人的（台账的 provenance）──
+// 台账要记下来源，否则「之前从南线派出去那批」将来无从匹配。判定只看字段在不在，
+// 不看地名、不看措辞——对任何图成立。
+function dispatchSourceOf(
+  intent: Intent,
+  selectedUnitIds: readonly number[] | undefined,
+): { sourceKind: DispatchSourceKind; sourceKey: string } {
+  if (intent.fromDispatch) return { sourceKind: "dispatch", sourceKey: intent.fromDispatch };
+  if (intent.fromSquad) return { sourceKind: "squad", sourceKey: intent.fromSquad };
+  if (intent.fromFront) return { sourceKind: "front", sourceKey: intent.fromFront };
+  if (selectedUnitIds && selectedUnitIds.length > 0) return { sourceKind: "selection", sourceKey: "" };
+  return { sourceKind: "pool", sourceKey: "" };
+}
 
 function normalizeReply(s: string): string {
   return s.trim().toLowerCase().replace(/[。.!！?？,，、\s]+$/g, "");
@@ -1693,6 +1711,48 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     setActiveChannel(COMMANDER_CHANNEL[COMMANDERS[0]]);
   };
 
+  // ── 刀C: 待决「选哪批部队」槽 ──
+  //
+  // ★ 与「批准这个已经确定的方案」是**两种语义**，必须是独立的待决类型：
+  //   批准合同问的是"办不办"，这里问的是"办谁"。把"选择"塞进"批准"的判定里，
+  //   改完会把刚收口的批准流程弄坏。UI 与过期检查沿用同一套（setClarification
+  //   + 同寿命窗口），判定本身各走各的。
+  const pendingSelectionRef = useRef<{
+    id: string;
+    channel: Channel;
+    sessionId: string;
+    epoch: number;
+    expiresAt: number;
+    candidates: DispatchCandidate[];
+  } | null>(null);
+
+  /** 还活着的那一槽（过期 / 换频道 / 重开一局都作废，绝不悬挂）。 */
+  const livePendingSelection = (now: number, ch: Channel) => {
+    const p = pendingSelectionRef.current;
+    if (!p) return null;
+    if (p.channel !== ch || p.sessionId !== SESSION_ID || p.epoch !== gameEpochRef.current || now > p.expiresAt) {
+      pendingSelectionRef.current = null;
+      return null;
+    }
+    return p;
+  };
+
+  /** 问一句：候选逐项列出，**不替他挑一个**，这一轮什么都不执行。 */
+  const askWhichDispatch = (state: GameState, ch: Channel, candidates: DispatchCandidate[]) => {
+    pendingSelectionRef.current = {
+      id: makePendingId(),
+      channel: ch,
+      sessionId: SESSION_ID,
+      epoch: gameEpochRef.current,
+      expiresAt: state.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC,
+      candidates,
+    };
+    const question = `您说的是哪一批？${candidates.map((c) => c.label).join("，还是")}？`;
+    addMessage("warning", question, state.time, ch, undefined, "command_ack");
+    pushContext(channelContextRef.current, ch, { role: "assistant", text: question, time: state.time });
+    setClarification("请指明是哪一批部队");
+  };
+
   // ── Phase 3: handle approving a staff thread option ──
   const handleThreadApprove = (thread: StaffThread, opt: AdvisorOption, idx: number) => {
     if (thread.status !== "open") return;
@@ -2356,6 +2416,21 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         actionableTurn &&
         ((execGate.auto && optionsArr.length >= 1) || (execBucket === "A" && execOpt0 != null));
 
+      // ── 刀C:「好的」不算选择 —— 由**模型**判，不由词表判 ──
+      //
+      // 第一版写在这里的是「确认词命中就拦下、再问一次」。台架当场炸了
+      // （ab-approval-v4 TB1/TB3 那道护栏）：那张确认词表立过一条规矩——
+      // **命中＝抄近路，未命中＝照常进 LLM，词表没有语义裁决权**。
+      // 拿它当"这不是选择"的判官，正是那道护栏写下来要防的那次事故
+      // （加速器变法官），而且它也确实漏："好的"根本不在表里，而表是
+      // NEVER EXPAND 的。
+      //
+      // 所以判定挪去它该在的地方：prompt 里一条语义原则（ai.ts 的
+      // DISPATCH REFERENCE 段）——参谋刚问完"哪一批"，长官一句应答词不是回答，
+      // 该再问一遍而不是开单。引擎这边只保证**只问一句**（下面那个待决槽是
+      // 一次性的），不再替长官挑；真挑错了，刀B 的回执会把"到底动了谁、去了哪"
+      // 逐条说出来——看得见，不是静默。
+
       // 其余全部分支（error / NOOP / 空 options / 正常命令）合用这一处：它们
       // 屏上显示的都是 data.brief（或它为空时各自的兜底行），所以耳朵听的也是它。
       const speechPlan = sayToEar((data.brief as string) || "", willExecute);
@@ -2773,6 +2848,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // intent identity; the intents array holds the same objects throughout.
     const ticketByIntent = new Map<Intent, EscalationTicket>();
     const ticketReceiptMode = new Map<Intent, "moved" | "in_place">();
+    // 刀C: fromDispatch 解析出来的合法名单（已与本参谋的可调池取交集）。
+    // 走新字段不等于绕过权限——G 号那条路踩过这个坑（手测账③ × B 刀）。
+    const dispatchRosters = new Map<Intent, number[]>();
 
     // 手测账③: who is being spoken to decides what they may move. This is the
     // ENGINE BACKSTOP — the primary fix is the prompt principle (a persona with
@@ -2793,6 +2871,51 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           state.time, ch, undefined, "command_ack",
         );
         return;
+      }
+
+      // ── 刀C: fromDispatch 的权限闸 ──
+      // 任务号既不是分队名也不是 G 号，上面那道 checkDispatchAuthority 看不见它
+      // ——不补这一刀，一份冻结的名单就会不经过滤地执行。
+      // 名单本身由引擎在 resolveSourceUnits 里**现查**（人会死、会被改派）；
+      // 这里只做"这位参谋调不调得动他们"。交集为空 ⇒ 明确拒绝，绝不静默少派。
+      if (intent.fromDispatch) {
+        const d = findDispatch(state, intent.fromDispatch);
+        if (d) {
+          const live = liveDispatchMembers(state, d).map((u) => u.id);
+          const pool = auth.kind === "allowed" ? new Set(auth.pool) : null;
+          const lawful = pool ? live.filter((id) => pool.has(id)) : live;
+          if (lawful.length === 0) {
+            const who = COMMANDER_META[speakingPersona].label;
+            addMessage("warning", `任务 ${d.id} 那批人不在${who}麾下，这道命令未执行——请对带这支部队的指挥官下令。`, state.time, ch, undefined, "command_ack");
+            return;
+          }
+          dispatchRosters.set(intent, lawful);
+        }
+        // 找不到这条任务 ⇒ 不在这里兜底。引擎的 resolveSourceUnits 会明确失败
+        // （「任务 M3 已经不在了」），那条路只废掉这一条意图，不连坐同批的其它意图。
+      }
+
+      // ── 刀C: 指代不清就问一句（**绝不替他挑一个**）──
+      // 判的是「候选是否唯一」，不是「玩家有没有说编号」：
+      //   「现在守南线的部队」＝明确（位置）⇒ 不问；
+      //   「刚派去山脊那批」＝明确（任务，且只有一条匹配）⇒ 不问；
+      //   留守的与外派的同时存在、或同一来源派出了两批 ⇒ 问。
+      {
+        // ★ 只问一句。已经问过（待决槽还活着）就按长官这一轮的回答办——
+        //   再问就成环：回答「守在那儿的那批」在 intent 里仍旧是 fromFront，
+        //   与被问的那条一模一样，第二次判定必然又判成"候选还是两条"。
+        //   不假装看懂了什么：这一轮的选兵仍旧由模型写的字段决定，而刀B 的回执
+        //   会把"到底动了谁、去了哪"逐条说出来，选错一眼就看得见。
+        const slot = livePendingSelection(state.time, ch);
+        if (slot) {
+          pendingSelectionRef.current = null; // 一次性消费，绝不悬挂
+        } else {
+          const amb = findDispatchAmbiguity(state, intent, selectedIdsSnapshotRef.current);
+          if (amb) {
+            askWhichDispatch(state, ch, amb);
+            return;
+          }
+        }
       }
 
       // v4 刀2b: a G-number is the ONE legal handle for "那批兵". Resolved
@@ -2910,12 +3033,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     const settled: { ticket: EscalationTicket; dispatched: number; mode: "moved" | "in_place" }[] = [];
     // 刀B：意图 → 它的 order 下标 + 落点名。执行回执唯一的取数口。
     const slices: DispatchSlice[] = [];
-    for (const intent of intents) {
+    for (let intentIdx = 0; intentIdx < intents.length; intentIdx++) {
+      const intent = intents[intentIdx];
       // v4 刀2b: a ticket's frozen roster wins over the box-select snapshot —
       // the player approved THAT batch, not whatever is currently framed.
+      // 刀C: 名单优先级 —— 票据 > 框选 > 任务。框选优先与现有优先级一致
+      // （框选是长官自己的手，最具体）；任务名单在没有框选时才当硬约束用。
       const result = resolveIntent(
         intent, state, state.style, reserved,
-        ticketRosters.get(intent) ?? selectedIdsSnapshotRef.current,
+        ticketRosters.get(intent) ?? selectedIdsSnapshotRef.current ?? dispatchRosters.get(intent),
       );
       if (result.degraded) {
         // 失败理由照旧上屏：它说的是"这条意图没能变成命令"，不是执行结果，
@@ -2952,8 +3078,21 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           destinationName: result.destinationName,
           orderIndexes: result.orders.map((_, k) => base + k),
         });
+        // ── 刀C: 给这批 order 盖上来源标记，台账据此登记 ──
+        // 记账只认这个标记，不认调用的是哪个函数：对话派兵走 applyOrders，
+        // 鼠标派兵走 applyPlayerCommands（后者还会盖 manualOverride）。
+        // ★ 一句话安排两个任务 ⇒ 两个 group ⇒ 两条记录，各记各的名单。
+        // ★ advisor 这条路**不设 manualOverride**——陈派的兵不算"玩家手动接管"。
+        const meta: DispatchMeta = {
+          group: `i${intentIdx}`,
+          ...dispatchSourceOf(intent, selectedIdsSnapshotRef.current),
+          action: intent.type,
+          targetName: result.destinationName,
+        };
+        allOrders.push(...result.orders.map((o) => ({ ...o, origin: "advisor" as const, dispatchMeta: meta })));
+      } else {
+        allOrders.push(...result.orders);
       }
-      allOrders.push(...result.orders);
     }
 
     if (allOrders.length === 0 && degradedCount > 0) {

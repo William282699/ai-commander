@@ -3,7 +3,7 @@
 // All game data models live here.
 // ============================================================
 
-import type { TradeBudget, ProduceBudget } from "./intents"; // 7b.1 / emily-production-v1: Orders carry budget intents through to settlement
+import type { TradeBudget, ProduceBudget, IntentType } from "./intents"; // 7b.1 / emily-production-v1: Orders carry budget intents through to settlement；IntentType：刀C 台账登记动作
 
 // --- Teams & Phases ---
 
@@ -271,6 +271,56 @@ export interface Order {
   // issues NO autonomous orders, so these stay undefined until 6b.
   autonomous?: boolean;
   actionId?: string;
+  /** retreat-scope 刀C: 谁下的这道令。缺席 ⇒ 视同 "auto"，**不记台账**
+   *  （fail-safe 方向：忘了填最多是漏记一条，绝不会记错一条）。 */
+  origin?: OrderOrigin;
+  /** 刀C: 记账用的其余信息。只有 origin 是 advisor/mouse 时才有意义。 */
+  dispatchMeta?: DispatchMeta;
+}
+
+// --- Dispatch ledger (retreat-scope 刀C) ---
+//
+// 「某条战线的部队」过去只有一种解释：此刻站在那条线包围盒里的可调单位（纯几何）。
+// 部队一开拔就不再"属于"原战线——而玩家心里的「南线的部队」可能是**位置**
+// （现在守在那儿的），也可能是**来源**（之前从那儿派出去的）。
+// 这是两种指代，而 intent 里只有一种表达方式（LEDGER §F2 的一张脸）。
+//
+// 台账让「刚从南线派去山脊那批」有地方可写：每次玩家命令真的派出了兵，
+// 引擎记一条 Dispatch，号由引擎生成（M#，避开 G# 那套临时编队号的命名空间）。
+// ★ 由**引擎在真派兵那一刻**写，不是从对话历史反推——§F2 就是被上下文带偏的。
+
+/** 这批人当时是被怎么指出来的。 */
+export type DispatchSourceKind = "front" | "squad" | "dispatch" | "selection" | "pool";
+
+export interface Dispatch {
+  /** 本局内的短号，形如 "M3"。 */
+  id: string;
+  atGameTime: number;
+  sourceKind: DispatchSourceKind;
+  /** 当时那条 intent 的来源字段原文（战线 id / 分队号 / 旧任务号 …）。 */
+  sourceKey: string;
+  action: IntentType;
+  /** 引擎真送他们去的地方（与回执同源）。空串＝没有去处可宣称。 */
+  targetName: string;
+  /** 登记时的名单。**活成员要现查**（liveDispatchMembers）——名单是快照，
+   *  战场不是：人会死、会被改派。 */
+  memberIds: number[];
+  status: "active" | "closed";
+}
+
+/** 下令方是谁。记账只认这个标记，**不认调用的是哪个函数**：
+ *  `applyPlayerCommands` 是鼠标专用（它给每个单位盖 manualOverride），
+ *  而对话派兵走的是 `applyOrders`——按函数认会漏掉说话派出去的每一个兵。 */
+export type OrderOrigin = "advisor" | "mouse" | "auto";
+
+/** 记账要用、而 Order 本身没有的那几样。缺席 ⇒ 按单条 order 各记各的。 */
+export interface DispatchMeta {
+  /** 同一 key 的 order 合成一条任务。一句话安排两个任务 ⇒ 两个 key，两条记录。 */
+  group: string;
+  sourceKind: DispatchSourceKind;
+  sourceKey: string;
+  action: IntentType;
+  targetName: string;
 }
 
 // --- Order execution result (retreat-scope 刀B) ---
@@ -696,6 +746,9 @@ export interface GameState {
   doctrines: import("./doctrine").StandingOrder[];
   doctrineCooldowns: Record<string, number>; // doctrineId → last alert game time
   tasks: TaskCard[];
+  /** retreat-scope 刀C: 任务台账。重开一局即清空（它活在 GameState 里）。 */
+  dispatches: Dispatch[];
+  nextDispatchNum: number;
   battleMarkers: BattleMarker[];
   /** Step 7e: recorded player decisions awaiting engine review (queue, capped). */
   decisionReviews: DecisionReviewRecord[];

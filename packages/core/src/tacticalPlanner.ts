@@ -28,6 +28,7 @@ import { usesGroundCaptureRules } from "./economy";
 import { frontDestinationFor, type FrontDestinationMode } from "./frontDestination";
 import { createMission } from "./missions";
 import { getFormationOffset, computeHeading, type FormationStyle } from "./formation";
+import { installFrontResolver, findDispatch, liveDispatchMembers } from "./dispatchLedger";
 
 // ── Result type ──
 
@@ -1526,7 +1527,10 @@ function resolveSourceUnits(
   const busyStates = new Set(["defending", "attacking", "moving", "retreating"]);
   const isFullMobilization = intent.quantity === "all" || intent.quantity === "most";
   const isSquadDefaultAll = !!intent.fromSquad && (intent.quantity == null || intent.quantity === undefined);
-  if (!isFullMobilization && !isSquadDefaultAll) {
+  // 刀C: 任务号与编制号同待遇。「刚派去山脊那批撤回来」没说数量 ⇒ 是整批，
+  // 不是"整批里闲着的那几个"——同一任务里本来就既有忙兵也有闲兵。
+  const isDispatchDefaultAll = !!intent.fromDispatch && (intent.quantity == null || intent.quantity === undefined);
+  if (!isFullMobilization && !isSquadDefaultAll && !isDispatchDefaultAll) {
     const idleUnits = units.filter((u) => !busyStates.has(u.state));
     // Crisis reinforcement (excludeFront set): strict idle-only, never fall back
     // to the full pool. Falling back would re-dispatch units already moving to
@@ -1551,6 +1555,27 @@ function resolveSourceUnitsRaw(
   intent: Intent,
   state: GameState,
 ): SourceUnitsResult {
+  // ── 刀C: fromDispatch —— 按**任务**指代（「刚从南线派去山脊那批」）──
+  //
+  // 排在 fromSquad 之前：任务号是一份冻结的具体名单，比编制更具体。
+  // 两个字段**不互相兜底**——查不到就明确失败，绝不退化成"按编制找"或
+  // "按位置找"，更不退化成全军（那正是 74/85 那笔账的形状）。
+  //
+  // ★ 这里同时就是「执行前复查」：本函数在 applyOrders 之前的那一刻跑，
+  //   活成员从**当前战场**现查（liveDispatchMembers）。服务端校验不算数——
+  //   等模型回复那几秒里人会死、会被改派。
+  if (intent.fromDispatch && typeof intent.fromDispatch === "string") {
+    const d = findDispatch(state, intent.fromDispatch);
+    if (!d) {
+      return { units: [], error: `任务 ${intent.fromDispatch} 已经不在了` };
+    }
+    const live = liveDispatchMembers(state, d);
+    if (live.length === 0) {
+      return { units: [], error: `任务 ${d.id} 已经没有可调的人了` };
+    }
+    return { units: live };
+  }
+
   // ── Phase 2: fromSquad — match by squad.id, leaderName, or ownerCommander ──
   if (intent.fromSquad && typeof intent.fromSquad === "string") {
     // 1. Exact squad id
@@ -1738,6 +1763,18 @@ export function findFront(state: GameState, hint: string): Front | undefined {
       f.name.toLowerCase().includes(lower),
   );
 }
+
+// ── 刀C: 把"战线 hint → 战线 / 线上有谁"这一份实现注入台账模块 ──
+//    台账需要同样的判断，而反向 import 会成环。复制一份几何判断就会漂，
+//    所以这里注入：一份实现，两处用。
+installFrontResolver({
+  frontIdOf: (state, hint) => findFront(state, hint)?.id ?? null,
+  frontNameOf: (state, hint) => findFront(state, hint)?.name ?? hint,
+  unitsOnFront: (state, hint) => {
+    const f = findFront(state, hint);
+    return f ? getUnitsOnFront(state, f) : [];
+  },
+});
 
 /** Get all dispatchable player units within a front's regions. */
 function getUnitsOnFront(state: GameState, front: Front): Unit[] {

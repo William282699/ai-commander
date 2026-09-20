@@ -36,6 +36,12 @@ export { selectEscalationEvent } from "./director";
 // Step 7c.1 — escalation grounding facts (pure; for LLM voice, not a template)
 export { frontEscalationFacts } from "./director";
 export { buildFrontEscalationPayload } from "./frontEscalationPayload";
+// retreat-scope 刀C — 任务台账（「哪次任务」这一类指代）
+export {
+  liveDispatchMembers, findDispatch, activeDispatches,
+  recordPlayerDispatch, findDispatchAmbiguity,
+} from "./dispatchLedger";
+export type { DispatchCandidate } from "./dispatchLedger";
 export { previewHighImpactIntent, isAllFrontHint } from "./tacticalPlanner";
 export type { HighImpactPreview } from "./tacticalPlanner";
 export { buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine } from "./commandPreflight";
