@@ -252,6 +252,32 @@ function runSynthetic(): void {
       `assigned=${r.assignedUnitIds.length}`);
   }
 
+  // D5) retreat-scope 刀A（本台架原先漏掉的那一格）：**同线 + 点名前哨**。
+  //     D3 只覆盖了「同线 + 无具体前哨」——而前哨天然坐落在自己那条战线里，
+  //     旧「修法3」按包围盒丢弃，把「撤回自家前哨」的目的地必然抹掉。
+  //     收窄后的规则只看**字段来源**：点名了设施就不是误填。
+  //     本格不推翻 D3——D3 那格仍然必须丢弃，两格一起才钉得住收窄的边界。
+  {
+    nextId = 9000;
+    const s2 = emptyBattlefield();
+    s2.time = 120;
+    const ids: number[] = [];
+    // 南部战线内部（southern_desert [200,140,400,225]），南线前哨 (365,155)
+    // 同在 front_south 的 alam_halfa_zone [320,138,365,165] 里。
+    for (let i = 0; i < 4; i++) ids.push(addUnit(s2, 340 + i * 2, 150).id);
+    addSquad(s2, ids, { id: "I1", leaderName: "Aiden" });
+    const post = s2.facilities.get("ea_player_south_post");
+    if (!post) throw new Error("no ea_player_south_post facility");
+    const r = resolveIntent({ type: "retreat", fromFront: "front_south", targetFacility: "ea_player_south_post", quantity: "all" } as Intent, s2, s2.style);
+    const landings = r.orders.map((o) => o.target).filter((t): t is { x: number; y: number } => t !== null);
+    check("D5 同线 + 点名前哨：落点在该前哨，回执报站名（刀A 补的那一格）",
+      r.assignedUnitIds.length === ids.length &&
+      landings.length === ids.length &&
+      landings.every((t) => near(t, post.position, 4)) &&
+      r.log.includes(post.name) && !r.log.includes("安全区域"),
+      `post=(${post.position.x},${post.position.y}) landings=${JSON.stringify(landings)} log=${r.log}`);
+  }
+
   // ── 修法2 contract: arrival holds the post; the U-turn loop is dead ──
   console.log("\n== arrival semantics (到位守住；掉头闭环) ==");
 

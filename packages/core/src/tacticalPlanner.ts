@@ -681,23 +681,29 @@ function planRetreat(
   // otherwise send the force back INTO the front it is leaving, and a bare
   // 「快撤」 must keep the legacy toward-HQ step byte-for-byte
   // (snapshot-pinned in ab-retreat-semantics).
+  // retreat-scope 刀A: the destination's SOURCE decides whether it may be
+  // dropped. A facility / region / coordinate the player or the model actually
+  // named is the player's intent; only a bare toFront is a guess we filled in.
+  const destinationExplicit = !!(intent._targetPos || intent.targetFacility || intent.targetRegion);
   let destination: Position | null =
-    intent._targetPos || intent.targetFacility || intent.targetRegion || intent.toFront
-      ? resolveTarget(intent, state)
-      : null;
+    destinationExplicit || intent.toFront ? resolveTarget(intent, state) : null;
 
-  // 修法3: destination inside the departure front = a mis-filled order that
-  // would pin the force where it already stands — ignore it, use the default.
-  if (destination !== null && intent.fromFront) {
+  // 修法3 (retreat-scope 刀A narrows it): drop the destination only for the ONE
+  // mis-fill shape this guard was built for — the staff repeating the departure
+  // front as the destination, which would pin the force where it already stands.
+  // That shape is "only toFront, and toFront IS fromFront".
+  //
+  // The old condition ("destination lands inside the departure front's bbox")
+  // treated 同一条战线 as 同一个位置. An outpost naturally sits inside its own
+  // front — 南线前哨 (365,155) ∈ alam_halfa_zone, 中央前哨 (360,105) ∈
+  // central_desert, 教学关我方哨站 (36,30) ∈ tut_base — so the most natural
+  // order of all,「让某条线的部队撤回自家前哨」, had its destination erased
+  // every single time. The rule now reads the FIELD SOURCE only: no place
+  // names, no distances, no coordinates, so it holds on any map.
+  if (destination !== null && !destinationExplicit && intent.toFront && intent.fromFront) {
     const departFront = findFront(state, intent.fromFront);
-    if (departFront) {
-      const d = destination;
-      const inDepart = departFront.regionIds
-        .map((rid) => state.regions.get(rid))
-        .filter((r): r is NonNullable<typeof r> => r !== undefined)
-        .some((r) => d.x >= r.bbox[0] && d.x <= r.bbox[2] && d.y >= r.bbox[1] && d.y <= r.bbox[3]);
-      if (inDepart) destination = null;
-    }
+    const destFront = findFront(state, intent.toFront);
+    if (departFront && destFront && departFront.id === destFront.id) destination = null;
   }
 
   if (destination !== null) {
