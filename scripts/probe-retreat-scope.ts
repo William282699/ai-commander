@@ -19,7 +19,7 @@
 
 import {
   createInitialGameState, resolveIntent, applyOrders, applyPlayerCommands, updateFog, processAutoBehavior,
-  liveDispatchMembers, findDispatch, activeDispatches, findDispatchAmbiguity,
+  liveDispatchMembers, findDispatch, activeDispatches, findDispatchAmbiguity, isDispatchIntent,
 } from "@ai-commander/core";
 import { tick } from "../packages/core/src/sim";
 import { processEnemyAI } from "../packages/core/src/enemyAI";
@@ -603,7 +603,25 @@ function advisorDispatch(
   };
   const stamped = r.orders.map((o) => ({ ...o, origin: "advisor" as const, dispatchMeta: meta }));
   const res = applyOrders(state, stamped);
-  return { res, assigned: r.assignedUnitIds, destinationName: r.destinationName, orders: stamped };
+  return { res, assigned: r.assignedUnitIds, destinationName: r.destinationName, orders: stamped, log: r.log };
+}
+
+/** 镜像 ChatPanel 造 slice 的那一段（刀甲：经济单带 economy/planLog）。
+ *  `withEconomy=false` 就是刀甲**之前**的写法——负对照用它。 */
+function sliceOf(
+  intent: Intent,
+  destinationName: string,
+  log: string,
+  orderIndexes: number[],
+  withEconomy = true,
+): DispatchSlice {
+  const economy = withEconomy && !isDispatchIntent(intent.type);
+  return {
+    action: intent.type,
+    destinationName,
+    orderIndexes,
+    ...(economy ? { economy: true, planLog: log } : {}),
+  };
 }
 
 function knifeC(negctl: boolean): void {
@@ -940,6 +958,130 @@ function knifeC(negctl: boolean): void {
   }
 }
 
+
+// ════════════════════════════════════════════════════════════
+// 刀 甲：经济单不许被误报成「没有执行」（审核 P0）
+// ════════════════════════════════════════════════════════════
+//
+// 病（审核已复现）：produce / trade 实际成功——队列 0→3、钱真扣了——屏上和耳朵
+// 却都说「没有执行——没有部队接到这道命令。」，红字 warning，还被 pushContext
+// 喂给模型，下一轮参谋记得的是"生产失败了"。Emily 的生产每条都中。
+// 根因：经济 order 的 unitIds 天生为空 ⇒ ApplyOrderOutcome 三栏全空 ⇒
+// buildExecReceipt 按人头判成 none。
+//
+// ★ 判据把「报成功」与「真成功」**绑在同一条断言里**：只断言字符串就会在
+//   引擎其实失败时照样绿。
+
+function economyState(money = 3850, fuel = 300): GameState {
+  const s = createInitialGameState("el_alamein");
+  s.economy.player.resources.money = money;
+  s.economy.player.resources.fuel = fuel;
+  return s;
+}
+
+function knifeJia(negctl: boolean): void {
+  console.log("\n== 刀 甲：经济单不许被误报成「没有执行」 ==");
+
+  const CASES: Array<[string, Intent, (s: GameState) => { before: number; after: number }]> = [
+    ["数量生产", { type: "produce", produceType: "infantry", quantity: 3 } as Intent,
+      (s) => ({ before: 0, after: s.productionQueue.player.length })],
+    ["预算生产", { type: "produce", produceType: "main_tank", produceBudget: { mode: "fraction_of_money", fraction: 1 } } as Intent,
+      (s) => ({ before: 0, after: s.productionQueue.player.length })],
+    ["买油", { type: "trade", tradeAction: "buy_fuel" } as Intent,
+      (s) => ({ before: 3850, after: s.economy.player.resources.money })],
+  ];
+
+  for (const [name, intent, probe] of CASES) {
+    const st = economyState();
+    const r = resolveIntent(intent, st, st.style);
+    const res = applyOrders(st, r.orders);
+    const receipt = buildExecReceipt(res, [sliceOf(intent, r.destinationName, r.log, r.orders.map((_, k) => k))]);
+    const moved = probe(st);
+    const enginedidIt = name === "买油" ? moved.after < moved.before : moved.after > moved.before;
+    check(`J1 ${name}：引擎**真办成了**（队列增加 / 钱减少）——本条不成立下面就不承重`,
+      enginedidIt, `before=${moved.before} after=${moved.after}`);
+    check(`J1b ${name} ★回执不说「没有执行」，结局不是 none，而且与引擎真的变了绑在一条断言里★`,
+      enginedidIt &&
+      receipt.outcome !== "none" &&
+      receipt.facts[0].outcome === "applied" &&
+      receipt.facts[0].economy === true &&
+      receipt.lines.length === 1 &&
+      !receipt.lines[0].includes("没有执行"),
+      `outcome=${receipt.outcome} lines=${JSON.stringify(receipt.lines)}`);
+    check(`J1c ${name}：回执那一行就是该 resolver 的 log（基线「执行: …」那句的内容）`,
+      receipt.lines[0].startsWith(r.log), `line=${receipt.lines[0]} log=${r.log}`);
+    check(`J1d ${name}：经济单不进人头统计（三栏全 0，不许拿它冒充派了兵）`,
+      receipt.facts[0].appliedCount === 0 && receipt.facts[0].alreadyDoingCount === 0 && receipt.facts[0].rejectedCount === 0,
+      JSON.stringify(receipt.facts[0]));
+  }
+
+  // ── J2 混合一句：一条 produce + 一条 retreat ⇒ 两行各自对应 ──
+  {
+    nextId = 9000;
+    const st = economyState();
+    // 南线上放一支可调小队（正式局自带的兵太多，混进来会把判据搅浑）
+    const ids: number[] = [];
+    for (let i = 0; i < 4; i++) ids.push(addUnit(st, 340 + i * 2, 150).id);
+    addSquad(st, ids, { id: "PJ", leaderName: "Probe" });
+    const prod = { type: "produce", produceType: "infantry", quantity: 3 } as Intent;
+    const retr = { type: "retreat", fromSquad: "PJ", targetFacility: "ea_player_south_post", quantity: "all" } as Intent;
+    const r1 = resolveIntent(prod, st, st.style);
+    const r2 = resolveIntent(retr, st, st.style, new Set(r1.assignedUnitIds));
+    const orders = [...r1.orders, ...r2.orders];
+    const slices = [
+      sliceOf(prod, r1.destinationName, r1.log, r1.orders.map((_, k) => k)),
+      sliceOf(retr, r2.destinationName, r2.log, r2.orders.map((_, k) => r1.orders.length + k)),
+    ];
+    const res = applyOrders(st, orders);
+    const receipt = buildExecReceipt(res, slices);
+    check("J2 混合一句：两行回执各自对应（生产那行走 planLog，撤退那行走人头）",
+      receipt.lines.length === 2 &&
+      receipt.facts[0].economy === true && receipt.facts[0].outcome === "applied" &&
+      receipt.facts[1].economy === false && receipt.facts[1].appliedCount === ids.length &&
+      receipt.facts[1].outcome === "applied",
+      JSON.stringify(receipt.facts));
+    check("J2b 撤退那行的人数仍取 appliedUnitIds（不被经济条污染）",
+      receipt.facts[1].appliedCount === res.appliedUnitIds.length &&
+      res.appliedUnitIds.length === ids.length,
+      `fact=${receipt.facts[1].appliedCount} apply=${res.appliedUnitIds.length}`);
+    check("J2c 总结局是 applied，不是 none / partial",
+      receipt.outcome === "applied", receipt.outcome);
+  }
+
+  // ── J3 源码级接线：两处建 slice 的地方都得盖 economy 标记 ──
+  //    （纯函数全绿而真机照旧报"没有执行"——这一条防的就是"忘了接"。）
+  {
+    const panelSrc = readFileSync("apps/web/src/ChatPanel.tsx", "utf8")
+      .split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
+    const wired = panelSrc.split("economy: true, planLog:").length - 1;
+    check("J3 ChatPanel 两处 slice 都带 economy/planLog（漏一处那条路照旧误报）",
+      wired === 2 && panelSrc.split("isDispatchIntent(intent.type)").length - 1 === 2,
+      `盖上的有 ${wired} 处`);
+    check("J3b 「是不是经济单」只有一份真相源（core 的 isDispatchIntent），UI 没另抄一张表",
+      !/const\s+economyTypes\s*=\s*new Set\(\["produce"/.test(panelSrc) ||
+      panelSrc.includes("isDispatchIntent(intent.type)"),
+      "");
+  }
+
+  // ── 绊索：把 economy 标记摘掉（＝刀甲之前的写法）跑同一份判据，必须真 RED ──
+  if (negctl) {
+    console.log("\n-- negctl：摘掉 economy 标记，必须真 FAIL --");
+    let red = 0;
+    for (const [name, intent, probe] of CASES) {
+      const st = economyState();
+      const r = resolveIntent(intent, st, st.style);
+      const res = applyOrders(st, r.orders);
+      const receipt = buildExecReceipt(res, [sliceOf(intent, r.destinationName, r.log, r.orders.map((_, k) => k), false)]);
+      const moved = probe(st);
+      const enginedidIt = name === "买油" ? moved.after < moved.before : moved.after > moved.before;
+      const stillGood = receipt.outcome !== "none" && !receipt.lines.join("").includes("没有执行");
+      console.log(`  ${stillGood ? "GREEN(坏)" : "RED(好)"} negctl-J ${name}：引擎真办成=${enginedidIt}，回执说「${receipt.lines[0]}」`);
+      if (!stillGood) red++;
+    }
+    check("negctl 三种经济单摘掉标记后全部真 FAIL（判据有牙）", red === 3, `只红了 ${red}/3`);
+  }
+}
+
 // ── main ──
 
 const knifeArg = (process.argv.find((a) => a.startsWith("--knife=")) ?? "--knife=all").split("=")[1];
@@ -948,6 +1090,7 @@ const negctl = process.argv.includes("--negctl");
 if (knifeArg === "a" || knifeArg === "all") knifeA(negctl);
 if (knifeArg === "b" || knifeArg === "all") knifeB(negctl);
 if (knifeArg === "c" || knifeArg === "all") knifeC(negctl);
+if (knifeArg === "jia" || knifeArg === "all") knifeJia(negctl);
 
 console.log(failCount === 0 ? `\nALL PASS (${checkCount} 条)` : `\n${failCount}/${checkCount} FAILURES`);
 process.exit(failCount === 0 ? 0 : 1);

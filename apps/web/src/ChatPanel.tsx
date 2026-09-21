@@ -23,6 +23,8 @@ import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduct
 import { spokenNameOf, resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, isKnownForceRef, checkDispatchAuthority, retargetIntentForTicket, ticketDestinationVerdict, describeCommittedPull } from "@ai-commander/core";
 // retreat-scope 刀C — 任务台账（「哪次任务」这一类指代）
 import { findDispatch, liveDispatchMembers, findDispatchAmbiguity, type DispatchCandidate } from "@ai-commander/core";
+// 刀甲：「这是不是经济单」的唯一真相源在 core（produce/trade），UI 不另抄一张表
+import { isDispatchIntent } from "@ai-commander/core";
 import type { CommanderRef, EscalationTicket } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
@@ -1808,10 +1810,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         for (const id of result.assignedUnitIds) reserved.add(id);
         if (result.orders.length > 0) {
           const base = allOrders.length;
+          const economy = !isDispatchIntent(intent.type);
           slices.push({
             action: intent.type,
             destinationName: result.destinationName,
             orderIndexes: result.orders.map((_, k) => base + k),
+            // 刀甲：经济单没有人头，按人头判必然判成"没有执行"。
+            ...(economy ? { economy: true, planLog: result.log } : {}),
           });
         }
         allOrders.push(...result.orders);
@@ -3073,10 +3078,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // applyOrders 按下标回报结果，回执据此逐条意图对账——不靠猜、不靠合并。
       if (result.orders.length > 0) {
         const base = allOrders.length;
+        // 刀甲：经济单（produce/trade）没有人头 —— 它的回执走 planLog 那一行，
+        // 不参与按人头的结局判定。判的是**字段形状**（意图类型），不是措辞。
+        const economy = !isDispatchIntent(intent.type);
         slices.push({
           action: intent.type,
           destinationName: result.destinationName,
           orderIndexes: result.orders.map((_, k) => base + k),
+          ...(economy ? { economy: true, planLog: result.log } : {}),
         });
         // ── 刀C: 给这批 order 盖上来源标记，台账据此登记 ──
         // 记账只认这个标记，不认调用的是哪个函数：对话派兵走 applyOrders，

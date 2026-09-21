@@ -36,6 +36,23 @@ export interface DispatchSlice {
   destinationName: string;
   /** 这条意图的 order 在 applyOrders 收到的数组里的下标。 */
   orderIndexes: number[];
+  /**
+   * ★刀甲：这是一张**经济单**（produce / trade）。
+   *
+   * 病：经济 order 的 `unitIds` 天生为空 ⇒ `ApplyOrderOutcome` 三栏全空 ⇒
+   * 下面按"人"算结局的那段判成 `none`，于是生产明明成了（队列 0→3、钱真扣了），
+   * 屏上和耳朵却都说「没有执行」，还是红字，还被 pushContext 喂给模型——
+   * 下一轮参谋记得的是"生产失败了"。Emily 的生产每条都中。
+   *
+   * 修法不是"在上层跳过经济意图"——那样生产连一行正面回执都没有，比基线的
+   * 「执行: 生产步兵 ×3」还差。经济单走自己的一行（planLog），结局记 applied，
+   * 且**不参与按人头的统计**（它本来就没有人头）。
+   * 真失败仍由引擎的 PRODUCE_FAIL / TRADE_FAIL 诊断上屏，那条路一个字不动。
+   */
+  economy?: boolean;
+  /** 经济单的回执行：取该 resolver 的 log（「生产步兵 ×3」/「按预算生产步兵」/
+   *  「下达交易命令: buy_fuel」）。只有 economy 为真时才读。 */
+  planLog?: string;
 }
 
 export type ExecOutcome = "applied" | "partial" | "already_doing" | "none";
@@ -48,6 +65,8 @@ export interface ExecFact {
   alreadyDoingCount: number;
   rejectedCount: number;
   outcome: ExecOutcome;
+  /** 刀甲：这一条是经济单 ⇒ 三个人头计数恒为 0，不许拿它们判结局。 */
+  economy: boolean;
 }
 
 export interface ExecReceipt {
@@ -117,6 +136,22 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
   const lines: string[] = [];
 
   for (const slice of slices) {
+    // ── 刀甲：经济单没有人头，按人头判结局必然判成"没有执行" ──
+    if (slice.economy) {
+      facts.push({
+        action: slice.action,
+        destinationName: slice.destinationName,
+        appliedCount: 0,
+        alreadyDoingCount: 0,
+        rejectedCount: 0,
+        outcome: "applied",
+        economy: true,
+      });
+      const line = (slice.planLog ?? "").trim();
+      if (line) lines.push(line.endsWith("。") ? line : `${line}。`);
+      continue;
+    }
+
     const rows = slice.orderIndexes
       .map((i) => result.perOrder[i])
       .filter((r): r is NonNullable<typeof r> => r !== undefined);
@@ -153,6 +188,7 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
       alreadyDoingCount: alreadyCount,
       rejectedCount,
       outcome,
+      economy: false,
     });
 
     const phrase = actionPhrase(slice.action, slice.destinationName);
@@ -173,7 +209,10 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
     }
   }
 
-  const anyApplied = facts.some((f) => f.appliedCount > 0);
+  // 刀甲：总结局按**每条的结局**汇总，不再按人头。对纯作战单逐字等价
+  //（作战条的 outcome ∈ {applied, partial} ⟺ appliedCount > 0），
+  // 只是经济条这类"没有人头但确实办成了"的也算数了。
+  const anyApplied = facts.some((f) => f.outcome === "applied" || f.outcome === "partial");
   const anyRejected = facts.some((f) => f.rejectedCount > 0);
   const anyAlready = facts.some((f) => f.alreadyDoingCount > 0);
   const outcome: ExecOutcome =
