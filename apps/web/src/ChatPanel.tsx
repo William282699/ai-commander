@@ -37,6 +37,8 @@ import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-com
 import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute, buildProductionOptions } from "@ai-commander/shared";
 import type { ProductionCategoryOptions } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
+// 刀癸 — 跨局/延迟回调的局印（守局次与对象身份，不守游戏时间）
+import { stampRun, runGuardAllows, judgeRunGuard, type RunStamp } from "@ai-commander/shared";
 // 刀己 — 候选选择合同：这层只需要请求侧那个标签的类型，判定全在 core
 import type { SelectionRequestTag } from "@ai-commander/shared";
 // retreat-scope 刀C — 台账登记用的来源标记
@@ -1022,7 +1024,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // decision-review record can only learn "this answered a staff question" through
   // this context. All four approve paths (auto, bucket-A, manual, high_impact
   // confirm) receive the same execCtx, so the correlation survives every route.
-  type ExecContext = { channel: Channel; threadId?: string; requestId?: string; escalateId?: string };
+  // ★刀癸 (审核 §六)：ExecContext 带上**来源局的印**（局次 + GameState 对象身份）。
+  //   processAdvisorData 头上那道重开守卫是对的，但它**过了之后**还要
+  //   `setTimeout(..., 0)` 才真去 handleApprove，而 ctx 里没有来源局的任何印记
+  //   ——中间那一跳撞上重开一局，上一局的单子就落进新局。
+  //   守局次与对象身份，**不守游戏时间**（新局钟从 0 起，按时间写的闸全失效）。
+  type ExecContext = {
+    channel: Channel; threadId?: string; requestId?: string; escalateId?: string;
+    /** 出发那一刻的局印。缺席 ⇒ fail-closed，按作废处理。 */
+    run?: RunStamp;
+  };
   const responseExecCtxRef = useRef<ExecContext | null>(null);
   // Tracks the latest valid requestId — approve buttons capture a snapshot of execCtx at
   // render time and pass it in; handleApprove compares against this ref to reject stale approvals.
@@ -2095,15 +2106,22 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const responses: Array<{ from: string; brief: string }> = data.responses || [];
       const shuffled = [...responses].sort(() => Math.random() - 0.5);
       let cumulativeDelay = 0;
+      // ★刀癸：群聊每条回复押 2.2–4 秒才上屏——这条路最长，也最容易把上一局的
+      //   话投进新局（旧写法还带着**旧局的** state.time）。出发盖印、落地复核。
+      const groupRun = stampRun(gameEpochRef.current, state);
       for (let i = 0; i < shuffled.length; i++) {
         const r = shuffled[i];
         if (i > 0) cumulativeDelay += 2200 + Math.random() * 1800;
         setTimeout(() => {
           const commander = FROM_TO_COMMANDER[r.from];
           if (!commander) return;
+          const now = getState();
+          // 跨局 / 换了 GameState ⇒ 静默作废：不上屏、不进 context。
+          if (!now || !runGuardAllows(groupRun, gameEpochRef.current, now)) return;
           const ch = COMMANDER_CHANNEL[commander];
-          pushContext(channelContextRef.current, ch, { role: "assistant", text: r.brief, time: state.time });
-          addMessage("info", r.brief, state.time, ch, commander, "command_ack", true);
+          // 时间取**落地这一刻**当前局的钟，不用出发时那个旧值。
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: r.brief, time: now.time });
+          addMessage("info", r.brief, now.time, ch, commander, "command_ack", true);
         }, cumulativeDelay);
       }
 
@@ -2545,7 +2563,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           handleApprove(
             { label: p.label, intents: [p.intent] } as unknown as AdvisorOption,
             0, "auto",
-            selSlotAtJudge?.execCtx ?? { channel: ch, requestId: crypto.randomUUID() },
+            selSlotAtJudge?.execCtx ?? { channel: ch, requestId: crypto.randomUUID(), run: stampRun(gameEpochRef.current, state) },
             undefined, selPlan.speakExecReceipt,
             { intents: new Map([[p.intent, p.unitIds]]) },
           );
@@ -2690,7 +2708,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const gate = execGate;
 
         const requestId = crypto.randomUUID();
-        const execCtx: ExecContext = { channel: ch, threadId: activeThreadOnChannel?.id, requestId, escalateId };
+        const execCtx: ExecContext = {
+          channel: ch, threadId: activeThreadOnChannel?.id, requestId, escalateId,
+          // 刀癸：盖印。四条批准路（auto / bucket A / 手点 / 高影响确认）共用这一份 ctx。
+          run: stampRun(gameEpochRef.current, state),
+        };
         latestRequestIdRef.current = requestId;
 
         if (gate.auto && (data.options as AdvisorOption[]).length >= 1) {
@@ -3024,6 +3046,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
     const execCtx = ctx ?? responseExecCtxRef.current;
     const ch = execCtx?.channel ?? getActiveChannel();
+
+    // ★刀癸 (审核 §六)：局印复核，排在**任何**写状态 / 发消息 / 下单之前。
+    //   四条批准路都带同一份 ctx，所以这一道一处就罩住全部；
+    //   跨局的旧回调静默作废（只留一条诊断，不污染新局的屏幕与 context）。
+    //   没盖印的 ctx 同样按作废处理（fail-closed）——但手点批准那条路
+    //   `ctx` 可能为空、由 responseExecCtxRef 兜底，它也是盖过印的。
+    if (!runGuardAllows(execCtx?.run, gameEpochRef.current, state)) {
+      state.diagnostics.push({
+        time: state.time, code: "STALE_RUN_DROPPED",
+        message: `跨局回调已作废（${judgeRunGuard(execCtx?.run, gameEpochRef.current, state)}）`,
+      });
+      return;
+    }
 
     // Validate: reject approve if response has already been cleared (stale click).
     if (mode === "manual" && !response) {

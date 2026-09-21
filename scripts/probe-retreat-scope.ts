@@ -28,6 +28,7 @@ import { processDefensiveAI } from "../packages/core/src/scenario/elAlamein/defe
 import { processPressureDirector } from "../packages/core/src/scenario/elAlamein/pressureDirector";
 import type { GameState, Unit, Squad, Intent, ScenarioId, Order, DispatchMeta, ApplyResult } from "@ai-commander/shared";
 import { buildExecReceipt, type DispatchSlice } from "../apps/web/src/execReceipt";
+import { stampRun, judgeRunGuard, runGuardAllows } from "@ai-commander/shared";
 import { planVoiceSpeech } from "../apps/web/src/voiceSpeech";
 import { readFileSync } from "fs";
 import { buildDigestForChannel } from "../apps/web/src/digestHelper";
@@ -2437,6 +2438,163 @@ function knifeGeng(negctl: boolean): void {
   }
 }
 
+// ════════════════════════════════════════════════════════════
+// 刀 癸：跨局 / 延迟回调保护（审核 §六）
+// ════════════════════════════════════════════════════════════
+//
+// 病：`processAdvisorData` 头上那道按对象身份的重开守卫是对的，但它**过了之后**
+// 还要 `setTimeout(..., 0)` 才真去 `handleApprove`，而 `ExecContext` 里没有来源局
+// 的任何印记 —— 中间那一跳撞上重开一局，上一局的单子就落进新局。
+// 群聊那条路更长（每条押 2.2–4 秒），旧写法还带着**旧局的** `state.time`。
+//
+// 判据分两层：
+//   ① 纯判官 `judgeRunGuard` 跑真代码，含**可控 fake timer** 的四步序列；
+//   ② 接线用源码级检查钉住（那几处在 React 闭包里，node 够不着）。
+
+/** 可控假定时器：push 进来的回调只有 flush() 时才跑（顺序 FIFO）。 */
+function fakeTimer() {
+  const q: Array<() => void> = [];
+  return {
+    schedule(fn: () => void) { q.push(fn); },
+    pending() { return q.length; },
+    flush() { const all = q.splice(0, q.length); for (const fn of all) fn(); },
+  };
+}
+
+function knifeGui(negctl: boolean): void {
+  console.log("\n== 刀 癸：跨局 / 延迟回调保护 ==");
+
+  // ── R1 纯判官四格 ──
+  {
+    const sA = createInitialGameState("el_alamein");
+    const sB = createInitialGameState("el_alamein");   // 重开一局＝换一个对象
+    const st = stampRun(1, sA);
+    check("R1 同一局（局次与对象身份都没变）⇒ same_run",
+      judgeRunGuard(st, 1, sA) === "same_run" && runGuardAllows(st, 1, sA), "");
+    check("R1b 局次变了 ⇒ restarted、不许跑",
+      judgeRunGuard(st, 2, sA) === "restarted" && !runGuardAllows(st, 2, sA), "");
+    check("R1c GameState 被换掉（轮询还没追上 epoch 的那个 race）⇒ state_replaced、不许跑",
+      judgeRunGuard(st, 1, sB) === "state_replaced" && !runGuardAllows(st, 1, sB), "");
+    check("R1d 没盖印 ⇒ no_stamp、不许跑（fail-closed：宁可漏做，不许做错局）",
+      judgeRunGuard(null, 1, sA) === "no_stamp" && !runGuardAllows(undefined, 1, sA), "");
+  }
+
+  // ── R2 ★守局次与对象身份，不守游戏时间★ ──
+  {
+    const sA = createInitialGameState("el_alamein");
+    const st = stampRun(1, sA);
+    sA.time = 9999;                   // 同一局把钟推很远 ⇒ 仍然算同一局
+    check("R2 同一局里时间推进多久都仍是 same_run（判据不看时间）",
+      runGuardAllows(st, 1, sA), "");
+    const sNew = createInitialGameState("el_alamein");
+    sNew.time = 0;                    // 新局钟从 0 起 ⇒ 任何"按时间"的闸都会漏
+    check("R2b ★新局钟从 0 起，按时间写的闸会漏，而本判据照样拦住★",
+      !runGuardAllows(st, 2, sNew) && sNew.time < sA.time, "");
+  }
+
+  // ── R3 ★可控 fake timer 的四步序列★（审核点名的那一条）──
+  //    ① 响应通过 guard；② timer 还没跑时重开一局；③ flush；④ 新局零污染。
+  {
+    const timer = fakeTimer();
+    let epoch = 1;
+    let live = createInitialGameState("el_alamein");
+    // ① 响应通过重开守卫：此刻 getState() === 出发时那个 state
+    const ctxRun = stampRun(epoch, live);
+    const passedGuard = runGuardAllows(ctxRun, epoch, live);
+    // 回调体：与生产里 handleApprove 的头一段同形——先复核，不过就一件事不做。
+    const newRunOrders: Order[] = [];
+    const newRunMessages: string[] = [];
+    let dropped = 0;
+    timer.schedule(() => {
+      if (!runGuardAllows(ctxRun, epoch, live)) { dropped++; return; }
+      // 真派兵 + 真上屏（跑到这儿就说明守卫漏了）
+      const r = resolveIntent({ type: "retreat", fromFront: "front_south", quantity: "all" } as Intent, live, live.style);
+      const res = applyOrders(live, r.orders);
+      newRunOrders.push(...r.orders);
+      newRunMessages.push(`已下令 ${res.appliedUnitIds.length} 个单位撤退`);
+    });
+    check("R3 ① 响应当时确实通过了守卫（否则这一条不承重）", passedGuard, "");
+    check("R3b ② timer 还没跑（回调押在队列里）", timer.pending() === 1, `pending=${timer.pending()}`);
+    // ② 重开一局：换对象 + 推进局次（生产里 syncGameEpoch 就是这么干的）
+    live = createInitialGameState("el_alamein");
+    epoch = 2;
+    const unitsBefore = live.units.size;
+    // ③ flush
+    timer.flush();
+    // ④ 新局零污染
+    check("R3c ★③flush 之后 ④新局零污染：没下单、没上屏、回调被静默作废★",
+      dropped === 1 && newRunOrders.length === 0 && newRunMessages.length === 0,
+      `dropped=${dropped} orders=${newRunOrders.length} msgs=${newRunMessages.length}`);
+    let anyOrdered = 0;
+    live.units.forEach((u) => { if (u.team === "player" && u.orders.length > 0) anyOrdered++; });
+    check("R3d 新局的部队一个都没接到旧局那道命令",
+      anyOrdered === 0 && live.units.size === unitsBefore, `ordered=${anyOrdered}`);
+  }
+
+  // ── R3e 负对照：把守卫摘掉，同一序列必须**真的**污染新局 ──
+  {
+    const timer = fakeTimer();
+    let live = createInitialGameState("el_alamein");
+    let epoch = 1;
+    const ctxRun = stampRun(epoch, live);
+    let ordered = 0;
+    timer.schedule(() => {
+      // ★摘刀：不复核，照生产里旧写法直接 getState() 当场用
+      void ctxRun;
+      const r = resolveIntent({ type: "retreat", fromFront: "front_south", quantity: "all" } as Intent, live, live.style);
+      const res = applyOrders(live, r.orders);
+      ordered = res.appliedUnitIds.length;
+    });
+    live = createInitialGameState("el_alamein");
+    epoch = 2;
+    void epoch;
+    timer.flush();
+    check("R3e ★摘刀负对照：不复核 ⇒ 旧局那道命令真的落进了新局（判据确实承重）★",
+      ordered > 0, `新局被下令 ${ordered} 个`);
+  }
+
+  // ── R4 接线：四条批准路与群聊延迟回调都盖印/复核 ──
+  {
+    const cp = readFileSync("apps/web/src/ChatPanel.tsx", "utf8");
+    check("R4 ExecContext 带局印字段（run: RunStamp）",
+      /type ExecContext = \{[\s\S]{0,400}?run\?: RunStamp;/.test(cp), "");
+    check("R4b 造 ctx 那一处盖印（四条批准路共用它）",
+      cp.includes("run: stampRun(gameEpochRef.current, state)"), "");
+    const ha = braceBody(cp, "const handleApprove = (");
+    const guardAt = ha.indexOf("runGuardAllows(execCtx?.run");
+    const firstWrite = Math.min(
+      ...["applyOrders(", "addMessage(", "pushContext(", "resolveIntent("]
+        .map((k) => { const i = ha.indexOf(k); return i < 0 ? Number.POSITIVE_INFINITY : i; }),
+    );
+    check("R4c ★handleApprove 的复核排在任何 写状态/发消息/下单 之前★",
+      guardAt > 0 && guardAt < firstWrite, `guardAt=${guardAt} firstWrite=${firstWrite}`);
+    check("R4d 复核不过就 return（静默作废，只留一条诊断）",
+      /runGuardAllows\(execCtx\?\.run[\s\S]{0,400}?STALE_RUN_DROPPED[\s\S]{0,200}?return;/.test(ha), "");
+    check("R4e 群聊那条延迟回调也盖印＋落地复核，且时间取落地这一刻的钟",
+      cp.includes("const groupRun = stampRun(gameEpochRef.current, state)") &&
+      cp.includes("if (!now || !runGuardAllows(groupRun, gameEpochRef.current, now)) return;") &&
+      cp.includes("addMessage(\"info\", r.brief, now.time, ch, commander"), "");
+    check("R4f 判据不看游戏时间：守卫那两处一个 state.time 比较都没有",
+      !/runGuardAllows\([^)]*time/.test(cp), "");
+  }
+
+  if (negctl) {
+    console.log("\n-- negctl：只守局次不守对象身份 / 只守对象身份不守局次，各漏一格 --");
+    const sA = createInitialGameState("el_alamein");
+    const sB = createInitialGameState("el_alamein");
+    const st = stampRun(1, sA);
+    // 只比 epoch：换了 GameState 但轮询还没推进 epoch ⇒ 漏
+    const epochOnly = (stamp: typeof st, e: number) => stamp.epoch === e;
+    const leak1 = epochOnly(st, 1) === true && !runGuardAllows(st, 1, sB);
+    console.log(`  ${leak1 ? "RED(好)" : "GREEN(坏)"} negctl-R1 只比局次 ⇒ 换了 GameState 那一格漏（真规则拦住）`);
+    // 只比对象身份：对象没换但 epoch 推进过（同一对象被复用）⇒ 漏
+    const idOnly = (stamp: typeof st, cur: unknown) => stamp.state === cur;
+    const leak2 = idOnly(st, sA) === true && !runGuardAllows(st, 2, sA);
+    console.log(`  ${leak2 ? "RED(好)" : "GREEN(坏)"} negctl-R2 只比对象身份 ⇒ 局次推进那一格漏（真规则拦住）`);
+    check("negctl 两道缺一不可（各自单用都漏一格）", leak1 && leak2, "");
+  }
+}
+
 // ── main ──
 
 const knifeArg = (process.argv.find((a) => a.startsWith("--knife=")) ?? "--knife=all").split("=")[1];
@@ -2451,6 +2609,7 @@ if (knifeArg === "bing" || knifeArg === "all") knifeBing(negctl);
 if (knifeArg === "wu" || knifeArg === "all") knifeWu(negctl);
 if (knifeArg === "ji" || knifeArg === "all") knifeJi(negctl);
 if (knifeArg === "geng" || knifeArg === "all") knifeGeng(negctl);
+if (knifeArg === "gui" || knifeArg === "all") knifeGui(negctl);
 
 console.log(failCount === 0 ? `\nALL PASS (${checkCount} 条)` : `\n${failCount}/${checkCount} FAILURES`);
 process.exit(failCount === 0 ? 0 : 1);
