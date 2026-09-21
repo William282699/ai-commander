@@ -141,6 +141,20 @@ export function findDispatchAmbiguity(
   const front = typeof intent.fromFront === "string" ? intent.fromFront.trim() : "";
   if (!front) return null;
 
+  // ── 刀丙：只在**原病例那个字段形状**上判歧义 ──
+  //
+  // 收窄前这里不看意图类型，只看"这条线上有留守的 + 有派出去的"。实测同一条线
+  // 连下 4 条 fromFront 命令 ⇒ 奇数轮问、偶数轮办（追问槽一次性消费，下一条
+  // 又从零判），被问的包括「南线再派两个去中央」「南线设防」这种玩家心里毫无
+  // 歧义的命令——撞玩家已定的「清楚就办，勿变 20 问」。
+  //
+  // 原病例的形状是「把某条线的部队**整批撤回来**」：撤退 + 数量是"全部/大部"。
+  // 只有这一格，"留守的"与"之前从这儿派出去的"才真的都可能是他指的那批。
+  // 判据只看**字段形状**——不许加中文关键词表（「刚才」「之前」之类），
+  // 穷举永不收敛（家法：写原则不写同义词表）。
+  if (intent.type !== "retreat") return null;
+  if (intent.quantity !== "all" && intent.quantity !== "most") return null;
+
   const candidates: DispatchCandidate[] = [];
 
   // 候选一：此刻还站在那条线上的（"留守的"）

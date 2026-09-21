@@ -908,6 +908,38 @@ function knifeC(negctl: boolean): void {
       !clean.includes("---DISPATCHES---"));
   }
 
+  // ── C18 字段名必须到得了模型，且只给带兵的那个人格 ──
+  //    审核点名：模型读字段表当权威。但 RESPONSE FORMAT 那张表在**共享面**上
+  //    （Emily 同读），而 `ab-g-knife --emily-guard` 是用户裁定的护栏：共享面
+  //    新增一行就红。所以字段表写进 CHANNEL_PERSONA.combat（陈独有、不在护栏
+  //    扫描的那两段里），两头都满足。这条判据把这个位置钉死。
+  {
+    const aiSrc = readFileSync("apps/server/src/ai.ts", "utf8");
+    const combatFrom = aiSrc.indexOf("  combat: \"⚠️ ENFORCEMENT RULES");
+    const combatTo = aiSrc.indexOf("  ops: \"You are CPT Marcus");
+    const combatBlock = combatFrom >= 0 && combatTo > combatFrom ? aiSrc.slice(combatFrom, combatTo) : "";
+    const sysFrom = aiSrc.indexOf("const SYSTEM_PROMPT = `");
+    const sysTo = aiSrc.indexOf("const SYSTEM_PROMPT_MARCUS_V2");
+    const sysBlock = sysFrom >= 0 && sysTo > sysFrom ? aiSrc.slice(sysFrom, sysTo) : "";
+    check("C18 台架自证：两段都取到了（否则下面是恒真）",
+      combatBlock.length > 500 && sysBlock.length > 2000,
+      `combat=${combatBlock.length} sys=${sysBlock.length}`);
+    check("C18b 字段名 fromDispatch 到得了陈（他读的那段里有来源字段表）",
+      combatBlock.includes("fromDispatch") && combatBlock.includes("---DISPATCHES---"),
+      "");
+    // 严格数法：SYSTEM_PROMPT 里 fromDispatch 的出现次数，减去**陈块内**的次数，
+    // 必须为 0。宽松写法（「要么没有、要么陈块里有」）会在两处都有时恒真。
+    const chenFrom = sysBlock.indexOf("combat channel → 陈军士");
+    const chenTo = sysBlock.indexOf("ops channel → CPT Marcus");
+    const chenSub = chenFrom >= 0 && chenTo > chenFrom ? sysBlock.slice(chenFrom, chenTo) : "";
+    const inSys = sysBlock.split("fromDispatch").length - 1;
+    const inChen = chenSub.split("fromDispatch").length - 1;
+    check("C18c 台架自证：陈块在 SYSTEM_PROMPT 里定位到了",
+      chenSub.length > 500, `${chenSub.length}`);
+    check("C18d ★共享面（陈块之外的 SYSTEM_PROMPT）一处 fromDispatch 都不许有★",
+      inSys - inChen === 0, `共享面上有 ${inSys - inChen} 处`);
+  }
+
   // ── 绊索（计划 §C.5 的 12、13、14）──
   if (negctl) {
     console.log("\n-- negctl：三种坏改法打新引擎，必须真 FAIL --");
@@ -1233,6 +1265,103 @@ function routedThroughRefuse(text: string, needle: string): boolean {
   return win.includes("refuseAloud(");
 }
 
+
+// ════════════════════════════════════════════════════════════
+// 刀 丙：收窄消歧追问的范围（审核 P1）
+// ════════════════════════════════════════════════════════════
+//
+// 病：`findDispatchAmbiguity` 不看意图类型，只看「这条线上有留守的 + 有派出去的」。
+// 实测同一条线连下 4 条 fromFront 命令 ⇒ 奇数轮问、偶数轮办（追问槽一次性消费，
+// 下一条又从零判）。被问的包括「南线再派两个去中央」「南线设防」这种玩家心里
+// 毫无歧义的命令——撞玩家已定的「清楚就办，勿变 20 问」。
+//
+// 判据只看**字段形状**（意图类型 + quantity），不许有中文关键词表。
+
+/** 留守 1 + 外派 4 的局面：返回 state、留守那个、外派那批。 */
+function splitFrontFixture(): { state: GameState; stay: number; sent: number[] } {
+  const { state, ids } = southArmy();
+  ids.push(addUnit(state, 344, 152).id); // 南线上一共 5 个
+  advisorDispatch(state, { type: "attack", fromFront: "front_south", toFront: "front_ridge", quantity: 4 } as Intent);
+  fullPump(state, 400);
+  const sentSet = new Set(state.dispatches[0].memberIds);
+  return { state, stay: ids.find((id) => !sentSet.has(id))!, sent: [...sentSet] };
+}
+
+function knifeBing(negctl: boolean): void {
+  console.log("\n== 刀 丙：收窄消歧追问的范围 ==");
+
+  // ── B1 原病例仍然问（收窄不许把承重那格一起砍掉）──
+  {
+    const { state } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, { type: "retreat", fromFront: "front_south", quantity: "all" } as Intent);
+    check("B1 原病例（retreat + quantity=all + 留守与外派并存）仍然问",
+      amb !== null && amb.length === 2, amb ? JSON.stringify(amb.map((c) => c.label)) : "null");
+    const ambMost = findDispatchAmbiguity(state, { type: "retreat", fromFront: "front_south", quantity: "most" } as Intent);
+    check("B1b quantity=most 同属原病例形状，也问", ambMost !== null && ambMost.length === 2);
+  }
+
+  // ── B2 ★新增负例：其余形状一律不问，而且实际调的是**留守那批** ──
+  //    判据比的是名单（逐 id），不比人数、不比全军。
+  {
+    const NEG: Array<[string, Intent]> = [
+      ["attack", { type: "attack", fromFront: "front_south", toFront: "front_center", quantity: "all" } as Intent],
+      ["defend", { type: "defend", fromFront: "front_south", quantity: "all" } as Intent],
+      ["recon", { type: "recon", fromFront: "front_south", toFront: "front_center", quantity: "all" } as Intent],
+      ["retreat+quantity=few", { type: "retreat", fromFront: "front_south", targetFacility: "ea_player_south_post", quantity: "few" } as Intent],
+    ];
+    for (const [name, intent] of NEG) {
+      const { state, stay, sent } = splitFrontFixture();
+      const amb = findDispatchAmbiguity(state, intent);
+      check(`B2 ${name}：不问（玩家心里没有歧义，清楚就办）`, amb === null,
+        amb ? JSON.stringify(amb.map((c) => c.key)) : "");
+      const out = advisorDispatch(state, intent, 1);
+      const moved = [...out.res.appliedUnitIds].sort((a, b) => a - b);
+      check(`B2b ${name}：实际调的就是**留守那批**（逐 id 比对，不比人数、不比全军）`,
+        moved.length === 1 && moved[0] === stay && !moved.some((id) => sent.includes(id)),
+        `moved=${JSON.stringify(moved)} stay=${stay} sent=${JSON.stringify(sent)}`);
+    }
+  }
+
+  // ── B3 ★交替追问回归：同一条线连下 4 条 attack ⇒ 追问次数为 0 ──
+  //    这条钉的是审核实测那个"奇数轮问、偶数轮办"的形状。
+  {
+    const { state } = splitFrontFixture();
+    let asks = 0;
+    for (let round = 0; round < 4; round++) {
+      const intent = { type: "attack", fromFront: "front_south", toFront: "front_center", quantity: 2 } as Intent;
+      if (findDispatchAmbiguity(state, intent) !== null) asks++;
+      advisorDispatch(state, intent, round + 1);
+      fullPump(state, 30);
+    }
+    check("B3 同一条线连下 4 条 attack ⇒ 追问 0 次（收窄前是奇数轮问、偶数轮办）",
+      asks === 0, `问了 ${asks} 次`);
+  }
+
+  // ── B4 收窄只看字段形状：源码里不许出现中文关键词表 ──
+  {
+    const led = readFileSync("packages/core/src/dispatchLedger.ts", "utf8");
+    const codeOnly = led.split("\n").filter((l) => !l.trimStart().startsWith("//") && !l.trimStart().startsWith("*")).join("\n");
+    check("B4 判据只看字段形状：`intent.type` + `intent.quantity`，没有中文词表",
+      codeOnly.includes('intent.type !== "retreat"') &&
+      codeOnly.includes('intent.quantity !== "all"') &&
+      !/["'](刚才|之前|刚刚|派出去|留守)["']/.test(codeOnly),
+      "");
+  }
+
+  if (negctl) {
+    console.log("\n-- negctl：摘掉收窄（＝刀丙之前）后，B2/B3 必须真红 --");
+    // 摘刀＝把"只在 retreat + all/most 上判"那两行去掉。这里用**同一份局面**
+    // 直接问引擎：没有类型/数量限制时，attack 那条会不会被判成歧义。
+    // 判法不复制影子实现：改用"把 intent 伪装成原病例形状"来证明局面本身够格。
+    const { state } = splitFrontFixture();
+    const asRetreatAll = findDispatchAmbiguity(state, { type: "retreat", fromFront: "front_south", quantity: "all" } as Intent);
+    const asAttack = findDispatchAmbiguity(state, { type: "attack", fromFront: "front_south", toFront: "front_center", quantity: "all" } as Intent);
+    const red = asRetreatAll !== null && asAttack === null;
+    console.log(`  ${red ? "RED(好)" : "GREEN(坏)"} negctl-B 同一个局面：原病例形状问（${asRetreatAll?.length ?? 0} 个候选）、attack 不问（${asAttack === null ? "null" : "仍在问"}）`);
+    check("negctl 收窄确实承重：局面不变、只换字段形状，判定就翻面", red, "");
+  }
+}
+
 // ── main ──
 
 const knifeArg = (process.argv.find((a) => a.startsWith("--knife=")) ?? "--knife=all").split("=")[1];
@@ -1243,6 +1372,7 @@ if (knifeArg === "b" || knifeArg === "all") knifeB(negctl);
 if (knifeArg === "c" || knifeArg === "all") knifeC(negctl);
 if (knifeArg === "jia" || knifeArg === "all") knifeJia(negctl);
 if (knifeArg === "yi" || knifeArg === "all") knifeYi(negctl);
+if (knifeArg === "bing" || knifeArg === "all") knifeBing(negctl);
 
 console.log(failCount === 0 ? `\nALL PASS (${checkCount} 条)` : `\n${failCount}/${checkCount} FAILURES`);
 process.exit(failCount === 0 ? 0 : 1);

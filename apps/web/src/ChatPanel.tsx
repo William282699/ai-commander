@@ -2985,8 +2985,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         // 刀C: NO receipt is written here. It used to be — with lawful.length,
         // before the resolver had run — and that is how a roster of 6 under a
         // quantity=2 order dispatched 2 units and printed "6个单位出发了"
-        // (§7⑤). The receipt is settled after resolveIntent, off the real
+        // (§7⑤). The receipt is settled after resolveIntent, off
         // assignedUnitIds, or not printed at all.
+        // ★刀B 之后这句注释的措辞要改口：assignedUnitIds 是**解析器选中的人**，
+        //   不是"the real"——真下出去的令在 ApplyResult 里。这条升级票回执仍从
+        //   assignedUnitIds 取数，是**第二个真相源**，登记为技术债：今天两个数
+        //   恒等（isDispatchablePlayerUnit 覆盖了 applyOrders 四道过滤的全部四种
+        //   情况），所以是债不是 bug；哪天那个覆盖关系变了，这里会先说谎。
         // The roster IS the scope now; leaving the G-number in fromSquad would
         // send the squad resolver looking for a squad that does not exist.
         intent.fromSquad = undefined;
