@@ -690,28 +690,33 @@ function planRetreat(
   // 「快撤」 must keep the legacy toward-HQ step byte-for-byte
   // (snapshot-pinned in ab-retreat-semantics).
   // retreat-scope 刀A: the destination's SOURCE decides whether it may be
-  // dropped. A facility / region / coordinate the player or the model actually
-  // named is the player's intent; only a bare toFront is a guess we filled in.
-  const destinationExplicit = !!(intent._targetPos || intent.targetFacility || intent.targetRegion);
-  let destination: Position | null =
-    destinationExplicit || intent.toFront ? resolveTarget(intent, state) : null;
-
-  // 修法3 (retreat-scope 刀A narrows it): drop the destination only for the ONE
-  // mis-fill shape this guard was built for — the staff repeating the departure
-  // front as the destination, which would pin the force where it already stands.
-  // That shape is "only toFront, and toFront IS fromFront".
+  // dropped — a place the player actually named is their intent, a bare front
+  // hint is a guess the staff filled in.
   //
-  // The old condition ("destination lands inside the departure front's bbox")
-  // treated 同一条战线 as 同一个位置. An outpost naturally sits inside its own
-  // front — 南线前哨 (365,155) ∈ alam_halfa_zone, 中央前哨 (360,105) ∈
-  // central_desert, 教学关我方哨站 (36,30) ∈ tut_base — so the most natural
-  // order of all,「让某条线的部队撤回自家前哨」, had its destination erased
-  // every single time. The rule now reads the FIELD SOURCE only: no place
-  // names, no distances, no coordinates, so it holds on any map.
-  if (destination !== null && !destinationExplicit && intent.toFront && intent.fromFront) {
-    const departFront = findFront(state, intent.fromFront);
-    const destFront = findFront(state, intent.toFront);
-    if (departFront && destFront && departFront.id === destFront.id) destination = null;
+  // ★刀戊 (审核 §一) 把判据从「字段非空」换成「**实际解析结果**」。
+  //   「字段非空」漏两格，两格都实测复现过、都与基线不符：
+  //     · `targetRegion` 可以装 front id（classifyDestination 的第 3 步），
+  //       而同战线保护只看 `toFront` ⇒ `targetRegion=fromFront` 撤到原地；
+  //     · 无效设施名解析失败后回落到 `fromFront`，字段却仍非空
+  //       ⇒ core 自己造出一个假目的地，回执还报得出战线名。
+  //   现在只有真解析成设施 / tag / region / 精确坐标才算"点名了地方"；
+  //   解析结果是一条战线，就与旧 `toFront` 保护同待遇；什么都没解析出来
+  //   就是"没说去哪"。规则不看地名、不看距离、不看坐标，对任何图成立。
+  const dest = classifyDestination(intent, state);
+  // 明确的"点"：设施 / tag / 真实 region / 精确坐标。即使它坐落在出发战线的
+  // bbox 里也**必须保留**——前哨天然长在自家战线里，那正是刀A 治的病。
+  const destinationNamedPlace = dest.kind === "exact" || dest.kind === "facility" || dest.kind === "place";
+  let destination: Position | null = destinationNamedPlace ? dest.position : null;
+
+  // 修法3：解析结果只是一条战线时，才谈得上"参谋把出发战线重复填进目的地"
+  // 这唯一的误填形状。比较的是**解析后的 canonical front id**，不是原始字符串
+  // ——同一条线的别名（id / 名字 / 序号前缀）因此一律判同。
+  if (dest.kind === "front") {
+    const departFront = intent.fromFront ? findFront(state, intent.fromFront) : undefined;
+    const sameFront = departFront != null && dest.frontId === departFront.id;
+    // 同线 ⇒ 丢弃，走下面的默认安全后撤（bare retreat 与基线逐字一致：它的
+    // 解析结果正是 fromFront 自己那条线）。异线 ⇒ 正常撤过去。
+    destination = sameFront ? null : dest.position;
   }
 
   if (destination !== null) {
@@ -1396,48 +1401,124 @@ function frontDestinationMode(intent: Intent): FrontDestinationMode {
   return "approach";
 }
 
-/** Resolve attack/defend/recon target position from intent fields. */
-function resolveTarget(intent: Intent, state: GameState): Position | null {
+// ── 刀戊: 目的地**按实际解析结果**分类，不按"字段非空" ──
+//
+// 病（审核 §一，基线对照实测）：刀A 把丢弃条件收窄成「字段来源」，判据写的是
+// `!!(_targetPos || targetFacility || targetRegion)`——**字段非空即视为明确地点**。
+// 可 `resolveTarget` 允许 `targetRegion` 里装一个 front id（下面第 3 步的 front
+// 分支），而同战线保护只看 `toFront`。于是两笔回归：
+//   · `targetRegion="front_south"` + `fromFront="front_south"` ⇒ 被当成明确地点，
+//     撤到本战线的 withdraw 锚（基线与 bare retreat 一样走默认安全后撤）；
+//   · `targetFacility="missing_fac"` 解析失败后回落到 `fromFront`，却仍因字段
+//     非空被视为明确地点 ⇒ **core 自己造了一个假目的地**。
+//
+// 修法：把"解析到哪儿"和"那是什么"一次算完。`resolveTarget` 降为本函数的薄
+// 包装，所以坐标只有一份实现、**不可能漂**；planRetreat 改读 `kind`/`frontId`。
+export type DestinationKind =
+  /** 引擎内部给的精确坐标（危机卡）。 */
+  | "exact"
+  /** 解析到了一个真实设施。 */
+  | "facility"
+  /** 解析到了一个真实 tag 或真实 region——玩家点的是一个**点**。 */
+  | "place"
+  /** 只解析到一条战线（最不具体的那一档，也是参谋误填唯一的形状）。 */
+  | "front"
+  /** 什么都没解析出来。**不许拿它冒充明确目的地。** */
+  | "none";
+
+export interface DestinationClass {
+  kind: DestinationKind;
+  position: Position | null;
+  /** kind==="front" 时那条战线的 canonical id（比较身份用，不比原始字符串）。 */
+  frontId: string | null;
+  /** 哪个字段最终产生了它（判据与诊断用，不参与判定）。 */
+  field: "_targetPos" | "targetFacility" | "targetRegion" | "toFront" | "fromFront" | "fuzzy" | null;
+}
+
+const NO_DESTINATION: DestinationClass = { kind: "none", position: null, frontId: null, field: null };
+
+/**
+ * 解析目的地**并说明它是什么**。顺序与历史 `resolveTarget` 逐字一致：
+ *   _targetPos → targetFacility → targetRegion(tag→region→front) → toFront
+ *   → fromFront → 三个字段当设施名的模糊兜底 → 无
+ */
+export function classifyDestination(intent: Intent, state: GameState): DestinationClass {
   // Internal override: crisis card system provides exact coordinates
   // (enemy centroid) to avoid region/front center inaccuracy.
   if (intent._targetPos) {
-    return { x: intent._targetPos.x, y: intent._targetPos.y };
+    return {
+      kind: "exact",
+      position: { x: intent._targetPos.x, y: intent._targetPos.y },
+      frontId: null,
+      field: "_targetPos",
+    };
   }
   if (intent.targetFacility) {
-    const pos = findFacilityPosition(state, intent.targetFacility);
-    if (pos) return pos;
+    const fac = findFacilityById(state, intent.targetFacility);
+    if (fac) {
+      return { kind: "facility", position: { ...fac.position }, frontId: null, field: "targetFacility" };
+    }
   }
   const mode = frontDestinationMode(intent);
   if (intent.targetRegion) {
     // Day 15: check tags first, then regions, then fronts
     // 刀4: findTagRef 认 id 也认引擎印出去的那个名字（闭环，见其注释）
     const tag = findTagRef(state, intent.targetRegion);
-    if (tag) return { x: Math.round(tag.position.x), y: Math.round(tag.position.y) };
-    const pos = getRegionCenter(state, intent.targetRegion);
-    if (pos) return pos;
-    // Also try front match (LLM might put front id in targetRegion)
+    if (tag) {
+      return {
+        kind: "place",
+        position: { x: Math.round(tag.position.x), y: Math.round(tag.position.y) },
+        frontId: null,
+        field: "targetRegion",
+      };
+    }
+    const region = findRegionByHint(state, intent.targetRegion);
+    if (region) {
+      return { kind: "place", position: regionCenterOf(region), frontId: null, field: "targetRegion" };
+    }
+    // Also try front match (LLM might put front id in targetRegion).
+    // ★ 这一档是 **front**，不是 place —— 同战线保护因此也管得到它。
     const front = findFront(state, intent.targetRegion);
-    if (front) return frontDestinationFor(state, front, mode);
+    if (front) {
+      return {
+        kind: "front",
+        position: frontDestinationFor(state, front, mode),
+        frontId: front.id,
+        field: "targetRegion",
+      };
+    }
   }
   if (intent.toFront) {
     const front = findFront(state, intent.toFront);
-    if (front) return frontDestinationFor(state, front, mode);
+    if (front) {
+      return { kind: "front", position: frontDestinationFor(state, front, mode), frontId: front.id, field: "toFront" };
+    }
   }
-  // For some intents, fromFront can serve as target area
+  // For some intents, fromFront can serve as target area.
+  // ★ 对撤退而言这一档几乎总是"没说去哪"：它解析出来的就是出发战线本身，
+  //   同战线保护会把它丢掉 ⇒ bare retreat 仍走默认安全后撤（逐字不变）。
   if (intent.fromFront) {
     const front = findFront(state, intent.fromFront);
-    if (front) return frontDestinationFor(state, front, mode);
+    if (front) {
+      return { kind: "front", position: frontDestinationFor(state, front, mode), frontId: front.id, field: "fromFront" };
+    }
   }
   // Last resort: try all location fields as facility name (fuzzy match).
   // Catches cases where LLM puts a facility name in toFront/targetRegion
   // and normalizeIntentLocations didn't move it (shouldn't happen, but defensive).
   for (const val of [intent.toFront, intent.targetRegion, intent.fromFront]) {
     if (val) {
-      const pos = findFacilityPosition(state, val);
-      if (pos) return pos;
+      const fac = findFacilityById(state, val);
+      if (fac) return { kind: "facility", position: { ...fac.position }, frontId: null, field: "fuzzy" };
     }
   }
-  return null;
+  return NO_DESTINATION;
+}
+
+/** Resolve attack/defend/recon target position from intent fields.
+ *  刀戊：降为 `classifyDestination` 的薄包装——坐标只有一份实现，不可能漂。 */
+function resolveTarget(intent: Intent, state: GameState): Position | null {
+  return classifyDestination(intent, state).position;
 }
 
 /**
@@ -1804,25 +1885,26 @@ function getUnitsOnFront(state: GameState, front: Front): Unit[] {
 // last rung. One front-center implementation, in frontDestination.ts.
 
 /** Find a region's center by exact id or fuzzy name match. */
-function getRegionCenter(state: GameState, regionHint: string): Position | null {
+// 刀戊：region 的查找与取中心拆成两件事，**一份实现两处用**
+// （`getRegionCenter` 与 `classifyDestination` 都走它；复制一份就会漂）。
+function findRegionByHint(state: GameState, regionHint: string) {
+  const found = state.regions.get(regionHint);
+  if (found) return found;
   const lower = regionHint.toLowerCase();
-  let found = state.regions.get(regionHint);
-  if (!found) {
-    for (const [, r] of state.regions) {
-      if (
-        r.id.toLowerCase().includes(lower) ||
-        r.name.toLowerCase().includes(lower)
-      ) {
-        found = r;
-        break;
-      }
-    }
+  for (const [, r] of state.regions) {
+    if (r.id.toLowerCase().includes(lower) || r.name.toLowerCase().includes(lower)) return r;
   }
-  if (!found) return null;
-  return {
-    x: (found.bbox[0] + found.bbox[2]) / 2,
-    y: (found.bbox[1] + found.bbox[3]) / 2,
-  };
+  return undefined;
+}
+
+function regionCenterOf(region: { bbox: readonly [number, number, number, number] | number[] }): Position {
+  const b = region.bbox as number[];
+  return { x: (b[0] + b[2]) / 2, y: (b[1] + b[3]) / 2 };
+}
+
+function getRegionCenter(state: GameState, regionHint: string): Position | null {
+  const found = findRegionByHint(state, regionHint);
+  return found ? regionCenterOf(found) : null;
 }
 
 /** Find a facility position by id, type, name, or tag match. */

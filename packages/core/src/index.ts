@@ -14,6 +14,9 @@ export { resolveIntent, isIntentSupported, findFront, findFacilityById, resolveR
 export { getFormationOffset, computeHeading } from "./formation";
 export type { FormationStyle } from "./formation";
 export type { ResolveResult } from "./tacticalPlanner";
+// 刀戊：目的地分类（按**实际解析结果**，不按字段非空）——判据要直接量它
+export { classifyDestination } from "./tacticalPlanner";
+export type { DestinationClass, DestinationKind } from "./tacticalPlanner";
 export { buildDigest } from "./intelDigest";
 export { buildBattleContextV2 } from "./battleContext";
 export { buildBattleBoard } from "./battleBoard";

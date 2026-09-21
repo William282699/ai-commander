@@ -20,6 +20,7 @@
 import {
   createInitialGameState, resolveIntent, applyOrders, applyPlayerCommands, updateFog, processAutoBehavior,
   liveDispatchMembers, findDispatch, activeDispatches, findDispatchAmbiguity, isDispatchIntent,
+  classifyDestination,
 } from "@ai-commander/core";
 import { tick } from "../packages/core/src/sim";
 import { processEnemyAI } from "../packages/core/src/enemyAI";
@@ -129,6 +130,9 @@ function ordersKey(orders: ReturnType<typeof resolveIntent>["orders"]): string {
 
 const near = (p: { x: number; y: number }, c: { x: number; y: number }, tol: number): boolean =>
   Math.hypot(p.x - c.x, p.y - c.y) <= tol;
+
+/** bbox 的中点（刀戊 W0 自证用）。 */
+const regionMid = (b: readonly number[]) => ({ x: (b[0] + b[2]) / 2, y: (b[1] + b[3]) / 2 });
 
 // ════════════════════════════════════════════════════════════
 // 刀 A：说了地点就去那个地点
@@ -1411,6 +1415,257 @@ function knifeBing(negctl: boolean): void {
   }
 }
 
+// ════════════════════════════════════════════════════════════
+// 刀 戊：撤退目的地按**实际解析结果**判，不按"字段非空"
+// ════════════════════════════════════════════════════════════
+//
+// 病（审核 §一，基线对照实测）：刀A 的 `destinationExplicit` 是
+// `!!(_targetPos || targetFacility || targetRegion)`——**字段非空即明确地点**。
+// 漏两格：
+//   · `targetRegion` 可以装一个 front id（resolveTarget 第 3 步的 front 分支），
+//     而同战线保护只看 `toFront` ⇒ `targetRegion=fromFront` 撤到原地；
+//   · 无效设施名解析失败后回落到 `fromFront`，字段仍非空 ⇒ **core 造假目的地**。
+// 两格在 9985f92 上都实测复现，且都与基线 4e41486 不符（基线两格都走默认后撤）。
+//
+// 判据全部**跑真代码**（resolveIntent / classifyDestination / 完整循环），
+// 没有一条源码字符串扫描。
+
+/** 南线 4 人 + 真实 tag（在本战线 bbox 内），供"本线内的点必须保留"用。 */
+function wuFixture(): { state: GameState; ids: number[] } {
+  const { state, ids } = southArmy();
+  // alam_halfa_zone bbox = [320,138,365,165] ⊂ front_south
+  state.tags = [{ id: "tag_1", name: "高地哨位", position: { x: 350, y: 150 }, createdAt: 100 }];
+  state.nextTagNum = 2;
+  return { state, ids };
+}
+
+function wuRetreat(build: () => { state: GameState; ids: number[] }, fields: Partial<Intent>) {
+  const { state } = build();
+  const r = resolveIntent(
+    { type: "retreat", fromFront: "front_south", quantity: "all", ...fields } as Intent,
+    state, state.style,
+  );
+  return { state, r, key: ordersKey(r.orders) };
+}
+
+function knifeWu(negctl: boolean): void {
+  console.log("\n== 刀 戊：撤退目的地按实际解析结果判 ==");
+
+  // ── W0 台架自证：本线内确实有那些东西，否则下面几条不承重 ──
+  {
+    const { state } = wuFixture();
+    const post = [...state.facilities.values()].find((f) => f.id === "ea_player_south_post");
+    const zone = state.regions.get("alam_halfa_zone");
+    const south = state.fronts.find((f) => f.id === "front_south")!;
+    const inBox = (p: { x: number; y: number }) =>
+      south.regionIds.some((rid) => {
+        const r = state.regions.get(rid);
+        return r != null && p.x >= r.bbox[0] && p.x <= r.bbox[2] && p.y >= r.bbox[1] && p.y <= r.bbox[3];
+      });
+    check("W0 台架自证：南线前哨、真实 region、真实 tag 都落在出发战线的 bbox 内",
+      post != null && zone != null && inBox(post.position) && inBox({ x: 350, y: 150 }) &&
+      inBox(regionMid(zone.bbox)),
+      `post=${post ? `${post.position.x},${post.position.y}` : "null"}`);
+  }
+
+  // ── W1 分类器：五档各自认对（这是整刀的判据基础）──
+  {
+    const { state } = wuFixture();
+    const kindOf = (fields: Partial<Intent>) =>
+      classifyDestination({ type: "retreat", fromFront: "front_south", quantity: "all", ...fields } as Intent, state);
+    const rows: Array<[string, Partial<Intent>, string, string | null]> = [
+      ["精确坐标", { _targetPos: { x: 300, y: 200 } } as Partial<Intent>, "exact", null],
+      ["有效设施", { targetFacility: "ea_player_south_post" }, "facility", null],
+      ["真实 tag", { targetRegion: "高地哨位" }, "place", null],
+      ["真实 region", { targetRegion: "alam_halfa_zone" }, "place", null],
+      ["targetRegion 装 front id", { targetRegion: "front_south" }, "front", "front_south"],
+      ["toFront", { toFront: "front_center" }, "front", "front_center"],
+      ["无效设施名 ⇒ 落到 fromFront 那一档", { targetFacility: "missing_fac" }, "front", "front_south"],
+      ["什么都没有 ⇒ 也是 fromFront 那一档", {}, "front", "front_south"],
+    ];
+    for (const [label, fields, wantKind, wantFront] of rows) {
+      const d = kindOf(fields);
+      check(`W1 分类：${label} ⇒ kind=${wantKind}${wantFront ? ` front=${wantFront}` : ""}`,
+        d.kind === wantKind && (wantFront === null || d.frontId === wantFront),
+        `实得 kind=${d.kind} frontId=${d.frontId} field=${d.field}`);
+    }
+    // 无 fromFront 且无目的地字段 ⇒ 真的什么都没有
+    const bare = classifyDestination({ type: "retreat", quantity: "all" } as Intent, state);
+    check("W1b 连 fromFront 都没有 ⇒ kind=none、position=null（不许凭空造点）",
+      bare.kind === "none" && bare.position === null, JSON.stringify(bare));
+  }
+
+  // ── W2 ★核心反例★ targetRegion=fromFront 必须与 bare retreat 逐字节相同 ──
+  {
+    const bare = wuRetreat(wuFixture, {});
+    const asRegion = wuRetreat(wuFixture, { targetRegion: "front_south" });
+    check("W2 ★targetRegion 装出发战线 ⇒ 与 bare retreat **逐字节**相同（回到基线行为）★",
+      asRegion.key === bare.key,
+      `bare=${bare.key.slice(0, 80)}\n       region=${asRegion.key.slice(0, 80)}`);
+    check("W2b 回执也不许报出战线名（那是假目的地）",
+      asRegion.r.destinationName === bare.r.destinationName && asRegion.r.destinationName === "安全区域",
+      `dest="${asRegion.r.destinationName}"`);
+    // 同线的**别名**也要判同（比 canonical id，不比原始字符串）
+    // ★ 名单里刻意不含 "south"：解析顺序是 region 先于 front（既有行为，见
+    //   classifyDestination 的第 3 步），而 "south" 会先子串命中真实 region
+    //   `southern_desert`。那一格由紧跟其后的 W2e 正面钉住——它**该**保留，
+    //   因为解析结果是一个真实的地方，不是一条战线。
+    for (const alias of ["南线", "南路", "四线", "4", "frontsouth", "4. 南部战线"]) {
+      const aliased = wuRetreat(wuFixture, { targetRegion: alias });
+      check(`W2c 别名「${alias}」也按 canonical front id 判同线 ⇒ 与 bare 逐字节相同`,
+        aliased.key === bare.key, `dest="${aliased.r.destinationName}"`);
+    }
+    // W2e ★边界正面钉死★ 先命中真实 region 的字样不是"战线别名"，该保留。
+    //   这一格证明判据量的是**解析结果**而不是字符串长相：同一个 "south"，
+    //   如果当成战线别名就该丢弃，当成真实 region 就该保留——引擎按解析结果走。
+    {
+      const { state } = wuFixture();
+      const d = classifyDestination(
+        { type: "retreat", fromFront: "front_south", targetRegion: "south", quantity: "all" } as Intent, state);
+      const got = wuRetreat(wuFixture, { targetRegion: "south" });
+      check("W2e 「south」先命中真实 region `southern_desert` ⇒ kind=place、保留（不按字符串长相判成战线）",
+        d.kind === "place" && d.frontId === null && got.key !== bare.key && got.r.destinationName === "南部沙漠",
+        `kind=${d.kind} field=${d.field} dest="${got.r.destinationName}"`);
+    }
+
+    // toFront 那一侧的老保护不许被碰掉
+    const asToFront = wuRetreat(wuFixture, { toFront: "front_south" });
+    check("W2d 旧保护仍在：toFront==fromFront 且无地点 ⇒ 与 bare 逐字节相同",
+      asToFront.key === bare.key, asToFront.r.destinationName);
+  }
+
+  // ── W3 ★核心反例★ 无效设施 / 无效 region 不得变成「撤退至出发战线」──
+  {
+    const bare = wuRetreat(wuFixture, {});
+    for (const [label, fields] of [
+      ["无效设施名", { targetFacility: "missing_fac" }],
+      ["无效 region 名", { targetRegion: "missing_region_xyz" }],
+      ["两个都无效", { targetFacility: "missing_fac", targetRegion: "missing_region_xyz" }],
+    ] as Array<[string, Partial<Intent>]>) {
+      const got = wuRetreat(wuFixture, fields);
+      const south = got.state.fronts.find((f) => f.id === "front_south")!;
+      check(`W3 ${label} ⇒ 不冒充明确目的地（与 bare 逐字节相同、回执不报「${south.name}」）`,
+        got.key === bare.key && got.r.destinationName === "安全区域" &&
+        !got.r.destinationName.includes(south.name),
+        `key=${got.key.slice(0, 70)} dest="${got.r.destinationName}"`);
+    }
+  }
+
+  // ── W4 本战线内的**有效**地点必须保留（刀A 的成果，一个字节不许退）──
+  {
+    const bare = wuRetreat(wuFixture, {});
+    const facCenter = probeCenter(wuFixture, { targetFacility: "ea_player_south_post" });
+    const fac = wuRetreat(wuFixture, { targetFacility: "ea_player_south_post" });
+    check("W4 本线内的有效设施仍然保留（落点在前哨附近、回执报站名、且与 bare 不同）",
+      fac.key !== bare.key && fac.r.destinationName === "南线前哨" &&
+      fac.r.orders.every((o) => o.target != null && near(o.target, facCenter, 4)),
+      `dest="${fac.r.destinationName}" 落点=${JSON.stringify(fac.r.orders.map((o) => o.target))}`);
+
+    const regCenter = probeCenter(wuFixture, { targetRegion: "alam_halfa_zone" });
+    const reg = wuRetreat(wuFixture, { targetRegion: "alam_halfa_zone" });
+    check("W4b 本线内的真实 region 仍然保留（落点在区中心附近、与 bare 不同）",
+      reg.key !== bare.key && reg.r.destinationName === "南部山脊区" &&
+      reg.r.orders.every((o) => o.target != null && near(o.target, regCenter, 4)),
+      `dest="${reg.r.destinationName}"`);
+
+    const tagCenter = probeCenter(wuFixture, { targetRegion: "高地哨位" });
+    const tag = wuRetreat(wuFixture, { targetRegion: "高地哨位" });
+    check("W4c 本线内的真实 tag 仍然保留（落点在 tag 附近、与 bare 不同）",
+      tag.key !== bare.key && tag.r.orders.every((o) => o.target != null && near(o.target, tagCenter, 4)),
+      `dest="${tag.r.destinationName}" 落点=${JSON.stringify(tag.r.orders.map((o) => o.target))}`);
+
+    const posCenter = { x: 350, y: 148 };
+    const exact = wuRetreat(wuFixture, { _targetPos: posCenter } as Partial<Intent>);
+    check("W4d 本线内的精确坐标仍然保留（与 bare 不同、落在给的点附近）",
+      exact.key !== bare.key && exact.r.orders.every((o) => o.target != null && near(o.target, posCenter, 4)),
+      `落点=${JSON.stringify(exact.r.orders.map((o) => o.target))}`);
+  }
+
+  // ── W5 异线仍能正常撤过去（targetRegion 与 toFront 两条路都要）──
+  {
+    const bare = wuRetreat(wuFixture, {});
+    for (const [label, fields, wantName] of [
+      ["targetRegion 装异线 front id", { targetRegion: "front_center" }, "3. 中央战线"],
+      ["toFront 异线", { toFront: "front_center" }, "3. 中央战线"],
+      ["targetRegion 异线别名「中线」", { targetRegion: "中线" }, "3. 中央战线"],
+    ] as Array<[string, Partial<Intent>, string]>) {
+      const got = wuRetreat(wuFixture, fields);
+      const center = probeCenter(wuFixture, fields);
+      check(`W5 ${label} ⇒ 照撤过去（回执报「${wantName}」、落点在那条线的锚附近）`,
+        got.key !== bare.key && got.r.destinationName === wantName &&
+        got.r.orders.every((o) => o.target != null && near(o.target, center, 6)),
+        `dest="${got.r.destinationName}" 落点=${JSON.stringify(got.r.orders.map((o) => o.target))}`);
+    }
+  }
+
+  // ── W6 ★跑完整循环★ 本线内前哨那一格：真到位、转 defending、不掉头 ──
+  {
+    const { state } = wuFixture();
+    const post = [...state.facilities.values()].find((f) => f.id === "ea_player_south_post")!;
+    const r = resolveIntent(
+      { type: "retreat", fromFront: "front_south", targetFacility: "ea_player_south_post", quantity: "all" } as Intent,
+      state, state.style,
+    );
+    applyOrders(state, r.orders);
+    fullPump(state, 300);
+    const alive = r.assignedUnitIds.map((id) => state.units.get(id)).filter((u): u is Unit => u != null && u.state !== "dead");
+    const arrived = alive.filter((u) => near(u.position, post.position, 6));
+    const strayed = alive.filter((u) => !near(u.position, post.position, 15));
+    check("W6 ★完整循环 300s：人真到了前哨（≤6 格）★",
+      alive.length === r.assignedUnitIds.length && arrived.length === alive.length,
+      `存活 ${alive.length}/${r.assignedUnitIds.length}、到位 ${arrived.length}`);
+    check("W6b ★没有整队掉头走回原岗（>15 格 一个都不许有）★", strayed.length === 0,
+      `掉头 ${strayed.length} 个：${JSON.stringify(strayed.map((u) => u.position))}`);
+    check("W6c 到位后转 defending（不是还在 moving/retreating）",
+      alive.every((u) => u.state === "defending"), JSON.stringify(alive.map((u) => u.state)));
+  }
+
+  // ── W7 别的动词一个字节不动（分类器是撤退专用的判据，不许溢出）──
+  {
+    for (const verb of ["attack", "defend", "recon"] as const) {
+      const a = (() => { const { state } = wuFixture(); return ordersKey(resolveIntent({ type: verb, fromFront: "front_south", targetRegion: "front_south", quantity: "all" } as Intent, state, state.style).orders); })();
+      const b = (() => { const { state } = wuFixture(); return ordersKey(resolveIntent({ type: verb, fromFront: "front_south", targetRegion: "front_south", quantity: "all" } as Intent, state, state.style).orders); })();
+      check(`W7 ${verb} 的同线 targetRegion 行为未被本刀改动（自比稳定，且不是空单）`,
+        a === b && a !== "[]", a.slice(0, 60));
+    }
+    // 攻击到本线内的前哨仍然打得到（同线保护绝不许溢出到别的动词）
+    const { state } = wuFixture();
+    const atk = resolveIntent({ type: "attack", fromFront: "front_south", targetFacility: "ea_player_south_post", quantity: "all" } as Intent, state, state.style);
+    check("W7b attack 到本线内的设施照旧有落点（不受撤退那条同线保护影响)",
+      atk.orders.length > 0 && atk.orders.every((o) => o.target != null), `orders=${atk.orders.length}`);
+  }
+
+  if (negctl) {
+    console.log("\n-- negctl：把旧判据（字段非空＝明确地点）打在新引擎上，必须真红 --");
+    // 旧判据的影子：只看字段在不在。拿它算出的"该保留"与新引擎实际行为对比。
+    const oldExplicit = (i: Partial<Intent>) => !!(i._targetPos || i.targetFacility || i.targetRegion);
+    let reds = 0;
+    for (const [label, fields] of [
+      ["targetRegion=出发战线", { targetRegion: "front_south" }],
+      ["无效设施名", { targetFacility: "missing_fac" }],
+      ["无效 region 名", { targetRegion: "missing_region_xyz" }],
+    ] as Array<[string, Partial<Intent>]>) {
+      const bare = wuRetreat(wuFixture, {});
+      const got = wuRetreat(wuFixture, fields);
+      // 旧判据说"明确" ⇒ 期望"与 bare 不同"。新引擎实际与 bare 相同 ⇒ 旧期望红。
+      const oldExpectsDifferent = oldExplicit(fields);
+      const actuallyDifferent = got.key !== bare.key;
+      const red = oldExpectsDifferent && !actuallyDifferent;
+      if (red) reds++;
+      console.log(`  ${red ? "RED(好)" : "GREEN(坏)"} negctl-W ${label}：旧判据判"明确"=${oldExpectsDifferent}，新引擎实际"另有落点"=${actuallyDifferent}`);
+    }
+    check("negctl 旧判据（字段非空）在这三格上全部真 FAIL（收窄确实承重）", reds === 3, `${reds}/3`);
+    // 反向：不许把刀A 的成果一起砍掉——有效地点那三格旧判据与新引擎**一致**
+    let agree = 0;
+    for (const fields of [{ targetFacility: "ea_player_south_post" }, { targetRegion: "alam_halfa_zone" }, { targetRegion: "高地哨位" }] as Array<Partial<Intent>>) {
+      const bare = wuRetreat(wuFixture, {});
+      const got = wuRetreat(wuFixture, fields);
+      if (got.key !== bare.key) agree++;
+    }
+    check("negctl 反向：本线内的**有效**地点三格仍然保留（没把刀A 一起砍掉）", agree === 3, `${agree}/3`);
+  }
+}
+
 // ── main ──
 
 const knifeArg = (process.argv.find((a) => a.startsWith("--knife=")) ?? "--knife=all").split("=")[1];
@@ -1422,6 +1677,7 @@ if (knifeArg === "c" || knifeArg === "all") knifeC(negctl);
 if (knifeArg === "jia" || knifeArg === "all") knifeJia(negctl);
 if (knifeArg === "yi" || knifeArg === "all") knifeYi(negctl);
 if (knifeArg === "bing" || knifeArg === "all") knifeBing(negctl);
+if (knifeArg === "wu" || knifeArg === "all") knifeWu(negctl);
 
 console.log(failCount === 0 ? `\nALL PASS (${checkCount} 条)` : `\n${failCount}/${checkCount} FAILURES`);
 process.exit(failCount === 0 ? 0 : 1);
