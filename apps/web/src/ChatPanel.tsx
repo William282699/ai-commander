@@ -1851,86 +1851,44 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     setClarification("请指明是哪一批部队");
   };
 
-  // ── Phase 3: handle approving a staff thread option ──
+  // ── Phase 3: 参谋线程的批准 —— **委派给主执行链** ──
+  //
+  // ★刀子 (审核 §七)：这里原本是 handleApprove 的一份复制品，而且是**退化**的
+  //   那一份——它绕过了整条主安全链：
+  //     · 没有 `checkDispatchAuthority`（谁在说话决定他能动谁）；
+  //     · 无效 `fromSquad` 被**删掉**后让引擎自动选兵 —— 正是
+  //       dispatch-scope-v1 裁定过的"静默扩大范围"那一族（74/85 那笔账的形状）；
+  //     · 不解析、不复查 `fromDispatch`，也不判指代歧义；
+  //     · 下的是**裸 order**（没有 `origin:"advisor"` / `dispatchMeta`）⇒ 台账
+  //       一条不记，此后「刚派去那批」就指不着这些兵；
+  //     · 不写对话 context；没有局印复核（跨局回调照样落地）。
+  //
+  //   它也**不是死代码**：`ENABLE_STAFF_ASK` / `ENABLE_STAFF_THREADS` 都是 true，
+  //   UNDER_ATTACK 这类事件在真实战斗里会触发 `/api/staff-ask`，选项按钮就会出现。
+  //   所以不能靠"反正休眠"了事，也不能只关个开关——那会留下一套"一启用就越权"
+  //   的半成品。
+  //
+  //   修法是最小的那个：主链**本来就**认 `execCtx.threadId`（跑完会
+  //   `resolveThread(threadId)`），所以这里只要造一份带 threadId 与局印的 ctx，
+  //   把选项交给 `handleApprove`。第二个执行入口就此消失——预检、权限、选兵、
+  //   apply、回执、台账、context 全都只有一份实现。
   const handleThreadApprove = (thread: StaffThread, opt: AdvisorOption, idx: number) => {
     if (thread.status !== "open") return;
     if (!tryLockThread(thread.id)) return;
-
     try {
       const state = getState();
       if (!state) return;
-
-      const letter = ["A", "B", "C"][idx] ?? "?";
-      const cleanLabel = opt.label.replace(/^[ABC]:\s*/, '');
-      const intents = opt.intents ?? [opt.intent];
-
-      for (const intent of intents) {
-        // Soft-fix: clear invalid fromSquad so engine auto-selects units
-        if (intent.fromSquad) {
-          const fs = intent.fromSquad.toLowerCase();
-          const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
-          const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
-          if (!isSquad && !isCommander) {
-            addMessage("warning", `分队 ${intent.fromSquad} 不存在，将自动分配单位`, state.time, thread.channel, undefined, "command_ack");
-            intent.fromSquad = undefined;
-          }
-        }
-
-        // Soft-fix: clear hallucinated target fields (e.g. LLM invents a non-existent
-        // tag/front/facility). Other valid fields in the same intent still drive execution.
-        softFixTargetFields(intent, state, (field, value) => {
-          addMessage("warning", `目标 ${field}=${value} 不存在，已忽略此字段`, state.time, thread.channel, undefined, "command_ack");
-        });
-
-        if (!isValidTarget(intent, state, COMMANDER_REFS)) {
-          const field = intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
-          addMessage("warning", `目标 ${field} 不存在`, state.time, thread.channel, undefined, "command_ack");
-          return;
-        }
-      }
-
-      const allOrders: ReturnType<typeof resolveIntent>["orders"] = [];
-      const reserved = new Set<number>();
-      // 刀B：与主路同一条链——意图 → order 下标 + 落点名 → ApplyResult → 回执。
-      // 这条路自 6a 起休眠，但它是**另一个** applyOrders 调用点：留着旧写法
-      // 等于留一张"计划当结果报"的备用脸。
-      const slices: DispatchSlice[] = [];
-
-      for (const intent of intents) {
-        const result = resolveIntent(intent, state, state.style, reserved);
-        if (result.degraded) {
-          addMessage("warning", result.log, state.time, thread.channel, undefined, "command_ack");
-        } else {
-          state.diagnostics.push({ time: state.time, code: "PLAN_LOG", message: result.log });
-        }
-        for (const id of result.assignedUnitIds) reserved.add(id);
-        if (result.orders.length > 0) {
-          const base = allOrders.length;
-          const economy = !isDispatchIntent(intent.type);
-          slices.push({
-            action: intent.type,
-            destinationName: result.destinationName,
-            orderIndexes: result.orders.map((_, k) => base + k),
-            // 刀甲/刀庚：经济单没有人头，按人头判必然判成"没有执行"；它的回执
-            // 由引擎回报的真实结算生成（不复述计划那一行）。
-            ...(economy ? { economy: true } : {}),
-          });
-        }
-        allOrders.push(...result.orders);
-      }
-
-      if (allOrders.length > 0) {
-        state.diagnostics.push({ time: state.time, code: "EXEC_PLAN_LABEL", message: `${letter}: ${cleanLabel}` });
-        const applyRes = applyOrders(state, allOrders);
-        const execReceipt = buildExecReceipt(applyRes, slices);
-        for (const line of execReceipt.lines) {
-          addMessage(
-            execReceipt.outcome === "none" || execReceipt.outcome === "partial" ? "warning" : "info",
-            line, state.time, thread.channel, undefined, "command_ack",
-          );
-        }
-        resolveThread(thread.id);
-      }
+      // mode 传 "auto" 而不是 "manual"：主链里 `mode === "manual"` **只**用在一处
+      // ——「聊天卡片已经过期」那道闸（`!response`）。线程选项不来自 `response`，
+      // 它有自己的新鲜度检查（`status === "open"` + 执行锁 + expireStaleThreads），
+      // 传 "manual" 会被那道闸误伤，把所有线程批准都拦掉。
+      handleApprove(opt, idx, "auto", {
+        channel: thread.channel,
+        threadId: thread.id,
+        requestId: crypto.randomUUID(),
+        // 刀癸：这条路也盖局印——它同样是"点一下才执行"，中间隔着用户的手。
+        run: stampRun(gameEpochRef.current, state),
+      });
     } finally {
       unlockThread(thread.id);
     }

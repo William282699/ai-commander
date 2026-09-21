@@ -545,8 +545,10 @@ function knifeB(negctl: boolean): void {
   {
     const panelSrc = readFileSync("apps/web/src/ChatPanel.tsx", "utf8")
       .split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
-    check("B9 执行回执的两个出口（上屏 / 出声）取的是同一次 buildExecReceipt 的结果",
-      panelSrc.split("buildExecReceipt(").length - 1 === 2 &&
+    // ★刀子 改判：从前这里数的是"两处"（主链 + 线程那份复制品）。复制品已经
+    //   委派给主链，所以现在钉的是**更强**的性质：全仓只剩**一处** buildExecReceipt。
+    check("B9 ★执行回执全仓只有一处（第二个执行入口已消失），且上屏与出声同取它★",
+      panelSrc.split("buildExecReceipt(").length - 1 === 1 &&
       panelSrc.includes("execReceipt.lines") &&
       panelSrc.includes("speak(`${voiceConfirm} ${execReceipt.spokenText}`"),
       `buildExecReceipt 出现 ${panelSrc.split("buildExecReceipt(").length - 1} 次`);
@@ -1169,9 +1171,10 @@ function knifeJia(negctl: boolean): void {
   {
     const panelSrc = readFileSync("apps/web/src/ChatPanel.tsx", "utf8")
       .split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
+    // ★刀子 改判：线程那条路已委派给主链，建 slice 的地方只剩一处。
     const wired = panelSrc.split("economy: true }").length - 1;
-    check("J3 ChatPanel 两处 slice 都盖了 economy 标记（漏一处那条路照旧误报）",
-      wired === 2 && panelSrc.split("isDispatchIntent(intent.type)").length - 1 === 2,
+    check("J3 ChatPanel 建 slice 的那一处盖了 economy 标记（如今只此一处）",
+      wired === 1 && panelSrc.split("isDispatchIntent(intent.type)").length - 1 === 1,
       `盖上的有 ${wired} 处`);
     check("J3b 「是不是经济单」只有一份真相源（core 的 isDispatchIntent），UI 没另抄一张表",
       !/const\s+economyTypes\s*=\s*new Set\(\["produce"/.test(panelSrc) ||
@@ -2410,8 +2413,9 @@ function knifeGeng(negctl: boolean): void {
     check("C3 执行回执的每一行都进 context（真实结果覆盖得到）",
       cp.includes("pushContext(channelContextRef.current, ch, { role: \"assistant\", text: line, time: state.time });"),
       "");
-    check("C4 部分成功也不许显示成普通 info（有没办成的部分就降级）",
-      (cp.match(/execReceipt\.outcome === "none" \|\| execReceipt\.outcome === "partial" \? "warning" : "info"/g) ?? []).length === 2,
+    // ★刀子 改判：执行出口只剩一处（线程那份已委派），所以这里也只该有一处。
+    check("C4 部分成功也不许显示成普通 info（有没办成的部分就降级；出口只此一处）",
+      (cp.match(/execReceipt\.outcome === "none" \|\| execReceipt\.outcome === "partial" \? "warning" : "info"/g) ?? []).length === 1,
       "");
   }
 
@@ -2595,6 +2599,111 @@ function knifeGui(negctl: boolean): void {
   }
 }
 
+// ════════════════════════════════════════════════════════════
+// 刀 子：不留第二个绕过主安全链的执行入口（审核 §七）
+// ════════════════════════════════════════════════════════════
+//
+// `handleThreadApprove` 原本是 handleApprove 的一份**退化**复制品：没有权限闸；
+// 无效 fromSquad 被删掉后让引擎自动选兵（"静默扩大范围"那一族）；不解析也不
+// 复查 fromDispatch；下的是裸 order（无 origin/dispatchMeta ⇒ 台账一条不记）；
+// 不写 context；没有局印复核。
+// ★它**不是死代码**：`ENABLE_STAFF_ASK` / `ENABLE_STAFF_THREADS` 都是 true，
+//   UNDER_ATTACK 这类事件在真实战斗里会触发 `/api/staff-ask`，按钮就会出现。
+// 修法：委派给主链（主链本来就认 execCtx.threadId 并会 resolveThread）。
+
+function knifeZi(negctl: boolean): void {
+  console.log("\n== 刀 子：不留第二个执行入口 ==");
+
+  const cp = readFileSync("apps/web/src/ChatPanel.tsx", "utf8");
+  const gc = readFileSync("apps/web/src/GameCanvas.tsx", "utf8");
+  const body = braceBody(cp, "const handleThreadApprove = (");
+
+  // ── Z0 台架自证：这条路是**活的**（否则"必须收口"这个前提不成立）──
+  {
+    check("Z0 ★台架自证：staff-thread 链是活的（两个 flag 都是 true，按钮真会出现）★",
+      /const ENABLE_STAFF_ASK = true/.test(gc) &&
+      /const ENABLE_STAFF_THREADS = true/.test(gc) &&
+      gc.includes("createThread(") &&
+      cp.includes("onClick={() => handleThreadApprove(thread, opt, i)}"),
+      "");
+  }
+
+  // ── Z1 ★副入口的执行能力必须为零★ ──
+  {
+    const banned = ["applyOrders(", "resolveIntent(", "buildExecReceipt(", "softFixTargetFields(", "isValidTarget("];
+    const still = banned.filter((k) => body.includes(k));
+    check("Z1 ★handleThreadApprove 里不再有任何执行动作（apply/resolve/回执/预检全没了）★",
+      body.length > 0 && still.length === 0, `仍残留: ${still.join(", ")}`);
+    check("Z1b 也不再自己删无效 fromSquad（「删掉后自动选兵」正是静默扩大范围）",
+      !body.includes("intent.fromSquad = undefined"), "");
+    check("Z1c 也不再自己 resolveThread（主链跑完按 execCtx.threadId 收尾）",
+      !body.includes("resolveThread("), "");
+  }
+
+  // ── Z2 ★它确实委派给了主链，并且带齐了主链需要的东西★ ──
+  {
+    check("Z2 委派给 handleApprove，且 ctx 带 threadId（主链据此 resolveThread）",
+      body.includes("handleApprove(opt, idx,") && body.includes("threadId: thread.id"), "");
+    check("Z2b ctx 带局印（跨局的旧点击也拦得住）",
+      body.includes("run: stampRun(gameEpochRef.current, state)"), "");
+    check("Z2c ★mode 传 \"auto\"：主链的 `mode===\"manual\"` 只用于聊天卡片过期那道闸，"
+      + "线程选项不来自 response，传 manual 会把所有线程批准误伤掉★",
+      /handleApprove\(opt, idx, "auto"/.test(body) && !/handleApprove\(opt, idx, "manual"/.test(body),
+      "");
+    check("Z2d 执行锁与 open 判定留着（线程自己的新鲜度检查）",
+      body.includes('thread.status !== "open"') && body.includes("tryLockThread(thread.id)") &&
+      body.includes("unlockThread(thread.id)"), "");
+  }
+
+  // ── Z3 ★全仓只剩一个执行入口★ ──
+  {
+    const panelSrc = cp.split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
+    check("Z3 ★ChatPanel 里 applyOrders 只有一处（主链）★",
+      panelSrc.split("applyOrders(").length - 1 === 1,
+      `applyOrders 出现 ${panelSrc.split("applyOrders(").length - 1} 次`);
+    check("Z3b ★buildExecReceipt 只有一处★",
+      panelSrc.split("buildExecReceipt(").length - 1 === 1, "");
+    // 主链那一处必须盖 origin/dispatchMeta（台账的入口）
+    check("Z3c 唯一那处 apply 仍盖 origin:\"advisor\" + dispatchMeta（台账记得上）",
+      panelSrc.includes('origin: "advisor" as const, dispatchMeta: meta'), "");
+  }
+
+  // ── Z4 走主链就自动拿到整条安全链（逐项点名）──
+  {
+    const ha = braceBody(cp, "const handleApprove = (");
+    const need: Array<[string, string]> = [
+      ["局印复核", "runGuardAllows(execCtx?.run"],
+      ["权限闸", "checkDispatchAuthority(state, speakingPersona, intent)"],
+      ["fromDispatch 权限复查", "任务 ${d.id} 那批人不在"],
+      ["指代歧义判定", "findDispatchAmbiguity(state, intent"],
+      ["无效分队**明确拒绝**（不是删字段）", "找不到叫「${intent.fromSquad}」的分队"],
+      ["目标校验", "isValidTarget(intent, state, COMMANDER_REFS)"],
+      ["台账登记", 'origin: "advisor" as const, dispatchMeta: meta'],
+      ["真实结果回执", "buildExecReceipt(applyRes, slices)"],
+      ["结果进 context", 'text: line, time: state.time'],
+    ];
+    const missing = need.filter(([, k]) => !ha.includes(k)).map(([n]) => n);
+    check("Z4 ★委派之后线程路自动获得整条安全链（九项逐项点名，缺一即红）★",
+      missing.length === 0, `缺: ${missing.join(" / ")}`);
+  }
+
+  if (negctl) {
+    console.log("\n-- negctl：把旧副入口那几样放回去，判据必须真红 --");
+    const fakeBody = `
+      const state = getState();
+      if (!state) return;
+      if (intent.fromSquad) { intent.fromSquad = undefined; }
+      const result = resolveIntent(intent, state, state.style, reserved);
+      applyOrders(state, allOrders);
+      resolveThread(thread.id);
+    `;
+    const banned = ["applyOrders(", "resolveIntent(", "intent.fromSquad = undefined", "resolveThread("];
+    const caught = banned.filter((k) => fakeBody.includes(k));
+    console.log(`  ${caught.length === 4 ? "RED(好)" : "GREEN(坏)"} negctl-Z 旧副入口的四样特征全被 Z1 抓住（${caught.length}/4）`);
+    check("negctl Z1 的黑名单确实抓得住旧写法（不是恒真）", caught.length === 4, "");
+  }
+}
+
 // ── main ──
 
 const knifeArg = (process.argv.find((a) => a.startsWith("--knife=")) ?? "--knife=all").split("=")[1];
@@ -2610,6 +2719,7 @@ if (knifeArg === "wu" || knifeArg === "all") knifeWu(negctl);
 if (knifeArg === "ji" || knifeArg === "all") knifeJi(negctl);
 if (knifeArg === "geng" || knifeArg === "all") knifeGeng(negctl);
 if (knifeArg === "gui" || knifeArg === "all") knifeGui(negctl);
+if (knifeArg === "zi" || knifeArg === "all") knifeZi(negctl);
 
 console.log(failCount === 0 ? `\nALL PASS (${checkCount} 条)` : `\n${failCount}/${checkCount} FAILURES`);
 process.exit(failCount === 0 ? 0 : 1);
