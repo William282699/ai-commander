@@ -26,7 +26,7 @@
 // 它一活就开始编。
 // ============================================================
 
-import type { ApplyResult, OrderRejectReason, IntentType } from "@ai-commander/shared";
+import type { ApplyResult, OrderRejectReason, IntentType, EconomyOutcome } from "@ai-commander/shared";
 
 /** 一条意图交给执行层的东西：它占了 orders 数组里的哪几格，以及去哪。 */
 export interface DispatchSlice {
@@ -45,14 +45,16 @@ export interface DispatchSlice {
    * 下一轮参谋记得的是"生产失败了"。Emily 的生产每条都中。
    *
    * 修法不是"在上层跳过经济意图"——那样生产连一行正面回执都没有，比基线的
-   * 「执行: 生产步兵 ×3」还差。经济单走自己的一行（planLog），结局记 applied，
-   * 且**不参与按人头的统计**（它本来就没有人头）。
-   * 真失败仍由引擎的 PRODUCE_FAIL / TRADE_FAIL 诊断上屏，那条路一个字不动。
+   * 「执行: 生产步兵 ×3」还差。
+   *
+   * ★刀庚 (审核 §三) 又修了一层：刀甲当时让经济条**无条件** `applied` 并复述
+   *   resolver 的计划那一行。那同样不是执行事实——实测 $170 造 3 个步兵，队列
+   *   真的只进 2 个、钱剩 $10，回执照说「生产步兵 ×3。」；预算生产/预算交易
+   *   完全失败（钱一分没动）时还说「全力生产主战坦克。」。
+   *   现在经济条读的是引擎回报的 `ApplyOrderOutcome.economy`（真实件数、真实
+   *   花费、真实原因），计划那一行**不再进回执**。
    */
   economy?: boolean;
-  /** 经济单的回执行：取该 resolver 的 log（「生产步兵 ×3」/「按预算生产步兵」/
-   *  「下达交易命令: buy_fuel」）。只有 economy 为真时才读。 */
-  planLog?: string;
 }
 
 export type ExecOutcome = "applied" | "partial" | "already_doing" | "none";
@@ -67,6 +69,22 @@ export interface ExecFact {
   outcome: ExecOutcome;
   /** 刀甲：这一条是经济单 ⇒ 三个人头计数恒为 0，不许拿它们判结局。 */
   economy: boolean;
+  /** 刀庚：经济单的真实结算（判据从这里取数，不做字符串 diff）。 */
+  economyFact?: EconomyAgg;
+}
+
+/** 刀庚：一条经济意图（可能拆成多条 order）的真实结算合计。 */
+export interface EconomyAgg {
+  kind: "produce" | "trade" | null;
+  subjectLabel: string;
+  requested: number;
+  succeeded: number;
+  failed: number;
+  moneySpent: number;
+  moneyGained: number;
+  resourceGained: number;
+  /** 同因合并后的原因（**只合并措辞，不合并计数**）。 */
+  reasons: string[];
 }
 
 export interface ExecReceipt {
@@ -126,6 +144,52 @@ function rejectPhrase(rejected: { unitId: number; reason: OrderRejectReason }[])
 }
 
 /**
+ * 刀庚：把一条经济意图的多条 order 合成一份真实结算。
+ * 数量生产会被 resolver 展开成 N 条 order，所以"真成了几件"必须在这里相加——
+ * 去重只作用在**原因措辞**上，绝不因此丢掉件数。
+ */
+function aggregateEconomy(rows: readonly EconomyOutcome[]): EconomyAgg {
+  const agg: EconomyAgg = {
+    kind: rows[0]?.kind ?? null,
+    subjectLabel: rows[0]?.subjectLabel ?? "",
+    requested: 0, succeeded: 0, failed: 0,
+    moneySpent: 0, moneyGained: 0, resourceGained: 0,
+    reasons: [],
+  };
+  for (const r of rows) {
+    agg.requested += r.requested;
+    agg.succeeded += r.succeeded;
+    agg.failed += r.failed;
+    agg.moneySpent += r.moneySpent;
+    agg.moneyGained += r.moneyGained;
+    agg.resourceGained += r.resourceGained;
+    for (const why of r.failReasons) if (!agg.reasons.includes(why)) agg.reasons.push(why);
+  }
+  return agg;
+}
+
+/** 经济单那一行。★成了几件、花了多少、没成的那部分为什么——全从真实结算取数。 */
+function economyLine(action: IntentType, agg: EconomyAgg, outcome: ExecOutcome): string {
+  const why = agg.reasons.join("；");
+  if (outcome === "none") {
+    // ★完全失败：绝不许先说一句正面成功句。
+    return why ? `没有执行——${why}` : `没有执行。`;
+  }
+  const cost = agg.moneySpent > 0 ? `，花了 $${agg.moneySpent}` : "";
+  const got = agg.moneyGained > 0 ? `，到手 $${agg.moneyGained}` : "";
+  const head = agg.kind === "trade"
+    ? (agg.moneyGained > 0
+        ? `卖出${agg.subjectLabel} ${Math.abs(agg.resourceGained)}`
+        : `买进${agg.subjectLabel} ${agg.resourceGained}`)
+    : `${verbOf(action)}${agg.subjectLabel} ×${agg.succeeded}`;
+  if (outcome === "partial") {
+    // ★部分成功：真实成功数 + 没成的那部分各说清楚。
+    return `${head}${cost}${got}；还差 ${agg.failed} 件没办成${why ? `（${why}）` : ""}。`;
+  }
+  return `${head}${cost}${got}。`;
+}
+
+/**
  * 从**执行层的回报**造一份回执。屏上和耳朵拿到的是同一份。
  *
  * ★ 措辞只说"下令"，不说"抵达"：`ApplyResult` 证明的是命令下出去了，
@@ -136,19 +200,29 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
   const lines: string[] = [];
 
   for (const slice of slices) {
-    // ── 刀甲：经济单没有人头，按人头判结局必然判成"没有执行" ──
+    // ── 经济单：没有人头，按人头判结局必然判成"没有执行"（刀甲）；
+    //    但也不能一律记 applied 复述计划那一行（刀庚）——那同样不是执行事实。
+    //    ★现在按引擎回报的**真实结算**说话（EconomyOutcome）。
     if (slice.economy) {
+      const econRows = slice.orderIndexes
+        .map((i) => result.perOrder[i]?.economy)
+        .filter((e): e is NonNullable<typeof e> => e != null);
+      const agg = aggregateEconomy(econRows);
+      const outcome: ExecOutcome =
+        agg.succeeded > 0 && agg.failed === 0 ? "applied"
+        : agg.succeeded > 0 ? "partial"
+        : "none";
       facts.push({
         action: slice.action,
         destinationName: slice.destinationName,
         appliedCount: 0,
         alreadyDoingCount: 0,
         rejectedCount: 0,
-        outcome: "applied",
+        outcome,
         economy: true,
+        economyFact: agg,
       });
-      const line = (slice.planLog ?? "").trim();
-      if (line) lines.push(line.endsWith("。") ? line : `${line}。`);
+      lines.push(economyLine(slice.action, agg, outcome));
       continue;
     }
 
@@ -175,10 +249,14 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
     const alreadyCount = already.size;
     const rejectedCount = rejectedIds.size;
 
+    // ★刀辛：`already_doing` **只在没有任何被拒时**才是纯第三类结局。
+    //   `applied=0 / already=1 / rejected=1` 旧版判成 already_doing，屏上还是普通
+    //   info，被拒那个一个字都不提——所以有被拒就降级成 partial（不是纯成功）。
     const outcome: ExecOutcome =
       appliedCount > 0 && rejectedCount === 0 ? "applied"
       : appliedCount > 0 ? "partial"
-      : alreadyCount > 0 ? "already_doing"
+      : alreadyCount > 0 && rejectedCount === 0 ? "already_doing"
+      : alreadyCount > 0 ? "partial"
       : "none";
 
     facts.push({
@@ -191,33 +269,43 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
       economy: false,
     });
 
+    // ── ★刀辛 (审核 §四): 三栏**分别**追加事实片段，不许互斥四分支丢掉非零栏 ──
+    //
+    // 旧写法是互斥四分支：applied=1 / already=1 / rejected=1 同时非零时只报
+    // applied + rejected，**already 那一栏整个消失**；而 applied=0 / already=1 /
+    // rejected=1 被判成 already_doing，只说"已经在执行"，被拒那个**一个字都不提**，
+    // 屏上还是普通 info。真实的 applyOrders 能产生这些组合，所以它们不是假设。
     const phrase = actionPhrase(slice.action, slice.destinationName);
-    if (outcome === "applied") {
-      lines.push(`已下令 ${appliedCount} 个单位${phrase}。`);
-    } else if (outcome === "partial") {
-      lines.push(`已下令 ${appliedCount} 个单位${phrase}；还有 ${rejectPhrase(liveRejected)}，没接到命令。`);
-    } else if (outcome === "already_doing") {
-      // 第三类结局：不算新派兵、不算失败。措辞里不许出现"已下令"。
-      lines.push(`这 ${alreadyCount} 个单位已经在${phrase}了，没有重新下令。`);
+    const parts: string[] = [];
+    if (appliedCount > 0) parts.push(`已下令 ${appliedCount} 个单位${phrase}`);
+    // alreadyDoing 是第三类结局：不算新派兵、不算失败，措辞里绝不许出现"已下令"。
+    if (alreadyCount > 0) parts.push(`另有 ${alreadyCount} 个已经在${phrase}了，没有重新下令`);
+    if (rejectedCount > 0) parts.push(`${rejectPhrase(liveRejected)}，没接到命令`);
+    if (parts.length === 0) {
+      // 三栏全空：明说没有执行，**不许出现"已下令…前往 X"**。
+      lines.push(`没有执行——没有部队接到这道命令。`);
+    } else if (appliedCount === 0 && alreadyCount === 0) {
+      // 只有被拒：整句从"没有执行"起头，不许读着像办成了。
+      lines.push(`没有执行——${rejectPhrase(liveRejected)}，一个都没接到命令。`);
+    } else if (appliedCount === 0) {
+      // 没有新派兵：不许以"已下令"起头（already 不是新派兵）。
+      lines.push(`没有重新下令——${parts.join("；")}。`);
     } else {
-      // ★ 一个都没执行：明说没有执行 + 原因，**不许出现"已下令…前往 X"**。
-      lines.push(
-        rejectedCount > 0
-          ? `没有执行——${rejectPhrase(liveRejected)}，一个都没接到命令。`
-          : `没有执行——没有部队接到这道命令。`,
-      );
+      lines.push(`${parts.join("；")}。`);
     }
   }
 
-  // 刀甲：总结局按**每条的结局**汇总，不再按人头。对纯作战单逐字等价
-  //（作战条的 outcome ∈ {applied, partial} ⟺ appliedCount > 0），
-  // 只是经济条这类"没有人头但确实办成了"的也算数了。
-  const anyApplied = facts.some((f) => f.outcome === "applied" || f.outcome === "partial");
-  const anyRejected = facts.some((f) => f.rejectedCount > 0);
-  const anyAlready = facts.some((f) => f.alreadyDoingCount > 0);
+  // 总结局按**每条的结局**汇总，不按人头（刀甲）。
+  // ★刀庚/刀辛 又补一层：汇总必须看得见**经济单的失败**。此前 `anyRejected` 只数
+  //   人头被拒，而经济单的三栏人头恒为 0 ⇒ 「$170 造 3 个只成 2 个」整批仍判
+  //   applied，屏上是普通 info，看不出有一件没办成。现在"有没有失败"按每条的
+  //   结局判：outcome ∈ {partial, none} 就是有失败。
+  const anySucceeded = facts.some((f) => f.outcome === "applied" || f.outcome === "partial");
+  const anyFailed = facts.some((f) => f.outcome === "partial" || f.outcome === "none");
+  const anyAlready = facts.some((f) => f.outcome === "already_doing" || f.alreadyDoingCount > 0);
   const outcome: ExecOutcome =
-    anyApplied && !anyRejected ? "applied"
-    : anyApplied ? "partial"
+    anySucceeded && !anyFailed ? "applied"
+    : anySucceeded ? "partial"
     : anyAlready ? "already_doing"
     : "none";
 

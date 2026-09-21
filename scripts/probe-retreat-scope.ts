@@ -1061,6 +1061,11 @@ function knifeJia(negctl: boolean): void {
     const res = applyOrders(st, r.orders);
     const receipt = buildExecReceipt(res, [sliceOf(intent, r.destinationName, r.log, r.orders.map((_, k) => k))]);
     const moved = probe(st);
+    // 引擎真办成了几件：生产看队列增量，买油看"花了几份钱"（$300/份）。
+    const delta = name === "买油"
+      ? Math.round((moved.before - moved.after) / 300)
+      : moved.after - moved.before;
+    Object.assign(moved as Record<string, unknown>, { delta });
     const enginedidIt = name === "买油" ? moved.after < moved.before : moved.after > moved.before;
     check(`J1 ${name}：引擎**真办成了**（队列增加 / 钱减少）——本条不成立下面就不承重`,
       enginedidIt, `before=${moved.before} after=${moved.after}`);
@@ -1072,8 +1077,21 @@ function knifeJia(negctl: boolean): void {
       receipt.lines.length === 1 &&
       !receipt.lines[0].includes("没有执行"),
       `outcome=${receipt.outcome} lines=${JSON.stringify(receipt.lines)}`);
-    check(`J1c ${name}：回执那一行就是该 resolver 的 log（基线「执行: …」那句的内容）`,
-      receipt.lines[0].startsWith(r.log), `line=${receipt.lines[0]} log=${r.log}`);
+    // ★刀庚 改判：旧版这里钉的是「回执那一行＝resolver 的 planLog」——那正是
+    //   本刀要废掉的东西（计划不是结果）。现在钉**真实结算**：件数与引擎实际
+    //   办成的件数相等，且那一行里**不许再出现计划那句话**。
+    const fact0 = receipt.facts[0];
+    // 判据测**效果**不测措辞：件数与引擎实际办成的相等，而且那一行里带着
+    // **计划里根本没有的东西**——真实花费（planLog 从来不含金额，所以这一条
+    // 只有真从结算取数才成立；成功句偶然与计划同前缀不算证据）。
+    check(`J1c ${name} ★回执按真实结算说话（件数=真件数，且报出计划里没有的真实花费）★`,
+      fact0.economyFact != null &&
+      fact0.economyFact.succeeded === moved.delta &&
+      fact0.economyFact.failed === 0 &&
+      fact0.economyFact.moneySpent > 0 &&
+      receipt.lines[0].includes(`$${fact0.economyFact.moneySpent}`) &&
+      !r.log.includes("$"),
+      `line=${receipt.lines[0]} log=${r.log} fact=${JSON.stringify(fact0.economyFact)}`);
     check(`J1d ${name}：经济单不进人头统计（三栏全 0，不许拿它冒充派了兵）`,
       receipt.facts[0].appliedCount === 0 && receipt.facts[0].alreadyDoingCount === 0 && receipt.facts[0].rejectedCount === 0,
       JSON.stringify(receipt.facts[0]));
@@ -1128,14 +1146,20 @@ function knifeJia(negctl: boolean): void {
       r.degraded === false && r.orders.length === 3 &&
       st.productionQueue.player.length === 0 && st.economy.player.resources.money === 50,
       `q=${st.productionQueue.player.length} $=${st.economy.player.resources.money}`);
-    check("J4b 引擎把失败记成了诊断（屏上与耳朵都从这儿取真相）",
+    check("J4b 引擎照旧把失败记成诊断（调试/系统日志要它，只是不再当回执的数据总线）",
       fails.length === 3 && fails.every((d) => d.message.includes("资金不足")),
       JSON.stringify(fails.map((d) => d.message)));
-    check("J4c 去重后只剩一句（三条一模一样，念三遍是噪音）",
+    check("J4c 同一条理由去重后只剩一句（三条一模一样，说三遍是噪音）",
       new Set(fails.map((d) => d.message)).size === 1, "");
-    check("J4d ★登记的取舍★ 回执仍先报 planLog（与基线同形），真相靠紧随其后的诊断",
-      receipt.lines.length === 1 && receipt.lines[0].startsWith(r.log) &&
-      !receipt.lines[0].includes("没有执行"),
+    // ★刀庚 改判：旧版这条把「回执先报 planLog」**钉成了正确行为**——而那正是
+    //   §三 的病（完全失败却先说一句正面成功句）。现在钉相反的要求。
+    check("J4d ★完全失败 ⇒ 回执明说「没有执行」＋原因，绝不先说计划那句正面话★",
+      receipt.lines.length === 1 &&
+      receipt.lines[0].includes("没有执行") &&
+      receipt.lines[0].includes("资金不足") &&
+      !receipt.lines[0].startsWith(r.log) &&
+      receipt.outcome === "none" &&
+      receipt.facts[0].economyFact?.succeeded === 0,
       receipt.lines.join(" "));
   }
 
@@ -1144,8 +1168,8 @@ function knifeJia(negctl: boolean): void {
   {
     const panelSrc = readFileSync("apps/web/src/ChatPanel.tsx", "utf8")
       .split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
-    const wired = panelSrc.split("economy: true, planLog:").length - 1;
-    check("J3 ChatPanel 两处 slice 都带 economy/planLog（漏一处那条路照旧误报）",
+    const wired = panelSrc.split("economy: true }").length - 1;
+    check("J3 ChatPanel 两处 slice 都盖了 economy 标记（漏一处那条路照旧误报）",
       wired === 2 && panelSrc.split("isDispatchIntent(intent.type)").length - 1 === 2,
       `盖上的有 ${wired} 处`);
     check("J3b 「是不是经济单」只有一份真相源（core 的 isDispatchIntent），UI 没另抄一张表",
@@ -1284,21 +1308,36 @@ function knifeYi(negctl: boolean): void {
       "");
   }
 
-  // ── Y5 ★补角：结算失败也得进耳朵（审核新查出的第 1 笔）──
-  //    这条不在 Y2 的射程里：那圈 PRODUCE_FAIL 的 addMessage 后面**没有 return**
-  //    （它在执行之后、回执之后），所以要单独钉。
+  // ── Y5 结算失败的原因必须到得了耳朵 ──
+  //
+  // ★刀庚 改判（审核 §三）：刀丁当时是从 `state.diagnostics` 里捞
+  //   PRODUCE_FAIL / TRADE_FAIL 补上屏＋补声。那是把诊断当回执的数据总线，
+  //   而且只捞到两个码——预算结算走的是 PRODUCE_BUDGET / TRADE_BUDGET，
+  //   完全失败时屏上一句失败都没有、只有那句假成功。
+  //   现在原因随**真实结算**一起回来，回执自己就带着它 ⇒ 那一圈整段退场。
+  //   本条因此改钉：原因确实进了回执那一份字符串（屏/耳/context 同源）。
   {
-    check("Y5 经济结算失败的诊断：既上屏、也经 refuseAloud 补进耳朵（屏上不重复）",
-      body.includes('addMessage("warning", d.message') &&
-      body.includes("economyFails.join(\" \"), speakReceipt, { screen: false }"),
+    check("Y5 诊断不再当回执的数据总线（那一圈捞 PRODUCE_FAIL 的写法已退场）",
+      !body.includes('addMessage("warning", d.message') && !body.includes("economyFails"),
       "");
-    check("Y5b 同一条理由去重（三条「资金不足」念一遍就够）",
-      body.includes("if (!economyFails.includes(d.message)) economyFails.push(d.message)"),
-      "");
-    check("Y5c ★顺序★ 补声排在正面回执之后（speak 按句排队，先办成后理由）",
-      body.indexOf("speak(`${voiceConfirm} ${execReceipt.spokenText}`") <
-      body.indexOf("economyFails.join"),
-      "");
+    // 真跑一遍：钱不够 ⇒ 回执那一行里带着引擎给的原因，且耳朵念的就是它。
+    {
+      const st = createInitialGameState("el_alamein");
+      st.economy.player.resources.money = 50;
+      const intent = { type: "produce", produceType: "infantry", quantity: 3 } as Intent;
+      const r = resolveIntent(intent, st, st.style);
+      const res = applyOrders(st, r.orders);
+      const receipt = buildExecReceipt(res, [sliceOf(intent, r.destinationName, r.log, r.orders.map((_, k) => k))]);
+      check("Y5b ★结算失败的原因进了回执（屏与耳同一份字符串），且同因只说一遍★",
+        receipt.lines.length === 1 &&
+        receipt.lines[0].includes("资金不足") &&
+        receipt.spokenText === receipt.lines.join(" ") &&
+        (receipt.lines[0].match(/资金不足/g) ?? []).length === 1,
+        JSON.stringify(receipt.lines));
+      check("Y5c 完全失败 ⇒ 那一行以「没有执行」起头，前面没有任何正面成功句",
+        receipt.outcome === "none" && receipt.lines[0].startsWith("没有执行"),
+        JSON.stringify(receipt.lines));
+    }
   }
 
   if (negctl) {
@@ -2110,6 +2149,294 @@ function knifeJi(negctl: boolean): void {
   }
 }
 
+// ════════════════════════════════════════════════════════════
+// 刀 庚/辛/壬：经济单回报真实结算 · mixed 回执补全 · 屏声 context 同源
+// ════════════════════════════════════════════════════════════
+//
+// §三 病：`slice.economy=true` 就无条件 outcome="applied" + 复述 planLog。
+//   实测三格（全部在 9985f92 上复现过）：
+//   A $170 造 3 个步兵 ⇒ 队列真只进 2、钱剩 $10，回执说「生产步兵 ×3。」
+//   B $50 全力造主战坦克 ⇒ 队列 0、钱没动，回执说「全力生产主战坦克。」
+//   C $50 全力买油 ⇒ 钱没动，回执说「下达交易命令: buy_fuel。」
+//   ★ B/C 连黄字都没有：刀丁只捞 PRODUCE_FAIL/TRADE_FAIL，而预算结算走的是
+//     PRODUCE_BUDGET/TRADE_BUDGET。
+// §四 病：作战条用互斥四分支判结局，非零栏会被丢掉。
+// §五 病：refuseAloud 不写 context；可执行回合先把 data.brief 推了进去。
+
+/** 跑一条经济意图，返回真实变化与回执（镜像 ChatPanel 的取数链）。 */
+function econRun(money: number, intent: Intent, fuel?: number) {
+  const st = createInitialGameState("el_alamein");
+  st.economy.player.resources.money = money;
+  if (fuel !== undefined) st.economy.player.resources.fuel = fuel;
+  const q0 = st.productionQueue.player.length;
+  const m0 = st.economy.player.resources.money;
+  const f0 = st.economy.player.resources.fuel;
+  const r = resolveIntent(intent, st, st.style);
+  if (r.degraded) return { st, r, receipt: null, dq: 0, dm: 0, df: 0 };
+  const res = applyOrders(st, r.orders);
+  const receipt = buildExecReceipt(res, [sliceOf(intent, r.destinationName, r.log, r.orders.map((_, k) => k))]);
+  return {
+    st, r, receipt,
+    dq: st.productionQueue.player.length - q0,
+    dm: m0 - st.economy.player.resources.money,
+    df: st.economy.player.resources.fuel - f0,
+  };
+}
+
+function knifeGeng(negctl: boolean): void {
+  console.log("\n== 刀 庚/辛/壬：真实结算 · mixed 回执 · 屏声 context 同源 ==");
+
+  // ── G1 ★反例 A★ 普通生产**部分成功**：报真数，不报计划那个数 ──
+  {
+    const g = econRun(170, { type: "produce", produceType: "infantry", quantity: 3 } as Intent);
+    const f = g.receipt!.facts[0].economyFact!;
+    check("G1 台架自证：$170 造 3 个步兵 ⇒ 引擎真只进 2 个、真花 $160",
+      g.dq === 2 && g.dm === 160, `dq=${g.dq} dm=${g.dm}`);
+    check("G1b ★回执报真实成功数 2（不是计划那个 3），并说清没办成的那 1 件★",
+      f.requested === 3 && f.succeeded === 2 && f.failed === 1 && f.moneySpent === 160 &&
+      g.receipt!.lines[0].includes("×2") && !g.receipt!.lines[0].includes("×3") &&
+      g.receipt!.lines[0].includes("还差 1 件"),
+      `line=${g.receipt!.lines[0]} fact=${JSON.stringify(f)}`);
+    check("G1c ★部分成功 ⇒ 整批结局是 partial，不许伪装成纯成功★",
+      g.receipt!.outcome === "partial" && g.receipt!.facts[0].outcome === "partial",
+      `outcome=${g.receipt!.outcome}`);
+    check("G1d 真实花费与引擎实际扣款逐元相等（计划那一行里根本没有金额）",
+      f.moneySpent === g.dm && !g.r.log.includes("$"), `spent=${f.moneySpent} dm=${g.dm}`);
+  }
+
+  // ── G2 钱够：一份成功回执，不多一声失败 ──
+  {
+    const g = econRun(3500, { type: "produce", produceType: "infantry", quantity: 3 } as Intent);
+    const f = g.receipt!.facts[0].economyFact!;
+    check("G2 钱够造 3 个 ⇒ 真成 3、回执 3、结局 applied、一条原因都没有",
+      g.dq === 3 && f.succeeded === 3 && f.failed === 0 && f.reasons.length === 0 &&
+      g.receipt!.outcome === "applied" && g.receipt!.lines.length === 1 &&
+      !g.receipt!.lines[0].includes("没有执行") && !g.receipt!.lines[0].includes("还差"),
+      `line=${g.receipt!.lines[0]}`);
+  }
+
+  // ── G3 完全没钱：零变化，且**不许先说一句正面成功句** ──
+  {
+    const g = econRun(0, { type: "produce", produceType: "infantry", quantity: 3 } as Intent);
+    const f = g.receipt!.facts[0].economyFact!;
+    check("G3 ★$0 造 3 个 ⇒ 真零变化、结局 none、回执以「没有执行」起头、带原因★",
+      g.dq === 0 && g.dm === 0 && f.succeeded === 0 && f.failed === 3 &&
+      g.receipt!.outcome === "none" &&
+      g.receipt!.lines[0].startsWith("没有执行") && g.receipt!.lines[0].includes("资金不足") &&
+      !g.receipt!.lines[0].includes("×3"),
+      `line=${g.receipt!.lines[0]}`);
+  }
+
+  // ── G4 ★反例 B★ 预算生产完全失败 ──
+  {
+    const g = econRun(50, {
+      type: "produce", produceType: "main_tank",
+      produceBudget: { mode: "fraction_of_money", fraction: 1 },
+    } as Intent);
+    const f = g.receipt!.facts[0].economyFact!;
+    check("G4 台架自证：$50 全力造主战坦克 ⇒ 队列没动、钱没动",
+      g.dq === 0 && g.dm === 0, `dq=${g.dq} dm=${g.dm}`);
+    check("G4b ★回执不再说「全力生产主战坦克。」，而是「没有执行」＋真实约束★",
+      g.receipt!.outcome === "none" && f.succeeded === 0 &&
+      g.receipt!.lines[0].startsWith("没有执行") &&
+      g.receipt!.lines[0].includes("钱不够") &&
+      !g.receipt!.lines[0].includes("全力生产"),
+      `line=${g.receipt!.lines[0]}`);
+  }
+
+  // ── G5 预算生产成功：回执带真实数量与花费 ──
+  {
+    const g = econRun(3500, {
+      type: "produce", produceType: "infantry",
+      produceBudget: { mode: "fraction_of_money", fraction: 0.5 },
+    } as Intent);
+    const f = g.receipt!.facts[0].economyFact!;
+    check("G5 预算生产成功 ⇒ 回执的件数/花费＝引擎真结算（不是模型也不是计划）",
+      f.succeeded === g.dq && f.moneySpent === g.dm && f.succeeded > 0 &&
+      g.receipt!.lines[0].includes(`×${f.succeeded}`) &&
+      g.receipt!.lines[0].includes(`$${f.moneySpent}`),
+      `line=${g.receipt!.lines[0]} dq=${g.dq} dm=${g.dm}`);
+  }
+
+  // ── G6 ★燃油界★：零件回执要报真实约束（钱油不合并，用户审计那一笔）──
+  {
+    const g = econRun(100000, {
+      type: "produce", produceType: "main_tank",
+      produceBudget: { mode: "fraction_of_money", fraction: 1 },
+    } as Intent, 0);
+    check("G6 钱多油零 ⇒ 回执说的是**燃油不足**，不是钱不够（钱界油界不合并）",
+      g.receipt!.outcome === "none" &&
+      g.receipt!.lines[0].includes("燃油不足") && !g.receipt!.lines[0].includes("钱不够"),
+      `line=${g.receipt!.lines[0]}`);
+  }
+
+  // ── G7 ★反例 C★ 预算交易失败 / 成功 两格 ──
+  {
+    const bad = econRun(50, {
+      type: "trade", tradeAction: "buy_fuel",
+      tradeBudget: { mode: "fraction_of_money", fraction: 1 },
+    } as Intent);
+    check("G7 ★$50 全力买油 ⇒ 钱没动，回执不再复述「buy_fuel」而是「没有执行」＋原因★",
+      bad.dm === 0 && bad.df === 0 && bad.receipt!.outcome === "none" &&
+      bad.receipt!.lines[0].startsWith("没有执行") &&
+      !bad.receipt!.lines[0].includes("buy_fuel"),
+      `line=${bad.receipt!.lines[0]}`);
+    const ok = econRun(3500, {
+      type: "trade", tradeAction: "buy_fuel",
+      tradeBudget: { mode: "fraction_of_money", fraction: 1 },
+    } as Intent);
+    const f = ok.receipt!.facts[0].economyFact!;
+    check("G7b 预算交易成功 ⇒ 报真实结算（到手的油量、花掉的钱），不复述计划字段",
+      f.resourceGained === ok.df && f.moneySpent === ok.dm && f.succeeded > 0 &&
+      ok.receipt!.lines[0].includes(`${ok.df}`) && ok.receipt!.lines[0].includes(`$${ok.dm}`) &&
+      !ok.receipt!.lines[0].includes("buy_fuel"),
+      `line=${ok.receipt!.lines[0]} df=${ok.df} dm=${ok.dm}`);
+    const single = econRun(50, { type: "trade", tradeAction: "buy_fuel" } as Intent);
+    check("G7c 单次买油钱不够 ⇒ 同样「没有执行」＋原因（不是正面交易计划）",
+      single.dm === 0 && single.receipt!.outcome === "none" &&
+      single.receipt!.lines[0].includes("资金不足"),
+      `line=${single.receipt!.lines[0]}`);
+  }
+
+  // ── G8 去重只合并措辞，不丢件数 ──
+  {
+    const g = econRun(170, { type: "produce", produceType: "infantry", quantity: 3 } as Intent);
+    const f = g.receipt!.facts[0].economyFact!;
+    check("G8 ★同因去重后只剩一句，但成功件数/失败件数一件不丢★",
+      f.reasons.length === 1 &&
+      (g.receipt!.lines[0].match(/资金不足/g) ?? []).length === 1 &&
+      f.succeeded === 2 && f.failed === 1 && f.succeeded + f.failed === f.requested,
+      `reasons=${JSON.stringify(f.reasons)} fact=${JSON.stringify(f)}`);
+  }
+
+  // ── S1..S7 ★审核 §四★ mixed 组合：三栏分别追加，不许丢掉非零栏 ──
+  //    ★ 用**真** applyOrders 造组合，不手搓假对象。
+  {
+    const mix = (opts: { applied: number; already: number; rejected: number }) => {
+      nextId = 9000;
+      const st = emptyBattlefield("el_alamein");
+      st.time = 120;
+      const ids: number[] = [];
+      const target = { x: 350, y: 150 };
+      // applied：干净的可调单位
+      for (let i = 0; i < opts.applied; i++) ids.push(addUnit(st, 340 + i, 150).id);
+      // rejected：被玩家手动接管 ⇒ applyOrders 的四道过滤会拒（manual_override）
+      const rej: number[] = [];
+      for (let i = 0; i < opts.rejected; i++) {
+        const u = addUnit(st, 345 + i, 150, { manualOverride: true });
+        rej.push(u.id); ids.push(u.id);
+      }
+      // already：已经在执行等价的危机增援单 ⇒ 幂等跳过
+      const alr: number[] = [];
+      for (let i = 0; i < opts.already; i++) {
+        const u = addUnit(st, 348 + i, 150);
+        u.orders = [{ unitIds: [u.id], action: "retreat", target, priority: 1, crisisFrontId: "cf1" }];
+        alr.push(u.id); ids.push(u.id);
+      }
+      const order: Order = {
+        unitIds: ids, action: "retreat", target, priority: 1, crisisFrontId: "cf1",
+      };
+      const res = applyOrders(st, [order]);
+      const receipt = buildExecReceipt(res, [{ action: "retreat", destinationName: "南线前哨", orderIndexes: [0] }]);
+      return { res, receipt };
+    };
+    const COMB: Array<[string, { applied: number; already: number; rejected: number }]> = [
+      ["只有 applied", { applied: 2, already: 0, rejected: 0 }],
+      ["只有 already", { applied: 0, already: 2, rejected: 0 }],
+      ["只有 rejected", { applied: 0, already: 0, rejected: 2 }],
+      ["applied+rejected", { applied: 2, already: 0, rejected: 1 }],
+      ["applied+already", { applied: 2, already: 1, rejected: 0 }],
+      ["already+rejected", { applied: 0, already: 1, rejected: 1 }],
+      ["applied+already+rejected", { applied: 1, already: 1, rejected: 1 }],
+    ];
+    for (const [label, want] of COMB) {
+      const { res, receipt } = mix(want);
+      const line = receipt.lines[0] ?? "";
+      const f = receipt.facts[0];
+      // ① 台架自证：applyOrders 真造出了这个组合（否则这一条不承重）
+      const got = {
+        applied: res.appliedUnitIds.length,
+        already: res.alreadyDoingUnitIds.length,
+        rejected: res.rejectedUnitIds.length,
+      };
+      const shaped = got.applied === want.applied && got.already === want.already && got.rejected === want.rejected;
+      // ② 每个非零栏都必须在那一行里露面（数字对得上）
+      const mentions =
+        (want.applied === 0 || (line.includes(`${want.applied} 个单位`) && line.includes("已下令"))) &&
+        (want.already === 0 || (line.includes(`${want.already} 个已经在`) && line.includes("没有重新下令"))) &&
+        (want.rejected === 0 || line.includes("没接到命令"));
+      // ③ 有被拒就不许读成纯成功
+      const severity = want.rejected === 0 || (f.outcome !== "applied" && f.outcome !== "already_doing");
+      check(`S ${label} ⇒ 真造出该组合、三栏各自露面、有被拒就不算纯成功`,
+        shaped && mentions && severity,
+        `got=${JSON.stringify(got)} want=${JSON.stringify(want)} outcome=${f.outcome} line=${line}`);
+    }
+    // ★ already 绝不进新任务的 applied 名单
+    {
+      nextId = 9000;
+      const st = emptyBattlefield("el_alamein");
+      st.time = 120;
+      const target = { x: 350, y: 150 };
+      const fresh = addUnit(st, 340, 150).id;
+      const busy = addUnit(st, 348, 150);
+      busy.orders = [{ unitIds: [busy.id], action: "retreat", target, priority: 1, crisisFrontId: "cf1" }];
+      const meta: DispatchMeta = { group: "i0", sourceKind: "front", sourceKey: "front_south", action: "retreat", targetName: "南线前哨" };
+      const res = applyOrders(st, [{
+        unitIds: [fresh, busy.id], action: "retreat", target, priority: 1,
+        crisisFrontId: "cf1", origin: "advisor", dispatchMeta: meta,
+      } as Order]);
+      const d = st.dispatches[st.dispatches.length - 1];
+      check("S8 ★alreadyDoing 不算新派兵：台账新记录里只有真下令那个，幂等那个不在★",
+        res.appliedUnitIds.length === 1 && res.appliedUnitIds[0] === fresh &&
+        res.alreadyDoingUnitIds.length === 1 && res.alreadyDoingUnitIds[0] === busy.id &&
+        d != null && d.memberIds.length === 1 && d.memberIds[0] === fresh,
+        `applied=${JSON.stringify(res.appliedUnitIds)} ledger=${JSON.stringify(d?.memberIds)}`);
+    }
+  }
+
+  // ── C1..C4 ★审核 §五★ 屏 / 声 / context 同源 ──
+  {
+    const cp = readFileSync("apps/web/src/ChatPanel.tsx", "utf8");
+    const helper = braceBody(cp, "const refuseAloud = (");
+    check("C1 ★拒绝出口也写 context（屏/声/context 同一个 msg）★",
+      helper.includes("pushContext(channelContextRef.current, ch, { role: \"assistant\", text: msg"),
+      helper ? "找到出口但没写 context" : "★找不到出口");
+    check("C1b `screen:false` 只表示不重复上屏，**不**禁止进 context（两个开关分开）",
+      helper.includes("opts?.screen !== false") && helper.includes("opts?.context !== false"),
+      "");
+    check("C2 ★会动兵的回合不把 data.brief 当已执行事实写进 context★",
+      cp.includes("if (data.brief && !willExecute) {"), "");
+    check("C3 执行回执的每一行都进 context（真实结果覆盖得到）",
+      cp.includes("pushContext(channelContextRef.current, ch, { role: \"assistant\", text: line, time: state.time });"),
+      "");
+    check("C4 部分成功也不许显示成普通 info（有没办成的部分就降级）",
+      (cp.match(/execReceipt\.outcome === "none" \|\| execReceipt\.outcome === "partial" \? "warning" : "info"/g) ?? []).length === 2,
+      "");
+  }
+
+  if (negctl) {
+    console.log("\n-- negctl：刀甲那版「经济单一律 applied + 复述计划」打在新引擎上，必须真红 --");
+    let reds = 0;
+    const CASES: Array<[string, () => ReturnType<typeof econRun>]> = [
+      ["A 部分成功", () => econRun(170, { type: "produce", produceType: "infantry", quantity: 3 } as Intent)],
+      ["B 预算生产全败", () => econRun(50, { type: "produce", produceType: "main_tank", produceBudget: { mode: "fraction_of_money", fraction: 1 } } as Intent)],
+      ["C 预算交易全败", () => econRun(50, { type: "trade", tradeAction: "buy_fuel", tradeBudget: { mode: "fraction_of_money", fraction: 1 } } as Intent)],
+    ];
+    for (const [label, run] of CASES) {
+      const g = run();
+      const oldLine = `${g.r.log}。`;                 // 刀甲：复述计划那一行
+      const oldOutcome = "applied";                   // 刀甲：无条件 applied
+      const trulyOk = g.dq > 0 || g.dm > 0;           // 引擎到底办成没有
+      const red = g.receipt!.lines[0] !== oldLine &&
+        (g.receipt!.outcome !== oldOutcome || !trulyOk === false);
+      const honest = (g.receipt!.outcome === "none") === (!trulyOk && g.dq === 0 && g.dm === 0);
+      if (red && honest) reds++;
+      console.log(`  ${red && honest ? "RED(好)" : "GREEN(坏)"} negctl-G ${label}：旧回执「${oldLine}」/${oldOutcome} vs 新回执「${g.receipt!.lines[0]}」/${g.receipt!.outcome}（引擎真变了=${trulyOk}）`);
+    }
+    check("negctl 刀甲那版回执在三格上全部与真相不符（真实结算确实承重）", reds === 3, `${reds}/3`);
+  }
+}
+
 // ── main ──
 
 const knifeArg = (process.argv.find((a) => a.startsWith("--knife=")) ?? "--knife=all").split("=")[1];
@@ -2123,6 +2450,7 @@ if (knifeArg === "yi" || knifeArg === "all") knifeYi(negctl);
 if (knifeArg === "bing" || knifeArg === "all") knifeBing(negctl);
 if (knifeArg === "wu" || knifeArg === "all") knifeWu(negctl);
 if (knifeArg === "ji" || knifeArg === "all") knifeJi(negctl);
+if (knifeArg === "geng" || knifeArg === "all") knifeGeng(negctl);
 
 console.log(failCount === 0 ? `\nALL PASS (${checkCount} 条)` : `\n${failCount}/${checkCount} FAILURES`);
 process.exit(failCount === 0 ? 0 : 1);

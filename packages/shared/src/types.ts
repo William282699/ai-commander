@@ -349,6 +349,44 @@ export interface ApplyOrderOutcome {
   /** 幂等跳过：已经在执行等价命令。第三类结局，不许塞进 rejected 冒充失败。 */
   alreadyDoingUnitIds: number[];
   rejected: { unitId: number; reason: OrderRejectReason }[];
+  /**
+   * 刀庚：经济单（produce / trade）的**真实结算**。
+   *
+   * 经济单没有"人头"，三栏 unitIds 天生是空的——刀甲当时的权宜是"经济单一律记
+   * applied，复述计划那一行"。那不是执行事实：实测 $170 造 3 个步兵，队列真的
+   * 只进了 2 个、钱剩 $10，回执照样说「生产步兵 ×3。」；预算生产/预算交易
+   * 完全失败（钱一分没动）时回执还说「全力生产主战坦克。」。
+   *
+   * 所以经济单也要有一等的执行结果。**屏幕、TTS、对话 context 一律从这里取数**；
+   * `state.diagnostics` 降为调试/系统日志，不再当前端回执的数据总线。
+   */
+  economy?: EconomyOutcome;
+}
+
+// --- 刀庚: 经济单的真实结算结果 ---
+
+export type EconomyOpKind = "produce" | "trade";
+
+export interface EconomyOutcome {
+  kind: EconomyOpKind;
+  /** produce: UnitType；trade: TradeType。机器用。 */
+  subject: string;
+  /** 给玩家看的中文名（「步兵」/「燃油」）。 */
+  subjectLabel: string;
+  /** 这一条 order 想办成几件（引擎自己算出来的那个数，不是模型说的）。 */
+  requested: number;
+  /** **真的**办成了几件。 */
+  succeeded: number;
+  /** **真的**没办成几件。 */
+  failed: number;
+  /** 真的花出去多少钱。 */
+  moneySpent: number;
+  /** 真的到手多少钱（卖出）。 */
+  moneyGained: number;
+  /** 真的到手多少资源（买燃油 +N）。 */
+  resourceGained: number;
+  /** 失败原因（引擎自己那句人话；成功就是空数组）。 */
+  failReasons: string[];
 }
 
 export interface ApplyResult {

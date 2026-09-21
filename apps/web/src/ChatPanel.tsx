@@ -1779,7 +1779,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     ch: Channel,
     msg: string,
     speakReceipt: boolean,
-    opts?: { screen?: boolean },
+    opts?: { screen?: boolean; context?: boolean },
   ) => {
     if (opts?.screen !== false) {
       addMessage("warning", msg, st.time, ch, undefined, "command_ack");
@@ -1788,6 +1788,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const persona = COMMANDERS.find((c) => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
       speak(msg, persona);
       flush(persona);
+    }
+    // ★刀壬 (审核 §五)：**同一份事实**也要进对话 context。
+    //   病：这个出口原先只上屏、出声，不写 context。而可执行回合又先把模型写的
+    //   `data.brief`（"准备执行…"）推了进去 ⇒ 下一轮模型记得的是"我要办了"，
+    //   根本不知道这道命令被权限/分队/目标/零 orders 拦下了。
+    //   `screen:false` 只表示"不重复上屏"，**不表示不进 context**——真实结果
+    //   一律进；要压掉重复的那一格（问句自己已经推过）才传 `context:false`。
+    if (opts?.context !== false && msg.trim()) {
+      pushContext(channelContextRef.current, ch, { role: "assistant", text: msg, time: st.time });
     }
   };
 
@@ -1825,7 +1834,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     };
     const question = `您说的是哪一批？${candidates.map((c) => c.label).join("，还是")}？`;
     // 刀乙：问句也要进耳朵——用嘴下的令被问回来，听不见就等于石沉大海。
-    refuseAloud(state, ch, question, speakReceipt);
+    // 刀壬：出口现在自己写 context，这儿就别推第二遍（`context:false`）。
+    refuseAloud(state, ch, question, speakReceipt, { context: false });
     pushContext(channelContextRef.current, ch, { role: "assistant", text: question, time: state.time });
     setClarification("请指明是哪一批部队");
   };
@@ -1890,8 +1900,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             action: intent.type,
             destinationName: result.destinationName,
             orderIndexes: result.orders.map((_, k) => base + k),
-            // 刀甲：经济单没有人头，按人头判必然判成"没有执行"。
-            ...(economy ? { economy: true, planLog: result.log } : {}),
+            // 刀甲/刀庚：经济单没有人头，按人头判必然判成"没有执行"；它的回执
+            // 由引擎回报的真实结算生成（不复述计划那一行）。
+            ...(economy ? { economy: true } : {}),
           });
         }
         allOrders.push(...result.orders);
@@ -1903,7 +1914,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const execReceipt = buildExecReceipt(applyRes, slices);
         for (const line of execReceipt.lines) {
           addMessage(
-            execReceipt.outcome === "none" ? "warning" : "info",
+            execReceipt.outcome === "none" || execReceipt.outcome === "partial" ? "warning" : "info",
             line, state.time, thread.channel, undefined, "command_ack",
           );
         }
@@ -2663,7 +2674,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         if (escalateId && getActiveEscalation(ch, state.time)?.actionId === escalateId) {
           clearEscalation(ch);
         }
-        if (data.brief) {
+        // ★刀壬 (审核 §五)：**会动兵的回合不把 data.brief 推进 context**。
+        //   它是模型在引擎跑之前写的方案（"准备让北线部队撤回前哨"）。推进去 ⇒
+        //   下一轮模型记得的是它以为发生的事；而真实结果（真人数、真落点、
+        //   被拒的原因）随后才由执行回执 / refuseAloud 推进来，覆盖不掉它。
+        //   计划不许压过结果：会动兵就不写，等结果那一句。
+        //   不会动兵的回合（咨询/反问）照旧写——那句话本身就是这一轮的全部事实。
+        if (data.brief && !willExecute) {
           pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
         }
 
@@ -3267,14 +3284,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // applyOrders 按下标回报结果，回执据此逐条意图对账——不靠猜、不靠合并。
       if (result.orders.length > 0) {
         const base = allOrders.length;
-        // 刀甲：经济单（produce/trade）没有人头 —— 它的回执走 planLog 那一行，
-        // 不参与按人头的结局判定。判的是**字段形状**（意图类型），不是措辞。
+        // 刀甲/刀庚：经济单（produce/trade）没有人头，不参与按人头的结局判定；
+        // 它的回执由引擎回报的**真实结算**生成（真件数/真花费/真原因），
+        // 计划那一行不再进回执。判的是字段形状（意图类型），不是措辞。
         const economy = !isDispatchIntent(intent.type);
         slices.push({
           action: intent.type,
           destinationName: result.destinationName,
           orderIndexes: result.orders.map((_, k) => base + k),
-          ...(economy ? { economy: true, planLog: result.log } : {}),
+          ...(economy ? { economy: true } : {}),
         });
         // ── 刀C: 给这批 order 盖上来源标记，台账据此登记 ──
         // 记账只认这个标记，不认调用的是哪个函数：对话派兵走 applyOrders，
@@ -3342,7 +3360,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const execReceipt = buildExecReceipt(applyRes, slices);
       for (const line of execReceipt.lines) {
         addMessage(
-          execReceipt.outcome === "none" ? "warning" : "info",
+          // ★刀辛：只要有没办成的部分，整条就不许伪装成纯成功的 info。
+          execReceipt.outcome === "none" || execReceipt.outcome === "partial" ? "warning" : "info",
           line, state.time, ch, undefined, "command_ack",
         );
         // 喂给模型的上下文与**真正播报出去的那句**同步。旧写法只推 data.brief
@@ -3401,28 +3420,17 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         });
       }
 
-      // Surface economy failures (produce/trade) the engine recorded as
-      // diagnostics during this apply — otherwise insufficient money/fuel/stock
-      // stays silent. Affordability is the engine's decision; the frontend only
-      // voices it. Object-identity diff is robust to the 50-entry ring buffer.
-      const economyFails: string[] = [];
-      for (const d of state.diagnostics) {
-        if (diagsBefore.has(d)) continue;
-        if (d.code === "PRODUCE_FAIL" || d.code === "TRADE_FAIL") {
-          addMessage("warning", d.message, state.time, ch, undefined, "command_ack");
-          if (!economyFails.includes(d.message)) economyFails.push(d.message);
-        }
-      }
-      // ★刀乙补角（审核新查出的第 1 笔）：结算失败也得进耳朵。
+      // ★刀庚 (审核 §三)：经济结算的**权威回执已经在上面那份 execReceipt 里**
+      //   （真件数 / 真花费 / 真原因，来自引擎回报的 EconomyOutcome）。
       //
-      // 病：上面这一圈只上屏。钱不够的时候屏上是「生产步兵 ×3。」＋三行「资金
-      // 不足」，而耳朵**只听见正面那一句**——刀甲把回执从 data.brief（模型自己
-      // 的话）换成了引擎腔的回执行，听起来更权威，于是这一格比基线还坏一点。
-      // 修法复用刀乙那个出口：屏上一个字节不动（screen:false），只把去重后的
-      // 失败理由补进耳朵，排在正面回执之后（speak 按句排队，顺序就是这个）。
-      if (economyFails.length > 0) {
-        refuseAloud(state, ch, economyFails.join(" "), speakReceipt, { screen: false });
-      }
+      //   刀丁当时是从 `state.diagnostics` 里捞 PRODUCE_FAIL / TRADE_FAIL 补上屏
+      //   与补声——那是把诊断当回执的数据总线，而且只捞到两个码：预算结算走的是
+      //   PRODUCE_BUDGET / TRADE_BUDGET，完全失败时屏上一句失败都没有、只有那句
+      //   假成功。现在原因随结算一起回来，屏/耳/context 同源，这一圈**整段退场**。
+      //   诊断本身照旧推（调试与系统日志要它），只是不再当玩家回执用。
+      //   ——被 degraded 拦在 resolver 的那些（未知单位类型 / 不可生产）走的是
+      //   上面 `result.log` 那条路，与本段无关，一个字节没动。
+      void diagsBefore;
 
       // Process doctrine fields at approve time (not at response time)
       const docSource = sourceResponse ?? response;

@@ -3,7 +3,7 @@
 // All orders flow through here → mutate GameState
 // ============================================================
 
-import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask, ApplyResult, ApplyOrderOutcome, OrderRejectReason, IntentType } from "@ai-commander/shared";
+import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask, ApplyResult, ApplyOrderOutcome, OrderRejectReason, IntentType, EconomyOutcome, EconomyOpKind } from "@ai-commander/shared";
 import { TRADE_COSTS, UNIT_STATS, UNIT_DISPLAY_NAME, isProducibleUnitType } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
 import { findPath, clearPathCache } from "./pathfinding";
@@ -65,7 +65,10 @@ export function applyOrders(state: GameState, orders: Order[]): ApplyResult {
     // from state.diagnostics (PRODUCE_FAIL / TRADE_FAIL) and are not a
     // per-unit fact this result can speak to.
     if (order.action === "produce" || order.action === "trade") {
-      handleEconomyOrder(order, "player", state);
+      // 刀庚：经济单的真实结算挂在这一条 order 的结果上。回执据此报真数，
+      // 不再复述计划那一行（实测：$170 造 3 个只成 2 个，旧回执照说「×3」）。
+      const econ = handleEconomyOrder(order, "player", state);
+      if (econ) outcome.economy = econ;
       continue;
     }
 
@@ -277,24 +280,52 @@ function pushDiagnostic(state: GameState, code: string, message: string): void {
   if (state.diagnostics.length > 50) state.diagnostics.shift();
 }
 
+/** 刀庚：经济单的空白结果骨架（每条路都从它起手，字段一个不漏）。 */
+function emptyEconomyOutcome(kind: EconomyOpKind, subject: string, subjectLabel: string): EconomyOutcome {
+  return {
+    kind, subject, subjectLabel,
+    requested: 0, succeeded: 0, failed: 0,
+    moneySpent: 0, moneyGained: 0, resourceGained: 0,
+    failReasons: [],
+  };
+}
+
+/**
+ * 刀庚：经济单从此**回报真实结算**，不再让 `state.diagnostics` 当回执的数据总线。
+ *
+ * 诊断照旧推（调试/系统日志要它），但那句人话现在**先进结果、再进诊断**——
+ * 一份文案两处用，不会漂。
+ */
 function handleEconomyOrder(
   order: Order,
   team: "player" | "enemy",
   state: GameState,
-): void {
+): EconomyOutcome | null {
   if (order.action === "produce" && order.produceUnitType) {
     if (order.produceBudget?.mode === "fraction_of_money") {
-      executeProduceBudget(state, team, order.produceUnitType, order.produceBudget);
-    } else {
-      const result = enqueueProduction(state, team, order.produceUnitType);
-      if (!result.ok) {
-        pushDiagnostic(state, "PRODUCE_FAIL",
-          `生产 ${order.produceUnitType} 失败: ${result.reason}`);
-      }
+      return executeProduceBudget(state, team, order.produceUnitType, order.produceBudget);
     }
-  } else if (order.action === "trade" && order.tradeType) {
-    executeTrade(state, team, order.tradeType, order.tradeBudget);
+    const unitType = order.produceUnitType;
+    const out = emptyEconomyOutcome("produce", unitType, UNIT_DISPLAY_NAME[unitType] ?? String(unitType));
+    out.requested = 1;
+    const moneyBefore = state.economy[team].resources.money;
+    const result = enqueueProduction(state, team, unitType);
+    if (result.ok) {
+      out.succeeded = 1;
+      out.moneySpent = Math.max(0, moneyBefore - state.economy[team].resources.money);
+    } else {
+      out.failed = 1;
+      const msg = `生产${out.subjectLabel}失败: ${result.reason}`;
+      out.failReasons.push(msg);
+      // 诊断留着（调试/系统日志），但玩家面前的回执从 out 取数。
+      pushDiagnostic(state, "PRODUCE_FAIL", msg);
+    }
+    return out;
   }
+  if (order.action === "trade" && order.tradeType) {
+    return executeTrade(state, team, order.tradeType, order.tradeBudget);
+  }
+  return null;
 }
 
 /** Per-order cap for budget production (existing resolveProduce cap, unchanged
@@ -314,34 +345,47 @@ function executeProduceBudget(
   team: "player" | "enemy",
   unitType: UnitType,
   budget: ProduceBudget,
-): void {
+): EconomyOutcome {
   const stats = UNIT_STATS[unitType];
   const eco = state.economy[team];
+  // 刀庚：每条出口都要填满这份结果。诊断照旧推，但**同一句人话**先进 out。
+  const out = emptyEconomyOutcome("produce", unitType, UNIT_DISPLAY_NAME[unitType] ?? String(unitType));
 
   // Defense in depth（同一个谓词 isProducibleUnitType，唯一真相源）：cost<=0 或
   // buildTime<=0 的类型绝不能进预算算术——会除以零。★这道闸不许因为"引擎入口
   // 已经加了闸"而删：它挡在 enqueueProduction 被调用**之前**（下面的预算除法就
   // 在本函数里），删了就是把除零放回来。
   if (!stats || !isProducibleUnitType(unitType)) {
-    pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${UNIT_DISPLAY_NAME[unitType]} 失败: 不可生产的单位类型`);
-    return;
+    const msg = `生产${out.subjectLabel}失败: 不可生产的单位类型`;
+    out.requested = 1; out.failed = 1; out.failReasons.push(msg);
+    pushDiagnostic(state, "PRODUCE_FAIL", msg);
+    return out;
   }
   // Defense in depth (mirrors schema.ts): only settle when fraction is a real,
   // finite number — however the Order was built. Otherwise fall through to a
   // single enqueue (never all-in on a bad fraction).
   if (typeof budget.fraction !== "number" || !Number.isFinite(budget.fraction)) {
+    out.requested = 1;
+    const moneyBefore = eco.resources.money;
     const r = enqueueProduction(state, team, unitType);
-    if (!r.ok) pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${UNIT_DISPLAY_NAME[unitType]} 失败: ${r.reason}`);
-    return;
+    if (r.ok) {
+      out.succeeded = 1;
+      out.moneySpent = Math.max(0, moneyBefore - eco.resources.money);
+    } else {
+      const msg = `生产${out.subjectLabel}失败: ${r.reason}`;
+      out.failed = 1; out.failReasons.push(msg);
+      pushDiagnostic(state, "PRODUCE_FAIL", msg);
+    }
+    return out;
   }
 
   const fraction = Math.max(0, Math.min(1, budget.fraction));
   if (fraction === 0) {
     // Codex acceptance: zero budget is its own honest reason — NOT "no money".
-    if (team === "player") {
-      pushDiagnostic(state, "PRODUCE_BUDGET", `预算为零：未下任何生产单，没动钱。`);
-    }
-    return;
+    const msg = `预算为零：未下任何生产单，没动钱。`;
+    out.failReasons.push(msg);   // requested=0 ⇒ 既不是成功也不是"造不起"
+    if (team === "player") pushDiagnostic(state, "PRODUCE_BUDGET", msg);
+    return out;
   }
 
   // Money and fuel bounds are kept SEPARATE so a zero-unit refusal can name
@@ -354,16 +398,18 @@ function executeProduceBudget(
     : Number.POSITIVE_INFINITY;
   const affordable = Math.min(moneyAffordable, fuelAffordable);
   if (affordable < 1) {
-    if (team === "player") {
-      const msg = fuelAffordable < 1 && moneyAffordable >= 1
-        ? `燃油不足：油料 ${Math.floor(eco.resources.fuel)}，一辆${UNIT_DISPLAY_NAME[unitType]}要 ${stats.fuelCost} 燃油，没动钱。`
-        : `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一辆${UNIT_DISPLAY_NAME[unitType]}（$${stats.cost}）都造不起，没动钱。`;
-      pushDiagnostic(state, "PRODUCE_BUDGET", msg);
-    }
-    return;
+    // ★钱界与油界不合并：零件回执要报**真实约束**（用户审计那一笔）。
+    const msg = fuelAffordable < 1 && moneyAffordable >= 1
+      ? `燃油不足：油料 ${Math.floor(eco.resources.fuel)}，一辆${UNIT_DISPLAY_NAME[unitType]}要 ${stats.fuelCost} 燃油，没动钱。`
+      : `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一辆${UNIT_DISPLAY_NAME[unitType]}（$${stats.cost}）都造不起，没动钱。`;
+    out.requested = 1; out.failed = 1; out.failReasons.push(msg);
+    if (team === "player") pushDiagnostic(state, "PRODUCE_BUDGET", msg);
+    return out;
   }
 
   const want = Math.min(affordable, PRODUCE_BUDGET_ORDER_CAP);
+  out.requested = want;   // ★引擎自己算出来的那个数（不是模型说的）
+  const moneyAtStart = eco.resources.money;
   let done = 0;
   let failReason: string | null = null;
   for (let i = 0; i < want; i++) {
@@ -377,16 +423,23 @@ function executeProduceBudget(
     done++;
   }
 
-  if (team !== "player") return;
+  // ★真实结算先进结果（屏幕/TTS/context 从这儿取数），诊断照旧推给日志。
+  out.succeeded = done;
+  out.failed = want - done;
+  out.moneySpent = Math.max(0, moneyAtStart - eco.resources.money);
   if (done === 0) {
-    // One failure report with the real reason — never a success claim.
-    pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${UNIT_DISPLAY_NAME[unitType]} 失败: ${failReason ?? "未知原因"}`);
-    return;
+    const msg = `生产${out.subjectLabel}失败: ${failReason ?? "未知原因"}`;
+    out.failReasons.push(msg);
+    if (team === "player") pushDiagnostic(state, "PRODUCE_FAIL", msg);
+    return out;
   }
+  if (failReason) out.failReasons.push(`第${done + 1}辆起中止: ${failReason}`);
+  if (team !== "player") return out;
   const capNote = affordable > want ? `（可产${affordable}，本单上限${PRODUCE_BUDGET_ORDER_CAP}）` : "";
   const stopNote = failReason ? `（第${done + 1}辆起中止: ${failReason}）` : "";
   pushDiagnostic(state, "PRODUCE_BUDGET",
     `${UNIT_DISPLAY_NAME[unitType]} ×${done}：花了 $${done * stats.cost}${capNote}${stopNote}，还剩 $${Math.floor(eco.resources.money)}。`);
+  return out;
 }
 
 /** Player-facing resource name for trade feedback. */
@@ -409,9 +462,15 @@ function executeTrade(
   team: "player" | "enemy",
   tradeType: TradeType,
   budget?: TradeBudget,
-): void {
+): EconomyOutcome {
   const info = TRADE_COSTS[tradeType];
-  if (!info) return;
+  // 刀庚：交易也回报**真实结算**——绝不把 `buy_fuel` 这种计划字段当成功事实复述。
+  const out = emptyEconomyOutcome("trade", tradeType, tradeResName(tradeType));
+  if (!info) {
+    out.requested = 1; out.failed = 1;
+    out.failReasons.push(`未知交易类型: ${tradeType}`);
+    return out;
+  }
   const eco = state.economy[team];
 
   // 7b.1 — budget-scaled BUYS. Only buys (cost>0) honor fraction_of_money; sells
@@ -434,46 +493,57 @@ function executeTrade(
     const budgetMoney = eco.resources.money * fraction;
     const times = Math.floor(budgetMoney / info.cost);
     if (times < 1) {
-      if (team === "player") {
-        pushDiagnostic(state, "TRADE_BUDGET",
-          `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一份${tradeResName(tradeType)}（$${info.cost}）都买不下来，没动钱。`);
-      }
-      return;
+      const msg = `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一份${tradeResName(tradeType)}（$${info.cost}）都买不下来，没动钱。`;
+      out.requested = 1; out.failed = 1; out.failReasons.push(msg);
+      if (team === "player") pushDiagnostic(state, "TRADE_BUDGET", msg);
+      return out;
     }
     const spend = times * info.cost;
     const gain = times * info.gain;
     eco.resources.money -= spend;
     addBoughtResource(eco, tradeType, gain);
+    out.requested = times; out.succeeded = times;
+    out.moneySpent = spend; out.resourceGained = gain;
     if (team === "player") {
       pushDiagnostic(state, "TRADE_BUDGET",
         `${tradeResName(tradeType)} ×${times}：花了 $${spend}（+${gain}），还剩 $${Math.floor(eco.resources.money)}。`);
     }
-    return;
+    return out;
   }
 
+  out.requested = 1;
   if (info.cost > 0) {
     // Buying: spend money, gain resource  (single — unchanged)
     if (eco.resources.money < info.cost) {
-      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", "交易失败: 资金不足");
-      return;
+      const msg = "交易失败: 资金不足";
+      out.failed = 1; out.failReasons.push(msg);
+      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", msg);
+      return out;
     }
     eco.resources.money -= info.cost;
     addBoughtResource(eco, tradeType, info.gain);
+    out.succeeded = 1; out.moneySpent = info.cost; out.resourceGained = info.gain;
   } else {
     // Selling: lose resource, gain money (cost is negative)
     const loss = -info.gain; // positive amount of resource to sell
     if (tradeType === "sell_fuel" && eco.resources.fuel < loss) {
-      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", "交易失败: 燃油不足");
-      return;
+      const msg = "交易失败: 燃油不足";
+      out.failed = 1; out.failReasons.push(msg);
+      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", msg);
+      return out;
     }
     if (tradeType === "sell_ammo" && eco.resources.ammo < loss) {
-      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", "交易失败: 弹药不足");
-      return;
+      const msg = "交易失败: 弹药不足";
+      out.failed = 1; out.failReasons.push(msg);
+      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", msg);
+      return out;
     }
     if (tradeType === "sell_fuel") eco.resources.fuel -= loss;
     else if (tradeType === "sell_ammo") eco.resources.ammo -= loss;
     eco.resources.money += -info.cost; // cost is negative, so -cost is positive
+    out.succeeded = 1; out.moneyGained = -info.cost; out.resourceGained = -loss;
   }
+  return out;
 }
 
 /** Unbind a unit from its patrol task (if any). */
