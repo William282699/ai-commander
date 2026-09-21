@@ -306,7 +306,11 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
   const outcome: ExecOutcome =
     anySucceeded && !anyFailed ? "applied"
     : anySucceeded ? "partial"
-    : anyAlready ? "already_doing"
+    // ★复审 §四：`already_doing` **只在没有任何失败时**才是纯第三类结局。
+    //   一句话里一条"已经在办"＋一条"没办成"，上一版汇总成 already_doing ⇒
+    //   屏上是普通 info，没办成那条读起来像没发生过。有失败就 partial。
+    : anyAlready && !anyFailed ? "already_doing"
+    : anyAlready ? "partial"
     : "none";
 
   return { outcome, lines, spokenText: lines.join(" "), facts };

@@ -1751,6 +1751,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     candidates: DispatchCandidate[];
     /** 被问的那条原命令的快照——绑定后执行的是**它**，不是下一轮模型写的单子。 */
     intentSnapshot: Intent;
+    /** ★复审 §三：被问的那一句里**全部** intents，与歧义那条的下标。
+     *  绑定结果放回原位置，整组重走主链——其余 intents 不许静默丢失。 */
+    allIntents: Intent[];
+    intentIndex: number;
     /** 原方案标签（回执/诊断用）。 */
     optionLabel: string;
     /** 原回合的执行上下文（频道/线程/升级单），绑定执行时沿用。 */
@@ -1826,8 +1830,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     speakReceipt: boolean,
     snapshot: Intent,
     optionLabel: string,
-    execCtx?: ExecContext,
+    execCtx: ExecContext | undefined,
+    /** ★复审 §三：整组 intents 与歧义那条的下标（绑定后放回原位，一条不丢）。 */
+    allIntents: Intent[],
+    intentIndex: number,
     reask = false,
+    /** 只剩一批时换个问法——问的仍是"是不是它"，不是替他定了。 */
+    soleCandidate = false,
   ) => {
     pendingSelectionRef.current = {
       // 再问一次沿用**同一个 id**：它标识的是"这一次消歧"，不是"这一句话"。
@@ -1840,10 +1849,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         : state.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC,
       candidates,
       intentSnapshot: { ...snapshot },
+      allIntents,
+      intentIndex,
       optionLabel,
       execCtx,
     };
-    const question = `您说的是哪一批？${candidates.map((c) => c.label).join("，还是")}？`;
+    const question = soleCandidate
+      // ★复审 §一：只剩一批也**照样问**。引擎不替长官挑——"少数变成唯一"
+      //   不等于他同意了。问法换掉，零执行这条不松动。
+      ? `现在只剩${candidates[0]?.label ?? "一批"}，是这一批吗？`
+      : `您说的是哪一批？${candidates.map((c) => c.label).join("，还是")}？`;
     // 刀乙：问句也要进耳朵——用嘴下的令被问回来，听不见就等于石沉大海。
     // 刀壬：出口现在自己写 context，这儿就别推第二遍（`context:false`）。
     refuseAloud(state, ch, question, speakReceipt, { context: false });
@@ -2038,6 +2053,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // Compressed cross-channel context so LLM knows what was discussed before
     const groupCtx = formatGroupContext(channelContextRef.current);
 
+    // ★刀癸 / 复审 §五：出发盖一枚局印，**这条路上每一处落地都拿它复核**——
+    //   `data.error`、`catch`、以及每条押了 2.2–4 秒才上屏的延迟回调。
+    //   群聊是全仓最长的那条异步链，上一局的话最容易从这儿投进新局。
+    const groupRun = stampRun(gameEpochRef.current, state);
+
     try {
       const res = await fetch(`${API_URL}/api/command-group`, {
         method: "POST",
@@ -2052,8 +2072,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       });
       const data = await res.json();
 
+      // ★复审 §五：群聊这条路**整条**都要用出发时的局印复核，不只是那几个延迟
+      //   回调。`data.error` 与下面的 `catch` 同样是"等了一会儿才回来"的东西
+      //   ——上一局的报错投进新局，屏上就会冒出一条与这一局无关的红字。
+      if (!runGuardAllows(groupRun, gameEpochRef.current, getState())) return;
+
       if (data.error) {
-        addMessage("urgent", data.error, state.time, "combat", "chen", "command_ack", true);
+        const nowErr = getState();
+        if (!nowErr) return;
+        addMessage("urgent", data.error, nowErr.time, "combat", "chen", "command_ack", true);
         return;
       }
 
@@ -2064,9 +2091,6 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const responses: Array<{ from: string; brief: string }> = data.responses || [];
       const shuffled = [...responses].sort(() => Math.random() - 0.5);
       let cumulativeDelay = 0;
-      // ★刀癸：群聊每条回复押 2.2–4 秒才上屏——这条路最长，也最容易把上一局的
-      //   话投进新局（旧写法还带着**旧局的** state.time）。出发盖印、落地复核。
-      const groupRun = stampRun(gameEpochRef.current, state);
       for (let i = 0; i < shuffled.length; i++) {
         const r = shuffled[i];
         if (i > 0) cumulativeDelay += 2200 + Math.random() * 1800;
@@ -2086,7 +2110,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // ALL channel is discussion-only — no options/execution handling
 
     } catch {
-      addMessage("urgent", "全体指令通信中断", state.time, "combat", "chen", "system", true);
+      // ★复审 §五：报错也可能是**上一局**那次请求的回声，同样要过局印。
+      const nowCatch = getState();
+      if (!runGuardAllows(groupRun, gameEpochRef.current, nowCatch)) return;
+      addMessage("urgent", "全体指令通信中断", nowCatch!.time, "combat", "chen", "system", true);
     }
   };
 
@@ -2477,6 +2504,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       //   刀C 那一版把判断写在这层的闭包里，于是没有任何机器断言看得见它。
       const selSlotAtJudge = pendingSelectionRef.current;
       const selPersona = COMMANDERS.find((c) => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
+      // ★复审 §一：`data.error` 那一轮**不许消费候选、也不许触发旧命令**。
+      //   后端出错时模型根本没给出裁决，任何"顺手消费"都是引擎自己在决定。
+      //   做法：这一轮当作没带标签（no_pending）⇒ passthrough ⇒ 下面的 error
+      //   分支照常报错，待决槽原封不动留着，长官下一句还能接着答。
+      const selTagThisTurn = data.error ? null : selectionTag;
       const selTurn = planSelectionTurn({
         state,
         slot: selSlotAtJudge && selSlotAtJudge.channel === ch
@@ -2488,9 +2520,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
               expiresAt: selSlotAtJudge.expiresAt,
               candidates: selSlotAtJudge.candidates,
               intentSnapshot: selSlotAtJudge.intentSnapshot,
+              allIntents: selSlotAtJudge.allIntents,
+              intentIndex: selSlotAtJudge.intentIndex,
             }
           : null,
-        requestTag: selectionTag,
+        requestTag: selTagThisTurn,
         epoch: gameEpochRef.current,
         now: state.time,
         persona: selPersona,
@@ -2501,15 +2535,24 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         // 槽的生命周期。过期清理**只许**清掉这次请求带的那一槽——等回复那几秒里
         // 若登记了更新的一槽，绝不碰它（照抄 pendingContract 的三方匹配规矩）。
         const sameSlot =
-          selSlotAtJudge != null && selectionTag != null &&
-          selSlotAtJudge.id === selectionTag.selectionId &&
-          selSlotAtJudge.channel === selectionTag.channel &&
-          selSlotAtJudge.sessionId === selectionTag.sessionId;
+          selSlotAtJudge != null && selTagThisTurn != null &&
+          selSlotAtJudge.id === selTagThisTurn.selectionId &&
+          selSlotAtJudge.channel === selTagThisTurn.channel &&
+          selSlotAtJudge.sessionId === selTagThisTurn.sessionId;
         if (!selTurn.keepSlot && sameSlot) {
           if (selTurn.verdict !== "stale" || selTurn.clearExpiredSlot) pendingSelectionRef.current = null;
         }
       }
 
+      // ★复审 §二：inert ⇒ 一件事都不做。不上屏、不进 context、新旧 options
+      //   一律不执行——它多半是**同一次回复的重复投递**（SSE 已经处理过 options，
+      //   随后 stream error 又走了 /api/command 兜底）。规矩逐字照抄
+      //   pendingContract 的 stale 那一格：displays NOTHING and writes NOTHING。
+      if (selTurn.plan.kind === "inert") {
+        setResponse(null);
+        setError(null);
+        return;
+      }
       if (selTurn.plan.kind !== "passthrough") {
         setResponse(null);
         setError(null);
@@ -2518,8 +2561,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const selPlan = sayToEar("", selTurn.plan.kind === "execute");
         if (selTurn.plan.kind === "execute") {
           const p = selTurn.plan;
+          // ★复审 §三：交给主链的是**整组** intents（绑定结果已放回原位置），
+          //   不是只有绑定那一条——其余 intents 一条都不许丢。整组重走主链预检。
           handleApprove(
-            { label: p.label, intents: [p.intent] } as unknown as AdvisorOption,
+            { label: p.label, intents: p.intents } as unknown as AdvisorOption,
             0, "auto",
             selSlotAtJudge?.execCtx ?? { channel: ch, requestId: crypto.randomUUID(), run: stampRun(gameEpochRef.current, state) },
             undefined, selPlan.speakExecReceipt,
@@ -2534,7 +2579,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           pushContext(channelContextRef.current, ch, { role: "assistant", text: p.lead, time: state.time });
           askWhichDispatch(
             state, ch, p.candidates, true,
-            selSlotAtJudge!.intentSnapshot, selSlotAtJudge!.optionLabel, selSlotAtJudge!.execCtx, true,
+            selSlotAtJudge!.intentSnapshot, selSlotAtJudge!.optionLabel, selSlotAtJudge!.execCtx,
+            selSlotAtJudge!.allIntents, selSlotAtJudge!.intentIndex,
+            true, p.soleCandidate,
           );
         }
         return;
@@ -2844,6 +2891,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     };
 
     // ── Streaming path (default), with fallback to non-streaming ──
+    //
+    // ★复审 §二：**同一条命令只能执行一次**。
+    //   病：SSE 收到 options 后 `processAdvisorData` 已经执行了这一轮，可万一
+    //   之后读流再抛错（连接断在末尾、EOF 解析失败…），catch 会去走
+    //   `/api/command` 兜底、把**同一条命令再执行一遍**。标记放在 try 之外，
+    //   catch 才看得见。
+    let optionsProcessed = false;
     try {
       const streamRes = await fetch(`${API_URL}/api/command-stream`, {
         method: "POST",
@@ -2898,6 +2952,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
               if (ttsEnabled && sendPlan.speakProseWhileStreaming) speak(event.content, ttsPersona);
             } else if (event.type === "options") {
               gotOptions = true;
+              optionsProcessed = true;   // ★这一轮已经处理过：兜底不许再来一遍
               setStreamingText(null);
               const data = event.content; // already an object, no double-parse
               // Override brief with streamed text if LLM didn't include it in JSON
@@ -2930,6 +2985,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                 if (ttsEnabled && sendPlan.speakProseWhileStreaming) speak(event.content, ttsPersona);
               } else if (event.type === "options") {
                 gotOptions = true;
+                optionsProcessed = true;   // ★同上：EOF 兜底那一处也算处理过
                 setStreamingText(null);
                 const data = event.content;
                 if (accumulatedText && !data.brief) data.brief = accumulatedText.trim();
@@ -2950,6 +3006,17 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     } catch (streamErr) {
       // Fallback to non-streaming /api/command
       setStreamingText(null);
+      // ★复审 §二：这一轮的 options **已经处理过**（SSE 那一程执行完了），
+      //   之后才抛的错只是流尾巴上的事故。再走一次 `/api/command` 等于把同一条
+      //   命令执行第二遍——屏上两份回执、兵被派两次、台账记两笔。
+      //   选择合同的 stale 那一格是第二道网（同一个 selectionId 的第二次投递会
+      //   被判 inert），这一道是第一道：**根本不发第二个请求**。
+      if (optionsProcessed) {
+        console.debug("[Streaming] options already processed — fallback suppressed", streamErr);
+        setLoading(false);
+        return;
+      }
+
       const isStreamFailure = streamErr instanceof Error &&
         (streamErr.message === "stream_unavailable" || streamErr.message === "stream_no_options");
 
@@ -3106,7 +3173,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       if (!boundIntents.has(intent)) {
         const amb = findDispatchAmbiguity(state, intent, selectedIdsSnapshotRef.current);
         if (amb) {
-          askWhichDispatch(state, ch, amb, speakReceipt, intent, cleanLabel, execCtx ?? undefined);
+          // ★复审 §三：整组 intents 与这条的下标一起存进槽；绑定后放回原位重走主链。
+          askWhichDispatch(
+            state, ch, amb, speakReceipt, intent, cleanLabel, execCtx ?? undefined,
+            intents, intents.indexOf(intent),
+          );
           return;
         }
       }
@@ -3351,10 +3422,19 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // 「人数/对象/目的地/成败」四项一致因此是构造保证，不是事后比对。
       // 措辞只说"下令"，不说"抵达"——到没到由战场自己说。
       const execReceipt = buildExecReceipt(applyRes, slices);
+      // ★复审 §四：**规划阶段就失败的那几条**（resolver degraded）也是这一批的
+      //   结果。它们的理由上面循环里已经逐条上屏了，但此前只在"零 orders"那条
+      //   路才进耳朵/context ⇒ 一句话一成一败时，耳朵只听到成功那半，模型
+      //   记得的也只有成功那半。现在混合批次一律把两部分**合并成同一份事实**：
+      //   屏（上面已打）＋耳（下面同一段 spokenText）＋context（下面同一批行）。
+      const mixedLines = [...degradedLines, ...execReceipt.lines];
+      const mixedSpoken = mixedLines.join(" ");
+      const mixedOutcome: typeof execReceipt.outcome =
+        degradedLines.length > 0 && execReceipt.outcome === "applied" ? "partial" : execReceipt.outcome;
       for (const line of execReceipt.lines) {
         addMessage(
           // ★刀辛：只要有没办成的部分，整条就不许伪装成纯成功的 info。
-          execReceipt.outcome === "none" || execReceipt.outcome === "partial" ? "warning" : "info",
+          mixedOutcome === "none" || mixedOutcome === "partial" ? "warning" : "info",
           line, state.time, ch, undefined, "command_ack",
         );
         // 喂给模型的上下文与**真正播报出去的那句**同步。旧写法只推 data.brief
@@ -3364,8 +3444,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // 耳朵：会动兵的回合，上面那一层（spoken/正文）已经一声不出，这里才是
       // 这一轮唯一的一声——而且它念的是真结果。屏上那句 voiceConfirm 一起念，
       // 免得耳朵从"数字"开头。
-      if (ttsEnabled && speakReceipt && execReceipt.spokenText) {
-        speak(`${voiceConfirm} ${execReceipt.spokenText}`, approveCommander);
+      // ★复审 §四：规划失败那几条也进 context（屏上已有，这里补齐三者同源）。
+      for (const dl of degradedLines) {
+        pushContext(channelContextRef.current, ch, { role: "assistant", text: dl, time: state.time });
+      }
+      if (ttsEnabled && speakReceipt && mixedSpoken) {
+        // 念的是**合并后的那一段**：成功与没办成的两部分都在里面。
+        speak(`${voiceConfirm} ${mixedSpoken}`, approveCommander);
         flush(approveCommander);
       }
 

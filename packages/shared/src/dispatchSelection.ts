@@ -145,14 +145,26 @@ export function selectionVerdictRoute(v: SelectionVerdict): {
   processResponse: boolean;
   /** 保留待决槽（还没答清楚，下一句还要接着答）。 */
   keepSlot: boolean;
+  /**
+   * ★复审 §二：这一次投递**完全 inert**——不上屏、不进 context、
+   * 新旧 options 一律不执行。
+   *
+   * 只给带了标签却对不上活槽的 `stale` 用，理由与 pendingContract 的 stale
+   * 那一格逐字相同：它多半是**同一次回复的重复投递**（SSE 已经处理过 options，
+   * 随后 stream error 又走了 /api/command 兜底）。当时放它"走正常流程"，
+   * 等于让同一条命令执行第二遍。
+   */
+  inert: boolean;
 } {
   switch (v) {
-    case "chose":            return { executeBound: true,  processResponse: false, keepSlot: false };
-    case "unclear":          return { executeBound: false, processResponse: false, keepSlot: true };
-    case "protocol_failure": return { executeBound: false, processResponse: false, keepSlot: true };
-    case "bad_key":          return { executeBound: false, processResponse: false, keepSlot: true };
-    case "unrelated":        return { executeBound: false, processResponse: true,  keepSlot: false };
-    case "stale":            return { executeBound: false, processResponse: true,  keepSlot: false };
-    case "no_pending":       return { executeBound: false, processResponse: true,  keepSlot: false };
+    case "chose":            return { executeBound: true,  processResponse: false, keepSlot: false, inert: false };
+    case "unclear":          return { executeBound: false, processResponse: false, keepSlot: true,  inert: false };
+    case "protocol_failure": return { executeBound: false, processResponse: false, keepSlot: true,  inert: false };
+    case "bad_key":          return { executeBound: false, processResponse: false, keepSlot: true,  inert: false };
+    case "unrelated":        return { executeBound: false, processResponse: true,  keepSlot: false, inert: false };
+    // ★带了标签却对不上活槽 ⇒ 重复投递 / 跨频道 / 跨局 / 过期：一件事都不做。
+    case "stale":            return { executeBound: false, processResponse: false, keepSlot: false, inert: true };
+    // 压根没带标签 ⇒ 这一轮与选择无关，正常流程。
+    case "no_pending":       return { executeBound: false, processResponse: true,  keepSlot: false, inert: false };
   }
 }

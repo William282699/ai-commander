@@ -645,6 +645,17 @@ const SUPPRESSED_DIAG_CODES = new Set([
   "DEFAI_ROLES",
   "DEFAI_DBG",
   "P4_DBG",   // 5C-lite pressure director debug
+  // ── ★复审 §四：经济单的**权威回执**现在是 typed `EconomyOutcome`（真件数 /
+  //    真花费 / 真原因），由 ChatPanel 的执行回执一次说完。这四个诊断码留着
+  //    做内部记录（调试与系统日志），但**不许再排进 Staff Feed 当第二份玩家
+  //    回执**——否则同一件事玩家看到两遍，两份措辞还不一样（回执说
+  //    「生产步兵 ×2，花了 $160」，诊断说「生产 infantry 失败: 资金不足」）。
+  "PRODUCE_FAIL",
+  "TRADE_FAIL",
+  "PRODUCE_BUDGET",
+  "TRADE_BUDGET",
+  // ★复审 §五：跨局回调作废是**内部事件**，与长官无关，不许上屏。
+  "STALE_RUN_DROPPED",
 ]);
 
 // 5C-lite: rating-driven game-over title. UI MUST read rating first; the binary
