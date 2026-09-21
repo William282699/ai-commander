@@ -9,12 +9,22 @@
 | `1317e8a` | A | 撤退目的地的丢弃条件按**字段来源**收窄，不按包围盒 |
 | `c28ad3a` | B | `applyOrders` 回报 `ApplyResult`；屏上与耳朵都按**实际下令结果**说 |
 | `764547f` | C | 任务台账 + `fromDispatch`：「哪条战线」与「哪次任务」分开表达 |
+| `00304b3` | 甲 | 经济单不许被误报成「没有执行」（刀B 自己开的新洞，P0） tag `retreat-scope-fix-jia` |
+| `9904f36` | 乙 | 命令被引擎拒掉时耳朵不许一声不出（刀B 自己开的新洞，P0） tag `retreat-scope-fix-yi` |
+| `287986b` | 丙 | 收窄消歧追问范围：只在 retreat + all/most 上问（P1） tag `retreat-scope-fix-bing` |
+
+> 甲/乙/丙 三刀来自 Opus 的独立审查（`@384e064` vs `4e41486`，全量读 diff +
+> 自写一次性脚本复算，未采信收工报告）。审查同时确认：刀A 与刀C 台账机制
+> 经基线对照实测过硬，头号病例端到端已通（南线 13 人派 10 出去 →
+> `fromDispatch` 改令撤回前哨 → 跑 300s 完整循环 ⇒ 10/10 到位、全转
+> defending、零掉头）。
 
 ## 怎么自己跑一遍
 
 ```bash
 cd "/Users/yuqiaohuang/MyProjects/AI Commander-retreat-scope"
-npx tsx scripts/probe-retreat-scope.ts --knife=all --negctl   # 68 条
+npx tsx scripts/probe-retreat-scope.ts --knife=all --negctl   # 119 条
+# 单刀：--knife=a|b|c|jia|yi|bing
 bash scripts/run-benches.sh                                    # 27/27
 ```
 浏览器：`.claude/launch.json` 里的 `retreat-api`(3028) + `retreat-web`(3029)。
@@ -36,6 +46,23 @@ bash scripts/run-benches.sh                                    # 27/27
 
 病灶对照：原来是「只动了 1/12 甚至 0 个，目的地也被丢掉」。
 
+## 甲/乙 两刀的真机串验（真 LLM，2026-09-20）
+
+**刀甲**（对艾米莉说「造三个步兵」）
+```
+屏：已记录，马上办。 / 生产步兵 ×3。
+耳（截获 /api/tts）：「已记录，马上办。」「生产步兵 ×3。」
+引擎：money 3500→3260（3×$80）、productionQueue 真排上
+```
+改前这一格屏上和耳朵都是红字「没有执行——没有部队接到这道命令。」。
+
+**刀乙**（对艾米莉说「把北部战线的部队调两个去中央前哨」——她名下没兵）
+```
+屏：艾米莉中尉名下没有部队，这道命令未执行——调兵请对带兵的指挥官说。
+耳：逐字同一句
+```
+改前这一格耳朵**一声不出**（execTurn ⇒ finalUtterance=""，而 applyOrders 根本没跑到）。
+
 ## 这轮**没做**的事（明说，别当它做了）
 
 1. **服务端粗校验任务号**（计划 §C.6 列过）。没做，理由是做了反而更坏：服务端
@@ -52,6 +79,16 @@ bash scripts/run-benches.sh                                    # 27/27
    再问就成环（「守在那儿的那批」在 intent 里仍是 `fromFront`，与被问的那条
    一模一样）。
 
+4. **★「问完绑定候选」——没做，不许标成已完成。**
+   现状：问完之后无论长官怎么答，下一轮都按模型填的字段办。留守 3 ＋ 外派 10
+   的局面，模型若仍填 `fromFront` 就只撤 3 个（该撤 10）——**原病的形状原封
+   不动**，只是刀B 的回执会如实报「3 个」（看得见，没治好）。
+   ★ 探针 C3c 不是这条的依据：它是直接把 `fromDispatch: M1` 喂给引擎的，
+   证明的是「字段填对就调对人」，**不是**「问完之后字段会填对」。
+   这条动手感，按规矩要先给长官三行人话再开工。
+
+5. **刀丙只做了第一步**（收窄触发范围）。它把误触发压到 0，但没有解决第 4 条。
+
 ## 顺手挖出、**没动**的旧账
 
 1. **`gate.auto` 捷径绕过 `decideBucket` 的语音闸**（`ChatPanel` 那条
@@ -66,6 +103,16 @@ bash scripts/run-benches.sh                                    # 27/27
    「绝不要求玩家念出 M3」——他没要求，但他把号说出口了。与现有
    `[临时编队G#]` 的印法同族，是否要藏起来归长官裁。
 
+4. **升级票回执仍从 `result.assignedUnitIds.length` 取数**（`ChatPanel:3066`
+   一带）——刀B 之后这是**第二个真相源**。已实测确认今天两个数恒等
+   （`isDispatchablePlayerUnit` 覆盖了 `applyOrders` 四道过滤的全部四种情况），
+   所以是**债不是 bug**；哪天那个覆盖关系变了，这里会先说谎。
+   这轮只改了那句把 `assignedUnitIds` 称作 "the real" 的注释，取数一个字节没动。
+5. **经济单真失败时仍会先报一行 planLog**（「生产步兵 ×3。」），紧跟着才是
+   引擎的 `PRODUCE_FAIL` 黄字。这是基线的诚实度，不是刀甲新开的洞——
+   刀甲只是把它从「误报没有执行」修回基线。要更严就得让结算回报真实件数，
+   那是另一级。
+
 ## 方法资产（这轮新添的）
 
 - **台架不许替引擎假设顺序**：C3 第一版假设"最后加的那个单位会留守"，
@@ -73,6 +120,15 @@ bash scripts/run-benches.sh                                    # 27/27
   `dispatches[0].memberIds` 反推谁留守。
 - **空战场会让"全局兜底"恰好等于那批人**：negctl-C1 第一版因此恒真（假绿）。
   比较"有字段 vs 没字段"时，旁观者必须在场。
+- **「报成功」必须与「真成功」绑在同一条断言里**：刀甲的判据若只断言回执
+  不含「没有执行」，引擎其实失败时照样绿。改成同一条 `check` 里同时对齐
+  `productionQueue` 增加 / `money` 减少。
+- **一个出口比复制六遍更容易写判据**：刀乙收成 `refuseAloud` 之后，绊索
+  才写得出「函数体里不许再有黄字+return 却不经出口的路」——复制粘贴式的
+  修法只能逐处手钉，抓不住将来新增的第 N 条。
+- **共享人格面有护栏，字段表要放对地方**：`RESPONSE FORMAT` 那张表在
+  `SYSTEM_PROMPT`（Emily 同读）里，`ab-g-knife --emily-guard` 新增一行就红；
+  `CHANNEL_PERSONA.combat` 是陈独有、不在护栏扫描范围内。
 - **浏览器泵帧要先确认面板没被隐藏**：接管 `requestAnimationFrame` 后，
   隐藏的面板里 rAF 不再触发 ⇒ 自己把 `javascript_tool` 也一起卡死，
   只能关标签页恢复。
