@@ -23,6 +23,8 @@ import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduct
 import { spokenNameOf, resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, isKnownForceRef, checkDispatchAuthority, retargetIntentForTicket, ticketDestinationVerdict, describeCommittedPull } from "@ai-commander/core";
 // retreat-scope 刀C — 任务台账（「哪次任务」这一类指代）
 import { findDispatch, liveDispatchMembers, findDispatchAmbiguity, type DispatchCandidate } from "@ai-commander/core";
+// 刀己 — 这一轮该做什么，判断全在 core（这层只执行它给的 plan）
+import { planSelectionTurn } from "@ai-commander/core";
 // 刀甲：「这是不是经济单」的唯一真相源在 core（produce/trade），UI 不另抄一张表
 import { isDispatchIntent } from "@ai-commander/core";
 import type { CommanderRef, EscalationTicket } from "@ai-commander/core";
@@ -35,6 +37,8 @@ import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-com
 import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute, buildProductionOptions } from "@ai-commander/shared";
 import type { ProductionCategoryOptions } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
+// 刀己 — 候选选择合同：这层只需要请求侧那个标签的类型，判定全在 core
+import type { SelectionRequestTag } from "@ai-commander/shared";
 // retreat-scope 刀C — 台账登记用的来源标记
 import type { DispatchMeta, DispatchSourceKind } from "@ai-commander/shared";
 import type { LeaderProfile, LeaderPersonality } from "@ai-commander/shared";
@@ -1719,13 +1723,27 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   //   批准合同问的是"办不办"，这里问的是"办谁"。把"选择"塞进"批准"的判定里，
   //   改完会把刚收口的批准流程弄坏。UI 与过期检查沿用同一套（setClarification
   //   + 同寿命窗口），判定本身各走各的。
+  //
+  // ★刀己 (审核 §二)：槽里现在存**原命令的安全快照**与**候选的稳定 key**。
+  //   刀C 那一版只存了候选、从没用它来选——下一条可执行 intent 一到就把槽清空，
+  //   然后照模型这一轮填的字段执行。于是「好的」、答非所问、或者模型又把
+  //   fromFront 写错，仍然调错兵（实测：留守 3 ＋ 外派 10 ⇒ 只撤 3 个）。
+  //   ★ **绝不存旧名单当执行真相**：名单在绑定那一刻从当前 GameState 现查
+  //     （bindDispatchSelection）——等回复那几秒里人会死、会被改派、任务会关。
   const pendingSelectionRef = useRef<{
     id: string;
     channel: Channel;
     sessionId: string;
     epoch: number;
     expiresAt: number;
+    /** 提问时印出去的候选（key 稳定，label 仅供显示）。 */
     candidates: DispatchCandidate[];
+    /** 被问的那条原命令的快照——绑定后执行的是**它**，不是下一轮模型写的单子。 */
+    intentSnapshot: Intent;
+    /** 原方案标签（回执/诊断用）。 */
+    optionLabel: string;
+    /** 原回合的执行上下文（频道/线程/升级单），绑定执行时沿用。 */
+    execCtx?: ExecContext;
   } | null>(null);
 
   /** 还活着的那一槽（过期 / 换频道 / 重开一局都作废，绝不悬挂）。 */
@@ -1773,15 +1791,37 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     }
   };
 
-  /** 问一句：候选逐项列出，**不替他挑一个**，这一轮什么都不执行。 */
-  const askWhichDispatch = (state: GameState, ch: Channel, candidates: DispatchCandidate[], speakReceipt: boolean) => {
+  /**
+   * 问一句：候选逐项列出，**不替他挑一个**，这一轮什么都不执行。
+   *
+   * ★刀己：连同**原命令的快照**一起存进槽。下一轮长官答了，执行的是这条快照
+   *   （来源字段被换成他选的那一批），不是模型那一轮重新写的单子。
+   *   屏上只印人话（谁、多少人、去了哪）——key 只进信封给模型抄，长官永远
+   *   不必念出 `dispatch:M1`。
+   */
+  const askWhichDispatch = (
+    state: GameState,
+    ch: Channel,
+    candidates: DispatchCandidate[],
+    speakReceipt: boolean,
+    snapshot: Intent,
+    optionLabel: string,
+    execCtx?: ExecContext,
+    reask = false,
+  ) => {
     pendingSelectionRef.current = {
-      id: makePendingId(),
+      // 再问一次沿用**同一个 id**：它标识的是"这一次消歧"，不是"这一句话"。
+      id: reask && pendingSelectionRef.current ? pendingSelectionRef.current.id : makePendingId(),
       channel: ch,
       sessionId: SESSION_ID,
       epoch: gameEpochRef.current,
-      expiresAt: state.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC,
+      expiresAt: reask && pendingSelectionRef.current
+        ? pendingSelectionRef.current.expiresAt   // 再问不续命：窗口有界，不许无限缠
+        : state.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC,
       candidates,
+      intentSnapshot: { ...snapshot },
+      optionLabel,
+      execCtx,
     };
     const question = `您说的是哪一批？${candidates.map((c) => c.label).join("，还是")}？`;
     // 刀乙：问句也要进耳朵——用嘴下的令被问回来，听不见就等于石沉大海。
@@ -2264,11 +2304,26 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     const pendingContext = pendingTag && pcAtSend
       ? `\n---PENDING_CONTRACT---\n待确认命令(id=${pcAtSend.id}): ${pcAtSend.summary}\n指挥官下面这句话可能是对这份待确认命令的答复。`
       : "";
+    // ── 刀己 (审核 §二): 候选选择合同的请求侧 ──
+    //
+    // 规矩照抄 pendingContract：只在**同频道、未过期、同一局**的活槽上打标签，
+    // 答复也只有在标签仍与活槽三方对齐时才可能消费（judgeSelectionConsumption）。
+    // ★ key 只进信封给模型逐字抄；屏上给长官的问句里没有 key，他永远不必念
+    //   `dispatch:M1`。
+    const selAtSend = livePendingSelection(state.time, ch);
+    const selectionTag: SelectionRequestTag | null = selAtSend
+      ? { selectionId: selAtSend.id, channel: ch, sessionId: SESSION_ID }
+      : null;
+    const selectionContext = selAtSend
+      ? `\n---DISPATCH_SELECTION---\n你上一句问了长官"是哪一批"(id=${selAtSend.id})，候选如下（行首那个 key 逐字抄进 dispatchSelection.candidate）：\n`
+        + selAtSend.candidates.map((c) => `${c.selectionKey}  ${c.label}`).join("\n")
+        + `\n指挥官下面这句话可能是对这一问的答复。`
+      : "";
     // Step C: dialogue focus (---ACTIVE_ESCALATION---) and camera focus
     // (---PLAYER_VIEW---) ride the envelope SIDE BY SIDE — the model judges
     // which one the player's words attach to; the engine classifies nothing.
     const playerViewContext = buildPlayerViewContext(state, baseDigest, getViewport?.() ?? null, cmdSelectedIds);
-    const digest = baseDigest + contextSuffix + threadContext + escalationContext + playerViewContext + pendingContext;
+    const digest = baseDigest + contextSuffix + threadContext + escalationContext + playerViewContext + pendingContext + selectionContext;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
     // Append declined context if player is refining a rejected proposal
@@ -2424,6 +2479,81 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         // amend / unrelated / no_pending → normal flow below (amend's old
         // contract is already cleared: ONLY the new intents may execute).
       }
+
+      // ══ 刀己 (审核 §二): 候选选择合同的答复侧 ══
+      //
+      // 排在批准合同之后、耳朵开口之前。两份合同互不干涉：批准问的是"办不办"，
+      // 这里问的是"办谁"。
+      //
+      // ★ 这一段就是「问完必须真正绑定候选」的落点，而**判断全在 core**
+      //   （`planSelectionTurn`）——这里只执行它给的 plan，一个判断都不自己做。
+      //   刀C 那一版把判断写在这层的闭包里，于是没有任何机器断言看得见它。
+      const selSlotAtJudge = pendingSelectionRef.current;
+      const selPersona = COMMANDERS.find((c) => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
+      const selTurn = planSelectionTurn({
+        state,
+        slot: selSlotAtJudge && selSlotAtJudge.channel === ch
+          ? {
+              id: selSlotAtJudge.id,
+              channel: selSlotAtJudge.channel,
+              sessionId: selSlotAtJudge.sessionId,
+              epoch: selSlotAtJudge.epoch,
+              expiresAt: selSlotAtJudge.expiresAt,
+              candidates: selSlotAtJudge.candidates,
+              intentSnapshot: selSlotAtJudge.intentSnapshot,
+            }
+          : null,
+        requestTag: selectionTag,
+        epoch: gameEpochRef.current,
+        now: state.time,
+        persona: selPersona,
+        rawDecision: (data as Record<string, unknown>).dispatchSelection,
+        personaLabel: COMMANDER_META[selPersona].label,
+      });
+      {
+        // 槽的生命周期。过期清理**只许**清掉这次请求带的那一槽——等回复那几秒里
+        // 若登记了更新的一槽，绝不碰它（照抄 pendingContract 的三方匹配规矩）。
+        const sameSlot =
+          selSlotAtJudge != null && selectionTag != null &&
+          selSlotAtJudge.id === selectionTag.selectionId &&
+          selSlotAtJudge.channel === selectionTag.channel &&
+          selSlotAtJudge.sessionId === selectionTag.sessionId;
+        if (!selTurn.keepSlot && sameSlot) {
+          if (selTurn.verdict !== "stale" || selTurn.clearExpiredSlot) pendingSelectionRef.current = null;
+        }
+      }
+
+      if (selTurn.plan.kind !== "passthrough") {
+        setResponse(null);
+        setError(null);
+        // 这一轮的走向已经定了，上面那一层（spoken/正文）一声不出——它是模型在
+        // 引擎跑**之前**写的那一版（刀B 的规矩）。声音由下面各自那一句带。
+        const selPlan = sayToEar("", selTurn.plan.kind === "execute");
+        if (selTurn.plan.kind === "execute") {
+          const p = selTurn.plan;
+          handleApprove(
+            { label: p.label, intents: [p.intent] } as unknown as AdvisorOption,
+            0, "auto",
+            selSlotAtJudge?.execCtx ?? { channel: ch, requestId: crypto.randomUUID() },
+            undefined, selPlan.speakExecReceipt,
+            { intents: new Map([[p.intent, p.unitIds]]) },
+          );
+        } else if (selTurn.plan.kind === "refuse") {
+          refuseAloud(state, ch, selTurn.plan.line, true);
+        } else {
+          // reask：零执行，把没执行这件事说清楚，再问一遍（候选已现查过滤）。
+          const p = selTurn.plan;
+          addMessage("info", p.lead, state.time, ch, undefined, "command_ack");
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: p.lead, time: state.time });
+          askWhichDispatch(
+            state, ch, p.candidates, true,
+            selSlotAtJudge!.intentSnapshot, selSlotAtJudge!.optionLabel, selSlotAtJudge!.execCtx, true,
+          );
+        }
+        return;
+      }
+      // ══ 刀己 段落结束（no_pending / stale / unrelated 走下面的正常流程）══
+
       // ── 刀B：这一回合到底会不会动兵，必须在耳朵开口之前就算出来 ──
       //
       // 闸与桶原本算在下面那个 actionable 分支里，而耳朵在这一行就开口了——
@@ -2858,7 +2988,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   /** spoken 层 R2：`speakReceipt=false` ⇒ 这一轮耳朵已经从 spoken 那儿听过这件事，
    *  回执不再单独出声（屏上那行一个字不动）。默认 true＝分层之前的行为，
    *  所以没被改过的调用点（手点批准、打字词表快路）逐字等价。 */
-  const handleApprove = (opt: AdvisorOption, idx: number, mode: "auto" | "manual" = "manual", ctx?: ExecContext, sourceResponse?: DisplayResponse, speakReceipt: boolean = true) => {
+  const handleApprove = (
+    opt: AdvisorOption,
+    idx: number,
+    mode: "auto" | "manual" = "manual",
+    ctx?: ExecContext,
+    sourceResponse?: DisplayResponse,
+    speakReceipt: boolean = true,
+    /**
+     * 刀己：长官答完「是哪一批」之后绑定出来的那份名单（key → **现查**成员）。
+     * 传了它就说明这条 intent 的来源**已经定了**：不再判歧义、不再问，
+     * 而且名单作为硬约束进 resolveIntent，不许被别的选法悄悄放大。
+     */
+    boundSelection?: { intents: ReadonlyMap<Intent, number[]> },
+  ) => {
     const state = getState();
     if (!state) return;
 
@@ -2891,6 +3034,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // 刀C: fromDispatch 解析出来的合法名单（已与本参谋的可调池取交集）。
     // 走新字段不等于绕过权限——G 号那条路踩过这个坑（手测账③ × B 刀）。
     const dispatchRosters = new Map<Intent, number[]>();
+    // 刀己: 长官答完「是哪一批」绑定出来的名单（现查 + 已与可调池取交集）。
+    // 在这张表里 ⇒ 来源已定：跳过歧义判定，名单当硬约束。
+    const boundRosters = new Map<Intent, number[]>(boundSelection?.intents ?? []);
+    const boundIntents = new Set<Intent>(boundRosters.keys());
 
     // 手测账③: who is being spoken to decides what they may move. This is the
     // ENGINE BACKSTOP — the primary fix is the prompt principle (a persona with
@@ -2933,26 +3080,24 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         // （「任务 M3 已经不在了」），那条路只废掉这一条意图，不连坐同批的其它意图。
       }
 
-      // ── 刀C: 指代不清就问一句（**绝不替他挑一个**）──
+      // ── 刀C/刀己: 指代不清就问一句（**绝不替他挑一个**）──
       // 判的是「候选是否唯一」，不是「玩家有没有说编号」：
       //   「现在守南线的部队」＝明确（位置）⇒ 不问；
       //   「刚派去山脊那批」＝明确（任务，且只有一条匹配）⇒ 不问；
       //   留守的与外派的同时存在、或同一来源派出了两批 ⇒ 问。
-      {
-        // ★ 只问一句。已经问过（待决槽还活着）就按长官这一轮的回答办——
-        //   再问就成环：回答「守在那儿的那批」在 intent 里仍旧是 fromFront，
-        //   与被问的那条一模一样，第二次判定必然又判成"候选还是两条"。
-        //   不假装看懂了什么：这一轮的选兵仍旧由模型写的字段决定，而刀B 的回执
-        //   会把"到底动了谁、去了哪"逐条说出来，选错一眼就看得见。
-        const slot = livePendingSelection(state.time, ch);
-        if (slot) {
-          pendingSelectionRef.current = null; // 一次性消费，绝不悬挂
-        } else {
-          const amb = findDispatchAmbiguity(state, intent, selectedIdsSnapshotRef.current);
-          if (amb) {
-            askWhichDispatch(state, ch, amb, speakReceipt);
-            return;
-          }
+      //
+      // ★刀己 换掉了刀C 的「问一次就放行」：
+      //   刀C 那一版看到活槽就把它清空，然后照模型这一轮填的字段执行——那不是
+      //   绑定，是"问过了就相信"。现在答复走**独立的选择合同**
+      //   （processAdvisorData 里的 judgeSelectionConsumption），绑定后执行的是
+      //   槽里那条**原命令快照**，根本不会再走到这儿。
+      //   走到这儿的只有两种：还没问过，或者这是一条与那一问无关的新命令
+      //   （verdict=unrelated，槽已在上面撤掉）。所以这里只剩"要不要问"。
+      if (!boundIntents.has(intent)) {
+        const amb = findDispatchAmbiguity(state, intent, selectedIdsSnapshotRef.current);
+        if (amb) {
+          askWhichDispatch(state, ch, amb, speakReceipt, intent, cleanLabel, execCtx ?? undefined);
+          return;
         }
       }
 
@@ -3082,11 +3227,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const intent = intents[intentIdx];
       // v4 刀2b: a ticket's frozen roster wins over the box-select snapshot —
       // the player approved THAT batch, not whatever is currently framed.
-      // 刀C: 名单优先级 —— 票据 > 框选 > 任务。框选优先与现有优先级一致
-      // （框选是长官自己的手，最具体）；任务名单在没有框选时才当硬约束用。
+      // 刀C/刀己: 名单优先级 —— 票据 > **绑定选择** > 框选 > 任务。
+      // 绑定选择排在框选之前：它是长官对"是哪一批"这一问的**当场答复**，
+      // 比可能早已陈旧的框选快照更贴这一条命令（框选那条路自己也不会进到这儿
+      // ——有框选时枚举直接返回空，根本不会问）。
       const result = resolveIntent(
         intent, state, state.style, reserved,
-        ticketRosters.get(intent) ?? selectedIdsSnapshotRef.current ?? dispatchRosters.get(intent),
+        ticketRosters.get(intent) ?? boundRosters.get(intent) ?? selectedIdsSnapshotRef.current ?? dispatchRosters.get(intent),
       );
       if (result.degraded) {
         // 失败理由照旧上屏：它说的是"这条意图没能变成命令"，不是执行结果，

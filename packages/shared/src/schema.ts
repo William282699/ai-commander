@@ -16,6 +16,8 @@ import type {
   PendingVerdict,
 } from "./types";
 import type { IntentType, Intent, UrgencyLevel, UnitCategoryHint } from "./intents";
+// 刀己：选来源的答复，与 pendingDecision 同族的白名单登记
+import { parseSelectionDecision } from "./dispatchSelection";
 
 const VALID_RESPONSE_TYPES: readonly ResponseType[] = ["EXECUTE", "CONFIRM", "ASK", "NOOP"];
 
@@ -313,6 +315,11 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
   // non-empty options) — the decision must never be dropped by either path.
   const pendingDecision = parsePendingDecision(obj.pendingDecision);
 
+  // 刀己：对「您说的是哪一批？」的答复。与 pendingDecision 同族的白名单登记
+  // ——不登记在这儿，模型填了也到不了客户端（本函数是白名单重建，没登记的
+  // 根级字段一律静默消失）。**两条 return 路径都要带。**
+  const dispatchSelection = parseSelectionDecision(obj.dispatchSelection);
+
   // 语音输入 V1: heard = 模型转写的长官原话。同 pendingDecision 一样，这里是
   // 全仓**唯一**能给 AdvisorResponse 装上 heard 的地方——本函数是白名单重建，
   // 没登记的根级字段一律静默消失。所以下面两条 return 都要带上它。
@@ -345,6 +352,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
       standingOrder,
       cancelDoctrine: cancelDoctrineId,
       pendingDecision,
+      dispatchSelection,
       heard,
       spoken,
     };
@@ -414,6 +422,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
     standingOrder,
     cancelDoctrine: cancelDoctrineId,
     pendingDecision,
+    dispatchSelection,
     heard,
     spoken,
   };

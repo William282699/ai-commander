@@ -10,3 +10,4 @@ export * from "./squadHierarchy";
 export * from "./doctrine";
 export * from "./featureFlags";
 export * from "./speechEcho";
+export * from "./dispatchSelection";

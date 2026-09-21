@@ -20,7 +20,7 @@
 import {
   createInitialGameState, resolveIntent, applyOrders, applyPlayerCommands, updateFog, processAutoBehavior,
   liveDispatchMembers, findDispatch, activeDispatches, findDispatchAmbiguity, isDispatchIntent,
-  classifyDestination,
+  classifyDestination, planSelectionTurn,
 } from "@ai-commander/core";
 import { tick } from "../packages/core/src/sim";
 import { processEnemyAI } from "../packages/core/src/enemyAI";
@@ -130,6 +130,34 @@ function ordersKey(orders: ReturnType<typeof resolveIntent>["orders"]): string {
 
 const near = (p: { x: number; y: number }, c: { x: number; y: number }, tol: number): boolean =>
   Math.hypot(p.x - c.x, p.y - c.y) <= tol;
+
+/** 源码级判据的锚：从 `needle` 起按括号配平截出那一段函数体。
+ *  ★ 不许拿"下一段注释的头一句"当结束锚——注释一动判据就假红（刀己 实证）。 */
+function braceBody(src: string, needle: string): string {
+  const from = src.indexOf(needle);
+  if (from < 0) return "";
+  // ★ 从 `=> {` 起算，不从第一个 `{` 起算——参数里的内联类型
+  //   （`opts?: { screen?: boolean }`）会让配平提前收口，只截到参数表。
+  const open = src.indexOf("=> {", from);
+  if (open < 0) return "";
+  let depth = 0;
+  for (let i = open + 3; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") { depth--; if (depth === 0) return src.slice(from, i + 1); }
+  }
+  return "";
+}
+
+/** 刀己：全场单位的命令投影——"一兵未动"要逐字节可比，不靠人数。 */
+function snapshotUnitOrders(state: GameState): string {
+  const rows: string[] = [];
+  state.units.forEach((u) => {
+    if (u.team !== "player") return;
+    rows.push(`${u.id}|${u.state}|${JSON.stringify(u.orders)}|${JSON.stringify(u.target)}`);
+  });
+  return rows.sort().join("\n");
+}
 
 /** bbox 的中点（刀戊 W0 自证用）。 */
 const regionMid = (b: readonly number[]) => ({ x: (b[0] + b[2]) / 2, y: (b[1] + b[3]) / 2 });
@@ -1235,9 +1263,10 @@ function knifeYi(negctl: boolean): void {
 
   // ── Y3 屏耳同源：出口内部喂给屏和喂给嘴的是**同一个变量** ──
   {
-    const hFrom = src.indexOf("const refuseAloud = (");
-    const hTo = src.indexOf("/** 问一句：候选逐项列出");
-    const helper = hFrom >= 0 && hTo > hFrom ? src.slice(hFrom, hTo) : "";
+    // ★ 锚点按**括号配平**取，不挂在注释文字上（刀己 改了旁边一段注释，
+    //   旧锚 `/** 问一句：候选逐项列出` 当场失配、Y3 三条一起假红——
+    //   源码级判据的锚必须是结构，不能是措辞）。
+    const helper = braceBody(src, "const refuseAloud = (");
     check("Y3 出口存在，且屏上与嘴里喂的是同一个 msg（不是两份文案）",
       helper.includes('addMessage("warning", msg,') && helper.includes("speak(msg, persona)"),
       helper ? "找到出口但两边不同源" : "★找不到出口");
@@ -1666,6 +1695,421 @@ function knifeWu(negctl: boolean): void {
   }
 }
 
+// ════════════════════════════════════════════════════════════
+// 刀 己：问完必须**真正绑定候选**
+// ════════════════════════════════════════════════════════════
+//
+// 病（审核 §二）：刀C 的消歧只做了"问一句"。`pendingSelectionRef` 只存了候选、
+// 从没用它来选；下一条可执行 intent 一到就把槽清空，然后**照模型这一轮填的
+// 字段执行**。于是长官答「好的」、答非所问、或者模型又把 fromFront 写错，
+// 仍然调错兵——实测：留守 1 ＋ 外派 4，模型仍填 fromFront ⇒ 只撤 1 个（该撤 4）。
+// ★ 旧探针 C3c 不是这条的依据：它是直接把 `fromDispatch: M1` 喂给引擎的，
+//   证明的是「字段填对就调对人」，不是「问完之后字段会填对」。
+//
+// 判据全部跑**生产代码**：`planSelectionTurn`（判定本体，已从 ChatPanel 闭包
+// 搬进 core）＋ 真 `resolveIntent`/`applyOrders`/台账。
+
+const JI_CH = "combat";
+const JI_SESSION = "sess-ji";
+
+/** 把一次「问」登记成槽——字段与 ChatPanel 的 askWhichDispatch 同源。 */
+function jiSlot(state: GameState, candidates: DispatchCandidate[], snapshot: Intent, id = "sel-1", epoch = 1) {
+  return {
+    id, channel: JI_CH, sessionId: JI_SESSION, epoch,
+    expiresAt: state.time + 120,
+    candidates, intentSnapshot: snapshot,
+  };
+}
+const jiTag = (id = "sel-1") => ({ selectionId: id, channel: JI_CH, sessionId: JI_SESSION });
+
+/** 跑一轮选择：判定 → （若 execute）真执行 → 回执 + 台账。 */
+function jiTurn(
+  state: GameState,
+  slot: ReturnType<typeof jiSlot> | null,
+  rawDecision: unknown,
+  over: { tag?: ReturnType<typeof jiTag> | null; epoch?: number; now?: number } = {},
+) {
+  const decision = planSelectionTurn({
+    state,
+    slot,
+    requestTag: over.tag === undefined ? jiTag(slot?.id ?? "sel-1") : over.tag,
+    epoch: over.epoch ?? 1,
+    now: over.now ?? state.time,
+    persona: "chen",
+    rawDecision,
+    personaLabel: "陈军士",
+  });
+  if (decision.plan.kind !== "execute") return { decision, applied: [] as number[], lines: [] as string[] };
+  // 执行侧与主链同源：绑定名单当硬约束 → resolveIntent → applyOrders → 回执
+  const p = decision.plan;
+  const r = resolveIntent(p.intent, state, state.style, undefined, p.unitIds);
+  const meta: DispatchMeta = {
+    group: "i0",
+    sourceKind: p.intent.fromDispatch ? "dispatch" : p.intent.fromFront ? "front" : "pool",
+    sourceKey: p.intent.fromDispatch ?? p.intent.fromFront ?? "",
+    action: p.intent.type, targetName: r.destinationName,
+  };
+  const stamped = r.orders.map((o) => ({ ...o, origin: "advisor" as const, dispatchMeta: meta }));
+  const res = applyOrders(state, stamped);
+  const receipt = buildExecReceipt(res, [sliceOf(p.intent, r.destinationName, r.log, stamped.map((_, k) => k))]);
+  return { decision, applied: [...res.appliedUnitIds].sort((a, b) => a - b), lines: receipt.lines, res, destinationName: r.destinationName };
+}
+
+const RETREAT_SNAPSHOT: Intent = {
+  type: "retreat", fromFront: "front_south", targetFacility: "ea_player_south_post", quantity: "all",
+} as Intent;
+
+function knifeJi(negctl: boolean): void {
+  console.log("\n== 刀 己：问完必须真正绑定候选 ==");
+
+  // ── I0 台架自证：局面真的是"留守 + 外派"，且候选带稳定 key ──
+  {
+    const { state, stay, sent } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT);
+    check("I0 台架自证：局面判为歧义、两个候选、key 带前缀（stay:/dispatch:）",
+      amb !== null && amb.length === 2 &&
+      amb.some((c) => c.selectionKey === `stay:front_south`) &&
+      amb.some((c) => c.selectionKey.startsWith("dispatch:M")),
+      amb ? JSON.stringify(amb.map((c) => c.selectionKey)) : "null");
+    check("I0b 台架自证：留守 1 个、外派 4 个（判据下面要逐 id 比这两组）",
+      sent.length === 4 && typeof stay === "number", `stay=${stay} sent=${JSON.stringify(sent)}`);
+    // ★ 病灶复现：模型若仍填 fromFront，实际只调得到留守那 1 个
+    const naive = resolveIntent(RETREAT_SNAPSHOT, state, state.style);
+    check("I0c ★病灶自证★ 模型仍填 fromFront ⇒ 只调到留守那 1 个（该调 4 个）",
+      naive.assignedUnitIds.length === 1 && naive.assignedUnitIds[0] === stay,
+      `assigned=${JSON.stringify(naive.assignedUnitIds)}`);
+  }
+
+  // ── I1 ★核心★ 回答「好的」⇒ 零执行，槽留着，不许清槽后盲办 ──
+  {
+    const { state } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+    const slot = jiSlot(state, amb, RETREAT_SNAPSHOT);
+    const before = snapshotUnitOrders(state);
+    // 「好的」＝模型判 unclear（语义归模型；引擎这儿没有任何中文确认词表）
+    const t = jiTurn(state, slot, { decision: "unclear" });
+    check("I1 ★「好的」⇒ verdict=unclear、零执行、再问一遍★",
+      t.decision.verdict === "unclear" && t.decision.plan.kind === "reask" && t.applied.length === 0,
+      `verdict=${t.decision.verdict} plan=${t.decision.plan.kind} applied=${t.applied.length}`);
+    check("I1b 槽必须留着（keepSlot），不许清掉后照模型字段办",
+      t.decision.keepSlot === true, `keepSlot=${t.decision.keepSlot}`);
+    check("I1c 一兵未动：全场单位的命令逐字节未变",
+      snapshotUnitOrders(state) === before, "");
+    check("I1d 再问的那一句说清了「还没执行」",
+      t.decision.plan.kind === "reask" && t.decision.plan.lead.includes("没有执行"),
+      t.decision.plan.kind === "reask" ? t.decision.plan.lead : "");
+  }
+
+  // ── I2 缺字段 / 非法字段 ⇒ 协议失败，同样零执行 ──
+  {
+    for (const [label, raw] of [
+      ["字段缺失", undefined],
+      ["空对象", {}],
+      ["decision 写错", { decision: "yes" }],
+      ["说选了却没给 candidate", { decision: "chose" }],
+      ["candidate 是空串", { decision: "chose", candidate: "  " }],
+    ] as Array<[string, unknown]>) {
+      const { state } = splitFrontFixture();
+      const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+      const before = snapshotUnitOrders(state);
+      const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), raw);
+      check(`I2 ${label} ⇒ protocol_failure、零执行、槽留着`,
+        t.decision.verdict === "protocol_failure" && t.applied.length === 0 &&
+        t.decision.keepSlot === true && snapshotUnitOrders(state) === before,
+        `verdict=${t.decision.verdict}`);
+    }
+  }
+
+  // ── I3 ★核心★ 选 stay ⇒ 只动"现在还守在原战线上的合法成员" ──
+  {
+    const { state, stay, sent } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+    const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "chose", candidate: "stay:front_south" });
+    check("I3 ★选 stay ⇒ 实际 applied **逐 id 等于**留守那一组，外派那 4 个一个都不许夹带★",
+      t.decision.verdict === "chose" && t.applied.length === 1 && t.applied[0] === stay &&
+      sent.every((id) => !t.applied.includes(id)),
+      `applied=${JSON.stringify(t.applied)} stay=${stay} sent=${JSON.stringify(sent)}`);
+    check("I3b 绑定后的 intent 来源被改写成明确的那一种（fromFront 在、fromDispatch 清掉）",
+      t.decision.plan.kind === "execute" &&
+      t.decision.plan.intent.fromFront === "front_south" &&
+      t.decision.plan.intent.fromDispatch === undefined &&
+      t.decision.plan.intent.fromSquad === undefined,
+      JSON.stringify(t.decision.plan.kind === "execute" ? t.decision.plan.intent : null));
+  }
+
+  // ── I4 ★核心★ 选任务号 ⇒ 只动那次任务的**实时存活**成员 ──
+  {
+    const { state, stay, sent } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+    const dKey = amb.find((c) => c.kind === "dispatch")!.selectionKey;
+    const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "chose", candidate: dKey });
+    check("I4 ★选任务 ⇒ applied 逐 id 等于那批外派的 4 个，留守那个不许被动★",
+      t.decision.verdict === "chose" &&
+      t.applied.length === sent.length && sent.every((id) => t.applied.includes(id)) &&
+      !t.applied.includes(stay),
+      `applied=${JSON.stringify(t.applied)} sent=${JSON.stringify([...sent].sort((a, b) => a - b))}`);
+    check("I4b 绑定后 fromDispatch 在、fromFront 清掉（两个字段绝不同时填）",
+      t.decision.plan.kind === "execute" &&
+      t.decision.plan.intent.fromDispatch === dKey.slice("dispatch:".length) &&
+      t.decision.plan.intent.fromFront === undefined,
+      JSON.stringify(t.decision.plan.kind === "execute" ? t.decision.plan.intent : null));
+    check("I4c 回执报的人数与真 applied 一致，落点报站名",
+      t.lines.length === 1 && t.lines[0] === `已下令 ${t.applied.length} 个单位撤退至南线前哨。`,
+      JSON.stringify(t.lines));
+    // ★ 台账：整批从旧任务摘除、进新任务
+    const active = activeDispatches(state);
+    const newest = state.dispatches[state.dispatches.length - 1];
+    check("I4d 台账：新任务的名单**逐 id 等于** applied，旧任务已清空转 closed",
+      JSON.stringify([...newest.memberIds].sort((a, b) => a - b)) === JSON.stringify(t.applied) &&
+      state.dispatches[0].status === "closed" && state.dispatches[0].memberIds.length === 0,
+      `new=${JSON.stringify(newest.memberIds)} old=${state.dispatches[0].status}/${state.dispatches[0].memberIds.length} active=${active.length}`);
+  }
+
+  // ── I5 ★核心★ 模型给一个**没给过**的 key ⇒ 明确拒绝、零执行 ──
+  {
+    // （空串/缺 candidate 走的是 protocol_failure 那一格，见 I2——两者都零执行、
+    //   都留槽，只是裁决名不同：一个是"选了个不存在的"，一个是"没说选了什么"。）
+    for (const bogus of ["dispatch:M99", "stay:front_center", "M1", "STAY:FRONT_SOUTH", "stay:front", "随便"]) {
+      const { state } = splitFrontFixture();
+      const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+      const before = snapshotUnitOrders(state);
+      const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "chose", candidate: bogus });
+      check(`I5 没给过的 key「${bogus}」⇒ bad_key、零执行、一兵未动`,
+        t.decision.verdict === "bad_key" && t.applied.length === 0 &&
+        snapshotUnitOrders(state) === before,
+        `verdict=${t.decision.verdict}`);
+    }
+    // ★ 唯一的规范化＝去掉首尾空白（模型常多带一个空格）。它只能把同一个 key
+    //   变回自己，绝不可能把"没给过的"变成"给过的"——所以这一格是**正例**。
+    //   大小写**不**折叠、不做模糊匹配（上面 STAY:FRONT_SOUTH 与 stay:front 两条
+    //   负例钉的就是这个）。
+    {
+      const { state } = splitFrontFixture();
+      const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+      const stayId = amb.find((c) => c.kind === "stay")!.unitIds[0];
+      const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "chose", candidate: "  stay:front_south\n" });
+      check("I5c 首尾空白被规范化掉 ⇒ 仍认得出那个 key（唯一的规范化，不折叠大小写）",
+        t.decision.verdict === "chose" && t.applied.length === 1 && t.applied[0] === stayId,
+        `verdict=${t.decision.verdict} applied=${JSON.stringify(t.applied)}`);
+    }
+
+    // bad_key 要说"我没听准"，不能让长官以为自己答对了
+    const { state } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+    const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "chose", candidate: "dispatch:M99" });
+    check("I5b bad_key 的再问句里说清了「没听准」＋「还没有执行」",
+      t.decision.plan.kind === "reask" &&
+      t.decision.plan.lead.includes("没听准") && t.decision.plan.lead.includes("没有执行"),
+      t.decision.plan.kind === "reask" ? t.decision.plan.lead : "");
+  }
+
+  // ── I6 等待期间**部分死亡** ⇒ 按实时状态缩减，不用旧 roster ──
+  {
+    const { state, sent } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+    const slot = jiSlot(state, amb, RETREAT_SNAPSHOT);
+    const dKey = amb.find((c) => c.kind === "dispatch")!.selectionKey;
+    const frozen = amb.find((c) => c.kind === "dispatch")!.unitIds.length;
+    // 回复途中死一个
+    const dead = sent[0];
+    state.units.get(dead)!.state = "dead";
+    const t = jiTurn(state, slot, { decision: "chose", candidate: dKey });
+    check("I6 ★等待期间死 1 个 ⇒ 实际调动 = 冻结名单 - 1，且死者不在 applied 里★",
+      t.applied.length === frozen - 1 && !t.applied.includes(dead),
+      `frozen=${frozen} applied=${JSON.stringify(t.applied)} dead=${dead}`);
+    check("I6b 回执报的是真数，不是槽里那份快照的原始人数",
+      t.lines.length === 1 && t.lines[0].includes(`${frozen - 1} 个`) && !t.lines[0].includes(`${frozen} 个`),
+      JSON.stringify(t.lines));
+  }
+
+  // ── I7 等待期间那批**全死 / 任务关闭** ⇒ 明确拒绝，不退回别的选法 ──
+  {
+    const { state, sent } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+    const slot = jiSlot(state, amb, RETREAT_SNAPSHOT);
+    const dKey = amb.find((c) => c.kind === "dispatch")!.selectionKey;
+    for (const id of sent) state.units.get(id)!.state = "dead";
+    const before = snapshotUnitOrders(state);
+    const t = jiTurn(state, slot, { decision: "chose", candidate: dKey });
+    check("I7 ★那批全死 ⇒ refuse、零执行（绝不退回去调留守那个或全军）★",
+      t.decision.plan.kind === "refuse" && t.applied.length === 0 &&
+      snapshotUnitOrders(state) === before,
+      `plan=${t.decision.plan.kind}`);
+    check("I7b 拒绝话里说明了「已经不在了」＋「没有执行」",
+      t.decision.plan.kind === "refuse" && t.decision.plan.line.includes("不在了") &&
+      t.decision.plan.line.includes("没有执行"),
+      t.decision.plan.kind === "refuse" ? t.decision.plan.line : "");
+  }
+
+  // ── I8 只剩一批时不再缠人：答不清也直接按仅剩那批办 ──
+  {
+    const { state, sent, stay } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+    const slot = jiSlot(state, amb, RETREAT_SNAPSHOT);
+    state.units.get(stay)!.state = "dead";   // 留守那个没了 ⇒ 候选只剩任务那一条
+    const t = jiTurn(state, slot, { decision: "unclear" });
+    check("I8 答不清但候选已只剩一批 ⇒ 直接按它办（不再缠人，撞「勿变 20 问」）",
+      t.decision.plan.kind === "execute" && t.applied.length === sent.length &&
+      sent.every((id) => t.applied.includes(id)),
+      `plan=${t.decision.plan.kind} applied=${JSON.stringify(t.applied)}`);
+  }
+
+  // ── I9 跨频道 / 过期 / 跨局：旧选择一律不可消费 ──
+  {
+    const mk = () => { const f = splitFrontFixture(); const amb = findDispatchAmbiguity(f.state, RETREAT_SNAPSHOT)!; return { ...f, amb }; };
+    const dKeyOf = (amb: DispatchCandidate[]) => amb.find((c) => c.kind === "dispatch")!.selectionKey;
+
+    // 跨频道：答复带的标签是别的频道
+    {
+      const { state, amb } = mk();
+      const before = snapshotUnitOrders(state);
+      const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "chose", candidate: dKeyOf(amb) },
+        { tag: { selectionId: "sel-1", channel: "logistics", sessionId: JI_SESSION } });
+      check("I9 跨频道的答复 ⇒ stale、不消费、零执行",
+        t.decision.verdict === "stale" && t.applied.length === 0 && snapshotUnitOrders(state) === before, `verdict=${t.decision.verdict}`);
+    }
+    // 跨会话
+    {
+      const { state, amb } = mk();
+      const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "chose", candidate: dKeyOf(amb) },
+        { tag: { selectionId: "sel-1", channel: JI_CH, sessionId: "other" } });
+      check("I9b 跨会话的答复 ⇒ stale、不消费", t.decision.verdict === "stale" && t.applied.length === 0);
+    }
+    // 跨局（epoch 变了＝重开一局）
+    {
+      const { state, amb } = mk();
+      const before = snapshotUnitOrders(state);
+      const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "chose", candidate: dKeyOf(amb) }, { epoch: 2 });
+      check("I9c ★重开一局（epoch 变了）⇒ 旧选择不可消费、零执行★",
+        t.decision.verdict === "stale" && t.applied.length === 0 && snapshotUnitOrders(state) === before,
+        `verdict=${t.decision.verdict}`);
+    }
+    // 过期
+    {
+      const { state, amb } = mk();
+      const slot = jiSlot(state, amb, RETREAT_SNAPSHOT);
+      const t = jiTurn(state, slot, { decision: "chose", candidate: dKeyOf(amb) }, { now: slot.expiresAt + 1 });
+      check("I9d 过期的答复 ⇒ stale、零执行，且允许清掉**这一槽**",
+        t.decision.verdict === "stale" && t.applied.length === 0 && t.decision.clearExpiredSlot === true,
+        `verdict=${t.decision.verdict} clearExpired=${t.decision.clearExpiredSlot}`);
+    }
+    // 标签对不上 id（等回复期间登记了更新的一槽）⇒ 不许碰那一槽
+    {
+      const { state, amb } = mk();
+      const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT, "sel-NEW"), { decision: "chose", candidate: dKeyOf(amb) },
+        { tag: jiTag("sel-OLD") });
+      check("I9e 标签 id 与活槽不符（中途换过一槽）⇒ stale、不消费、不许清那一槽",
+        t.decision.verdict === "stale" && t.applied.length === 0 && t.decision.clearExpiredSlot === false,
+        `verdict=${t.decision.verdict}`);
+    }
+    // 没带标签
+    {
+      const { state, amb } = mk();
+      const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "chose", candidate: dKeyOf(amb) }, { tag: null });
+      check("I9f 请求没带标签 ⇒ no_pending、走正常流程（不消费那一槽）",
+        t.decision.verdict === "no_pending" && t.decision.plan.kind === "passthrough", `verdict=${t.decision.verdict}`);
+    }
+  }
+
+  // ── I10 无关新命令 ⇒ 撤掉旧槽、正常处理这条新命令 ──
+  {
+    const { state, amb } = (() => { const f = splitFrontFixture(); return { ...f, amb: findDispatchAmbiguity(f.state, RETREAT_SNAPSHOT)! }; })();
+    const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "unrelated" });
+    check("I10 无关新命令 ⇒ unrelated、passthrough、槽不留（不许拿新命令偷偷消费那一次豁免）",
+      t.decision.verdict === "unrelated" && t.decision.plan.kind === "passthrough" && t.decision.keepSlot === false,
+      `verdict=${t.decision.verdict} keepSlot=${t.decision.keepSlot}`);
+  }
+
+  // ── I11 权限：那批人不在这位参谋麾下 ⇒ 明确拒绝、零执行 ──
+  {
+    const { state } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+    const dKey = amb.find((c) => c.kind === "dispatch")!.selectionKey;
+    const before = snapshotUnitOrders(state);
+    const d = planSelectionTurn({
+      state, slot: jiSlot(state, amb, RETREAT_SNAPSHOT), requestTag: jiTag(), epoch: 1, now: state.time,
+      persona: "emily", rawDecision: { decision: "chose", candidate: dKey }, personaLabel: "艾米莉中尉",
+    });
+    check("I11 ★选定的那批不在这位参谋麾下 ⇒ refuse、零执行（走的是主链同一个权限闸）★",
+      d.plan.kind === "refuse" && d.plan.line.includes("艾米莉中尉") && d.plan.line.includes("没有执行") &&
+      snapshotUnitOrders(state) === before,
+      `plan=${d.plan.kind} line=${d.plan.kind === "refuse" ? d.plan.line : ""}`);
+  }
+
+  // ── I12 ★跑完整循环★ 绑定后真到位、转 defending、不掉头 ──
+  {
+    const { state, sent } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+    const dKey = amb.find((c) => c.kind === "dispatch")!.selectionKey;
+    const t = jiTurn(state, jiSlot(state, amb, RETREAT_SNAPSHOT), { decision: "chose", candidate: dKey });
+    const post = [...state.facilities.values()].find((f) => f.id === "ea_player_south_post")!;
+    fullPump(state, 300);
+    const alive = t.applied.map((id) => state.units.get(id)).filter((u): u is Unit => u != null && u.state !== "dead");
+    check("I12 ★绑定执行后跑完整循环 300s：人到前哨（≤6 格）、零掉头（>15 格）、转 defending★",
+      alive.length === sent.length &&
+      alive.every((u) => near(u.position, post.position, 6)) &&
+      alive.every((u) => u.state === "defending"),
+      `存活 ${alive.length}/${sent.length} 距离=${JSON.stringify(alive.map((u) => Math.round(Math.hypot(u.position.x - post.position.x, u.position.y - post.position.y))))} 状态=${JSON.stringify(alive.map((u) => u.state))}`);
+  }
+
+  // ── I13 引擎侧零中文词表：判定只看结构 ──
+  {
+    const src = readFileSync("packages/shared/src/dispatchSelection.ts", "utf8")
+      + readFileSync("packages/core/src/dispatchSelectionTurn.ts", "utf8");
+    const codeOnly = src.split("\n").filter((l) => {
+      const t = l.trimStart();
+      return !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*");
+    }).join("\n");
+    check("I13 合同与判定里没有中文确认词/同义词表（「好的」这类一个都不许有）",
+      !/["'`](好的?|对|是的?|可以|行|嗯|没错|就这样|执行|确认)["'`]/.test(codeOnly),
+      "");
+    check("I13b 严格解析只认三个字面值（chose/unclear/unrelated），别的一律 undefined",
+      codeOnly.includes('=== "unclear"') && codeOnly.includes('=== "unrelated"') && codeOnly.includes('=== "chose"'),
+      "");
+  }
+
+  // ── I14 接线：ChatPanel 不许自己做判断，也不许再走"清槽后盲办" ──
+  {
+    const cp = readFileSync("apps/web/src/ChatPanel.tsx", "utf8");
+    check("I14 ChatPanel 走的是 core 的 planSelectionTurn（判定不留在闭包里）",
+      cp.includes("planSelectionTurn({"), "");
+    check("I14b 刀C 那句「一次性消费 ⇒ 照模型字段办」的写法已经不在了",
+      !cp.includes("pendingSelectionRef.current = null; // 一次性消费"), "");
+    check("I14c 绑定名单作为硬约束进 resolveIntent（优先级排在框选之前）",
+      cp.includes("ticketRosters.get(intent) ?? boundRosters.get(intent) ?? selectedIdsSnapshotRef.current"), "");
+    check("I14d 新字段过了 shared 的白名单重建（两条 return 路径都带）",
+      (readFileSync("packages/shared/src/schema.ts", "utf8").match(/dispatchSelection,/g) ?? []).length === 2, "");
+  }
+
+  if (negctl) {
+    console.log("\n-- negctl：刀C 那版「问完就相信模型」打在新合同上，必须真红 --");
+    // 旧行为的影子：不看 candidate、直接执行模型这一轮写的 intent（＝原快照）。
+    const { state, stay } = splitFrontFixture();
+    const amb = findDispatchAmbiguity(state, RETREAT_SNAPSHOT)!;
+    const dKey = amb.find((c) => c.kind === "dispatch")!.selectionKey;
+    const naive = resolveIntent(RETREAT_SNAPSHOT, state, state.style);   // 刀C：照字段办
+    const bound = planSelectionTurn({
+      state, slot: jiSlot(state, amb, RETREAT_SNAPSHOT), requestTag: jiTag(), epoch: 1, now: state.time,
+      persona: "chen", rawDecision: { decision: "chose", candidate: dKey }, personaLabel: "陈军士",
+    });
+    const boundIds = bound.plan.kind === "execute" ? [...bound.plan.unitIds].sort((a, b) => a - b) : [];
+    const red = naive.assignedUnitIds.length === 1 && naive.assignedUnitIds[0] === stay && boundIds.length === 4;
+    console.log(`  ${red ? "RED(好)" : "GREEN(坏)"} negctl-I 刀C 照字段办 ⇒ ${naive.assignedUnitIds.length} 个（留守那个）；绑定后 ⇒ ${boundIds.length} 个（外派那批）`);
+    check("negctl 绑定确实承重：同一句话、同一局面，照字段办与绑定办**调的不是同一批人**", red, "");
+
+    // 第二条：把"好的"当成选定（＝没有 unclear 这一格）会怎样
+    const { state: st2 } = splitFrontFixture();
+    const amb2 = findDispatchAmbiguity(st2, RETREAT_SNAPSHOT)!;
+    const unclear = planSelectionTurn({
+      state: st2, slot: jiSlot(st2, amb2, RETREAT_SNAPSHOT), requestTag: jiTag(), epoch: 1, now: st2.time,
+      persona: "chen", rawDecision: { decision: "unclear" }, personaLabel: "陈军士",
+    });
+    const red2 = unclear.plan.kind === "reask" && unclear.keepSlot === true;
+    console.log(`  ${red2 ? "RED(好)" : "GREEN(坏)"} negctl-I2 「好的」那一格：plan=${unclear.plan.kind}、keepSlot=${unclear.keepSlot}（旧版会执行）`);
+    check("negctl 「好的」绝不消费待决槽（旧版这一格会照字段执行）", red2, "");
+  }
+}
+
 // ── main ──
 
 const knifeArg = (process.argv.find((a) => a.startsWith("--knife=")) ?? "--knife=all").split("=")[1];
@@ -1678,6 +2122,7 @@ if (knifeArg === "jia" || knifeArg === "all") knifeJia(negctl);
 if (knifeArg === "yi" || knifeArg === "all") knifeYi(negctl);
 if (knifeArg === "bing" || knifeArg === "all") knifeBing(negctl);
 if (knifeArg === "wu" || knifeArg === "all") knifeWu(negctl);
+if (knifeArg === "ji" || knifeArg === "all") knifeJi(negctl);
 
 console.log(failCount === 0 ? `\nALL PASS (${checkCount} 条)` : `\n${failCount}/${checkCount} FAILURES`);
 process.exit(failCount === 0 ? 0 : 1);

@@ -120,40 +120,41 @@ export interface DispatchCandidate {
   kind: "stay" | "dispatch";
   /** stay: 战线 id；dispatch: 任务号。 */
   key: string;
+  /**
+   * 刀己：给模型/合同用的**稳定、自描述**的 key（`stay:front_south` /
+   * `dispatch:M1`）。两类各带前缀，所以永不可能互相冒认，模型也只需逐字抄。
+   * 选择合同的闸押在这一份 key 名单上，`key` 那一栏保持原样给现有判据用。
+   */
+  selectionKey: string;
   /** 给玩家看的一句话（谁、多少人、去了哪）。 */
   label: string;
   unitIds: number[];
 }
 
+/** 刀己：key 的唯一构造处（拼字符串只许有一份实现）。 */
+export function selectionKeyOf(kind: "stay" | "dispatch", key: string): string {
+  return `${kind}:${key}`;
+}
+
 /**
- * 这条意图指的是哪一批人？——候选唯一就不问，两条及以上才问。
+ * 刀己：把候选**枚举**与「该不该问」拆开。
  *
- * 只对「按位置指代」（fromFront，且没点名任务/分队/框选）判。玩家已经点名了
- * 任务号或分队，指代本来就唯一。
+ * 为什么必须拆：执行前复查要的是"这个 key 现在还对应谁"，而那一刻候选可能只剩
+ * 一条（留守的全死了 / 旧任务关了）——`findDispatchAmbiguity` 的 `>= 2` 闸会把
+ * 它判成 null，于是绑定就无从复查。枚举是事实，"问不问"是策略，两件事。
+ *
+ * ★ 名单一律**现查**（`unitsOnFrontKey` / `liveDispatchMembers`）：
+ *   这就是「执行前按本局实时任务、存活成员重新检查」那一条的落点。
  */
-export function findDispatchAmbiguity(
+export function enumerateDispatchCandidates(
   state: GameState,
   intent: Intent,
   selectedUnitIds?: readonly number[],
-): DispatchCandidate[] | null {
-  if (selectedUnitIds && selectedUnitIds.length > 0) return null; // 框选优先，指代已唯一
-  if (intent.fromDispatch || intent.fromSquad) return null;
+): DispatchCandidate[] {
+  if (selectedUnitIds && selectedUnitIds.length > 0) return []; // 框选优先，指代已唯一
+  if (intent.fromDispatch || intent.fromSquad) return [];
   const front = typeof intent.fromFront === "string" ? intent.fromFront.trim() : "";
-  if (!front) return null;
-
-  // ── 刀丙：只在**原病例那个字段形状**上判歧义 ──
-  //
-  // 收窄前这里不看意图类型，只看"这条线上有留守的 + 有派出去的"。实测同一条线
-  // 连下 4 条 fromFront 命令 ⇒ 奇数轮问、偶数轮办（追问槽一次性消费，下一条
-  // 又从零判），被问的包括「南线再派两个去中央」「南线设防」这种玩家心里毫无
-  // 歧义的命令——撞玩家已定的「清楚就办，勿变 20 问」。
-  //
-  // 原病例的形状是「把某条线的部队**整批撤回来**」：撤退 + 数量是"全部/大部"。
-  // 只有这一格，"留守的"与"之前从这儿派出去的"才真的都可能是他指的那批。
-  // 判据只看**字段形状**——不许加中文关键词表（「刚才」「之前」之类），
-  // 穷举永不收敛（家法：写原则不写同义词表）。
-  if (intent.type !== "retreat") return null;
-  if (intent.quantity !== "all" && intent.quantity !== "most") return null;
+  if (!front) return [];
 
   const candidates: DispatchCandidate[] = [];
 
@@ -163,6 +164,7 @@ export function findDispatchAmbiguity(
     candidates.push({
       kind: "stay",
       key: front,
+      selectionKey: selectionKeyOf("stay", front),
       label: `还守在${frontDisplayName(state, front)}的 ${onFront.length} 个`,
       unitIds: onFront.map((u) => u.id),
     });
@@ -178,6 +180,7 @@ export function findDispatchAmbiguity(
     candidates.push({
       kind: "dispatch",
       key: d.id,
+      selectionKey: selectionKeyOf("dispatch", d.id),
       label: d.targetName
         ? `之前派去${d.targetName}的那批（${d.id}，${away.length} 个）`
         : `之前派出去的那批（${d.id}，${away.length} 个）`,
@@ -185,7 +188,93 @@ export function findDispatchAmbiguity(
     });
   }
 
+  return candidates;
+}
+
+/**
+ * 这条意图指的是哪一批人？——候选唯一就不问，两条及以上才问。
+ *
+ * 只对「按位置指代」（fromFront，且没点名任务/分队/框选）判。玩家已经点名了
+ * 任务号或分队，指代本来就唯一。
+ */
+export function findDispatchAmbiguity(
+  state: GameState,
+  intent: Intent,
+  selectedUnitIds?: readonly number[],
+): DispatchCandidate[] | null {
+  // ── 刀丙：只在**原病例那个字段形状**上判歧义 ──
+  //
+  // 收窄前这里不看意图类型，只看"这条线上有留守的 + 有派出去的"。实测同一条线
+  // 连下 4 条 fromFront 命令 ⇒ 奇数轮问、偶数轮办（追问槽一次性消费，下一条
+  // 又从零判），被问的包括「南线再派两个去中央」「南线设防」这种玩家心里毫无
+  // 歧义的命令——撞玩家已定的「清楚就办，勿变 20 问」。
+  //
+  // 原病例的形状是「把某条线的部队**整批撤回来**」：撤退 + 数量是"全部/大部"。
+  // 只有这一格，"留守的"与"之前从这儿派出去的"才真的都可能是他指的那批。
+  // 判据只看**字段形状**——不许加中文关键词表（「刚才」「之前」之类），
+  // 穷举永不收敛（家法：写原则不写同义词表）。
+  if (intent.type !== "retreat") return null;
+  if (intent.quantity !== "all" && intent.quantity !== "most") return null;
+
+  const candidates = enumerateDispatchCandidates(state, intent, selectedUnitIds);
   return candidates.length >= 2 ? candidates : null;
+}
+
+// ── 刀己：把选定的那个 key 绑回一条可执行的 intent（**执行前现查**）──
+
+export type SelectionBindFailure =
+  /** 这个 key 现在已经对不上任何候选（人全死了 / 任务关了 / 人已回到线上）。 */
+  | "gone"
+  /** 快照里没有 `fromFront`，重建无从下手（理论上进不来，fail-closed）。 */
+  | "no_source";
+
+export type SelectionBindResult =
+  | {
+      ok: true;
+      kind: "stay" | "dispatch";
+      selectionKey: string;
+      /** 绑定后的 intent：来源字段被**改写成明确的那一种**，冲突字段清掉。 */
+      intent: Intent;
+      /** 此刻**现查**出来的成员（执行时还要与该参谋的可调池取交集）。 */
+      unitIds: number[];
+      /** 给玩家看的那一句（回执/拒绝语用）。 */
+      label: string;
+    }
+  | { ok: false; reason: SelectionBindFailure };
+
+/**
+ * 按 key 重新解析候选，并把选择映射回**原 intent 的明确来源**。
+ *
+ * ★ 这里是「不许用旧 roster」那条的落点：函数**只收 key**，名单一律从当前
+ *   `GameState` 现查。等模型回复的那几秒里人会死、会被改派、任务会关——
+ *   拿登记时的快照执行，就是把"长官选的那批"偷换成"当时那批"。
+ */
+export function bindDispatchSelection(
+  state: GameState,
+  snapshot: Intent,
+  selectionKey: string,
+): SelectionBindResult {
+  if (typeof snapshot.fromFront !== "string" || snapshot.fromFront.trim().length === 0) {
+    return { ok: false, reason: "no_source" };
+  }
+  // 现查：用与提问时同一份枚举实现（一份实现，两处用）。
+  const fresh = enumerateDispatchCandidates(state, snapshot);
+  const hit = fresh.find((c) => c.selectionKey === selectionKey);
+  if (!hit || hit.unitIds.length === 0) return { ok: false, reason: "gone" };
+
+  // 映射回明确来源。两个字段互斥——绝不同时填，也不留下会互相兜底的残留。
+  const intent: Intent = { ...snapshot };
+  if (hit.kind === "stay") {
+    // 「还守在那条线上的」＝位置指代，本来就是 fromFront 那一档；
+    // 它此刻的明确性由下面那份现查名单保证（作为硬约束一起传下去）。
+    intent.fromFront = hit.key;
+    intent.fromDispatch = undefined;
+  } else {
+    intent.fromDispatch = hit.key;
+    intent.fromFront = undefined;
+  }
+  intent.fromSquad = undefined;
+  return { ok: true, kind: hit.kind, selectionKey, intent, unitIds: [...hit.unitIds], label: hit.label };
 }
 
 // ── 两个小工具：战线 key 的解析交给 tacticalPlanner 注入，避免循环依赖 ──

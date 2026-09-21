@@ -3,7 +3,8 @@
 // All game data models live here.
 // ============================================================
 
-import type { TradeBudget, ProduceBudget, IntentType } from "./intents"; // 7b.1 / emily-production-v1: Orders carry budget intents through to settlement；IntentType：刀C 台账登记动作
+import type { TradeBudget, ProduceBudget, IntentType } from "./intents";
+import type { SelectionDecision } from "./dispatchSelection"; // 刀己：选来源的答复 // 7b.1 / emily-production-v1: Orders carry budget intents through to settlement；IntentType：刀C 台账登记动作
 
 // --- Teams & Phases ---
 
@@ -899,6 +900,10 @@ export interface AdvisorResponse {
    *  行为），绝不静默哑掉——一条规则覆盖四种缺席：模型忘写 / 白名单吃掉 /
    *  JSON 解析失败走兜底 / 通讯中断。 */
   spoken?: string;
+  /** 刀己：对「您说的是哪一批？」的答复。与 heard/spoken/pendingDecision **同族**
+   *  ——白名单重建会静默吃掉没登记的根级字段，schema 的**两条 return 路径**都
+   *  必须带。缺席/非法一律按协议失败处理（零执行、再问一次），绝不放行。 */
+  dispatchSelection?: SelectionDecision;
   standingOrder?: {
     type: string;
     locationTag: string;
