@@ -1739,8 +1739,42 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     return p;
   };
 
+  /**
+   * ★刀乙：引擎拒掉这道命令时，**屏上黄字和耳朵是同一句**。
+   *
+   * 病：`planVoiceSpeech` 在 execTurn 时 `finalUtterance=""`（刀B 有意为之，
+   * 是对的），而执行回执只在 `applyOrders` 真跑完才出声。可是 handleApprove 有
+   * 一排在 apply **之前**就 return 的路——权限拒绝、任务不在麾下、消歧追问、
+   * 票据不可用、找不到分队、目标不存在、目的地判退、零 orders 的规划失败。
+   * 结果：语音下了一条命令被引擎拒了 ⇒ 屏上黄字、**耳朵全静音**。
+   * 基线上至少还念一句 spoken。交接文档 §4 点名要求过"选兵/权限/规划阶段
+   * 零 orders 的失败也要如实反馈"——屏上做到了，耳朵没有。
+   *
+   * 一处补声，所有早退路都好：新增第 N 条早退路只要走这个出口就自带声音，
+   * 不走就会被 probe 的源码级判据当场抓住（防"复制六遍漏第七遍"）。
+   *
+   * `screen:false` 只给"话已经在屏上了、这里只补声"那一格用
+   * （零 orders 那条：具体理由在循环里已经逐条打过）。
+   */
+  const refuseAloud = (
+    st: GameState,
+    ch: Channel,
+    msg: string,
+    speakReceipt: boolean,
+    opts?: { screen?: boolean },
+  ) => {
+    if (opts?.screen !== false) {
+      addMessage("warning", msg, st.time, ch, undefined, "command_ack");
+    }
+    if (ttsEnabled && speakReceipt && msg.trim()) {
+      const persona = COMMANDERS.find((c) => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
+      speak(msg, persona);
+      flush(persona);
+    }
+  };
+
   /** 问一句：候选逐项列出，**不替他挑一个**，这一轮什么都不执行。 */
-  const askWhichDispatch = (state: GameState, ch: Channel, candidates: DispatchCandidate[]) => {
+  const askWhichDispatch = (state: GameState, ch: Channel, candidates: DispatchCandidate[], speakReceipt: boolean) => {
     pendingSelectionRef.current = {
       id: makePendingId(),
       channel: ch,
@@ -1750,7 +1784,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       candidates,
     };
     const question = `您说的是哪一批？${candidates.map((c) => c.label).join("，还是")}？`;
-    addMessage("warning", question, state.time, ch, undefined, "command_ack");
+    // 刀乙：问句也要进耳朵——用嘴下的令被问回来，听不见就等于石沉大海。
+    refuseAloud(state, ch, question, speakReceipt);
     pushContext(channelContextRef.current, ch, { role: "assistant", text: question, time: state.time });
     setClarification("请指明是哪一批部队");
   };
@@ -2868,13 +2903,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const auth = checkDispatchAuthority(state, speakingPersona, intent);
       if (auth.kind === "denied") {
         const who = COMMANDER_META[speakingPersona].label;
-        addMessage(
-          "warning",
+        refuseAloud(state, ch,
           auth.reason === "commands_no_forces"
             ? `${who}名下没有部队，这道命令未执行——调兵请对带兵的指挥官说。`
             : `那支部队不在${who}麾下，这道命令未执行——请对${COMMANDER_META[auth.ownerOfNamed!].label}下令。`,
-          state.time, ch, undefined, "command_ack",
-        );
+          speakReceipt);
         return;
       }
 
@@ -2891,7 +2924,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           const lawful = pool ? live.filter((id) => pool.has(id)) : live;
           if (lawful.length === 0) {
             const who = COMMANDER_META[speakingPersona].label;
-            addMessage("warning", `任务 ${d.id} 那批人不在${who}麾下，这道命令未执行——请对带这支部队的指挥官下令。`, state.time, ch, undefined, "command_ack");
+            refuseAloud(state, ch, `任务 ${d.id} 那批人不在${who}麾下，这道命令未执行——请对带这支部队的指挥官下令。`, speakReceipt);
             return;
           }
           dispatchRosters.set(intent, lawful);
@@ -2917,7 +2950,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         } else {
           const amb = findDispatchAmbiguity(state, intent, selectedIdsSnapshotRef.current);
           if (amb) {
-            askWhichDispatch(state, ch, amb);
+            askWhichDispatch(state, ch, amb, speakReceipt);
             return;
           }
         }
@@ -2929,7 +2962,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // a spoken reason — never a silent fallback (the soft-fix family).
       const tk = resolveTicketReference(state, intent.fromSquad, state.time);
       if (tk.kind === "refuse") {
-        addMessage("warning", tk.line, state.time, ch, undefined, "command_ack");
+        refuseAloud(state, ch, tk.line, speakReceipt);
         setClarification("增援案不可用，请重新指明部队");
         return;
       }
@@ -2944,7 +2977,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const lawful = pool ? tk.unitIds.filter((id) => pool.has(id)) : tk.unitIds;
         if (lawful.length === 0) {
           const who = COMMANDER_META[speakingPersona].label;
-          addMessage("warning", `${spokenNameOf(tk.ticket)} 不在${who}麾下，这道命令未执行——请对带这支部队的指挥官下令。`, state.time, ch, undefined, "command_ack");
+          refuseAloud(state, ch, `${spokenNameOf(tk.ticket)} 不在${who}麾下，这道命令未执行——请对带这支部队的指挥官下令。`, speakReceipt);
           return;
         }
         ticketRosters.set(intent, lawful);
@@ -2976,7 +3009,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
         const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
         if (!isSquad && !isCommander) {
-          addMessage("warning", `找不到叫「${intent.fromSquad}」的分队，命令未执行——请用编制里的编号或队长名字重新下令`, state.time, ch, undefined, "command_ack");
+          refuseAloud(state, ch, `找不到叫「${intent.fromSquad}」的分队，命令未执行——请用编制里的编号或队长名字重新下令`, speakReceipt);
           setClarification(`分队「${intent.fromSquad}」无法识别，请重述`);
           return;
         }
@@ -2997,7 +3030,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
       if (!isValidTarget(intent, state, COMMANDER_REFS)) {
         const field = intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
-        addMessage("warning", `目标 ${field} 不存在`, state.time, ch, undefined, "command_ack");
+        refuseAloud(state, ch, `目标 ${field} 不存在`, speakReceipt);
         setClarification("命令引用了不存在的目标，请重新描述");
         return;
       }
@@ -3011,7 +3044,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       if (boundTicket) {
         const verdict = ticketDestinationVerdict(state, intent, boundTicket, wroteDestination);
         if (verdict.kind === "refuse") {
-          addMessage("warning", verdict.line, state.time, ch, undefined, "command_ack");
+          refuseAloud(state, ch, verdict.line, speakReceipt);
           setClarification(
             verdict.reason === "unknown_place" ? "目的地无法定位，请换个地名" : "请指明目的地",
           );
@@ -3038,6 +3071,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     const settled: { ticket: EscalationTicket; dispatched: number; mode: "moved" | "in_place" }[] = [];
     // 刀B：意图 → 它的 order 下标 + 落点名。执行回执唯一的取数口。
     const slices: DispatchSlice[] = [];
+    // 刀乙：规划阶段失败的理由，原样留一份给"零 orders"那条早退路念出去。
+    const degradedLines: string[] = [];
     for (let intentIdx = 0; intentIdx < intents.length; intentIdx++) {
       const intent = intents[intentIdx];
       // v4 刀2b: a ticket's frozen roster wins over the box-select snapshot —
@@ -3053,6 +3088,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         // 本来就诚实（此处一个字节不动）。
         degradedCount++;
         addMessage("warning", result.log, state.time, ch, undefined, "command_ack");
+        // 刀乙：屏上已经有了，这里只留给下面"零 orders"那条早退路补声用。
+        degradedLines.push(result.log);
       } else {
         // ★刀B：`执行: ${result.log}` 不许再上屏。它来自执行**之前**的计划——
         //   计划选中 8 个、applyOrders 的四道过滤只放行 5 个，留着它就会出现
@@ -3114,6 +3151,10 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       //    另有其路（模型返回 options:[] 那条，:2223 起），那条才该说请重述；
       // ③ 姊妹路径 handleThreadApprove（:1645 起）跑同一个循环，从来没有这个块。
       // 保留 setApprovedIdx 的闪烁与 return——它们是执行反馈，不是措辞。
+      //
+      // 刀乙：这条路屏上有话（上面循环里逐条打过具体理由），耳朵原先一声不出。
+      // 补声用 screen:false——不重复上屏，念的就是屏上那几行，逐字同源。
+      refuseAloud(state, ch, degradedLines.join(" "), speakReceipt, { screen: false });
       setApprovedIdx(idx);
       setTimeout(() => setApprovedIdx(null), 400);
       return;

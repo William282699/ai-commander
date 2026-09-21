@@ -1082,6 +1082,157 @@ function knifeJia(negctl: boolean): void {
   }
 }
 
+
+// ════════════════════════════════════════════════════════════
+// 刀 乙：命令被引擎拒掉时，耳朵不许一声不出（审核 P0）
+// ════════════════════════════════════════════════════════════
+//
+// 病：`planVoiceSpeech` 在 execTurn 时 finalUtterance=""（刀B 有意为之，是对的），
+// 而执行回执只在 applyOrders 真跑完才出声。可 handleApprove 有一排在 apply
+// **之前**就 return 的路——权限拒绝、任务不在麾下、消歧追问、票据不可用、
+// 找不到分队、目标不存在、目的地判退、零 orders 的规划失败。于是用嘴下的命令
+// 被引擎拒了 ⇒ 屏上黄字、耳朵全静音。基线上至少还念一句 spoken。
+//
+// 修法是**一个出口**（refuseAloud），不是复制六遍。判据因此必须能抓住
+// "将来新增第 N 条早退路却没走这个出口"——否则它只是恒真的装饰。
+
+/** 取出 handleApprove 的函数体（到下一个组件成员声明为止）。 */
+function handleApproveBody(src: string): { lines: string[]; from: number } {
+  const lines = src.split("\n");
+  const from = lines.findIndex((l) => l.startsWith("  const handleApprove = ("));
+  if (from < 0) throw new Error("handleApprove 不见了——判据失去承重对象");
+  let to = lines.length;
+  for (let i = from + 1; i < lines.length; i++) {
+    if (/^ {2}(const|function) [A-Za-z]/.test(lines[i])) { to = i; break; }
+  }
+  return { lines: lines.slice(from, to), from };
+}
+
+function knifeYi(negctl: boolean): void {
+  console.log("\n== 刀 乙：命令被引擎拒掉时，耳朵不许一声不出 ==");
+
+  const src = readFileSync("apps/web/src/ChatPanel.tsx", "utf8");
+  const { lines } = handleApproveBody(src);
+  const body = lines.join("\n");
+
+  // ── Y0 台架自证：函数体真取到了，而且大得像那个函数（否则下面全是恒真）──
+  check("Y0 台架自证：handleApprove 函数体取到了（>200 行）",
+    lines.length > 200, `${lines.length} 行`);
+
+  // ── Y1 手钉清单：这些早退路必须**逐条**走同一个出口 ──
+  //    手钉而不是正则数数：正则一旦写宽，改名/挪位都不会红（B3 那条方法资产）。
+  const SITES: Array<[string, string]> = [
+    ["权限拒绝（这位参谋名下没兵 / 那支不是他的）", "名下没有部队，这道命令未执行"],
+    ["fromDispatch 那批不在麾下", "那批人不在${who}麾下"],
+    ["消歧追问（问完这一轮什么都不执行）", "您说的是哪一批？"],
+    ["票据不可用", "refuseAloud(state, ch, tk.line"],
+    ["票据那批不在麾下", "不在${who}麾下，这道命令未执行——请对带这支部队的指挥官下令。`, speakReceipt)"],
+    ["找不到分队", "找不到叫「${intent.fromSquad}」的分队"],
+    ["目标不存在", "`目标 ${field} 不存在`"],
+    ["目的地判退（票据说不出「去哪」）", "refuseAloud(state, ch, verdict.line"],
+    ["零 orders 的规划失败（屏上已有话，这里只补声）", "degradedLines.join(\" \"), speakReceipt, { screen: false }"],
+  ];
+  const whole = src; // 问句那条在 askWhichDispatch 里，不在 handleApprove 体内
+  for (const [name, needle] of SITES) {
+    const inBody = body.includes(needle);
+    const inFile = whole.includes(needle);
+    const routed = inBody ? routedThroughRefuse(body, needle) : routedThroughRefuse(whole, needle);
+    check(`Y1 ${name} ⇒ 走 refuseAloud`, inFile && routed,
+      inFile ? "在，但没走那个出口" : "★连这段话都找不到了——判据失去承重对象");
+  }
+
+  // ── Y2 ★绊索：函数体里不许再有"黄字 + return"却不经出口的早退路 ──
+  //    这条专抓"将来新增第 N 条路，复制粘贴了 addMessage 却忘了补声"。
+  {
+    const offenders: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i].trim();
+      if (l.startsWith("//")) continue;
+      if (!/addMessage\(\s*"warning"/.test(l)) continue;
+      // 把这条语句拼全（可能跨行）
+      let stmt = lines[i];
+      let j = i;
+      while (j + 1 < lines.length && !/\);\s*$/.test(stmt)) { j++; stmt += "\n" + lines[j]; }
+      // 只看"打完就 return"的那种（后面 6 行内有裸 return;）
+      let earlyReturn = false;
+      for (let k = j + 1; k < Math.min(j + 7, lines.length); k++) {
+        const t = lines[k].trim();
+        if (t === "return;") { earlyReturn = true; break; }
+        if (t.length > 0 && !t.startsWith("//") && !t.startsWith("setClarification")) break;
+      }
+      if (!earlyReturn) continue;
+      // 唯一登记在案的豁免：stale 点击那条是 "system" 类的 UI 过期提示，
+      // 不是引擎拒令（它只在鼠标点了一张过期卡片时出现，没有语音回合）。
+      if (/"system"/.test(stmt)) continue;
+      offenders.push(stmt.trim().slice(0, 70));
+    }
+    check("Y2 ★绊索★ handleApprove 里再没有「黄字+return」却不经 refuseAloud 的早退路",
+      offenders.length === 0, offenders.join(" | "));
+  }
+
+  // ── Y3 屏耳同源：出口内部喂给屏和喂给嘴的是**同一个变量** ──
+  {
+    const hFrom = src.indexOf("const refuseAloud = (");
+    const hTo = src.indexOf("/** 问一句：候选逐项列出");
+    const helper = hFrom >= 0 && hTo > hFrom ? src.slice(hFrom, hTo) : "";
+    check("Y3 出口存在，且屏上与嘴里喂的是同一个 msg（不是两份文案）",
+      helper.includes('addMessage("warning", msg,') && helper.includes("speak(msg, persona)"),
+      helper ? "找到出口但两边不同源" : "★找不到出口");
+    check("Y3b 出口用的是既有那道开关（ttsEnabled && speakReceipt），没另开一个",
+      helper.includes("ttsEnabled && speakReceipt"), "");
+    check("Y3c 出口自己 flush（短句没有句末标点会卡在句子缓冲里，永远不出声）",
+      helper.includes("flush(persona)"), "");
+  }
+
+  // ── Y4 屏上那一行与念出去的那一段，在"只补声"那一格也同源 ──
+  {
+    check("Y4 零 orders 那条：念的就是屏上逐条打过的理由（degradedLines 同一份）",
+      body.includes("degradedLines.push(result.log)") &&
+      body.includes('degradedLines.join(" "), speakReceipt, { screen: false }'),
+      "");
+  }
+
+  if (negctl) {
+    console.log("\n-- negctl：给函数体注入一条「忘了补声」的早退路，Y2 必须真 FAIL --");
+    const fake = lines.slice();
+    fake.splice(10, 0,
+      '        addMessage("warning", "假的第七条早退路", state.time, ch, undefined, "command_ack");',
+      "        return;");
+    let caught = false;
+    for (let i = 0; i < fake.length; i++) {
+      const l = fake[i].trim();
+      if (!/addMessage\(\s*"warning"/.test(l) || l.startsWith("//")) continue;
+      let stmt = fake[i]; let j = i;
+      while (j + 1 < fake.length && !/\);\s*$/.test(stmt)) { j++; stmt += "\n" + fake[j]; }
+      let early = false;
+      for (let k = j + 1; k < Math.min(j + 7, fake.length); k++) {
+        const t = fake[k].trim();
+        if (t === "return;") { early = true; break; }
+        if (t.length > 0 && !t.startsWith("//") && !t.startsWith("setClarification")) break;
+      }
+      if (early && !/"system"/.test(stmt)) caught = true;
+    }
+    console.log(`  ${caught ? "RED(好)" : "GREEN(坏)"} negctl-Y 注入的第七条早退路被 Y2 抓住`);
+    check("negctl 绊索确实会红（不是恒真的装饰）", caught, "注入了也没抓住");
+  }
+}
+
+/**
+ * needle 那段话是不是经由 refuseAloud 出口发出去的。
+ *
+ * 判法：在它前后一个小窗口里找 refuseAloud，**并且**它自己那一行不许是
+ * addMessage——后半句才是牙：谁把某一条改回 addMessage，这条当场红。
+ * （前半句单独用会太松：窗口里随便有个别的 refuseAloud 就恒真。）
+ */
+function routedThroughRefuse(text: string, needle: string): boolean {
+  const lines = text.split("\n");
+  const i = lines.findIndex((l) => l.includes(needle));
+  if (i < 0) return false;
+  if (/addMessage\(/.test(lines[i])) return false;
+  const win = lines.slice(Math.max(0, i - 6), i + 4).join("\n");
+  return win.includes("refuseAloud(");
+}
+
 // ── main ──
 
 const knifeArg = (process.argv.find((a) => a.startsWith("--knife=")) ?? "--knife=all").split("=")[1];
@@ -1091,6 +1242,7 @@ if (knifeArg === "a" || knifeArg === "all") knifeA(negctl);
 if (knifeArg === "b" || knifeArg === "all") knifeB(negctl);
 if (knifeArg === "c" || knifeArg === "all") knifeC(negctl);
 if (knifeArg === "jia" || knifeArg === "all") knifeJia(negctl);
+if (knifeArg === "yi" || knifeArg === "all") knifeYi(negctl);
 
 console.log(failCount === 0 ? `\nALL PASS (${checkCount} 条)` : `\n${failCount}/${checkCount} FAILURES`);
 process.exit(failCount === 0 ? 0 : 1);
