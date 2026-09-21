@@ -113,6 +113,20 @@ bash scripts/run-benches.sh                                    # 27/27
    「绝不要求玩家念出 M3」——他没要求，但他把号说出口了。与现有
    `[临时编队G#]` 的印法同族，是否要藏起来归长官裁。
 
+## ★订正：staff-thread 那条路**目前休眠**（2026-09-21）
+
+上一版收工说明里写过「staff-thread 链是活的（两个 flag 都是 true，按钮真会
+出现）」。**那是错误推断，特此订正。**
+
+flag 为真、函数存在、按钮挂在 JSX 里，都**不等于生产者会跑**。实查：
+`staffAskState.pendingByChannel` 全仓只有两处赋值——初始化那处、用掉之后清空
+那处——**都是 `null`**，没有任何地方把它填成非空。于是 `tryStartStaffAsk` 永不
+触发，它 `.then` 里的 `createThread` 永不执行，线程永远不会出现。
+
+所以 `handleThreadApprove` 的委派收口是**防将来**（一旦哪天恢复生产者，它不会
+绕过权限/台账/回执/局印），不是"现在正在越权"。本轮**不恢复生产者**。
+判据（Z0/Z0b/Z0c）已改成钉这个代码事实，不再靠 flag 或字符串存在证明可达。
+
 4. **升级票回执仍从 `result.assignedUnitIds.length` 取数**（`ChatPanel:3066`
    一带）——刀B 之后这是**第二个真相源**。已实测确认今天两个数恒等
    （`isDispatchablePlayerUnit` 覆盖了 `applyOrders` 四道过滤的全部四种情况），
