@@ -1080,6 +1080,33 @@ function knifeJia(negctl: boolean): void {
       receipt.outcome === "applied", receipt.outcome);
   }
 
+  // ── J4 ★登记在案的边角：resolver 过了，结算买不起 ──
+  //    这一格刀甲**有意**仍旧先报一行 planLog（＝基线「执行: 生产步兵 ×3」的
+  //    诚实度），真相由引擎的 PRODUCE_FAIL 紧跟其后。判据把这个取舍钉住：
+  //    引擎确实没变、失败诊断确实记了、而且**去重后只剩一句**（三条一模一样）。
+  {
+    const st = economyState(50, 300);
+    const intent = { type: "produce", produceType: "infantry", quantity: 3 } as Intent;
+    const before = new Set(st.diagnostics);
+    const r = resolveIntent(intent, st, st.style);
+    const res = applyOrders(st, r.orders);
+    const receipt = buildExecReceipt(res, [sliceOf(intent, r.destinationName, r.log, r.orders.map((_, k) => k))]);
+    const fails = st.diagnostics.filter((d) => !before.has(d) && (d.code === "PRODUCE_FAIL" || d.code === "TRADE_FAIL"));
+    check("J4 台架自证：resolver 放行（3 条 order）但结算真的买不起（队列没动、钱没扣）",
+      r.degraded === false && r.orders.length === 3 &&
+      st.productionQueue.player.length === 0 && st.economy.player.resources.money === 50,
+      `q=${st.productionQueue.player.length} $=${st.economy.player.resources.money}`);
+    check("J4b 引擎把失败记成了诊断（屏上与耳朵都从这儿取真相）",
+      fails.length === 3 && fails.every((d) => d.message.includes("资金不足")),
+      JSON.stringify(fails.map((d) => d.message)));
+    check("J4c 去重后只剩一句（三条一模一样，念三遍是噪音）",
+      new Set(fails.map((d) => d.message)).size === 1, "");
+    check("J4d ★登记的取舍★ 回执仍先报 planLog（与基线同形），真相靠紧随其后的诊断",
+      receipt.lines.length === 1 && receipt.lines[0].startsWith(r.log) &&
+      !receipt.lines[0].includes("没有执行"),
+      receipt.lines.join(" "));
+  }
+
   // ── J3 源码级接线：两处建 slice 的地方都得盖 economy 标记 ──
   //    （纯函数全绿而真机照旧报"没有执行"——这一条防的就是"忘了接"。）
   {
@@ -1224,6 +1251,23 @@ function knifeYi(negctl: boolean): void {
       "");
   }
 
+  // ── Y5 ★补角：结算失败也得进耳朵（审核新查出的第 1 笔）──
+  //    这条不在 Y2 的射程里：那圈 PRODUCE_FAIL 的 addMessage 后面**没有 return**
+  //    （它在执行之后、回执之后），所以要单独钉。
+  {
+    check("Y5 经济结算失败的诊断：既上屏、也经 refuseAloud 补进耳朵（屏上不重复）",
+      body.includes('addMessage("warning", d.message') &&
+      body.includes("economyFails.join(\" \"), speakReceipt, { screen: false }"),
+      "");
+    check("Y5b 同一条理由去重（三条「资金不足」念一遍就够）",
+      body.includes("if (!economyFails.includes(d.message)) economyFails.push(d.message)"),
+      "");
+    check("Y5c ★顺序★ 补声排在正面回执之后（speak 按句排队，先办成后理由）",
+      body.indexOf("speak(`${voiceConfirm} ${execReceipt.spokenText}`") <
+      body.indexOf("economyFails.join"),
+      "");
+  }
+
   if (negctl) {
     console.log("\n-- negctl：给函数体注入一条「忘了补声」的早退路，Y2 必须真 FAIL --");
     const fake = lines.slice();
@@ -1246,6 +1290,11 @@ function knifeYi(negctl: boolean): void {
     }
     console.log(`  ${caught ? "RED(好)" : "GREEN(坏)"} negctl-Y 注入的第七条早退路被 Y2 抓住`);
     check("negctl 绊索确实会红（不是恒真的装饰）", caught, "注入了也没抓住");
+    // Y5 的摘刀：把补声那一行拿掉，Y5 必须当场红
+    const stripped = body.replace(/economyFails\.join\("[^"]*"\), speakReceipt, \{ screen: false \}/, "REMOVED");
+    const y5Still = stripped.includes("economyFails.join(\" \"), speakReceipt, { screen: false }");
+    console.log(`  ${y5Still ? "GREEN(坏)" : "RED(好)"} negctl-Y5 摘掉「失败也念一句」那一行，Y5 当场红`);
+    check("negctl Y5 的绊索也有牙", !y5Still, "");
   }
 }
 

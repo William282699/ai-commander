@@ -3258,11 +3258,23 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // diagnostics during this apply — otherwise insufficient money/fuel/stock
       // stays silent. Affordability is the engine's decision; the frontend only
       // voices it. Object-identity diff is robust to the 50-entry ring buffer.
+      const economyFails: string[] = [];
       for (const d of state.diagnostics) {
         if (diagsBefore.has(d)) continue;
         if (d.code === "PRODUCE_FAIL" || d.code === "TRADE_FAIL") {
           addMessage("warning", d.message, state.time, ch, undefined, "command_ack");
+          if (!economyFails.includes(d.message)) economyFails.push(d.message);
         }
+      }
+      // ★刀乙补角（审核新查出的第 1 笔）：结算失败也得进耳朵。
+      //
+      // 病：上面这一圈只上屏。钱不够的时候屏上是「生产步兵 ×3。」＋三行「资金
+      // 不足」，而耳朵**只听见正面那一句**——刀甲把回执从 data.brief（模型自己
+      // 的话）换成了引擎腔的回执行，听起来更权威，于是这一格比基线还坏一点。
+      // 修法复用刀乙那个出口：屏上一个字节不动（screen:false），只把去重后的
+      // 失败理由补进耳朵，排在正面回执之后（speak 按句排队，顺序就是这个）。
+      if (economyFails.length > 0) {
+        refuseAloud(state, ch, economyFails.join(" "), speakReceipt, { screen: false });
       }
 
       // Process doctrine fields at approve time (not at response time)

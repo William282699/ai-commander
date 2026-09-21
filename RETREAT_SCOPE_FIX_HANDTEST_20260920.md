@@ -12,6 +12,7 @@
 | `00304b3` | 甲 | 经济单不许被误报成「没有执行」（刀B 自己开的新洞，P0） tag `retreat-scope-fix-jia` |
 | `9904f36` | 乙 | 命令被引擎拒掉时耳朵不许一声不出（刀B 自己开的新洞，P0） tag `retreat-scope-fix-yi` |
 | `287986b` | 丙 | 收窄消歧追问范围：只在 retreat + all/most 上问（P1） tag `retreat-scope-fix-bing` |
+| （见 tag） | 丁 | 结算失败也进耳朵（刀乙的缺角，审核复算新查出的第 1 笔） tag `retreat-scope-fix-ding` |
 
 > 甲/乙/丙 三刀来自 Opus 的独立审查（`@384e064` vs `4e41486`，全量读 diff +
 > 自写一次性脚本复算，未采信收工报告）。审查同时确认：刀A 与刀C 台账机制
@@ -23,7 +24,7 @@
 
 ```bash
 cd "/Users/yuqiaohuang/MyProjects/AI Commander-retreat-scope"
-npx tsx scripts/probe-retreat-scope.ts --knife=all --negctl   # 119 条
+npx tsx scripts/probe-retreat-scope.ts --knife=all --negctl   # 127 条
 # 单刀：--knife=a|b|c|jia|yi|bing
 bash scripts/run-benches.sh                                    # 27/27
 ```
@@ -62,6 +63,15 @@ bash scripts/run-benches.sh                                    # 27/27
 耳：逐字同一句
 ```
 改前这一格耳朵**一声不出**（execTurn ⇒ finalUtterance=""，而 applyOrders 根本没跑到）。
+
+**刀丁**（把钱扣到 $50 后再对艾米莉说「再造三个步兵」）
+```
+屏：这就处理。/ 生产步兵 ×3。/ 生产 infantry 失败: 资金不足 ×3（一个字节没动）
+耳：「这就处理。」「生产步兵 ×3。」「生产 infantry 失败: 资金不足」（去重成一句，排在正面回执之后）
+引擎：money 50 没动、queue 0
+```
+改前耳朵停在「生产步兵 ×3。」——**说了句假话**。这一格刀甲曾让它略微变坏：
+基线耳朵念的是 `data.brief`（模型自己的话），刀甲换成引擎腔的回执行，听着更权威。
 
 ## 这轮**没做**的事（明说，别当它做了）
 
@@ -112,6 +122,18 @@ bash scripts/run-benches.sh                                    # 27/27
    引擎的 `PRODUCE_FAIL` 黄字。这是基线的诚实度，不是刀甲新开的洞——
    刀甲只是把它从「误报没有执行」修回基线。要更严就得让结算回报真实件数，
    那是另一级。
+
+6. **部分降级的回合，失败那条不进耳朵**（P2，挂账）。`degradedLines` 只在
+   `allOrders.length === 0` 那条路被念。一句话两条意图、一成一败 ⇒ 耳朵只听到
+   成功那条回执。非回归，是缺角。
+7. **softFix 的「目标 X=Y 不存在，已忽略此字段」不进耳朵**（P3，挂账）。
+   不致命：执行继续、回执说真话。
+8. **陈那边有两份来源规则**（`ai.ts` ③b ＋ 新的来源字段表），在「照抄
+   DISPATCHES 的号 / 别编号」上重叠（P3，挂账）。都在陈独有面，无护栏问题。
+9. **`PRODUCE_FAIL` 的措辞现在会被念出来**（P3，挂账）：它写的是
+   「生产 **infantry** 失败」用的是类型 id，不是 `UNIT_DISPLAY_NAME` 的「步兵」；
+   屏上同一句还会重复三遍（每条 order 一条）。都是既有的引擎诊断措辞，
+   刀丁只是把它接进了耳朵（耳朵那半已去重）。
 
 ## 方法资产（这轮新添的）
 
