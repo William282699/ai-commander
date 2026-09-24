@@ -48,8 +48,16 @@ export {
 } from "./dispatchLedger";
 export type { DispatchCandidate, SelectionBindResult, SelectionBindFailure } from "./dispatchLedger";
 // 刀己 — 「是哪一批」这一轮该做什么（判定本体在 core，UI 只执行 plan）
-export { planSelectionTurn } from "./dispatchSelectionTurn";
-export type { SelectionSlotState, SelectionTurnPlan, SelectionTurnDecision } from "./dispatchSelectionTurn";
+export { planSelectionTurn, planDispatchSelectionBatch } from "./dispatchSelectionTurn";
+export type {
+  SelectionSlotState,
+  SelectionTurnPlan,
+  SelectionTurnDecision,
+  DispatchSelectionKey,
+  ResolvedDispatchSelection,
+  DispatchSelectionRequirement,
+  DispatchSelectionBatchPlan,
+} from "./dispatchSelectionTurn";
 export { previewHighImpactIntent, isAllFrontHint } from "./tacticalPlanner";
 export type { HighImpactPreview } from "./tacticalPlanner";
 export { buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine } from "./commandPreflight";

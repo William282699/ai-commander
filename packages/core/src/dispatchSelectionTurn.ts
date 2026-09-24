@@ -15,16 +15,100 @@ import type { GameState, Intent, CommanderKey } from "@ai-commander/shared";
 import {
   judgeSelectionConsumption,
   selectionVerdictRoute,
-  parseSelectionDecision,
+  validateSelectionDecision,
   type SelectionRequestTag,
   type SelectionVerdict,
 } from "@ai-commander/shared";
 import {
   enumerateDispatchCandidates,
+  findDispatchAmbiguity,
   bindDispatchSelection,
   type DispatchCandidate,
 } from "./dispatchLedger";
 import { checkDispatchAuthority } from "./commandAuthority";
+
+/**
+ * 一次复合命令里已经明确选过的来源。这里只存稳定 key，绝不存旧 roster；
+ * 每次继续消歧、以及最终执行前，名单都从当前 GameState 重新绑定。
+ */
+export interface DispatchSelectionKey {
+  intentIndex: number;
+  selectionKey: string;
+}
+
+export interface DispatchSelectionRequirement {
+  intentIndex: number;
+  /** 首次发现歧义时提供的候选范围，等待期间不擅自加入新候选。 */
+  offeredKeys: string[];
+}
+
+export type DispatchSelectionBatchPlan =
+  | { kind: "ask"; intentIndex: number; candidates: DispatchCandidate[]; soleCandidate: boolean;
+      requirements: DispatchSelectionRequirement[] }
+  | { kind: "ready"; intents: Intent[]; bindings: ResolvedDispatchSelection[];
+      requirements: DispatchSelectionRequirement[] }
+  | { kind: "refuse"; line: string };
+
+/**
+ * 整组消歧预检：在票据或目标字段改写之前运行，纯读状态。
+ * 首次扫描整组，记住每个需回答的下标；候选后来缩成一个也仍须回答。
+ * 只有全部回答后才 ready；每次调用对所有已选 key 重新取人、验权。
+ */
+export function planDispatchSelectionBatch(args: {
+  state: GameState;
+  allIntents: readonly Intent[];
+  selectionKeys?: readonly DispatchSelectionKey[];
+  requirements?: readonly DispatchSelectionRequirement[];
+  selectedUnitIds?: number[];
+  persona: CommanderKey;
+  personaLabel: string;
+}): DispatchSelectionBatchPlan {
+  const { state, allIntents, persona, personaLabel } = args;
+  const requirements = (args.requirements ?? []).map((r) => ({ ...r, offeredKeys: [...r.offeredKeys] }));
+  const validIndex = (i: number) => Number.isInteger(i) && i >= 0 && i < allIntents.length;
+  if (requirements.some((r) => !validIndex(r.intentIndex)) ||
+      new Set(requirements.map((r) => r.intentIndex)).size !== requirements.length) {
+    return { kind: "refuse", line: "这道命令的来源记录已经失效，整道命令没有执行，请重新下令。" };
+  }
+  for (let i = 0; i < allIntents.length; i++) {
+    if (requirements.some((r) => r.intentIndex === i)) continue;
+    const amb = findDispatchAmbiguity(state, allIntents[i], args.selectedUnitIds);
+    if (amb) requirements.push({ intentIndex: i, offeredKeys: amb.map((c) => c.selectionKey) });
+  }
+  requirements.sort((a, b) => a.intentIndex - b.intentIndex);
+  const choices = args.selectionKeys ?? [];
+  if (new Set(choices.map((s) => s.intentIndex)).size !== choices.length || choices.some((s) =>
+    !validIndex(s.intentIndex) || !requirements.some((r) =>
+      r.intentIndex === s.intentIndex && r.offeredKeys.includes(s.selectionKey)))) {
+    return { kind: "refuse", line: "选定的来源不属于这道命令原先的候选，整道命令没有执行。" };
+  }
+  const intents = [...allIntents];
+  const bindings: ResolvedDispatchSelection[] = [];
+  for (const selected of choices) {
+    const bound = bindDispatchSelection(state, allIntents[selected.intentIndex], selected.selectionKey);
+    if (!bound.ok) return { kind: "refuse", line: "您先前选定的那一批已经不在了，整道命令没有执行，请重新指明来源。" };
+    const lawful = lawfulSubset(state, persona, bound.intent, bound.unitIds);
+    if (lawful.length === 0) return { kind: "refuse", line: `${personaLabel}现在调不动您先前选定的那一批人，整道命令没有执行。` };
+    intents[selected.intentIndex] = bound.intent;
+    bindings.push({ ...selected, intent: bound.intent, unitIds: lawful, label: bound.label });
+  }
+  for (const requirement of requirements) {
+    if (choices.some((s) => s.intentIndex === requirement.intentIndex)) continue;
+    const candidates = enumerateDispatchCandidates(state, allIntents[requirement.intentIndex], args.selectedUnitIds)
+      .filter((c) => requirement.offeredKeys.includes(c.selectionKey));
+    if (candidates.length === 0) return { kind: "refuse", line: "刚才待选的那几批现在都不在了，整道命令没有执行。" };
+    return { kind: "ask", intentIndex: requirement.intentIndex, candidates,
+      soleCandidate: candidates.length === 1, requirements };
+  }
+  return { kind: "ready", intents, bindings, requirements };
+}
+
+/** 当前状态下重新绑定后的执行事实。 */
+export interface ResolvedDispatchSelection extends DispatchSelectionKey {
+  intent: Intent;
+  unitIds: number[];
+  label: string;
+}
 
 /** 待决槽里与判定相关的那几样（名单**不在**其中——名单必须现查）。 */
 export interface SelectionSlotState {
@@ -34,7 +118,7 @@ export interface SelectionSlotState {
   epoch: number;
   expiresAt: number;
   /** 提问时印出去的候选（闸押在这一份 selectionKey 名单上）。 */
-  candidates: DispatchCandidate[];
+  candidates: Pick<DispatchCandidate, "selectionKey" | "label">[];
   /** 被问的那条原命令。绑定后执行的是**它**。 */
   intentSnapshot: Intent;
   /**
@@ -47,6 +131,8 @@ export interface SelectionSlotState {
   intentIndex: number;
   /** 被问的那一句里**全部** intents（按原顺序）。 */
   allIntents: Intent[];
+  /** 此前已经明确选过的来源；只存 key，继续回答时全部现查重绑。 */
+  selectionKeys: DispatchSelectionKey[];
 }
 
 export type SelectionTurnPlan =
@@ -61,6 +147,10 @@ export type SelectionTurnPlan =
        * 执行层必须把这一整组交给主链，不许只执行 `intent` 那一条。
        */
       intents: Intent[];
+      /** 本轮以前加本轮，按 intent 下标去重后的全部稳定选择。 */
+      selectionKeys: DispatchSelectionKey[];
+      /** 上述 key 在当前 GameState 下重新绑定出的全部名单。 */
+      bindings: ResolvedDispatchSelection[];
       unitIds: number[];
       selectionKey: string;
       label: string;
@@ -100,12 +190,16 @@ export function planSelectionTurn(args: {
   epoch: number;
   now: number;
   persona: CommanderKey;
-  /** 模型交回的原始字段（不做任何预处理——严格解析在合同里）。 */
-  rawDecision: unknown;
+  /**
+   * 浏览器收到的 `dispatchSelection`——**已经是内部格式** `{kind, candidateKey}`
+   * （服务端 `validateAdvisorResponse` 转换过一次）。这里只做内部形状的严格校验，
+   * **绝不**再拿原始 parser 解析第二遍（那正是"连答两次仍重问第一问"的病根）。
+   */
+  decision: unknown;
   /** 参谋的显示名，只用于拼那句拒绝话。 */
   personaLabel: string;
 }): SelectionTurnDecision {
-  const { state, slot, requestTag, epoch, now, persona, rawDecision, personaLabel } = args;
+  const { state, slot, requestTag, epoch, now, persona, decision, personaLabel } = args;
 
   const judge = judgeSelectionConsumption({
     requestTag,
@@ -121,7 +215,7 @@ export function planSelectionTurn(args: {
       : null,
     now,
     epoch,
-    decision: parseSelectionDecision(rawDecision),
+    decision: validateSelectionDecision(decision),
   });
   const route = selectionVerdictRoute(judge.verdict);
   const base = { verdict: judge.verdict, keepSlot: route.keepSlot, clearExpiredSlot: judge.expiredExactMatch };
@@ -137,49 +231,80 @@ export function planSelectionTurn(args: {
   }
 
   if (route.executeBound && judge.candidateKey) {
-    const bound = bindDispatchSelection(state, slot.intentSnapshot, judge.candidateKey);
-    if (!bound.ok) {
-      return {
-        ...base,
-        keepSlot: false,
-        plan: {
-          kind: "refuse",
-          line: bound.reason === "gone"
-            ? "您说的那一批已经不在了（人没了，或者那次任务已经结束），这道命令没有执行。"
-            : "那条命令的来源已经无法还原，这道命令没有执行——请重新说一遍。",
-        },
-      };
-    }
-    const lawful = lawfulSubset(state, persona, bound.intent, bound.unitIds);
-    if (lawful.length === 0) {
-      return {
-        ...base,
-        keepSlot: false,
-        plan: {
-          kind: "refuse",
-          line: `${personaLabel}现在调不动那一批人，这道命令没有执行——请对带这支部队的指挥官下令。`,
-        },
-      };
-    }
-    // ★复审 §三：绑定结果放回它在整份 option 里的原位置，其余 intents 原样带上。
-    //   一条都不许丢——丢了就是"只执行了半句话"，而长官以为整句都办了。
-    // 深度防御：TS 已强制这两个字段，但 JS 调用方（台架/将来的新入口）漏传时
-    // 不许崩——退回"只有这一条"，与 intentIndex=0 自洽。
+    // 复合命令可能连续问两次以上。槽里累计的是 intentIndex → stable key；
+    // roster 绝不累计，因为等第二个回答的几秒里，人会死、任务会关、权限会变。
+    // 每次回答都把**全部** key 在当前 GameState 下重新绑定并重新验权。
     const all = Array.isArray(slot.allIntents) && slot.allIntents.length > 0
       ? slot.allIntents : [slot.intentSnapshot];
     const at = Number.isInteger(slot.intentIndex) && slot.intentIndex >= 0 && slot.intentIndex < all.length
       ? slot.intentIndex : 0;
-    const merged = all.map((it, i) => (i === at ? bound.intent : it));
+    const keyed = new Map<number, string>();
+    for (const prior of slot.selectionKeys ?? []) {
+      if (!Number.isInteger(prior.intentIndex) || prior.intentIndex < 0 || prior.intentIndex >= all.length) {
+        return {
+          ...base,
+          keepSlot: false,
+          plan: { kind: "refuse", line: "刚才那道复合命令的来源记录已经损坏，没有执行——请重新说一遍。" },
+        };
+      }
+      keyed.set(prior.intentIndex, prior.selectionKey);
+    }
+    keyed.set(at, judge.candidateKey);
+
+    const selectionKeys = [...keyed.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([intentIndex, selectionKey]) => ({ intentIndex, selectionKey }));
+    const merged = [...all];
+    const bindings: ResolvedDispatchSelection[] = [];
+
+    for (const selected of selectionKeys) {
+      const bound = bindDispatchSelection(state, all[selected.intentIndex], selected.selectionKey);
+      if (!bound.ok) {
+        return {
+          ...base,
+          keepSlot: false,
+          plan: {
+            kind: "refuse",
+            line: bound.reason === "gone"
+              ? "您先前选定的那一批已经不在了（人没了，或者那次任务已经结束），整道命令没有执行。"
+              : "那道复合命令里有一条来源已经无法还原，整道命令没有执行——请重新说一遍。",
+          },
+        };
+      }
+      const lawful = lawfulSubset(state, persona, bound.intent, bound.unitIds);
+      if (lawful.length === 0) {
+        return {
+          ...base,
+          keepSlot: false,
+          plan: {
+            kind: "refuse",
+            line: `${personaLabel}现在调不动您先前选定的那一批人，整道命令没有执行——请对带这支部队的指挥官下令。`,
+          },
+        };
+      }
+      merged[selected.intentIndex] = bound.intent;
+      bindings.push({
+        intentIndex: selected.intentIndex,
+        selectionKey: selected.selectionKey,
+        intent: bound.intent,
+        unitIds: lawful,
+        label: bound.label,
+      });
+    }
+
+    const current = bindings.find((b) => b.intentIndex === at)!;
     return {
       ...base,
       keepSlot: false,
       plan: {
         kind: "execute",
-        intent: bound.intent,
+        intent: current.intent,
         intents: merged,
-        unitIds: lawful,
-        selectionKey: bound.selectionKey,
-        label: bound.label,
+        selectionKeys,
+        bindings,
+        unitIds: current.unitIds,
+        selectionKey: current.selectionKey,
+        label: current.label,
       },
     };
   }

@@ -27,8 +27,8 @@ import { processEnemyAI } from "../packages/core/src/enemyAI";
 import { processDefensiveAI } from "../packages/core/src/scenario/elAlamein/defensiveAI";
 import { processPressureDirector } from "../packages/core/src/scenario/elAlamein/pressureDirector";
 import type { GameState, Unit, Squad, Intent, ScenarioId, Order, DispatchMeta, ApplyResult } from "@ai-commander/shared";
-import { buildExecReceipt, type DispatchSlice } from "../apps/web/src/execReceipt";
-import { stampRun, judgeRunGuard, runGuardAllows, selectionVerdictRoute } from "@ai-commander/shared";
+import { buildExecFeedback, buildExecReceipt, type DispatchSlice } from "../apps/web/src/execReceipt";
+import { stampRun, judgeRunGuard, runGuardAllows, selectionVerdictRoute, validateAdvisorResponse } from "@ai-commander/shared";
 import { planVoiceSpeech } from "../apps/web/src/voiceSpeech";
 import { readFileSync } from "fs";
 import { buildDigestForChannel } from "../apps/web/src/digestHelper";
@@ -547,16 +547,16 @@ function knifeB(negctl: boolean): void {
       .split("\n").filter((l) => !l.trimStart().startsWith("//")).join("\n");
     // ★刀子 改判：从前这里数的是"两处"（主链 + 线程那份复制品）。复制品已经
     //   委派给主链，所以现在钉的是**更强**的性质：全仓只剩**一处** buildExecReceipt。
-    // ★复审 §四 改判：耳朵现在念的是**合并后**那一段（规划失败那几条 +
-    //   执行回执那几条）。同源关系没变、反而更全：两部分都来自屏上已经打过的
-    //   同一批字符串，只是把此前只上屏、不进耳朵的那半也带上了。
+    // ★复审 §四 / 本轮接线：规划失败与执行回执先由 buildExecFeedback 合成一份；
+    //   屏、耳、context 只能消费 feedback 的三个字段，不许在 UI 各自再拼一遍。
     check("B9 ★执行回执全仓只有一处（第二个执行入口已消失），且上屏与出声同取它★",
       panelSrc.split("buildExecReceipt(").length - 1 === 1 &&
-      panelSrc.includes("execReceipt.lines") &&
-      panelSrc.includes("const mixedLines = [...degradedLines, ...execReceipt.lines];") &&
-      panelSrc.includes("const mixedSpoken = mixedLines.join(\" \");") &&
-      panelSrc.includes("speak(`${voiceConfirm} ${mixedSpoken}`"),
-      `buildExecReceipt 出现 ${panelSrc.split("buildExecReceipt(").length - 1} 次`);
+      panelSrc.split("buildExecFeedback(").length - 1 === 1 &&
+      panelSrc.includes("const feedback = buildExecFeedback(execReceipt, degradedLines);") &&
+      panelSrc.includes("for (const line of feedback.lines)") &&
+      panelSrc.includes("feedback.outcome === \"none\" || feedback.outcome === \"partial\"") &&
+      panelSrc.includes("speak(`${voiceConfirm} ${feedback.spokenText}`"),
+      `buildExecReceipt=${panelSrc.split("buildExecReceipt(").length - 1}, buildExecFeedback=${panelSrc.split("buildExecFeedback(").length - 1}`);
     check("B9b ★计划日志不许再上屏（`执行: ${result.log}` 全仓归零）★",
       !panelSrc.includes("`执行: ${result.log}`"));
     check("B9c ★执行前不许再打方案标题（cleanLabel 只进诊断）★",
@@ -1254,7 +1254,7 @@ function knifeYi(negctl: boolean): void {
     ["找不到分队", "找不到叫「${intent.fromSquad}」的分队"],
     ["目标不存在", "`目标 ${field} 不存在`"],
     ["目的地判退（票据说不出「去哪」）", "refuseAloud(state, ch, verdict.line"],
-    ["零 orders 的规划失败（屏上已有话，这里只补声）", "degradedLines.join(\" \"), speakReceipt, { screen: false }"],
+    ["零 orders 的规划失败（屏/声/context 一次发布）", "refuseAloud(state, ch, degradedLines.join(\" \"), speakReceipt)"],
   ];
   const whole = src; // 问句那条在 askWhichDispatch 里，不在 handleApprove 体内
   for (const [name, needle] of SITES) {
@@ -1309,11 +1309,12 @@ function knifeYi(negctl: boolean): void {
       helper.includes("flush(persona)"), "");
   }
 
-  // ── Y4 屏上那一行与念出去的那一段，在"只补声"那一格也同源 ──
+  // ── Y4 零 orders 也只发布一次，屏 / 声 / context 同源 ──
   {
-    check("Y4 零 orders 那条：念的就是屏上逐条打过的理由（degradedLines 同一份）",
+    check("Y4 零 orders 那条：degradedLines 经统一拒绝出口一次发布到屏/声/context",
       body.includes("degradedLines.push(result.log)") &&
-      body.includes('degradedLines.join(" "), speakReceipt, { screen: false }'),
+      body.includes('refuseAloud(state, ch, degradedLines.join(" "), speakReceipt);') &&
+      !body.includes('degradedLines.join(" "), speakReceipt, { screen: false }'),
       "");
   }
 
@@ -1784,10 +1785,26 @@ function jiSlot(state: GameState, candidates: DispatchCandidate[], snapshot: Int
     expiresAt: state.time + 120,
     candidates, intentSnapshot: snapshot,
     // 复审 §三：槽要存整组 intents 与歧义那条的下标。
-    allIntents: [snapshot], intentIndex: 0,
+    allIntents: [snapshot], intentIndex: 0, selectionKeys: [],
   };
 }
 const jiTag = (id = "sel-1") => ({ selectionId: id, channel: JI_CH, sessionId: JI_SESSION });
+
+/**
+ * ★测试输入调整（2026-09-23，有意为之，理由写明）：**原先绕过了真实服务端边界**。
+ *
+ * 旧写法把模型原始的 `{decision,candidate}` 直接塞进 `planSelectionTurn`，
+ * 而生产里浏览器收到的是 `validateAdvisorResponse` **转换过一次**的内部格式。
+ * core 又拿原始 parser 再解析一遍的那个 bug（玩家连答两次仍重问第一问），
+ * 于是这里整整一刀的判据**一条都看不见**，一直是假绿。
+ * 现在模型原始字段一律先过**生产** schema ＋ JSON 往返。断言一条没改——
+ * 改的只是输入：从"绕过边界"改成"走真边界"。
+ */
+function viaSchema(rawModelField: unknown): unknown {
+  const v = validateAdvisorResponse({ brief: "x", options: [], dispatchSelection: rawModelField });
+  if (!v) throw new Error("production schema rejected the response");
+  return (JSON.parse(JSON.stringify(v)) as { dispatchSelection?: unknown }).dispatchSelection;
+}
 
 /** 跑一轮选择：判定 → （若 execute）真执行 → 回执 + 台账。 */
 function jiTurn(
@@ -1803,7 +1820,7 @@ function jiTurn(
     epoch: over.epoch ?? 1,
     now: over.now ?? state.time,
     persona: "chen",
-    rawDecision,
+    decision: viaSchema(rawDecision),   // ★走真服务端边界
     personaLabel: "陈军士",
   });
   if (decision.plan.kind !== "execute") return { decision, applied: [] as number[], lines: [] as string[] };
@@ -2103,7 +2120,7 @@ function knifeJi(negctl: boolean): void {
     const before = snapshotUnitOrders(state);
     const d = planSelectionTurn({
       state, slot: jiSlot(state, amb, RETREAT_SNAPSHOT), requestTag: jiTag(), epoch: 1, now: state.time,
-      persona: "emily", rawDecision: { decision: "chose", candidate: dKey }, personaLabel: "艾米莉中尉",
+      persona: "emily", decision: viaSchema({ decision: "chose", candidate: dKey }), personaLabel: "艾米莉中尉",
     });
     check("I11 ★选定的那批不在这位参谋麾下 ⇒ refuse、零执行（走的是主链同一个权限闸）★",
       d.plan.kind === "refuse" && d.plan.line.includes("艾米莉中尉") && d.plan.line.includes("没有执行") &&
@@ -2150,8 +2167,9 @@ function knifeJi(negctl: boolean): void {
       cp.includes("planSelectionTurn({"), "");
     check("I14b 刀C 那句「一次性消费 ⇒ 照模型字段办」的写法已经不在了",
       !cp.includes("pendingSelectionRef.current = null; // 一次性消费"), "");
-    check("I14c 绑定名单作为硬约束进 resolveIntent（优先级排在框选之前）",
-      cp.includes("ticketRosters.get(intent) ?? boundRosters.get(intent) ?? selectedIdsSnapshotRef.current"), "");
+    check("I14c 绑定名单作为硬约束进 resolveIntent（优先级排在冻结框选之前）",
+      cp.includes("batch.bindings.map((b) => [intents[b.intentIndex], b.unitIds])") &&
+      cp.includes("ticketRosters.get(intent) ?? boundRosters.get(intent) ?? progress.selectedUnitIds ?? dispatchRosters.get(intent)"), "");
     check("I14d 新字段过了 shared 的白名单重建（两条 return 路径都带）",
       (readFileSync("packages/shared/src/schema.ts", "utf8").match(/dispatchSelection,/g) ?? []).length === 2, "");
   }
@@ -2165,7 +2183,7 @@ function knifeJi(negctl: boolean): void {
     const naive = resolveIntent(RETREAT_SNAPSHOT, state, state.style);   // 刀C：照字段办
     const bound = planSelectionTurn({
       state, slot: jiSlot(state, amb, RETREAT_SNAPSHOT), requestTag: jiTag(), epoch: 1, now: state.time,
-      persona: "chen", rawDecision: { decision: "chose", candidate: dKey }, personaLabel: "陈军士",
+      persona: "chen", decision: viaSchema({ decision: "chose", candidate: dKey }), personaLabel: "陈军士",
     });
     const boundIds = bound.plan.kind === "execute" ? [...bound.plan.unitIds].sort((a, b) => a - b) : [];
     const red = naive.assignedUnitIds.length === 1 && naive.assignedUnitIds[0] === stay && boundIds.length === 4;
@@ -2177,7 +2195,7 @@ function knifeJi(negctl: boolean): void {
     const amb2 = findDispatchAmbiguity(st2, RETREAT_SNAPSHOT)!;
     const unclear = planSelectionTurn({
       state: st2, slot: jiSlot(st2, amb2, RETREAT_SNAPSHOT), requestTag: jiTag(), epoch: 1, now: st2.time,
-      persona: "chen", rawDecision: { decision: "unclear" }, personaLabel: "陈军士",
+      persona: "chen", decision: viaSchema({ decision: "unclear" }), personaLabel: "陈军士",
     });
     const red2 = unclear.plan.kind === "reask" && unclear.keepSlot === true;
     console.log(`  ${red2 ? "RED(好)" : "GREEN(坏)"} negctl-I2 「好的」那一格：plan=${unclear.plan.kind}、keepSlot=${unclear.keepSlot}（旧版会执行）`);
@@ -2446,11 +2464,12 @@ function knifeGeng(negctl: boolean): void {
       cp.includes("pushContext(channelContextRef.current, ch, { role: \"assistant\", text: line, time: state.time });"),
       "");
     // ★刀子 改判：执行出口只剩一处（线程那份已委派），所以这里也只该有一处。
-    // ★复审 §四 改判：严重度现在按**合并后**的结局判（degraded + 成功的混合
-    //   批次也算有没办成的部分），所以判的是 `mixedOutcome` 那一个。
+    // ★本轮接线：严重度由 buildExecFeedback 算出的**合并后**结局判；UI 不再
+    //   自己维护 mixedOutcome 这份第二真相源。
     check("C4 部分成功也不许显示成普通 info（按合并后的结局判；出口只此一处）",
-      (cp.match(/mixedOutcome === "none" \|\| mixedOutcome === "partial" \? "warning" : "info"/g) ?? []).length === 1 &&
-      cp.includes("execReceipt.outcome === \"none\" || execReceipt.outcome === \"partial\" ? \"warning\" : \"info\"") === false,
+      (cp.match(/feedback\.outcome === "none" \|\| feedback\.outcome === "partial" \? "warning" : "info"/g) ?? []).length === 1 &&
+      !cp.includes("mixedOutcome") &&
+      !cp.includes("execReceipt.outcome === \"none\" || execReceipt.outcome === \"partial\" ? \"warning\" : \"info\""),
       "");
   }
 
@@ -2721,7 +2740,7 @@ function knifeZi(negctl: boolean): void {
       ["局印复核", "runGuardAllows(execCtx?.run"],
       ["权限闸", "checkDispatchAuthority(state, speakingPersona, intent)"],
       ["fromDispatch 权限复查", "任务 ${d.id} 那批人不在"],
-      ["指代歧义判定", "findDispatchAmbiguity(state, intent"],
+      ["整组指代消歧预检", "planDispatchSelectionBatch({"],
       ["无效分队**明确拒绝**（不是删字段）", "找不到叫「${intent.fromSquad}」的分队"],
       ["目标校验", "isValidTarget(intent, state, COMMANDER_REFS)"],
       ["台账登记", 'origin: "advisor" as const, dispatchMeta: meta'],
@@ -2764,7 +2783,7 @@ function chouSlot(state: GameState, cands: DispatchCandidate[], all: Intent[], i
   return {
     id, channel: "combat", sessionId: "sess-chou", epoch,
     expiresAt: state.time + 120,
-    candidates: cands, intentSnapshot: all[idx], allIntents: all, intentIndex: idx,
+    candidates: cands, intentSnapshot: all[idx], allIntents: all, intentIndex: idx, selectionKeys: [],
   };
 }
 const chouTag = (id = "sel-1") => ({ selectionId: id, channel: "combat", sessionId: "sess-chou" });
@@ -2775,7 +2794,7 @@ function chouPlan(state: GameState, slot: ReturnType<typeof chouSlot> | null, ra
     state, slot,
     requestTag: over.tag === undefined ? chouTag(slot?.id ?? "sel-1") : over.tag,
     epoch: over.epoch ?? 1, now: over.now ?? state.time,
-    persona: "chen", rawDecision: raw, personaLabel: "陈军士",
+    persona: "chen", decision: viaSchema(raw), personaLabel: "陈军士",
   });
 }
 
@@ -2916,14 +2935,18 @@ function knifeChou(negctl: boolean): void {
       d2.plan.intents[1] === d2.plan.intent, "");
     check("U5d 台架自证：绑定那条真的换了来源（否则 U5b 不承重）",
       d.plan.kind === "execute" && d.plan.unitIds.length === sent.length, "");
-    // UI 侧：交给主链的是 p.intents
+    // UI 侧：交给主链的是最初保存的完整 option；选择只累计稳定 key，主链统一重绑。
     const cp = readFileSync("apps/web/src/ChatPanel.tsx", "utf8");
-    check("U5e UI 把**整组**交给主链（`intents: p.intents`，不是 `[p.intent]`）",
-      cp.includes("{ label: p.label, intents: p.intents }") &&
+    check("U5e UI 把**完整原 option**交回主链，只把累计 selectionKeys 作为进度附上",
+      cp.includes("selSlotAtJudge!.optionSnapshot,") &&
+      cp.includes("{ ...selSlotAtJudge!, selectionKeys: p.selectionKeys },") &&
+      !cp.includes("{ label: p.label, intents: p.intents }") &&
       !cp.includes("{ label: p.label, intents: [p.intent] }"), "");
-    check("U5f 提问时就把整组与下标存进槽（否则绑定那刻无从还原）",
-      cp.includes("intents, intents.indexOf(intent),") &&
-      cp.includes("allIntents: selSlotAtJudge.allIntents,"), "");
+    check("U5f 待决槽保存不可变完整 option + 稳定 key，判定时仍按原顺序取整组",
+      cp.includes("optionSnapshot: cloneSelectionOption(progress.optionSnapshot)") &&
+      cp.includes("selectionKeys: progress.selectionKeys.map((s) => ({ ...s }))") &&
+      cp.includes("allIntents: selSlotAtJudge.optionSnapshot.intents") &&
+      cp.includes("selectionKeys: selSlotAtJudge.selectionKeys"), "");
   }
 
   // ══ §四 回执汇总 ══
@@ -2959,17 +2982,24 @@ function knifeChou(negctl: boolean): void {
     check("U6b 纯「已经在办」（无任何失败）仍是 already_doing（没把这一格一起改掉）",
       r2.outcome === "already_doing", `outcome=${r2.outcome}`);
 
-    // degraded + 成功 的混合批次：屏/耳/context 三者都要含两部分
+    // degraded + 成功 的混合批次：纯函数先定唯一顺序/结局，UI 三处只消费它。
     const cp = readFileSync("apps/web/src/ChatPanel.tsx", "utf8");
-    check("U7 ★混合批次：耳朵念的是 degradedLines + 回执行合并后的那一段★",
-      cp.includes("const mixedLines = [...degradedLines, ...execReceipt.lines];") &&
-      cp.includes("speak(`${voiceConfirm} ${mixedSpoken}`, approveCommander)"), "");
-    check("U7b ★规划失败那几条也进 context（屏上本来就有，这里补齐三者同源）★",
-      /for \(const dl of degradedLines\) \{[\s\S]{0,200}?pushContext\(channelContextRef\.current, ch, \{ role: "assistant", text: dl/.test(cp),
-      "");
+    const degraded = "目标 front_missing 不存在";
+    const feedback = buildExecFeedback(r2, [degraded]);
+    check("U7 ★混合批次：唯一反馈按 degraded → 执行回执排序，耳朵逐字连接同一组 lines★",
+      feedback.lines.length === r2.lines.length + 1 &&
+      feedback.lines[0] === degraded &&
+      feedback.lines.slice(1).every((line, i) => line === r2.lines[i]) &&
+      feedback.spokenText === feedback.lines.join(" ") &&
+      cp.includes("const feedback = buildExecFeedback(execReceipt, degradedLines);") &&
+      cp.includes("speak(`${voiceConfirm} ${feedback.spokenText}`, approveCommander)"),
+      JSON.stringify(feedback));
+    check("U7b ★屏与 context 共用 feedback.lines 的同一个有序循环★",
+      (cp.match(/for \(const line of feedback\.lines\) \{/g) ?? []).length === 1 &&
+      /for \(const line of feedback\.lines\) \{[\s\S]*?addMessage\([\s\S]*?pushContext\(channelContextRef\.current, ch, \{ role: "assistant", text: line[^\n]*\n\s*\}/.test(cp), "");
     check("U7c 混合批次的严重度按**合并后**判（有 degraded 就不许是纯 info）",
-      cp.includes("degradedLines.length > 0 && execReceipt.outcome === \"applied\" ? \"partial\" : execReceipt.outcome") &&
-      cp.includes("mixedOutcome === \"none\" || mixedOutcome === \"partial\" ? \"warning\" : \"info\""), "");
+      feedback.outcome === "partial" &&
+      cp.includes("feedback.outcome === \"none\" || feedback.outcome === \"partial\" ? \"warning\" : \"info\""), "");
 
     // 经济诊断不再当第二份玩家回执
     const gc = readFileSync("apps/web/src/GameCanvas.tsx", "utf8");

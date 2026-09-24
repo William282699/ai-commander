@@ -33,6 +33,8 @@ export type SelectionDecision =
 /**
  * STRICT 字面解析——只认下面三种形状，别的一律 undefined（＝协议失败）。
  * **NEVER EXPAND**：这里不做语义判断、不认同义词、不认中文确认词。
+ * ★**只在服务端入口用一次**（`validateAdvisorResponse`）：它吃的是**模型原始格式**，
+ *   吐的是内部格式。消费端请用 `validateSelectionDecision`，不许再调本函数。
  *   { "decision": "chose", "candidate": "<key>" }
  *   { "decision": "unclear" }
  *   { "decision": "unrelated" }
@@ -46,6 +48,38 @@ export function parseSelectionDecision(v: unknown): SelectionDecision | undefine
   if (d === "chose") {
     const key = typeof o.candidate === "string" ? o.candidate.trim() : "";
     if (key.length === 0) return undefined; // 说"选了"却没说选哪个 ⇒ 协议失败
+    return { kind: "chose", candidateKey: key };
+  }
+  return undefined;
+}
+
+/**
+ * ★**内部格式**的严格校验（消费端专用）。
+ *
+ * 格式边界只有一处：模型原始的 `{decision, candidate}` 由服务端
+ * `validateAdvisorResponse` 调 `parseSelectionDecision` **转换一次**，之后发给
+ * 浏览器、交给 core 的一律是内部格式 `{kind, candidateKey}`。
+ *
+ * 病（玩家实测，2026-09-23）：core 的 `planSelectionTurn` 又拿**原始 parser**
+ * 把已经转换过的内部对象再解析一遍——原始 parser 只认 `decision/candidate`，
+ * 于是一个正确的选择变成 undefined ⇒ protocol_failure ⇒「这道命令还没有执行」
+ * ＋ 原样重问。玩家连答两次「派出去的那批」都卡在第一问。
+ * （`parsePendingDecision` 解析前后是同一个字符串，所以那边解析两次无害；
+ *   这里解析前后形状不同，照抄那套写法就埋下了这个雷。）
+ *
+ * 本函数**只认内部形状**：
+ *   { kind: "chose", candidateKey: "<非空>" } | { kind: "unclear" } | { kind: "unrelated" }
+ * ★不接受原始的 `decision/candidate` 来"猜"格式；非法 kind 即使带着合法 key
+ *   也一律 undefined（＝协议失败 ⇒ 零执行）。
+ */
+export function validateSelectionDecision(v: unknown): SelectionDecision | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+  if (o.kind === "unclear") return { kind: "unclear" };
+  if (o.kind === "unrelated") return { kind: "unrelated" };
+  if (o.kind === "chose") {
+    const key = typeof o.candidateKey === "string" ? o.candidateKey.trim() : "";
+    if (key.length === 0) return undefined;
     return { kind: "chose", candidateKey: key };
   }
   return undefined;

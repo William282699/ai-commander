@@ -97,6 +97,35 @@ export interface ExecReceipt {
   facts: ExecFact[];
 }
 
+/**
+ * 把解析阶段没能变成 order 的理由与执行层回执合成**同一份玩家反馈**。
+ *
+ * `buildExecReceipt` 只知道真正送进 `applyOrders` 的 slices；同一批命令里若还有
+ * resolver-degraded 的 intent，那些失败也属于这次执行结果。屏幕、耳朵与下一轮
+ * context 必须共同消费这里返回的 `lines` / `spokenText`，不能各自再拼一遍。
+ *
+ * 纯函数：不改传入的 receipt、lines 或 facts。规划失败不制造新的执行事实，
+ * 所以 facts 只做数组拷贝；总结局则按“整批是否含失败”降级：有成功或已在办的
+ * 同时又有 degraded ⇒ partial，原执行回执本就 none ⇒ 整批仍是 none。
+ */
+export function buildExecFeedback(
+  receipt: ExecReceipt,
+  degradedLines: readonly string[],
+): ExecReceipt {
+  const lines = [...degradedLines, ...receipt.lines];
+  const hasDegraded = degradedLines.length > 0;
+  const outcome: ExecOutcome = hasDegraded
+    ? (receipt.outcome === "none" ? "none" : "partial")
+    : receipt.outcome;
+
+  return {
+    outcome,
+    lines,
+    spokenText: lines.join(" "),
+    facts: [...receipt.facts],
+  };
+}
+
 // 动作的中文说法。封闭集合，与 tacticalPlanner 的 SUPPORTED_INTENTS 同源；
 // 这是把枚举翻成人话，不是"穷举玩家可能怎么说"。
 const ACTION_VERB: Record<string, string> = {
