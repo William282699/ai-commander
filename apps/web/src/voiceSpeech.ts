@@ -30,8 +30,15 @@
 //   复活它只要把这一段接回去**（砍的是调用，不是池子——R6「池子 NEVER EXPAND」
 //   照旧成立，一句没加也一句没删）。
 //
-//   打字回合：一个字节不动（用户钉的边界）——正文边流边念、回执照旧出声、
-//     没有本地应答。
+//   打字回合：★刀B「办法一」之前是「正文边流边念」，现在改成**先缓冲**。
+//     用户钉的那条边界（打字路径零改动）到此为止有了一个具名的例外，理由写在
+//     下面 planVoiceSpeech 的打字分支里：会动兵的回合，边流边念等于在引擎跑
+//     之前就把计划念出去，话收不回来。咨询的内容一字不差，只是开口时间晚到
+//     "回复写完＋裁决"那一刻——**这是手感损失，如实登记**。
+//
+// ★刀B 新增的一条横贯规则（`execTurn`）：**会动兵的回合，这一层一声不出**。
+//   耳朵等 `ApplyResult` 出来的执行回执（execReceipt.ts）。四条路由结构不动，
+//   只是 finalUtterance / speakExecReceipt 两个字段的取值多认一个输入。
 // ============================================================
 
 import { echoesHeard } from "@ai-commander/shared";
@@ -40,7 +47,8 @@ export type SpeechRoute =
   | "typed"           // 打字回合＝现状
   | "spoken"          // 语音回合，模型交回了 spoken
   | "prose_fallback"  // 语音回合，spoken 缺席（或复读）→ 退回念正文
-  | "silent_echo";    // 语音回合，spoken 与正文**双层复读** → 这一段不出声
+  | "silent_echo"     // 语音回合，spoken 与正文**双层复读** → 这一段不出声
+  | "engine";         // 这一段是**引擎的裁定**（拒绝／没执行／要问长官）——只念它，spoken 一概不念
 
 export interface VoiceSpeechInput {
   /** 这一轮是不是语音回合。 */
@@ -53,6 +61,29 @@ export interface VoiceSpeechInput {
   /** 长官这一轮的原话（heard）。**引擎闸拿它当尺**：要念出去的那段若整句
    *  复读了它，就等于把他的话念回给他——这一层存在的全部理由就是不干这件事。 */
   heard?: string;
+  /** retreat-scope 刀B：这一回合**会不会真动兵**。
+   *  会动兵 ⇒ 这一段（spoken / 正文）一律不进耳朵，耳朵等 `ApplyResult` 出来的
+   *  执行回执。理由是根因而非措辞：这一段文字是模型在引擎跑**之前**写的，
+   *  它说的是计划；计划选中 8 个、实际只对 5 个下了令，照念就是假确认。
+   *  缺省 false＝不会动兵，逐字等价于刀B 之前。 */
+  execTurn?: boolean;
+  /**
+   * 第七轮：`prose` 是谁的话。
+   *   · "model"（缺省）＝模型的咨询内容（回答、提议、反问）：语音回合优先念 spoken（口语那一版）。
+   *   · "engine"＝引擎已经裁定的结果（协议失败、通讯失败、没执行、要问长官）：**只念 prose**，
+   *     spoken 不管多像话都不念——它是模型在引擎裁定**之前**写的，引擎一旦拒绝，那一版就可能是
+   *     假成功（Codex 复现：spoken「那两个已经派过去了」而实际零执行）。prose 为空 ⇒ 这一段不出声
+   *     （引擎的那句话由它自己的出口 refuseAloud 念，不在这里念第二遍）。
+   * 屏上／耳朵／context 说同一件事的保证就押在这一格：调用方交进来的是屏上那一句，耳朵念的也是它。
+   */
+  authority?: "model" | "engine";
+  /**
+   * 第九轮：引擎**附在这一段后面**的事实——批准问题里存下的那份完整方案（「要办的是：…」）。
+   * 不论走哪条路（spoken / 正文 / 复读静音）都照念，而且就是屏上那一句里的同一串字：
+   * 模型的 CONFIRM 问句只说了北线、方案却含北南两条时，耳朵不能只听模型那半句。
+   * 会动兵的回合（execTurn）不念——那一轮耳朵只等执行回执。
+   */
+  appendix?: string;
 }
 
 export interface VoiceSpeechPlan {
@@ -66,14 +97,38 @@ export interface VoiceSpeechPlan {
 }
 
 export function planVoiceSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
-  const spoken = (input.spoken ?? "").trim();
+  const plan = planBaseSpeech(input);
+  const appendix = (input.appendix ?? "").trim();
+  if (!appendix || input.execTurn === true) return plan;
+  return { ...plan, finalUtterance: [plan.finalUtterance, appendix].filter((x) => x.length > 0).join(" ") };
+}
 
-  // 打字回合：逐字等价于分层之前——本函数在这条路上不做任何决定。
+function planBaseSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
+  const spoken = (input.spoken ?? "").trim();
+  const execTurn = input.execTurn === true;
+
+  // 第七轮：引擎的裁定——打字、语音一个样：念屏上那一句，spoken 不参与。
+  if (input.authority === "engine") {
+    return {
+      route: "engine",
+      speakProseWhileStreaming: false,
+      finalUtterance: execTurn ? "" : input.prose.trim(),
+      speakExecReceipt: true,
+    };
+  }
+
+  // 打字回合。★刀B「办法一」改了这里：不再**边流边念**。
+  //   为什么必须改：流式那一刻还不知道这回合会不会动兵（模型先写正文、后写
+  //   JSON），照旧边流边念 ⇒ 会动兵的回合，耳朵在引擎跑之前就把计划念出去了，
+  //   话收不回来。办法一＝流式期间只收不念，等裁决完再决定放哪一段。
+  //   代价如实登记：咨询失去"边写边念"的临场感，开口时间晚到"回复写完＋裁决"
+  //   那一刻。这是手感损失，不是零成本（用户已定办法一，计划 §5）。
   if (!input.voiceTurn) {
     return {
       route: "typed",
-      speakProseWhileStreaming: true,
-      finalUtterance: "",
+      speakProseWhileStreaming: false,
+      // 会动兵 ⇒ 缓冲整段丢弃，耳朵改听执行回执。
+      finalUtterance: execTurn ? "" : input.prose.trim(),
       speakExecReceipt: true,
     };
   }
@@ -86,8 +141,10 @@ export function planVoiceSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
     return {
       route: "spoken",
       speakProseWhileStreaming: false,
-      finalUtterance: spoken,
-      speakExecReceipt: false,
+      // 刀B：会动兵 ⇒ spoken 也不念。它同样是**执行之前**写的那一版，
+      //   而这一回合耳朵只许听一声——那一声得是真结果。
+      finalUtterance: execTurn ? "" : spoken,
+      speakExecReceipt: execTurn ? true : false,
     };
   }
 
@@ -97,7 +154,7 @@ export function planVoiceSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
     return {
       route: "prose_fallback",
       speakProseWhileStreaming: false,
-      finalUtterance: prose,
+      finalUtterance: execTurn ? "" : prose,
       speakExecReceipt: true,
     };
   }

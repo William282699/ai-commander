@@ -45,6 +45,9 @@ export function generateDigestV1(
   // everything before it stays byte-identical; absent on a calm battlefield
   // (calm = no line — same Act-0 guard as the judgment section).
   moodLine?: string,
+  // retreat-scope 刀C: precomputed ---DISPATCHES--- rows (built in
+  // core/dispatchLedger.ts — same shared-never-imports-core contract as `board`).
+  dispatchLines?: string[],
 ): string {
   const t = formatTime(state.time);
   const ph = state.phase;
@@ -84,6 +87,14 @@ export function generateDigestV1(
     if (activeMissions.length > maxMissions) {
       digest += `...+${activeMissions.length - maxMissions} more\n`;
     }
+  }
+
+  // retreat-scope 刀C: 在役任务（「之前从某处派出去的那一批人」）。
+  // 「位置」与「任务」是两种指代，这一节是后者唯一的把手——不列出来，
+  // 模型永远填不出 fromDispatch，整条链对玩家不可见。
+  if (dispatchLines && dispatchLines.length > 0) {
+    digest += `---DISPATCHES--- (之前派出去的那几批人。指"现在站在某条线上的"用 fromFront；指"之前从某处派出去的那批"用 fromDispatch=<号>)\n`;
+    for (const line of dispatchLines) digest += `${line}\n`;
   }
 
   // Air summary

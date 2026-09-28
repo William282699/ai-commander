@@ -14,8 +14,11 @@ import type {
   PendingRequestTag,
   PendingContractView,
   PendingVerdict,
+  AdvisorFailure,
 } from "./types";
 import type { IntentType, Intent, UrgencyLevel, UnitCategoryHint } from "./intents";
+// 刀己：选来源的答复，与 pendingDecision 同族的白名单登记
+import { parseSelectionDecision } from "./dispatchSelection";
 
 const VALID_RESPONSE_TYPES: readonly ResponseType[] = ["EXECUTE", "CONFIRM", "ASK", "NOOP"];
 
@@ -90,6 +93,33 @@ export function sanitizeIntent(raw: unknown): Intent | null {
     if (!SQUAD_SENTINELS.includes(sq.toLowerCase())) {
       intent.fromSquad = sq;
     }
+  }
+
+  // retreat-scope 刀C — fromDispatch（任务号）。
+  // ★ 这一步最容易漏：白名单以外的字段在这里被**静默剥掉**，连报错都没有
+  //   ——引擎端写得再对，模型填的号也到不了。同 fromSquad 一样过 sentinel 滤网。
+  if (typeof obj.fromDispatch === "string" && obj.fromDispatch.trim().length > 0) {
+    const fd = obj.fromDispatch.trim();
+    const DISPATCH_SENTINELS = ["none", "null", "n/a", "undefined", ""];
+    if (!DISPATCH_SENTINELS.includes(fd.toLowerCase())) {
+      intent.fromDispatch = fd;
+    }
+  }
+
+  // 刀寅：目的地模式「回到出发地」。严格只认一个值；别的写法一律当没写（不猜）。
+  // ★第六轮：模型懂了「回原处」、却把字段名写成 retreatTo（真模型回包：本轮 recall 失败的 3/3、
+  //   第五轮归档 2 例）。白名单重建把它静默剥掉 ⇒ 成了裸撤退 ⇒ 往安全区撤，而不是回出发地——
+  //   丢掉的恰好是限定去处的那一样，执行范围就被放大了。只认 **"origin" 这一个值**（与 returnTo 同一条
+  //   严格规矩）；retreatTo 写成别的东西照旧当没写，不猜它指哪儿。
+  if (obj.returnTo === "origin" || obj.retreatTo === "origin") intent.returnTo = "origin";
+  // 刀寅：去处原话（只收不长的一段字；空串当没写）。
+  if (typeof obj.destinationQuote === "string") {
+    const q = obj.destinationQuote.trim();
+    if (q.length > 0 && q.length <= 40) intent.destinationQuote = q;
+  }
+  if (typeof obj.quantityQuote === "string") {
+    const q = obj.quantityQuote.trim();
+    if (q.length > 0 && q.length <= 20) intent.quantityQuote = q;
   }
 
   // Optional string fields — strip empty strings to avoid downstream mis-matches
@@ -243,6 +273,10 @@ export function judgePendingConsumption(args: {
   return decision;
 }
 
+// 刀寅的 `authorizeContradicts`（只比动作种类）已由 core 的 `contractReplyConflict` 取代（第六/七轮）：
+// 批准与同一份回复里的单子是否一致，要比人数 / 兵种 / 来源 / 去处 / 动作 / 条数，
+// 而去处比较要看地图（设施在不在那条战线里），所以判定挪进了 core。
+
 /**
  * Consumption-layer routing table (Codex step2-fix): what each verdict is
  * allowed to execute. The UI layer must obey this table verbatim — it is the
@@ -302,6 +336,11 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
   // non-empty options) — the decision must never be dropped by either path.
   const pendingDecision = parsePendingDecision(obj.pendingDecision);
 
+  // 刀己：对「您说的是哪一批？」的答复。与 pendingDecision 同族的白名单登记
+  // ——不登记在这儿，模型填了也到不了客户端（本函数是白名单重建，没登记的
+  // 根级字段一律静默消失）。**两条 return 路径都要带。**
+  const dispatchSelection = parseSelectionDecision(obj.dispatchSelection);
+
   // 语音输入 V1: heard = 模型转写的长官原话。同 pendingDecision 一样，这里是
   // 全仓**唯一**能给 AdvisorResponse 装上 heard 的地方——本函数是白名单重建，
   // 没登记的根级字段一律静默消失。所以下面两条 return 都要带上它。
@@ -334,6 +373,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
       standingOrder,
       cancelDoctrine: cancelDoctrineId,
       pendingDecision,
+      dispatchSelection,
       heard,
       spoken,
     };
@@ -403,6 +443,7 @@ export function validateAdvisorResponse(data: unknown): AdvisorResponse | null {
     standingOrder,
     cancelDoctrine: cancelDoctrineId,
     pendingDecision,
+    dispatchSelection,
     heard,
     spoken,
   };
@@ -442,47 +483,44 @@ export function isDay7SupportedIntentType(type: IntentType): boolean {
 // ── Fallback Response ──
 
 /**
- * Create a default fallback response when LLM returns non-JSON or invalid data.
- *
- * ★2026-08-10 刀 C 顺手一刀（用户手测：他把这句话念成「通讯感染」报上来了）：
- * 原文末尾是「以下为默认方案。」——**砍卡法之后这条路根本不展示 A/B/C 选项**，
- * 那半句指着一个屏上不存在的东西。纯删除，不补一个字：这一格的下文由 bucket B
- * 现成的问句机器接（`buildGateQuestion` 的 default 支给出「—— 请确认或重述。」），
- * 不新造罐头（07-22 台词禁死模板）。
- *
- * ⚠ 下面的 options 一个没动：它们不是给人看的，是给 `decideBucket` 的负对照与
- * 「兜底带着可执行 intent 所以不能自动执行」那条判定用的（台架 N37/V8/V9）。
+ * 失败轮屏上／耳朵里／context 里那一句：**引擎的事实**（没收到可用答复、什么都没执行），
+ * 不是人物台词。服务端兜底的 brief 与客户端的失败分支共用这一处。
  */
-export function createFallbackResponse(): AdvisorResponse {
+export function advisorFailureLine(kind: AdvisorFailure): string {
+  return kind === "parse"
+    ? "通讯干扰，参谋的答复没能解析——这句命令没有执行，请再说一遍。"
+    : "通讯中断，参谋没能答复——这句命令没有执行，请再说一遍。";
+}
+
+/**
+ * 这一份回复是不是**失败轮**。只认服务端兜底写入的 `failure` 字段——**不看 warning**
+ * （正常答复也会带提示）。字段在场但不是已知值 ⇒ 仍按失败算（fail-closed），按通讯中断说。
+ */
+export function advisorFailureOf(data: unknown): AdvisorFailure | null {
+  if (!data || typeof data !== "object") return null;
+  const f = (data as Record<string, unknown>).failure;
+  if (f === undefined || f === null || f === false) return null;
+  return f === "parse" ? "parse" : "comms";
+}
+
+/**
+ * 模型没交回可用答复（非 JSON / 校验不过 / 通讯中断 / 限流）时服务端交给浏览器的那一份。
+ *
+ * ★第六轮：**不带任何可执行的东西**，并明确标出失败（`failure`）。
+ *   旧版带着三份可执行默认方案（稳守 / 有限进攻 / 侦察），客户端又没把它排除在执行链之外：
+ *   真实初始局里长官说「刚才那两个快撤」、模型那一轮解析失败 ⇒ 闸判 no_anchor、桶 A ⇒
+ *   实际给 3 个单位下了设防令，屏上「已下令 3 个单位设防」（Codex 复现，台架 F1-F5）。
+ *   现在服务端这一层不产生 options / 持续命令，客户端那一层见 `failure` 就零执行——两道网。
+ *
+ * brief 就是引擎那句事实（`advisorFailureLine`），不再有「以下为默认方案」之类指向屏上不存在之物的话。
+ */
+export function createFallbackResponse(kind: AdvisorFailure = "parse"): AdvisorResponse {
   return {
-    brief: "通讯干扰，无法解析参谋建议。",
-    options: [
-      {
-        label: "A: 稳守阵地",
-        description: "全线防御，等待进一步情报",
-        risk: 0.2,
-        reward: 0.3,
-        intent: { type: "defend", urgency: "medium" },
-        intents: [{ type: "defend", urgency: "medium" }],
-      },
-      {
-        label: "B: 有限进攻",
-        description: "在最有利战线发动试探性进攻",
-        risk: 0.5,
-        reward: 0.6,
-        intent: { type: "attack", quantity: "some", urgency: "medium" },
-        intents: [{ type: "attack", quantity: "some", urgency: "medium" }],
-      },
-      {
-        label: "C: 全线侦察",
-        description: "派出侦察力量摸清敌方部署",
-        risk: 0.1,
-        reward: 0.4,
-        intent: { type: "recon", quantity: "few", urgency: "low" },
-        intents: [{ type: "recon", quantity: "few", urgency: "low" }],
-      },
-    ],
+    brief: advisorFailureLine(kind),
+    options: [],
     recommended: "A",
     urgency: 0.3,
+    responseType: "NOOP",
+    failure: kind,
   };
 }

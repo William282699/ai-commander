@@ -21,6 +21,17 @@ import { VolumePopover } from "./VolumePopover";
 import { ArsenalPanel } from "./ArsenalPanel";
 import { resolveIntent, applyOrders, updateStyleParam, findFront, enqueueProduction, cancelDoctrine, captureDecisionReview, enqueueDecisionReview, isReviewableIntentType, previewHighImpactIntent, buildPreflightConcernFacts, serializePreflightFacts, buildPreflightFallbackLine, buildPlayerViewLines, isAllFrontHint } from "@ai-commander/core";
 import { spokenNameOf, resolveTicketReference, ticketDispatchReceipt, burnEscalationTicket, isKnownForceRef, checkDispatchAuthority, retargetIntentForTicket, ticketDestinationVerdict, describeCommittedPull } from "@ai-commander/core";
+// 刀寅：用过的票 → 真走了的那一批；票据差额的结构化原因
+import { resolveTicketBatch, ticketGapFacts, checkDestinationQuote, isCompleteConfirmPlan, findQuantityAmbiguity, applyQuantityReading, contractReplyConflict, type TicketGapFacts, type QuantityAmbiguity } from "@ai-commander/core";
+// 刀寅：本地对账日志（与服务端同一个请求编号）
+import { newTraceId, traceClient, intentFacts } from "./advisorTrace";
+// retreat-scope 刀C — 任务台账（「哪次任务」这一类指代）
+import { findDispatch, liveDispatchMembers, findSameTaskInProgress, describePlanForApproval, type DispatchCandidate } from "@ai-commander/core";
+// 刀己 — 这一轮该做什么，判断全在 core（这层只执行它给的 plan）
+import { planSelectionTurn, planDispatchSelectionBatch } from "@ai-commander/core";
+import type { DispatchSelectionKey, DispatchSelectionRequirement } from "@ai-commander/core";
+// 刀甲：「这是不是经济单」的唯一真相源在 core（produce/trade），UI 不另抄一张表
+import { isDispatchIntent } from "@ai-commander/core";
 import type { CommanderRef, EscalationTicket } from "@ai-commander/core";
 import type { ViewportGeometry } from "@ai-commander/core";
 import type { GameState, AdvisorResponse, AdvisorOption, Intent, Channel, CommanderMemory, TaskCard, TaskPriority } from "@ai-commander/shared";
@@ -28,9 +39,15 @@ import { buildDigestForChannel } from "./digestHelper";
 // Phase 1 的闸已搬去 autoExecuteGate.ts（零行为变化）——留在组件闭包里台架够不到。
 import { isKnownLocation, isValidTarget, detectStaleSquadRefs, canAutoExecute, decideBucket } from "./autoExecuteGate";
 import type { StandingOrder, StandingOrderType, DoctrinePriority } from "@ai-commander/shared";
-import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute, buildProductionOptions } from "@ai-commander/shared";
+import { CHANNEL_LABELS, collectUnitsUnder, judgePendingConsumption, parsePendingDecision, pendingVerdictRoute, buildProductionOptions, advisorFailureOf, advisorFailureLine } from "@ai-commander/shared";
 import type { ProductionCategoryOptions } from "@ai-commander/shared";
 import type { PendingRequestTag } from "@ai-commander/shared";
+// 刀癸 — 跨局/延迟回调的局印（守局次与对象身份，不守游戏时间）
+import { stampRun, runGuardAllows, judgeRunGuard, type RunStamp } from "@ai-commander/shared";
+// 刀己 — 候选选择合同：这层只需要请求侧那个标签的类型，判定全在 core
+import type { SelectionRequestTag } from "@ai-commander/shared";
+// retreat-scope 刀C — 台账登记用的来源标记
+import type { DispatchMeta, DispatchSourceKind } from "@ai-commander/shared";
 import type { LeaderProfile, LeaderPersonality } from "@ai-commander/shared";
 import { armVoiceCapture, isVoiceCaptureSupported, isVoiceWarmEnabled, getVoiceOpenDiag, type VoiceRecording, type VoiceCaptureArm } from "./voiceRecorder";
 import { probeVoiceChannels, channelUsesVoiceCapture, isBaselineArm } from "./voiceCapability";
@@ -39,6 +56,8 @@ import { TelegraphKey } from "./TelegraphKey";
 import { MicIcon, HornIcon } from "./InputRailIcons";
 // spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
 import { planVoiceSpeech } from "./voiceSpeech";
+import { buildExecReceipt, buildExecFeedback, type DispatchSlice } from "./execReceipt";
+import { cloneSelectionOption, optionWithResolvedIntents, selectionEnvelope } from "./selectionOption";
 import { setPlaybackObserver } from "./tts";
 import { shouldRecordSpeechDiag, type ReleaseMark } from "./speechDiagGate";
 import {
@@ -258,6 +277,20 @@ const HIGH_IMPACT_CONFIRM_WORDS = ["确认", "是", "对", "执行", "同意", "
 const HIGH_IMPACT_CANCEL_WORDS = ["不", "否", "取消", "算了", "no", "cancel"];
 const HIGH_IMPACT_CONFIRM_WINDOW_SEC = 120;
 
+// ── retreat-scope 刀C: 这条意图是**怎么**指出这批人的（台账的 provenance）──
+// 台账要记下来源，否则「之前从南线派出去那批」将来无从匹配。判定只看字段在不在，
+// 不看地名、不看措辞——对任何图成立。
+function dispatchSourceOf(
+  intent: Intent,
+  selectedUnitIds: readonly number[] | undefined,
+): { sourceKind: DispatchSourceKind; sourceKey: string } {
+  if (intent.fromDispatch) return { sourceKind: "dispatch", sourceKey: intent.fromDispatch };
+  if (intent.fromSquad) return { sourceKind: "squad", sourceKey: intent.fromSquad };
+  if (intent.fromFront) return { sourceKind: "front", sourceKey: intent.fromFront };
+  if (selectedUnitIds && selectedUnitIds.length > 0) return { sourceKind: "selection", sourceKey: "" };
+  return { sourceKind: "pool", sourceKey: "" };
+}
+
 function normalizeReply(s: string): string {
   return s.trim().toLowerCase().replace(/[。.!！?？,，、\s]+$/g, "");
 }
@@ -286,7 +319,7 @@ function isDeclineReply(s: string): boolean {
 // Bucket C (high_impact only) voices a concern + asks for a yes (resolved locally
 // via the pending-confirm path, not a fresh LLM call); bucket B (ambiguous /
 // missing target / wrong squad) asks for a clarification.
-function buildGateQuestion(reason: string | undefined, brief: string, staleRefs: string[]): string {
+function buildGateQuestion(reason: string | undefined, brief: string, staleRefs: string[], plan?: string): string {
   const lead = brief ? brief.trim() : "";
   if (staleRefs.length > 0) {
     return `${lead ? lead + " " : ""}⚠ 这条引用的 ${staleRefs.join("、")} 已不在编 —— 确认要继续，还是另指部队？`;
@@ -298,12 +331,9 @@ function buildGateQuestion(reason: string | undefined, brief: string, staleRefs:
       // pendingContractRef) is unchanged: an in-list affirmative executes the
       // saved option locally; any other reply falls through to the normal
       // command flow, so "直接改令" was already mechanically true.
-      {
-        // brief often ends with 。— strip trailing punctuation so the joined
-        // sentence never reads "。，" (Codex polish round-2 #2).
-        const cleanLead = (lead || "这道命令没点名部队，会抽动全军").replace(/[。．.，,！!？?\s]+$/, "");
-        return `${cleanLead}——其它方向就空了。照打还是留兵，您一句话。`;
-      }
+      // ★第八轮：这一问是引擎发起的批准——长官点头批的就是存下的那份方案，所以问句由**那份方案**
+      //   逐条生成（plan＝core.describePlanForApproval），不再拿模型的 brief 当开头（它可能只说了其中一条）。
+      return `要办的是：${plan ?? "（方案缺失）"}——其它方向就空了。照打还是留兵，您一句话。`;
     case "no_selected_units":
       return `您说的"选中的部队"我没看到选中任何单位 —— 请先框选，或直接说明哪支部队。`;
     case "invalid_intent_fields":
@@ -570,7 +600,24 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     data: DisplayResponse;
     execCtx: ExecContext;
     summary: string;
+    /** 刀寅（审核 B）：这份方案是参谋在本频道第几轮回复里问出来的（replyTurnOf）。 */
+    createdTurn: number;
+    /** 刀寅（审核 C）：引擎提出的修正方案要连同**已经选好的那一批**一起存；执行时照这份重新现查。 */
+    selection?: SelectionProgress;
   } | null>(null);
+  // 刀寅（审核 B）：**一次只挂一个问题**。每个频道记"参谋答到第几轮了"；待确认方案记下
+  //   它是哪一轮问出来的。参谋之后只要又答了一轮（不管答的是什么），这份方案就不能再被
+  //   一句「对」消费——长官那句「对」答的是最新那一问，不是翻篇之前的旧方案。
+  //   同一次回复的重复投递（流断了走兜底）按请求编号去重，不算新一轮；通讯出错那一轮不算。
+  const replyTurnRef = useRef<Partial<Record<Channel, { n: number; traceId: string }>>>({});
+  const replyTurnOf = (ch: Channel): number => replyTurnRef.current[ch]?.n ?? 0;
+  const bumpReplyTurn = (ch: Channel, tid: string) => {
+    const cur = replyTurnRef.current[ch];
+    if (cur && cur.traceId === tid) return;
+    replyTurnRef.current[ch] = { n: (cur?.n ?? 0) + 1, traceId: tid };
+  };
+  // 第七轮：请求身份的幂等——同一个请求编号（traceId）的回复只处理一次（最近 32 个）。
+  const handledRepliesRef = useRef<string[]>([]);
   const pendingSeqRef = useRef(0);
   const makePendingId = () => `pf-${Date.now().toString(36)}-${++pendingSeqRef.current}`;
   const [error, setError] = useState<string | null>(null);
@@ -997,11 +1044,52 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // decision-review record can only learn "this answered a staff question" through
   // this context. All four approve paths (auto, bucket-A, manual, high_impact
   // confirm) receive the same execCtx, so the correlation survives every route.
-  type ExecContext = { channel: Channel; threadId?: string; requestId?: string; escalateId?: string };
+  // ★刀癸 (审核 §六)：ExecContext 带上**来源局的印**（局次 + GameState 对象身份）。
+  //   processAdvisorData 头上那道重开守卫是对的，但它**过了之后**还要
+  //   `setTimeout(..., 0)` 才真去 handleApprove，而 ctx 里没有来源局的任何印记
+  //   ——中间那一跳撞上重开一局，上一局的单子就落进新局。
+  //   守局次与对象身份，**不守游戏时间**（新局钟从 0 起，按时间写的闸全失效）。
+  type ExecContext = {
+    channel: Channel; threadId?: string; requestId?: string; escalateId?: string;
+    /** 出发那一刻的局印。缺席 ⇒ fail-closed，按作废处理。 */
+    run?: RunStamp;
+    /** 刀寅：本地对账日志的请求编号（纯观测）。 */
+    traceId?: string;
+    /** 刀寅：产生这份方案的那一句长官原话（打字＝原文，语音＝heard）。目的地忠实度用。 */
+    playerText?: string;
+    /**
+     * 第六轮：这是模型**这一轮新写**的单子（自动执行 / 桶 A 那两处才带）。只有它要过
+     * 「同一道令又下了一遍」那道判定；长官批准过的存档方案、答完问题执行的原命令都不带。
+     * handleApprove 一进门就把它从要存下来的那份上下文里摘掉——存档方案永远不带它。
+     */
+    freshPlan?: boolean;
+  };
+  type SelectionProgress = {
+    /** 玩家原先批准的完整 option；永远不把预检改写反灌回来。 */
+    optionSnapshot: AdvisorOption;
+    /** 已明确选过的稳定 key。名单在每轮及最终执行前统一现查。 */
+    selectionKeys: DispatchSelectionKey[];
+    requirements: DispatchSelectionRequirement[];
+    /** 整道命令沿用首次提问的期限；转到下一问也不续命。 */
+    expiresAt: number;
+    selectedUnitIds?: number[];
+    /** 原响应供 doctrine/复盘收尾；消歧不能把它丢掉。 */
+    sourceResponse?: DisplayResponse;
+    /** 原 option 下标，供批准动画/审计保持身份。 */
+    optionIndex: number;
+    /**
+     * 第六轮：这道命令里**已经问过数量读法**的那几组（按组的身份，不按下标）。
+     * 长官答过就不再问同一组；读法本身已经写进 optionSnapshot（total ⇒ 合成一条）。
+     */
+    quantityConfirmed?: string[];
+  };
   const responseExecCtxRef = useRef<ExecContext | null>(null);
   // Tracks the latest valid requestId — approve buttons capture a snapshot of execCtx at
   // render time and pass it in; handleApprove compares against this ref to reject stale approvals.
   const latestRequestIdRef = useRef<string | null>(null);
+  // 刀寅：正在处理的这一轮命令的对账编号（发出时生成，服务端与浏览器各层共用）。
+  const traceIdRef = useRef<string | null>(null);
+
 
   // Day 16B: per-channel context memory
   const channelContextRef = useRef<ChannelContext>(createEmptyChannelContext());
@@ -1692,63 +1780,289 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     setActiveChannel(COMMANDER_CHANNEL[COMMANDERS[0]]);
   };
 
-  // ── Phase 3: handle approving a staff thread option ──
+  // ── 刀C: 待决「选哪批部队」槽 ──
+  //
+  // ★ 与「批准这个已经确定的方案」是**两种语义**，必须是独立的待决类型：
+  //   批准合同问的是"办不办"，这里问的是"办谁"。把"选择"塞进"批准"的判定里，
+  //   改完会把刚收口的批准流程弄坏。UI 与过期检查沿用同一套（setClarification
+  //   + 同寿命窗口），判定本身各走各的。
+  //
+  // ★刀己 (审核 §二)：槽里现在存**原命令的安全快照**与**候选的稳定 key**。
+  //   刀C 那一版只存了候选、从没用它来选——下一条可执行 intent 一到就把槽清空，
+  //   然后照模型这一轮填的字段执行。于是「好的」、答非所问、或者模型又把
+  //   fromFront 写错，仍然调错兵（实测：留守 3 ＋ 外派 10 ⇒ 只撤 3 个）。
+  //   ★ **绝不存旧名单当执行真相**：名单在绑定那一刻从当前 GameState 现查
+  //     （bindDispatchSelection）——等回复那几秒里人会死、会被改派、任务会关。
+  const pendingSelectionRef = useRef<SelectionProgress & {
+    id: string;
+    channel: Channel;
+    sessionId: string;
+    epoch: number;
+    /** 提问时印出去的候选（key 稳定，label 仅供显示）。 */
+    candidates: Pick<DispatchCandidate, "selectionKey" | "label">[];
+    /** 当前正在问哪一条；原 intent 从不可变 optionSnapshot 按下标读取。 */
+    intentIndex: number;
+    /** 原回合的执行上下文（频道/线程/升级单），绑定执行时沿用。 */
+    execCtx?: ExecContext;
+    /** 第六轮：这一槽问的是什么。缺席＝「是哪一批」。 */
+    kind?: "source" | "quantity";
+    /** 第六轮：kind==="quantity" 时，问的是哪一组、「一共」读法的总数、原问句（再问时照说）。 */
+    quantity?: Pick<QuantityAmbiguity, "signature" | "indexes" | "total" | "question">;
+  } | null>(null);
+
+  /** 还活着的那一槽（过期 / 换频道 / 重开一局都作废，绝不悬挂）。 */
+  const livePendingSelection = (now: number, ch: Channel) => {
+    const p = pendingSelectionRef.current;
+    if (!p) return null;
+    if (p.channel !== ch || p.sessionId !== SESSION_ID || p.epoch !== gameEpochRef.current || now > p.expiresAt) {
+      pendingSelectionRef.current = null;
+      return null;
+    }
+    return p;
+  };
+
+  /**
+   * 刀寅（审核 B）：此刻还能被长官这一句答复消费的那份待确认方案。
+   *
+   * 作废（当场清掉，绝不悬挂）：换了局、过了期、参谋在它之后又答了一轮、或者之后又升级了
+   * 一个新请示——任何一条都说明长官眼前的"最新一问"已经不是它了。
+   * 只是"此刻不可答"（别的频道、代价还没念完）⇒ 返回 null，但不清。
+   * send 的确认词捷径和发请求时的合同标签**共用这一个判定**（台架直接调它）。
+   */
+  const livePendingContract = (st: GameState, ch: Channel) => {
+    const pc = pendingContractRef.current;
+    if (!pc) return null;
+    const esc = getActiveEscalation(pc.channel, st.time);
+    if (
+      pc.epoch !== gameEpochRef.current ||
+      st.time > pc.expiresAt ||
+      pc.createdTurn !== replyTurnOf(pc.channel) ||
+      (esc != null && esc.createdAt > pc.createdAt)
+    ) {
+      pendingContractRef.current = null;
+      return null;
+    }
+    if (pc.channel !== ch || pc.phase !== "awaiting_reply") return null;
+    return pc;
+  };
+
+  /**
+   * 确认词捷径（不问模型）：只有 livePendingContract 认的那一份、且长官这句是封闭词表里的
+   * 确认/取消词，才在这里直接办。返回 true ＝ 这一句已经处理完。词表以外的话照常交给模型。
+   */
+  const tryPendingShortcut = (st: GameState, ch: Channel, userMsg: string): boolean => {
+    const pc = livePendingContract(st, ch);
+    if (!pc) return false;
+    if (isConfirmReply(userMsg)) {
+      pendingContractRef.current = null;
+      traceClient(traceIdRef.current, "pending_shortcut", { reply: "confirm", pendingId: pc.id, planTraceId: pc.execCtx.traceId ?? null });
+      handleApprove(pc.opt, 0, "auto", pc.execCtx, pc.data, true, pc.selection);
+      return true;
+    }
+    if (isCancelReply(userMsg)) {
+      pendingContractRef.current = null;
+      traceClient(traceIdRef.current, "pending_shortcut", { reply: "cancel", pendingId: pc.id, planTraceId: pc.execCtx.traceId ?? null });
+      addMessage("info", "行，那就不动。", st.time, ch, undefined, "command_ack");
+      return true;
+    }
+    return false;
+  };
+
+  /**
+   * ★第九轮：**登记待批准方案的唯一入口**（模型 CONFIRM、引擎提议「要再派吗」/去处收窄、高影响三处都走这里）。
+   *
+   * 规矩：展示的完整方案＝保存的方案＝批准后执行的方案。完整方案由 core.describePlanForApproval 从
+   * **这份 opt 本身**逐条生成（动作、来源、数量、去处）；返回这一句，调用方把它原样放进屏上／耳朵／context
+   * 的那一问；给下一轮模型看的 summary 也是同一句。存下的 opt、选择进度、期限、一次只挂一个问题照旧。
+   */
+  const registerApprovalPlan = (st: GameState, ch: Channel, a: {
+    opt: AdvisorOption; data: DisplayResponse; execCtx: ExecContext;
+    phase: "voicing" | "awaiting_reply"; question: string; selection?: SelectionProgress;
+  }): string => {
+    const plan = describePlanForApproval(st, a.opt.intents?.length ? a.opt.intents : [a.opt.intent]);
+    const expiresAt = st.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC;
+    pendingSelectionRef.current = null; // 一次只挂一个问题（审核 B）
+    pendingContractRef.current = {
+      id: makePendingId(), createdTurn: replyTurnOf(ch), phase: a.phase, channel: ch, sessionId: SESSION_ID,
+      epoch: gameEpochRef.current, createdAt: st.time, expiresAt,
+      opt: a.opt, data: a.data, execCtx: a.execCtx,
+      summary: `要办的是：${plan}（陈刚问长官：${a.question}）`,
+      ...(a.selection ? { selection: { ...a.selection, expiresAt } } : {}),
+    };
+    return plan;
+  };
+
+  /**
+   * ★刀乙：引擎拒掉这道命令时，**屏上黄字和耳朵是同一句**。
+   *
+   * 病：`planVoiceSpeech` 在 execTurn 时 `finalUtterance=""`（刀B 有意为之，
+   * 是对的），而执行回执只在 `applyOrders` 真跑完才出声。可是 handleApprove 有
+   * 一排在 apply **之前**就 return 的路——权限拒绝、任务不在麾下、消歧追问、
+   * 票据不可用、找不到分队、目标不存在、目的地判退、零 orders 的规划失败。
+   * 结果：语音下了一条命令被引擎拒了 ⇒ 屏上黄字、**耳朵全静音**。
+   * 基线上至少还念一句 spoken。交接文档 §4 点名要求过"选兵/权限/规划阶段
+   * 零 orders 的失败也要如实反馈"——屏上做到了，耳朵没有。
+   *
+   * 一处补声，所有早退路都好：新增第 N 条早退路只要走这个出口就自带声音，
+   * 不走就会被 probe 的源码级判据当场抓住（防"复制六遍漏第七遍"）。
+   *
+   * `screen:false` 可用于调用方已经发布过屏幕行的情况。
+   */
+  const refuseAloud = (
+    st: GameState,
+    ch: Channel,
+    msg: string,
+    speakReceipt: boolean,
+    opts?: { screen?: boolean; context?: boolean },
+  ) => {
+    traceClient(traceIdRef.current, "refuse", { line: msg });
+    if (opts?.screen !== false) {
+      addMessage("warning", msg, st.time, ch, undefined, "command_ack");
+    }
+    if (ttsEnabled && speakReceipt && msg.trim()) {
+      const persona = COMMANDERS.find((c) => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
+      speak(msg, persona);
+      flush(persona);
+    }
+    // ★刀壬 (审核 §五)：**同一份事实**也要进对话 context。
+    //   病：这个出口原先只上屏、出声，不写 context。而可执行回合又先把模型写的
+    //   `data.brief`（"准备执行…"）推了进去 ⇒ 下一轮模型记得的是"我要办了"，
+    //   根本不知道这道命令被权限/分队/目标/零 orders 拦下了。
+    //   `screen:false` 只表示"不重复上屏"，**不表示不进 context**——真实结果
+    //   一律进；要压掉重复的那一格（问句自己已经推过）才传 `context:false`。
+    if (opts?.context !== false && msg.trim()) {
+      pushContext(channelContextRef.current, ch, { role: "assistant", text: msg, time: st.time });
+    }
+  };
+
+  /**
+   * 问一句：候选逐项列出，**不替他挑一个**，这一轮什么都不执行。
+   *
+   * ★刀己：连同**原命令的快照**一起存进槽。下一轮长官答了，执行的是这条快照
+   *   （来源字段被换成他选的那一批），不是模型那一轮重新写的单子。
+   *   屏上只印人话（谁、多少人、去了哪）——key 只进信封给模型抄，长官永远
+   *   不必念出 `dispatch:M1`。
+   */
+  const askWhichDispatch = (
+    state: GameState,
+    ch: Channel,
+    candidates: DispatchCandidate[],
+    speakReceipt: boolean,
+    progress: SelectionProgress,
+    execCtx: ExecContext | undefined,
+    intentIndex: number,
+    reask = false,
+    /** 只剩一批时换个问法——问的仍是"是不是它"，不是替他定了。 */
+    soleCandidate = false,
+  ) => {
+    // 刀寅（审核 B）：一次只挂一个问题——这一问一出，之前等着点头的方案作废。
+    pendingContractRef.current = null;
+    pendingSelectionRef.current = {
+      ...progress,
+      // 再问一次沿用**同一个 id**：它标识的是"这一次消歧"，不是"这一句话"。
+      id: reask && pendingSelectionRef.current ? pendingSelectionRef.current.id : makePendingId(),
+      channel: ch,
+      sessionId: SESSION_ID,
+      epoch: gameEpochRef.current,
+      candidates: candidates.map(({ selectionKey, label }) => ({ selectionKey, label })),
+      intentIndex,
+      // 每次都重新复制，防调用方后续的票据/目标预检原地改写污染待决合同。
+      optionSnapshot: cloneSelectionOption(progress.optionSnapshot),
+      selectionKeys: progress.selectionKeys.map((s) => ({ ...s })),
+      execCtx,
+      kind: "source",
+      quantity: undefined,
+    };
+    const question = soleCandidate
+      // ★复审 §一：只剩一批也**照样问**。引擎不替长官挑——"少数变成唯一"
+      //   不等于他同意了。问法换掉，零执行这条不松动。
+      ? `现在只剩${candidates[0]?.label ?? "一批"}，是这一批吗？`
+      : `您说的是哪一批？${candidates.map((c) => c.label).join("，还是")}？`;
+    // 刀乙：问句也要进耳朵——用嘴下的令被问回来，听不见就等于石沉大海。
+    // 刀壬：出口现在自己写 context，这儿就别推第二遍（`context:false`）。
+    refuseAloud(state, ch, question, speakReceipt, { context: false });
+    pushContext(channelContextRef.current, ch, { role: "assistant", text: question, time: state.time });
+    traceClient(traceIdRef.current, "ask_selection", { intentIndex, question, keys: candidates.map((c) => c.selectionKey) });
+    setClarification("请指明是哪一批部队");
+  };
+
+  /**
+   * 第六轮：问**数量读法**（「一共 2 个，还是每种各 2 个」），这一轮零执行。
+   *
+   * 旧做法只问一句、不存任何东西，并让紧接着的那一轮**跳过检查**（防绕圈）——下一轮模型
+   * 只要照旧交两条，就派出 4 个（Codex 复现：长官答「一共两个」，实际派了 4 个）。
+   * 现在它是一个真正的待决选择，与「是哪一批」同一套合同：存下**原命令**与两种已明确的
+   * 读法（稳定 key），模型只负责分类长官选了哪一种；执行的是按那种读法改写的**原命令**，
+   * 不是模型那一轮重写的单子。多候选只回「对」、缺字段、编造 key、跨局、过期、重复投递 ⇒ 零执行。
+   */
+  const askQuantityReading = (
+    state: GameState,
+    ch: Channel,
+    amb: QuantityAmbiguity | NonNullable<NonNullable<typeof pendingSelectionRef.current>["quantity"]> & { candidates: { selectionKey: string; label: string }[] },
+    speakReceipt: boolean,
+    progress: SelectionProgress,
+    execCtx: ExecContext | undefined,
+    reask = false,
+  ) => {
+    pendingContractRef.current = null; // 一次只挂一个问题（审核 B）
+    pendingSelectionRef.current = {
+      ...progress,
+      id: reask && pendingSelectionRef.current ? pendingSelectionRef.current.id : makePendingId(),
+      channel: ch,
+      sessionId: SESSION_ID,
+      epoch: gameEpochRef.current,
+      candidates: amb.candidates.map(({ selectionKey, label }) => ({ selectionKey, label })),
+      intentIndex: amb.indexes[0] ?? 0,
+      optionSnapshot: cloneSelectionOption(progress.optionSnapshot),
+      selectionKeys: progress.selectionKeys.map((k) => ({ ...k })),
+      requirements: progress.requirements.map((r) => ({ ...r, offeredKeys: [...r.offeredKeys] })),
+      quantityConfirmed: [...(progress.quantityConfirmed ?? [])],
+      execCtx,
+      kind: "quantity",
+      quantity: { signature: amb.signature, indexes: [...amb.indexes], total: amb.total, question: amb.question },
+    };
+    refuseAloud(state, ch, amb.question, speakReceipt, { context: false });
+    pushContext(channelContextRef.current, ch, { role: "assistant", text: amb.question, time: state.time });
+    traceClient(traceIdRef.current, "ask_quantity", { signature: amb.signature, question: amb.question, keys: amb.candidates.map((c) => c.selectionKey) });
+    setClarification(null);
+  };
+
+  // ── Phase 3: 参谋线程的批准 —— **委派给主执行链** ──
+  //
+  // ★刀子 (审核 §七)：这里原本是 handleApprove 的一份复制品，而且是**退化**的
+  //   那一份——它绕过了整条主安全链：
+  //     · 没有 `checkDispatchAuthority`（谁在说话决定他能动谁）；
+  //     · 无效 `fromSquad` 被**删掉**后让引擎自动选兵 —— 正是
+  //       dispatch-scope-v1 裁定过的"静默扩大范围"那一族（74/85 那笔账的形状）；
+  //     · 不解析、不复查 `fromDispatch`，也不判指代歧义；
+  //     · 下的是**裸 order**（没有 `origin:"advisor"` / `dispatchMeta`）⇒ 台账
+  //       一条不记，此后「刚派去那批」就指不着这些兵；
+  //     · 不写对话 context；没有局印复核（跨局回调照样落地）。
+  //
+  //   当前生产者休眠：pendingByChannel 没有非空写入；UNDER_ATTACK 走 crisis
+  //   conversation。保留这处委派，使将来恢复生产者时也沿用主执行链。
+  //
+  //   修法是最小的那个：主链**本来就**认 `execCtx.threadId`（跑完会
+  //   `resolveThread(threadId)`），所以这里只要造一份带 threadId 与局印的 ctx，
+  //   把选项交给 `handleApprove`。第二个执行入口就此消失——预检、权限、选兵、
+  //   apply、回执、台账、context 全都只有一份实现。
   const handleThreadApprove = (thread: StaffThread, opt: AdvisorOption, idx: number) => {
     if (thread.status !== "open") return;
     if (!tryLockThread(thread.id)) return;
-
     try {
       const state = getState();
       if (!state) return;
-
-      const letter = ["A", "B", "C"][idx] ?? "?";
-      const cleanLabel = opt.label.replace(/^[ABC]:\s*/, '');
-      const intents = opt.intents ?? [opt.intent];
-
-      for (const intent of intents) {
-        // Soft-fix: clear invalid fromSquad so engine auto-selects units
-        if (intent.fromSquad) {
-          const fs = intent.fromSquad.toLowerCase();
-          const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
-          const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
-          if (!isSquad && !isCommander) {
-            addMessage("warning", `分队 ${intent.fromSquad} 不存在，将自动分配单位`, state.time, thread.channel, undefined, "command_ack");
-            intent.fromSquad = undefined;
-          }
-        }
-
-        // Soft-fix: clear hallucinated target fields (e.g. LLM invents a non-existent
-        // tag/front/facility). Other valid fields in the same intent still drive execution.
-        softFixTargetFields(intent, state, (field, value) => {
-          addMessage("warning", `目标 ${field}=${value} 不存在，已忽略此字段`, state.time, thread.channel, undefined, "command_ack");
-        });
-
-        if (!isValidTarget(intent, state, COMMANDER_REFS)) {
-          const field = intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
-          addMessage("warning", `目标 ${field} 不存在`, state.time, thread.channel, undefined, "command_ack");
-          return;
-        }
-      }
-
-      const allOrders: ReturnType<typeof resolveIntent>["orders"] = [];
-      const reserved = new Set<number>();
-
-      for (const intent of intents) {
-        const result = resolveIntent(intent, state, state.style, reserved);
-        if (result.degraded) {
-          addMessage("warning", result.log, state.time, thread.channel, undefined, "command_ack");
-        } else {
-          addMessage("info", `执行: ${result.log}`, state.time, thread.channel, undefined, "command_ack");
-        }
-        for (const id of result.assignedUnitIds) reserved.add(id);
-        allOrders.push(...result.orders);
-      }
-
-      if (allOrders.length > 0) {
-        addMessage("info", `Roger. Executing ${letter}: ${cleanLabel}`, state.time, thread.channel, undefined, "command_ack");
-        applyOrders(state, allOrders);
-        resolveThread(thread.id);
-      }
+      // mode 传 "auto" 而不是 "manual"：主链里 `mode === "manual"` **只**用在一处
+      // ——「聊天卡片已经过期」那道闸（`!response`）。线程选项不来自 `response`，
+      // 它有自己的新鲜度检查（`status === "open"` + 执行锁 + expireStaleThreads），
+      // 传 "manual" 会被那道闸误伤，把所有线程批准都拦掉。
+      handleApprove(opt, idx, "auto", {
+        channel: thread.channel,
+        threadId: thread.id,
+        requestId: crypto.randomUUID(),
+        // 刀癸：这条路也盖局印——它同样是"点一下才执行"，中间隔着用户的手。
+        run: stampRun(gameEpochRef.current, state),
+      });
     } finally {
       unlockThread(thread.id);
     }
@@ -1898,6 +2212,11 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // Compressed cross-channel context so LLM knows what was discussed before
     const groupCtx = formatGroupContext(channelContextRef.current);
 
+    // ★刀癸 / 复审 §五：出发盖一枚局印，**这条路上每一处落地都拿它复核**——
+    //   `data.error`、`catch`、以及每条押了 2.2–4 秒才上屏的延迟回调。
+    //   群聊是全仓最长的那条异步链，上一局的话最容易从这儿投进新局。
+    const groupRun = stampRun(gameEpochRef.current, state);
+
     try {
       const res = await fetch(`${API_URL}/api/command-group`, {
         method: "POST",
@@ -1912,8 +2231,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       });
       const data = await res.json();
 
+      // ★复审 §五：群聊这条路**整条**都要用出发时的局印复核，不只是那几个延迟
+      //   回调。`data.error` 与下面的 `catch` 同样是"等了一会儿才回来"的东西
+      //   ——上一局的报错投进新局，屏上就会冒出一条与这一局无关的红字。
+      if (!runGuardAllows(groupRun, gameEpochRef.current, getState())) return;
+
       if (data.error) {
-        addMessage("urgent", data.error, state.time, "combat", "chen", "command_ack", true);
+        const nowErr = getState();
+        if (!nowErr) return;
+        addMessage("urgent", data.error, nowErr.time, "combat", "chen", "command_ack", true);
         return;
       }
 
@@ -1930,16 +2256,23 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         setTimeout(() => {
           const commander = FROM_TO_COMMANDER[r.from];
           if (!commander) return;
+          const now = getState();
+          // 跨局 / 换了 GameState ⇒ 静默作废：不上屏、不进 context。
+          if (!now || !runGuardAllows(groupRun, gameEpochRef.current, now)) return;
           const ch = COMMANDER_CHANNEL[commander];
-          pushContext(channelContextRef.current, ch, { role: "assistant", text: r.brief, time: state.time });
-          addMessage("info", r.brief, state.time, ch, commander, "command_ack", true);
+          // 时间取**落地这一刻**当前局的钟，不用出发时那个旧值。
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: r.brief, time: now.time });
+          addMessage("info", r.brief, now.time, ch, commander, "command_ack", true);
         }, cumulativeDelay);
       }
 
       // ALL channel is discussion-only — no options/execution handling
 
     } catch {
-      addMessage("urgent", "全体指令通信中断", state.time, "combat", "chen", "system", true);
+      // ★复审 §五：报错也可能是**上一局**那次请求的回声，同样要过局印。
+      const nowCatch = getState();
+      if (!runGuardAllows(groupRun, gameEpochRef.current, nowCatch)) return;
+      addMessage("urgent", "全体指令通信中断", nowCatch!.time, "combat", "chen", "system", true);
     }
   };
 
@@ -1967,6 +2300,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       releaseMarkRef.current = { ...releaseMarkRef.current, turn: speechTurn };
     }
     const userMsg = voice ? "" : message.trim();
+    // 刀寅：这一轮的对账编号。发出时生成、随请求带给服务端，之后浏览器各层也用它记。
+    const traceId = newTraceId();
+    traceIdRef.current = traceId;
     setLoading(true);
     setError(null);
     setApprovedIdx(null);
@@ -2001,33 +2337,18 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // ── Single commander path ──
     const ch = primaryChannel;
 
+
     // Step 5 (地基二 rework) — pending high-impact contract handling.
     // The literal fast path stays instant and CLOSED (see NEVER EXPAND above);
     // a word-list miss no longer destroys the contract — it rides to the LLM
     // as a tagged ---PENDING_CONTRACT--- context and comes back as a semantic
     // pendingDecision, judged fail-closed in processAdvisorData.
-    const pendingNow = pendingContractRef.current;
-    if (pendingNow) {
-      if (pendingNow.epoch !== gameEpochRef.current) {
-        pendingContractRef.current = null; // old-battle contract — dead on arrival
-      } else if (state.time > pendingNow.expiresAt) {
-        pendingContractRef.current = null; // expired — plain cleanup, no consumption
-      } else if (pendingNow.channel === ch && pendingNow.phase === "awaiting_reply") {
-        if (isConfirmReply(userMsg)) {
-          pendingContractRef.current = null;
-          handleApprove(pendingNow.opt, 0, "auto", pendingNow.execCtx, pendingNow.data);
-          setLoading(false);
-          return;
-        }
-        if (isCancelReply(userMsg)) {
-          pendingContractRef.current = null;
-          addMessage("info", "行，那就不动。", state.time, ch, undefined, "command_ack");
-          setLoading(false);
-          return;
-        }
-        // word-list miss → contract STAYS; the semantic pass below owns it.
-      }
-      // voicing phase / off-channel: no consumption of any kind here.
+    // 刀寅（审核 B）：判定抽成生产函数（livePendingContract / tryPendingShortcut），
+    //   这里与台架调的是同一份；过期、换局、翻篇（参谋又答了一轮 / 又来了新请示）都在里面作废。
+    //   词表以外的话，合同留给下面的语义那一轮（仍须 livePendingContract 认它）。
+    if (tryPendingShortcut(state, ch, userMsg)) {
+      setLoading(false);
+      return;
     }
 
     // ── v4 刀2b P1: instrument the ONE branch that decides whether 刀A (the
@@ -2136,19 +2457,32 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // 地基二: tag the request with the live contract ONLY when it is visible
     // (awaiting_reply), same channel, unexpired. voicing is never tagged — a
     // reply the player typed before seeing the concern cannot authorize it.
-    const pcAtSend = pendingContractRef.current;
-    const pendingTag: PendingRequestTag | null =
-      pcAtSend && pcAtSend.channel === ch && pcAtSend.phase === "awaiting_reply" && state.time <= pcAtSend.expiresAt
-        ? { pendingId: pcAtSend.id, channel: ch, sessionId: SESSION_ID }
-        : null;
+    const pcAtSend = livePendingContract(state, ch);
+    const pendingTag: PendingRequestTag | null = pcAtSend
+      ? { pendingId: pcAtSend.id, channel: ch, sessionId: SESSION_ID }
+      : null;
     const pendingContext = pendingTag && pcAtSend
       ? `\n---PENDING_CONTRACT---\n待确认命令(id=${pcAtSend.id}): ${pcAtSend.summary}\n指挥官下面这句话可能是对这份待确认命令的答复。`
       : "";
+    // ── 刀己 (审核 §二): 候选选择合同的请求侧 ──
+    //
+    // 规矩照抄 pendingContract：只在**同频道、未过期、同一局**的活槽上打标签，
+    // 答复也只有在标签仍与活槽三方对齐时才可能消费（judgeSelectionConsumption）。
+    // ★ key 只进信封给模型逐字抄；屏上给长官的问句里没有 key，他永远不必念
+    //   `dispatch:M1`。
+    const selAtSend = livePendingSelection(state.time, ch);
+    const selectionTag: SelectionRequestTag | null = selAtSend
+      ? { selectionId: selAtSend.id, channel: ch, sessionId: SESSION_ID }
+      : null;
+    // ★刀寅：信封里写**实际问的那种问法**。只剩一批时屏上问的是「是这一批吗？」，
+    //   旧信封却一律写「你问了是哪一批」、规则又说"一句应答词不算选"——于是长官答
+    //   「是的」必判没选、原样再问，绕圈。两种问法各自写明，判定仍归模型、闸仍在 key。
+    const selectionContext = selAtSend ? selectionEnvelope(selAtSend) : "";
     // Step C: dialogue focus (---ACTIVE_ESCALATION---) and camera focus
     // (---PLAYER_VIEW---) ride the envelope SIDE BY SIDE — the model judges
     // which one the player's words attach to; the engine classifies nothing.
     const playerViewContext = buildPlayerViewContext(state, baseDigest, getViewport?.() ?? null, cmdSelectedIds);
-    const digest = baseDigest + contextSuffix + threadContext + escalationContext + playerViewContext + pendingContext;
+    const digest = baseDigest + contextSuffix + threadContext + escalationContext + playerViewContext + pendingContext + selectionContext;
     const styleNote = `risk=${state.style.riskTolerance.toFixed(2)} focus=${state.style.focusFireBias.toFixed(2)} obj=${state.style.objectiveBias.toFixed(2)} cas=${state.style.casualtyAversion.toFixed(2)}`;
 
     // Append declined context if player is refining a rejected proposal
@@ -2174,6 +2508,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         syncGameEpoch(getState() ?? state);
         return;
       }
+      // ★第七轮：**同一个请求的回复只处理一次**（请求身份＝发出时生成的 traceId）。
+      //   同一份回复被投递两次（同一条 SSE 里两个 options 事件、流尾巴出错后的重入……）⇒ 第二次
+      //   完全 inert：不上屏、不进 context、不执行。这是执行幂等，不看内容、不看目的地——
+      //   长官**另说一句**（哪怕一字不差）是一个新请求、新编号，照常处理。
+      if (handledRepliesRef.current.includes(traceId)) return;
+      handledRepliesRef.current = [...handledRepliesRef.current.slice(-31), traceId];
 
       // ── 语音输入 V1：heard 结算（本轮唯一一次，打字回合整块跳过）──
       //
@@ -2208,19 +2548,54 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // 调用点只有两处，且互斥（第一处走完就 return）：合同判决路一处、
       // 其余全部分支合用一处。放在这里而不是更早，是因为 stale 那一格的规矩是
       // 「displays NOTHING and writes NOTHING」——它也不该出声。
-      const sayToEar = (prose: string) => {
+      //
+      // ★刀B（办法一）改了两件事：
+      //   ① 打字回合也走这里。流式期间不再边流边念（voiceSpeech 的 typed 分支
+      //      已改判），正文缓在 accumulatedText 里，到这一刻才整段放出去。
+      //   ② 多认一个输入 `execTurn`：会动兵的回合，这一段（spoken/正文）一声
+      //      不出——它是引擎跑**之前**写的那一版，照念就是假确认。耳朵等
+      //      `ApplyResult` 出来的执行回执（handleApprove 里那一声）。
+      // ★第七轮：第三个参数说明这一段是谁的话。"engine"＝引擎已经裁定（拒绝／没执行／要问）：
+      //   只念 prose（即屏上那一句），spoken 一概不念；"model"＝模型的咨询内容：语音回合念 spoken。
+      //   这是本轮唯一改动的播报分流点——各失败分支不另写播报代码，引擎的话一律经这里或 refuseAloud。
+      // 第九轮：appendix＝引擎附在这一段后面的事实（批准问题里的完整方案），不论念 spoken 还是正文都照念。
+      const sayToEar = (prose: string, execTurn: boolean, authority: "model" | "engine" = "model", appendix?: string) => {
         const plan = planVoiceSpeech({
           voiceTurn: isVoiceTurn,
           spoken: typeof data?.spoken === "string" ? data.spoken : undefined,
           prose,
           heard,   // 引擎闸的尺：要念的那段若整句复读它，就不许念
+          execTurn,
+          authority,
+          appendix,
         });
-        if (isVoiceTurn && ttsEnabled && plan.finalUtterance) {
+        if (ttsEnabled && plan.finalUtterance) {
           speak(plan.finalUtterance, ttsPersona);
           flush(ttsPersona); // 非流兜底路后面没有 flush，末句不许卡在句子缓冲里
         }
         return plan;
       };
+
+      // ══ 第六轮：失败轮（服务端没拿到可用的参谋答复）══
+      //
+      // 服务端兜底标了 `failure`（解析失败 / 通讯中断 / 限流）⇒ 这一轮**什么都不执行**：
+      // options、持续命令一律不看；待批准的方案、待答的选择一律不碰——它们原样留着，长官
+      // 再说一遍还能接着办；也不算参谋又答了一轮（同 data.error）。屏上／耳朵／context 只放
+      // 引擎那句事实，模型流出来的半截正文一个字都不采信。
+      // ★排在一切判官之前：否则兜底会被判成「对待确认方案没给判词」⇒ 协议失败 ⇒ 方案作废，
+      //   或者带着可执行 intent 一路走到闸与桶（台架 F1-F5 的原病：真实初始局下了 3 个设防令）。
+      const failure = advisorFailureOf(data);
+      if (failure) {
+        setResponse(null);
+        setError(null);
+        setClarification(null);
+        const line = advisorFailureLine(failure);
+        traceClient(traceId, "model_failure", { failure });
+        addMessage("warning", line, state.time, ch, undefined, "command_ack");
+        pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
+        sayToEar(line, false, "engine");
+        return;
+      }
 
       // ── 地基二: pending semantic consumption, judged BEFORE anything else.
       // The verdict maps through pendingVerdictRoute — the ONE bench-testable
@@ -2229,6 +2604,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // re-entered via the fallback path) is fully fail-closed: no old
       // contract, no new options, no doctrine (Codex step2-fix). Error
       // responses never consume — the contract survives them.
+      // 刀寅（审核 B）：参谋答了新的一轮（出错那一轮不算）。之后登记的方案记这一轮。
+      if (!data.error) bumpReplyTurn(ch, traceId);
       if (!data.error) {
         const pcNow = pendingContractRef.current;
         // Restart guard: an old-battle contract is presented to the judge as
@@ -2237,7 +2614,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           pendingContractRef.current = null;
         }
         const pcSameEpoch = pcNow && pcNow.epoch === gameEpochRef.current ? pcNow : null;
-        const verdict = judgePendingConsumption({
+        const judged = judgePendingConsumption({
           requestTag: pendingTag,
           current: pcSameEpoch
             ? { id: pcSameEpoch.id, channel: pcSameEpoch.channel, sessionId: pcSameEpoch.sessionId, phase: pcSameEpoch.phase, expiresAt: pcSameEpoch.expiresAt }
@@ -2245,13 +2622,25 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           now: state.time,
           decision: parsePendingDecision((data as Record<string, unknown>).pendingDecision),
         });
+        // 第七轮：判词与同一份回复里的单子在结构上合不合法（core.contractReplyConflict，唯一判定处）：
+        //   authorize ⇒ 回复里**每一张**单子都得是存下方案的复述；amend ⇒ 只能有一种改法。
+        //   不合法 ⇒ 按协议失败（零执行、旧方案作废、用引擎的话说清哪里对不上，请长官再说一遍）。
+        //   不看第几张、不看 recommended——任何一张「碰巧与旧方案一致」都掩盖不了另一张的修改。
+        const conflict = pcSameEpoch && (judged === "authorize" || judged === "amend")
+          ? contractReplyConflict(state, pcSameEpoch.opt, judged, data.options) : null;
+        const verdict = conflict ? "protocol_failure" as const : judged;
         const route = pendingVerdictRoute(verdict);
+        if (pendingTag) traceClient(traceId, "pending", { verdict, judged, pendingId: pendingTag.pendingId, conflict: conflict ?? undefined });
 
         // Contract lifecycle per verdict. Expiry cleanup may ONLY clear the
         // very contract this request was tagged with — never a newer one that
         // was registered while this response was in flight.
         if (verdict === "authorize" || verdict === "cancel" || verdict === "amend") {
           pendingContractRef.current = null;
+        } else if (verdict === "unrelated" || verdict === "protocol_failure") {
+          // 刀寅（审核 B）：长官这句不是在答它（或答得不清），参谋接着又开了口——一次只挂一个
+          //   问题，旧方案作废；要办就再说一次。只清这次标签指着的那一份，绝不碰更新的。
+          if (pcSameEpoch && pendingTag && pcSameEpoch.id === pendingTag.pendingId) pendingContractRef.current = null;
         } else if (verdict === "stale") {
           // Expiry cleanup strictly THREE-way matched (id + channel + session)
           // AND expired — a newer contract registered mid-flight, or one with
@@ -2276,26 +2665,267 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         if (!route.processResponse) {
           setResponse(null);
           setError(null);
-          const fallbackLine =
-            verdict === "authorize" ? "依令行事。"
-            : verdict === "cancel" ? "行，那就不动。"
-            : "……(指令未定，请再说一遍)"; // protocol_failure
-          const line = (data.brief as string) || fallbackLine;
+          // 第六轮（交接档 §5）：协议失败是**引擎拒绝**的路——屏上／耳朵／context 只说引擎的事实
+          //   （什么都没执行、那份方案作废了），模型那一轮写的 brief 一个字都不采信（实测它会写
+          //   「已经派过去了」，而实际零执行）。批准 / 取消两条路照旧用参谋自己的话。
+          const line = verdict === "protocol_failure"
+            ? (conflict?.kind === "authorize_changed"
+                ? `您这句跟待确认的方案对不上（${conflict.differences.join("；")}）——那个方案没有执行，也不再挂着；要怎么办请再说一遍。`
+                : conflict?.kind === "amend_ambiguous"
+                ? `您要改方案，可我这边拿出了 ${conflict.plans} 种不同的改法——什么都没有执行，那个方案也不再挂着；请说要哪一种。`
+                : "这句我没判断清是不是在答刚才待确认的方案——什么都没有执行，那个方案也不再挂着；要办请再说一遍。")
+            : (data.brief as string) || (verdict === "authorize" ? "依令行事。" : "行，那就不动。");
           addMessage(verdict === "protocol_failure" ? "warning" : "info", line, state.time, ch, undefined, "command_ack", undefined, replyMark(ch));
           pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
           // 语音说「可以」批准就走这条路：耳朵拿到的是 spoken，缺席则是这句判词。
-          const decisionPlan = sayToEar(line);
+          // 刀B：这条路**会执行**旧合同时，判词也不念——耳朵等执行回执。
+          //   v2 把这条路排除在外是错的：它和流式那两条是同一个病（先说、后执行）。
+          const willExecuteOldContract = route.executeOldContract && pcSameEpoch != null;
+          const decisionPlan = sayToEar(line, willExecuteOldContract, verdict === "protocol_failure" ? "engine" : "model");
           if (route.executeOldContract && pcSameEpoch) {
-            handleApprove(pcSameEpoch.opt, 0, "auto", pcSameEpoch.execCtx, pcSameEpoch.data, decisionPlan.speakExecReceipt);
+            handleApprove(pcSameEpoch.opt, 0, "auto", pcSameEpoch.execCtx, pcSameEpoch.data, decisionPlan.speakExecReceipt, pcSameEpoch.selection);
           }
           return;
         }
         // amend / unrelated / no_pending → normal flow below (amend's old
         // contract is already cleared: ONLY the new intents may execute).
       }
+
+      // ══ 刀己 (审核 §二): 候选选择合同的答复侧 ══
+      //
+      // 排在批准合同之后、耳朵开口之前。两份合同互不干涉：批准问的是"办不办"，
+      // 这里问的是"办谁"。
+      //
+      // ★ 这一段就是「问完必须真正绑定候选」的落点，而**判断全在 core**
+      //   （`planSelectionTurn`）——这里只执行它给的 plan，一个判断都不自己做。
+      //   刀C 那一版把判断写在这层的闭包里，于是没有任何机器断言看得见它。
+      const selSlotAtJudge = pendingSelectionRef.current;
+      const selPersona = COMMANDERS.find((c) => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
+      // ★复审 §一：`data.error` 那一轮**不许消费候选、也不许触发旧命令**。
+      //   后端出错时模型根本没给出裁决，任何"顺手消费"都是引擎自己在决定。
+      //   做法：这一轮当作没带标签（no_pending）⇒ passthrough ⇒ 下面的 error
+      //   分支照常报错，待决槽原封不动留着，长官下一句还能接着答。
+      const selTagThisTurn = data.error ? null : selectionTag;
+      const selTurn = planSelectionTurn({
+        state,
+        slot: selSlotAtJudge && selSlotAtJudge.channel === ch
+          ? {
+              kind: selSlotAtJudge.kind,
+              id: selSlotAtJudge.id,
+              channel: selSlotAtJudge.channel,
+              sessionId: selSlotAtJudge.sessionId,
+              epoch: selSlotAtJudge.epoch,
+              expiresAt: selSlotAtJudge.expiresAt,
+              candidates: selSlotAtJudge.candidates,
+              intentSnapshot: selSlotAtJudge.optionSnapshot.intents[selSlotAtJudge.intentIndex],
+              allIntents: selSlotAtJudge.optionSnapshot.intents,
+              intentIndex: selSlotAtJudge.intentIndex,
+              selectionKeys: selSlotAtJudge.selectionKeys,
+            }
+          : null,
+        requestTag: selTagThisTurn,
+        epoch: gameEpochRef.current,
+        now: state.time,
+        persona: selPersona,
+        // 服务端已转换成内部格式；core 只做内部形状校验，不再二次原始解析。
+        decision: (data as Record<string, unknown>).dispatchSelection,
+        personaLabel: COMMANDER_META[selPersona].label,
+      });
+      if (selTagThisTurn) traceClient(traceId, "selection", { verdict: selTurn.verdict, plan: selTurn.plan.kind });
+      {
+        // 槽的生命周期。过期清理**只许**清掉这次请求带的那一槽——等回复那几秒里
+        // 若登记了更新的一槽，绝不碰它（照抄 pendingContract 的三方匹配规矩）。
+        const sameSlot =
+          selSlotAtJudge != null && selTagThisTurn != null &&
+          selSlotAtJudge.id === selTagThisTurn.selectionId &&
+          selSlotAtJudge.channel === selTagThisTurn.channel &&
+          selSlotAtJudge.sessionId === selTagThisTurn.sessionId;
+        if (!selTurn.keepSlot && sameSlot) {
+          if (selTurn.verdict !== "stale" || selTurn.clearExpiredSlot) pendingSelectionRef.current = null;
+        }
+      }
+
+      // ★复审 §二：inert ⇒ 一件事都不做。不上屏、不进 context、新旧 options
+      //   一律不执行——它多半是**同一次回复的重复投递**（SSE 已经处理过 options，
+      //   随后 stream error 又走了 /api/command 兜底）。规矩逐字照抄
+      //   pendingContract 的 stale 那一格：displays NOTHING and writes NOTHING。
+      if (selTurn.plan.kind === "inert") {
+        setResponse(null);
+        setError(null);
+        return;
+      }
+      if (selTurn.plan.kind !== "passthrough") {
+        setResponse(null);
+        setError(null);
+        // 这一轮的走向已经定了，上面那一层（spoken/正文）一声不出——它是模型在
+        // 引擎跑**之前**写的那一版（刀B 的规矩）。声音由下面各自那一句带。
+        // 第七轮：这一轮归引擎裁定（执行／拒绝／再问），模型的 spoken 一声都不念；要说的话由
+        //   执行回执或 refuseAloud / ask* 那一句带（它们本来就上屏、进 context、出声）。
+        const selPlan = sayToEar("", selTurn.plan.kind === "execute" || selTurn.plan.kind === "quantity_chosen", "engine");
+        if (selTurn.plan.kind === "quantity_chosen") {
+          // 第六轮：按长官选的读法改写**原命令**（不是模型这一轮写的单子），整组重走主链。
+          const slot = selSlotAtJudge!;
+          const q = slot.quantity;
+          const read = q ? applyQuantityReading(slot.optionSnapshot.intents, q, selTurn.plan.key) : null;
+          // 已选来源的 key 按下标记账：合并后跟着挪；挪到同一格却是不同的 key ⇒ 来源记录失效。
+          const keys = read ? slot.selectionKeys.map((k) => ({ ...k, intentIndex: read.indexMap.get(k.intentIndex) ?? -1 })) : [];
+          const reqs = read ? slot.requirements.map((r) => ({ ...r, intentIndex: read.indexMap.get(r.intentIndex) ?? -1, offeredKeys: [...r.offeredKeys] })) : [];
+          const clash = keys.some((k, i) => k.intentIndex < 0 || keys.some((o, j) => j !== i && o.intentIndex === k.intentIndex && o.selectionKey !== k.selectionKey));
+          if (!read || !q || clash) {
+            refuseAloud(state, ch, "刚才那道命令的人数记录已经失效，整道命令没有执行，请重新下令。", true);
+          } else {
+            const snapshot = optionWithResolvedIntents(slot.optionSnapshot, read.intents);
+            const uniq = <T extends { intentIndex: number }>(xs: T[]) => xs.filter((x, i) => xs.findIndex((y) => y.intentIndex === x.intentIndex) === i);
+            traceClient(traceId, "quantity_chosen", { key: selTurn.plan.key, signature: q.signature });
+            handleApprove(snapshot, slot.optionIndex, "auto", slot.execCtx, slot.sourceResponse, selPlan.speakExecReceipt, {
+              optionSnapshot: snapshot,
+              optionIndex: slot.optionIndex,
+              selectionKeys: uniq(keys),
+              requirements: uniq(reqs),
+              expiresAt: slot.expiresAt,
+              selectedUnitIds: slot.selectedUnitIds,
+              sourceResponse: slot.sourceResponse,
+              quantityConfirmed: [...(slot.quantityConfirmed ?? []), q.signature],
+            });
+          }
+        } else if (selTurn.plan.kind === "reask_quantity") {
+          const slot = selSlotAtJudge!;
+          addMessage("info", selTurn.plan.lead, state.time, ch, undefined, "command_ack");
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: selTurn.plan.lead, time: state.time });
+          if (slot.quantity) {
+            askQuantityReading(state, ch, { ...slot.quantity, candidates: slot.candidates }, true, slot, slot.execCtx, true);
+          }
+        } else if (selTurn.plan.kind === "execute") {
+          const p = selTurn.plan;
+          // ★复审 §三：交给主链的是**整组** intents（绑定结果已放回原位置），
+          //   不是只有绑定那一条——其余 intents 一条都不许丢。整组重走主链预检。
+          handleApprove(
+            selSlotAtJudge!.optionSnapshot,
+            selSlotAtJudge!.optionIndex, "auto", selSlotAtJudge!.execCtx,
+            selSlotAtJudge!.sourceResponse, selPlan.speakExecReceipt,
+            { ...selSlotAtJudge!, selectionKeys: p.selectionKeys },
+          );
+        } else if (selTurn.plan.kind === "refuse") {
+          refuseAloud(state, ch, selTurn.plan.line, true);
+        } else {
+          // reask：零执行，把没执行这件事说清楚，再问一遍（候选已现查过滤）。
+          const p = selTurn.plan;
+          addMessage("info", p.lead, state.time, ch, undefined, "command_ack");
+          pushContext(channelContextRef.current, ch, { role: "assistant", text: p.lead, time: state.time });
+          askWhichDispatch(
+            state, ch, p.candidates, true,
+            selSlotAtJudge!, selSlotAtJudge!.execCtx, selSlotAtJudge!.intentIndex,
+            true, p.soleCandidate,
+          );
+        }
+        return;
+      }
+      // ══ 刀己 段落结束（no_pending / unrelated 走下面的正常流程）══
+
+      // ══ 刀寅：陈要长官点头的**具体方案**（只认 CONFIRM ＋ 一个完整方案）══
+      //
+      // 病（实测，玩家那局的原对话复现 6/10）：陈反问「您指的是 G2 吗？」时手里没有
+      // 结构化的方案，长官答「是的」，模型只能凭记忆把命令**重写一遍**——重写时把
+      // 「北线前哨」丢了、只剩「北部战线」。修法＝陈要长官点头一个**已经完整**的方案时
+      // （responseType CONFIRM），这一刻把方案存成待确认合同（复用高影响确认那套：
+      // 同频道、同局、有期限、只消费一次）；长官同意就执行**存下的这份**，执行前全链复核。
+      //   · 只认 CONFIRM ＋ 恰好一个 ＋ 完整（isCompleteConfirmPlan）。**开放问题**（ASK，
+      //     哪怕夹着一张暂定单子）不进批准流程——长官一句「对」会走确认词捷径直接执行草稿
+      //     （审核实测复现）。
+      //   · 高影响方案不在这里存，交给下面现成的高影响链（先把代价说出来再等批准）；
+      //   · 这一轮零执行。以前 ASK/CONFIRM 带方案会掉进下面的可执行分支，可能直接执行。
+      {
+        const rtNow = typeof data.responseType === "string" ? (data.responseType as string).toUpperCase() : "";
+        const askOpts = Array.isArray(data.options) ? (data.options as AdvisorOption[]) : [];
+        if (!data.error && (rtNow === "CONFIRM" || rtNow === "ASK") && askOpts.length > 0) {
+          const plan = rtNow === "CONFIRM" && askOpts.length === 1 && isCompleteConfirmPlan(askOpts[0]) ? askOpts[0] : null;
+          const planGate = plan
+            ? canAutoExecute(plan, isVoiceTurn ? heard : userMsg, state, [], isGroupChat, COMMANDER_REFS)
+            : null;
+          if (!(plan && planGate?.reason === "high_impact")) {
+            setResponse(null);
+            setError(null);
+            const question = (data.brief as string) || "长官，按这个方案办吗？";
+            // 第九轮：登记了待批方案，这一问就必须带上**存下的那份完整方案**（模型的问句可能只说了其中一条）。
+            let planLine = "";
+            if (plan) {
+              const planText = registerApprovalPlan(state, ch, {
+                opt: plan, data: data as DisplayResponse, phase: "awaiting_reply", question, // 问句这一刻就上屏了
+                execCtx: {
+                  channel: ch, threadId: activeThreadOnChannel?.id, requestId: crypto.randomUUID(), escalateId,
+                  run: stampRun(gameEpochRef.current, state), traceId,
+                  playerText: isVoiceTurn ? heard : userMsg,
+                },
+              });
+              planLine = `要办的是：${planText}。`;
+              setClarification(null);
+            } else {
+              // 开放问题：不存、不执行，长官下一句照常交给模型理解。
+              setClarification(question + " — 请回答或重新下令");
+            }
+            traceClient(traceId, "confirm_captured", {
+              captured: !!plan, responseType: rtNow, options: askOpts.length,
+              intents: plan ? (plan.intents ?? []).map((i) => intentFacts(i as unknown as Record<string, unknown>)) : undefined,
+            });
+            const shown = planLine ? `${question} ${planLine}` : question;
+            addMessage("info", shown, state.time, ch, undefined, "command_ack", undefined, replyMark(ch));
+            pushContext(channelContextRef.current, ch, { role: "assistant", text: shown, time: state.time });
+            // 耳朵：模型那半句照旧（语音回合念 spoken），后面接同一句完整方案（屏上那一串原样）。
+            sayToEar(question, false, "model", planLine || undefined);
+            return;
+          }
+          // 高影响方案：落到下面的高影响链（bucket B → 先说代价 → 登记合同），不在这里另登记。
+        }
+      }
+
+      // ── 刀B：这一回合到底会不会动兵，必须在耳朵开口之前就算出来 ──
+      //
+      // 闸与桶原本算在下面那个 actionable 分支里，而耳朵在这一行就开口了——
+      // 于是"先说、后执行"是结构决定的，不是谁忘了改。把判定提到开口之前，
+      // 下面的分支**直接用这三个值，不再算第二遍**（算两遍就会漂）。
+      // ★控制流逐字保持：willExecute 的公式与下面的分支条件一模一样
+      //   （gate.auto 捷径在前、decideBucket 在后），本刀不趁机改闸。
+      const optionsArr = Array.isArray(data.options) ? (data.options as AdvisorOption[]) : [];
+      const actionableTurn =
+        !data.error &&
+        !(typeof data.responseType === "string" && (data.responseType as string).toUpperCase() === "NOOP") &&
+        optionsArr.length > 0;
+      const execGate: { auto: boolean; reason?: string; playerNamedSquad?: boolean } = actionableTurn
+        // ④ 语音回合喂 heard——闸靠正则在长官的话里找锚（番号/领队名/「选中」），
+        //   没有文本它会把每一句都当成"长官没点名"。
+        ? canAutoExecute(optionsArr[0], isVoiceTurn ? heard : userMsg, state, [], isGroupChat, COMMANDER_REFS)
+        : { auto: false };
+      const execOpt0 = actionableTurn ? optionsArr[0] : undefined;
+      const execStaleRefs = actionableTurn ? detectStaleSquadRefs(optionsArr, state, COMMANDER_REFS) : [];
+      const execBucket = actionableTurn
+        ? decideBucket({
+            gate: execGate,
+            hasOption: execOpt0 != null,
+            staleRefCount: execStaleRefs.length,
+            voiceTurn: isVoiceTurn,
+            heardPresent: heard.length > 0,
+          })
+        : "B";
+      const willExecute =
+        actionableTurn &&
+        ((execGate.auto && optionsArr.length >= 1) || (execBucket === "A" && execOpt0 != null));
+      traceClient(traceId, "route", {
+        responseType: data.responseType, options: optionsArr.length, error: data.error ?? undefined,
+        gateAuto: execGate.auto, gateReason: execGate.reason, bucket: actionableTurn ? execBucket : undefined, willExecute,
+      });
+
+      // 选择合同已在上方处理：模型做语义分类，引擎核对本次给出的 key；
+      // unclear 再问且零执行，不复用普通批准的确认词表。
+
       // 其余全部分支（error / NOOP / 空 options / 正常命令）合用这一处：它们
       // 屏上显示的都是 data.brief（或它为空时各自的兜底行），所以耳朵听的也是它。
-      const speechPlan = sayToEar((data.brief as string) || "");
+      // ★第七轮：会动兵却**不自动执行**的那一格（桶 B 问一句／桶 C 先说代价）是引擎的裁定——
+      //   这里一声不出，那一问在它真正上屏的地方由 refuseAloud 念（静态问句当场、代价台词到了再念）。
+      //   旧写法在这里念模型的 spoken（「两个这就过去」「全军这就压上去」），而引擎其实没执行、在问长官。
+      const engineAsks = actionableTurn && !willExecute;
+      const speechPlan = engineAsks
+        ? sayToEar("", false, "engine")
+        : sayToEar((data.brief as string) || "", willExecute);
       if (data.error) {
         setError(data.error as string);
         setResponse(null);
@@ -2355,27 +2985,37 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         if (escalateId && getActiveEscalation(ch, state.time)?.actionId === escalateId) {
           clearEscalation(ch);
         }
-        if (data.brief) {
+        // ★刀壬 (审核 §五)：**会动兵的回合不把 data.brief 推进 context**。
+        //   它是模型在引擎跑之前写的方案（"准备让北线部队撤回前哨"）。推进去 ⇒
+        //   下一轮模型记得的是它以为发生的事；而真实结果（真人数、真落点、
+        //   被拒的原因）随后才由执行回执 / refuseAloud 推进来，覆盖不掉它。
+        //   计划不许压过结果：会动兵就不写，等结果那一句。
+        //   不会动兵的回合（咨询/反问）照旧写——那句话本身就是这一轮的全部事实。
+        if (data.brief && !willExecute) {
           pushContext(channelContextRef.current, ch, { role: "assistant", text: data.brief as string, time: state.time });
         }
 
-        const gate: { auto: boolean; reason?: string; playerNamedSquad?: boolean } =
-          (Array.isArray(data.options) && data.options.length >= 1)
-          // ④ 语音回合喂 heard——闸靠正则在长官的话里找锚（番号/领队名/「选中」），
-          //   没有文本它会把每一句都当成"长官没点名"。
-          ? canAutoExecute((data.options as AdvisorOption[])[0], isVoiceTurn ? heard : userMsg, state, [], isGroupChat, COMMANDER_REFS)
-          : { auto: false };
+        // 刀B：闸已在耳朵开口之前算过（willExecute 那一段）。这里**复用**，
+        // 不再算第二遍——两处各算一遍就会漂，而播报的诚实性正押在"说的和做的
+        // 是同一个判定"上。
+        const gate = execGate;
 
         const requestId = crypto.randomUUID();
-        const execCtx: ExecContext = { channel: ch, threadId: activeThreadOnChannel?.id, requestId, escalateId };
+        const execCtx: ExecContext = {
+          channel: ch, threadId: activeThreadOnChannel?.id, requestId, escalateId,
+          // 刀癸：盖印。四条批准路（auto / bucket A / 手点 / 高影响确认）共用这一份 ctx。
+          run: stampRun(gameEpochRef.current, state),
+          traceId,
+          playerText: isVoiceTurn ? heard : userMsg,
+        };
         latestRequestIdRef.current = requestId;
 
         if (gate.auto && (data.options as AdvisorOption[]).length >= 1) {
           const autoData = data as DisplayResponse;
-          setTimeout(() => handleApprove(autoData.options[0], 0, "auto", execCtx, autoData, speechPlan.speakExecReceipt), 0);
+          setTimeout(() => handleApprove(autoData.options[0], 0, "auto", { ...execCtx, freshPlan: true }, autoData, speechPlan.speakExecReceipt), 0);
         } else {
           const reason = gate.reason;
-          const opt0 = Array.isArray(data.options) ? (data.options as AdvisorOption[])[0] : undefined;
+          const opt0 = execOpt0; // 刀B：与 willExecute 同一份候选，不另取
           if (reason) {
             const intent0 = opt0?.intents?.[0] ?? opt0?.intent;
             console.log(`[P1 gate] no-auto reason=${reason}`, {
@@ -2394,7 +3034,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
           // Safety net stays: a brief that references squads which died in-flight must
           // never blind-execute — it disqualifies bucket A and falls through to ask/warn.
-          const staleRefs = detectStaleSquadRefs(data.options as AdvisorOption[] | undefined, state, COMMANDER_REFS);
+          const staleRefs = execStaleRefs;
 
           // Bucket A — clear command, player named no squad of their own → the advisor
           // picked. Auto-execute the recommended option; the persona's own reply and
@@ -2413,19 +3053,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           // 那条新安全行为的落点，留在闭包里就没有任何机器断言看得见它。
           // voiceTurn/heardPresent 由步 3 的语音回合接线喂进来；打字回合两者恒 false，
           // decideBucket 逐字等价于原来这两行。
-          const bucket = decideBucket({
-            gate,
-            hasOption: opt0 != null,
-            staleRefCount: staleRefs.length,
-            voiceTurn: isVoiceTurn,
-            heardPresent: heard.length > 0,
-          });
+          const bucket = execBucket;
 
           // `&& opt0` 只为让 TS 收窄类型——decideBucket 判到 "A" 时 hasOption 必为真，
           // 语义上是重复的，不是第二道判定。
           if (bucket === "A" && opt0) {
             setClarification(null);
-            setTimeout(() => handleApprove(opt0, 0, "auto", execCtx, data as DisplayResponse, speechPlan.speakExecReceipt), 0);
+            setTimeout(() => handleApprove(opt0, 0, "auto", { ...execCtx, freshPlan: true }, data as DisplayResponse, speechPlan.speakExecReceipt), 0);
           } else {
             // Bucket B (clarify) / C (confirm high_impact). Voice the concern/question.
             // high_impact → stash a LOCAL pending-confirm so the player's next confirm
@@ -2438,19 +3072,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
               // (phase "voicing" — nothing can consume it yet). 地基三 will slot
               // the async preflight voice between this registration and the
               // awaiting_reply flip below.
-              pendingContractRef.current = {
-                id: makePendingId(),
-                phase: "voicing",
-                channel: ch,
-                sessionId: SESSION_ID,
-                epoch: gameEpochRef.current,
-                createdAt: state.time,
-                expiresAt: state.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC,
-                opt: opt0,
-                data: data as DisplayResponse,
-                execCtx,
-                summary: `${opt0.label} — ${opt0.description}`,
-              };
+              registerApprovalPlan(state, ch, {
+                opt: opt0, data: data as DisplayResponse, execCtx, phase: "voicing", question: "照打还是留兵",
+              });
             }
             // ── 地基三: preflight VOICE for single-intent high-impact contracts.
             // The engine previews the order (pure), hands the exact cost facts
@@ -2502,8 +3126,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                   pendingContractRef.current = null;
                   return;
                 }
-                addMessage("warning", line, sNow.time, ch, undefined, "command_ack");
-                pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: sNow.time });
+                // 第七轮：代价那一问是引擎的裁定——屏／耳／context 同一句，经同一个出口。
+                // 第八轮：代价台词后面跟上**存下方案**的完整说法——点头批的就是这一份。
+                refuseAloud(sNow, ch, `${line} 要办的是：${describePlanForApproval(sNow, pcLive.opt.intents?.length ? pcLive.opt.intents : [pcLive.opt.intent])}。`, true);
                 pendingContractRef.current = { ...pcLive, phase: "awaiting_reply" };
               };
               const ac = new AbortController();
@@ -2528,13 +3153,16 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                   postConcern(engineFallback);
                 });
             } else {
-              const q = buildGateQuestion(reason, (data.brief as string) || "", staleRefs);
+              const q = buildGateQuestion(reason, (data.brief as string) || "", staleRefs,
+                reason === "high_impact" && pendingContractRef.current?.phase === "voicing"
+                  ? describePlanForApproval(state, pendingContractRef.current.opt.intents?.length ? pendingContractRef.current.opt.intents : [pendingContractRef.current.opt.intent])
+                  : undefined);
               // Voice-polish v1 (Codex-approved): the question renders ONCE as a
               // chat bubble — no parallel clarification banner with the same
               // text. pushContext + the pending contract above stay unchanged.
               setClarification(null);
-              addMessage("warning", q, state.time, ch, undefined, "command_ack");
-              pushContext(channelContextRef.current, ch, { role: "assistant", text: q, time: state.time });
+              // 第七轮：引擎不自动执行、要问长官——这一问屏／耳／context 同一句（refuseAloud）。
+              refuseAloud(state, ch, q, true);
               if (reason === "high_impact" && pendingContractRef.current?.phase === "voicing") {
                 // The concern is now VISIBLE — only from this moment may a reply
                 // consume the contract (no informed consent before display).
@@ -2547,11 +3175,18 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     };
 
     // ── Streaming path (default), with fallback to non-streaming ──
+    //
+    // ★复审 §二：**同一条命令只能执行一次**。
+    //   病：SSE 收到 options 后 `processAdvisorData` 已经执行了这一轮，可万一
+    //   之后读流再抛错（连接断在末尾、EOF 解析失败…），catch 会去走
+    //   `/api/command` 兜底、把**同一条命令再执行一遍**。标记放在 try 之外，
+    //   catch 才看得见。
+    let optionsProcessed = false;
     try {
       const streamRes = await fetch(`${API_URL}/api/command-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: takeSpeechDiag() }),
+        body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, traceId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: takeSpeechDiag() }),
       });
 
       if (!streamRes.ok || !streamRes.body) {
@@ -2593,9 +3228,15 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
               accumulatedText += event.content;
               setStreamingText(accumulatedText);
               // 语音回合正文不进耳朵（它是写给眼睛的那一版）——耳朵等 spoken。
+              // ★刀B（办法一）起，**打字回合也不在这里出声**：流式这一刻还不知道
+              //   这回合会不会动兵（模型先写正文、后写 JSON），念出去就收不回来。
+              //   正文改由 accumulatedText 缓着，裁决完在 sayToEar 整段放出。
+              //   这一行保留着不删：它是"边流边念"唯一的接线口，将来若改用
+              //   服务端先报回合类型（办法二），翻 planVoiceSpeech 一个字段即可复活。
               if (ttsEnabled && sendPlan.speakProseWhileStreaming) speak(event.content, ttsPersona);
             } else if (event.type === "options") {
               gotOptions = true;
+              optionsProcessed = true;   // ★这一轮已经处理过：兜底不许再来一遍
               setStreamingText(null);
               const data = event.content; // already an object, no double-parse
               // Override brief with streamed text if LLM didn't include it in JSON
@@ -2628,6 +3269,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
                 if (ttsEnabled && sendPlan.speakProseWhileStreaming) speak(event.content, ttsPersona);
               } else if (event.type === "options") {
                 gotOptions = true;
+                optionsProcessed = true;   // ★同上：EOF 兜底那一处也算处理过
                 setStreamingText(null);
                 const data = event.content;
                 if (accumulatedText && !data.brief) data.brief = accumulatedText.trim();
@@ -2648,6 +3290,17 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     } catch (streamErr) {
       // Fallback to non-streaming /api/command
       setStreamingText(null);
+      // ★复审 §二：这一轮的 options **已经处理过**（SSE 那一程执行完了），
+      //   之后才抛的错只是流尾巴上的事故。再走一次 `/api/command` 等于把同一条
+      //   命令执行第二遍——屏上两份回执、兵被派两次、台账记两笔。
+      //   选择合同的 stale 那一格是第二道网（同一个 selectionId 的第二次投递会
+      //   被判 inert），这一道是第一道：**根本不发第二个请求**。
+      if (optionsProcessed) {
+        console.debug("[Streaming] options already processed — fallback suppressed", streamErr);
+        setLoading(false);
+        return;
+      }
+
       const isStreamFailure = streamErr instanceof Error &&
         (streamErr.message === "stream_unavailable" || streamErr.message === "stream_no_options");
 
@@ -2659,7 +3312,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const res = await fetch(`${API_URL}/api/command`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: takeSpeechDiag() }),
+          body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, traceId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: takeSpeechDiag() }),
         });
         const data = await res.json();
         processAdvisorData(data);
@@ -2683,12 +3336,37 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   /** spoken 层 R2：`speakReceipt=false` ⇒ 这一轮耳朵已经从 spoken 那儿听过这件事，
    *  回执不再单独出声（屏上那行一个字不动）。默认 true＝分层之前的行为，
    *  所以没被改过的调用点（手点批准、打字词表快路）逐字等价。 */
-  const handleApprove = (opt: AdvisorOption, idx: number, mode: "auto" | "manual" = "manual", ctx?: ExecContext, sourceResponse?: DisplayResponse, speakReceipt: boolean = true) => {
+  const handleApprove = (
+    opt: AdvisorOption,
+    idx: number,
+    mode: "auto" | "manual" = "manual",
+    ctx?: ExecContext,
+    sourceResponse?: DisplayResponse,
+    speakReceipt: boolean = true,
+    /** 连续选择的原命令与稳定 key；名单在本次调用中重新取。 */
+    selectionProgress?: SelectionProgress,
+  ) => {
     const state = getState();
     if (!state) return;
 
-    const execCtx = ctx ?? responseExecCtxRef.current;
+    const execCtx0 = ctx ?? responseExecCtxRef.current;
+    // 第六轮：「模型这一轮新写的」只对这一次调用有意义；存进待确认方案 / 待答问题的那份上下文一律不带它。
+    const freshPlan = execCtx0?.freshPlan === true;
+    const execCtx = execCtx0 && freshPlan ? { ...execCtx0, freshPlan: undefined } : execCtx0;
     const ch = execCtx?.channel ?? getActiveChannel();
+
+    // ★刀癸 (审核 §六)：局印复核，排在**任何**写状态 / 发消息 / 下单之前。
+    //   四条批准路都带同一份 ctx，所以这一道一处就罩住全部；
+    //   跨局的旧回调静默作废（只留一条诊断，不污染新局的屏幕与 context）。
+    //   没盖印的 ctx 同样按作废处理（fail-closed）——但手点批准那条路
+    //   `ctx` 可能为空、由 responseExecCtxRef 兜底，它也是盖过印的。
+    if (!runGuardAllows(execCtx?.run, gameEpochRef.current, state)) {
+      state.diagnostics.push({
+        time: state.time, code: "STALE_RUN_DROPPED",
+        message: `跨局回调已作废（${judgeRunGuard(execCtx?.run, gameEpochRef.current, state)}）`,
+      });
+      return;
+    }
 
     // Validate: reject approve if response has already been cleared (stale click).
     if (mode === "manual" && !response) {
@@ -2696,9 +3374,195 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       return;
     }
 
-    const letter = ["A", "B", "C"][idx] ?? "?";
-    const cleanLabel = opt.label.replace(/^[ABC]:\s*/, '');
-    const intents = opt.intents ?? [opt.intent];
+    // 刀B：A/B/C 那个字母不再上屏（卡片早已砍掉，而它只出现在那句执行前的
+    // 方案标题里）。方案标题本身留着进诊断，供对账用。
+    const speakingPersona = COMMANDERS.find((c) => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
+    const progress: SelectionProgress = selectionProgress ?? {
+      optionSnapshot: cloneSelectionOption(opt),
+      optionIndex: idx,
+      selectionKeys: [],
+      requirements: [],
+      expiresAt: state.time + HIGH_IMPACT_CONFIRM_WINDOW_SEC,
+      selectedUnitIds: selectedIdsSnapshotRef.current ? [...selectedIdsSnapshotRef.current] : undefined,
+      sourceResponse: sourceResponse ?? response ?? undefined,
+    };
+    if (selectionProgress && state.time > progress.expiresAt) {
+      refuseAloud(state, ch, "刚才那道命令已经过期，整道命令没有执行，请重新下令。", speakReceipt);
+      return;
+    }
+    // 保持原有顺序：名下没兵／点名了别人麾下的队，先拒绝，不追问“哪一批”。
+    // 这里只读原命令；不冻结权限池，最终绑定和票据解析仍按实时权限取交集。
+    for (const intent of progress.optionSnapshot.intents) {
+      const auth = checkDispatchAuthority(state, speakingPersona, intent);
+      if (auth.kind === "denied") {
+        const who = COMMANDER_META[speakingPersona].label;
+        refuseAloud(state, ch,
+          auth.reason === "commands_no_forces"
+            ? `${who}名下没有部队，这道命令未执行——调兵请对带兵的指挥官说。`
+            : `那支部队不在${who}麾下，这道命令未执行——请对${COMMANDER_META[auth.ownerOfNamed!].label}下令。`,
+          speakReceipt);
+        return;
+      }
+    }
+    // ── 第六轮：数量读法（「两个」被按兵种拆成坦克两个＋步兵两个）⇒ 先问，零执行 ──
+    //   判定在 core（findQuantityAmbiguity）。排在「是哪一批」之前：「一共」读法会把一组合成一条，
+    //   来源的选择按下标记账，先定数量再选来源，下标就不会挪。答过的组记在 quantityConfirmed，
+    //   同一道命令里不再问同一组——**没有"下一轮豁免"**：豁免只认这份存下的答案，不认模型那一轮写了什么。
+    {
+      const said = execCtx?.playerText;
+      const confirmed = new Set(progress.quantityConfirmed ?? []);
+      const amb = findQuantityAmbiguity(progress.optionSnapshot.intents, said).find((a) => !confirmed.has(a.signature));
+      if (amb) {
+        traceClient(traceIdRef.current, "quantity_split", { signature: amb.signature, indexes: amb.indexes, said });
+        askQuantityReading(state, ch, amb, speakReceipt, progress, execCtx ?? undefined);
+        return;
+      }
+    }
+    // 在任何票据/目标原地改写之前扫描整组。未答完时，本次没有执行副作用。
+    const batch = planDispatchSelectionBatch({
+      state, allIntents: progress.optionSnapshot.intents,
+      selectionKeys: progress.selectionKeys, requirements: progress.requirements,
+      selectedUnitIds: progress.selectedUnitIds,
+      persona: speakingPersona, personaLabel: COMMANDER_META[speakingPersona].label,
+    });
+    if (batch.kind === "refuse") {
+      refuseAloud(state, ch, batch.line, speakReceipt);
+      return;
+    }
+    if (batch.kind === "ask") {
+      askWhichDispatch(
+        state, ch, batch.candidates, speakReceipt,
+        { ...progress, requirements: batch.requirements }, execCtx ?? undefined,
+        batch.intentIndex, false, batch.soleCandidate,
+      );
+      return;
+    }
+    // ── 引擎提出一份**完整方案**请长官点头（零执行）：存成待确认合同（同频道、同局、有期限、只消费一次），
+    //   长官同意时照常全链复核。第七轮把原先收窄提议里的那段登记抽成这一处，「要再派吗」共用它。
+    //   ★连同**已经选好的那一批**与答过的数量读法一起存（稳定 key，不存名单）——点头时照这份现查。
+    //   ★第八轮：问句**由存下的这份方案逐条生成**（core.describePlanForApproval：动作、来源、数量、去处），
+    //   调用方只给「为什么问」（reason）和「问什么」（ask）。长官点头批的＝问句里列出的＝存下的＝执行的。
+    //   旧写法由调用方拼问句：「要再派吗」只拿第一条命中的那一条说，「按北线前哨办吗」只说收窄的那一条，
+    //   而点头后执行的是整份方案（Codex 复现：只问北线再派 2 个，执行了北、南各 2 个）。
+    const proposeForApproval = (proposal: AdvisorOption, reason: string, ask: string) => {
+      const question = `${reason}——${ask}？`;
+      let line = `${question}这道命令先没有执行。`;
+      if (execCtx) {
+        const planText = registerApprovalPlan(state, ch, {
+          opt: proposal, data: (progress.sourceResponse ?? response) as DisplayResponse, execCtx,
+          phase: "awaiting_reply", question,
+          selection: {
+            ...progress,
+            optionSnapshot: cloneSelectionOption(proposal),
+            selectionKeys: progress.selectionKeys.map((k) => ({ ...k })),
+            requirements: batch.requirements.map((r) => ({ ...r, offeredKeys: [...r.offeredKeys] })),
+            selectedUnitIds: progress.selectedUnitIds ? [...progress.selectedUnitIds] : undefined,
+          },
+        });
+        line = `${question}要办的是：${planText}。这道命令先没有执行。`;
+      }
+      refuseAloud(state, ch, line, speakReceipt);
+      setClarification(null);
+    };
+
+    // 原 option 保持完整；后续 G-ticket/soft-fix 只改这份工作副本。
+    const workingOption = optionWithResolvedIntents(progress.optionSnapshot, batch.intents);
+    const cleanLabel = workingOption.label.replace(/^[ABC]:\s*/, '');
+    const intents = workingOption.intents;
+    const boundRosters = new Map<Intent, number[]>(
+      batch.bindings.map((b) => [intents[b.intentIndex], b.unitIds]),
+    );
+
+    // ── 刀寅：用过的 G 号 ⇒ 指**真走了的那一批**（台账任务），走主链 ──
+    //
+    // 票是一次性方案（烧了就不能按票上的名单再派一次），派出去的人是一条任务。
+    // 这里只把号换成任务号（fromDispatch），后面照旧过本局/权限/活成员现查/
+    // ApplyResult 回执——不另开一条执行入口。判定在 core（resolveTicketBatch）。
+    //   · 拆成了几拨 ⇒ 列出来问，整道命令零执行（不合并）；
+    //   · 一个活人都不剩 ⇒ 明说，零执行；
+    //   · 票没用过 ⇒ 原封不动交给下面的票据路。
+    // 整组先扫一遍再改写：任何一条要拒，整组都不动（与上面的整组预检同一个原则）。
+    const batchByIntent = new Map<Intent, string>();
+    for (const intent of intents) {
+      const tb = resolveTicketBatch(state, intent.fromSquad);
+      if (tb.kind === "refuse" || tb.kind === "split") {
+        refuseAloud(state, ch, tb.line, speakReceipt);
+        setClarification(tb.kind === "split" ? "请指明是哪一拨" : "那批人已经调不动了，请重新指明部队");
+        return;
+      }
+      if (tb.kind === "batch") batchByIntent.set(intent, tb.dispatchId);
+    }
+    for (const [intent, dispatchId] of batchByIntent) {
+      intent.fromSquad = undefined;
+      intent.fromFront = undefined; // 来源就是那一批人；战线字段在这里只会与它打架
+      intent.fromDispatch = dispatchId;
+    }
+
+    // ── 第七轮：模型这一轮新写的单子，与一次**还在办**的外派是同一件事，而长官这句话里没有它 ──
+    //   这时引擎分不清是「多余的答复」还是「要增援」——两种都可能，谁也不许替长官定：
+    //   不另派（不当增援），也不谎称「已经在办」（不当重复）。把这份单子原样存成待确认方案、
+    //   说清刚才那批还在路上，问他要不要再派；他点头才执行（批准过的方案不再过这一道）。
+    //   「这句话里有没有它」只用原话片段作证据（core.findSameTaskInProgress）：片段出自这一句
+    //   （「再派两个去北线前哨」）⇒ 新命令，照常增援。网络重投不走这里——同一请求只处理一次，见 processAdvisorData 顶部。
+    if (freshPlan) {
+      const hits = [...new Set(intents.map((it) => findSameTaskInProgress(state, it, execCtx?.playerText)?.dispatchId)
+        .filter((id): id is string => !!id))];
+      if (hits.length > 0) {
+        // 为什么问：每一次在办的外派各说一句（事实）；问什么、批什么：整份方案（proposeForApproval 生成）。
+        const reason = hits.map((id) => {
+          const d = findDispatch(state, id);
+          const live = d ? liveDispatchMembers(state, d).length : 0;
+          return `${d?.targetName ? `${d.targetName}那边` : "那边"}已经有 ${live} 个是刚才派去的，还在办`;
+        }).join("；");
+        traceClient(traceIdRef.current, "same_task_in_progress", { dispatchIds: hits, said: execCtx?.playerText ?? null });
+        proposeForApproval(cloneSelectionOption(progress.optionSnapshot), reason, "要再派吗");
+        return;
+      }
+    }
+
+    // ── 刀寅：每条命令自己的「去处原话」与它的目的地字段对一遍（判定在 core）──
+    //   只用**这份方案绑定的那一句原话**（execCtx.playerText：发出这份方案的那一轮；
+    //   确认回合执行的是存下的方案，用的也是存它那一轮的原话）。不翻历史、不借别的命令的地名。
+    //   整组先看完再动：任何一条对不上，整道命令都不执行，先问。
+    {
+      const said = execCtx?.playerText;
+      const checks = intents.map((it) => checkDestinationQuote(state, it, said));
+      if (checks.some((v) => v.kind !== "no_check" || v.reason !== "not_dispatch")) {
+        traceClient(traceIdRef.current, "destination_quote", { said, verdicts: checks });
+      }
+      const conflict = checks.find((v) => v.kind === "conflict");
+      if (conflict && conflict.kind === "conflict") {
+        refuseAloud(state, ch, conflict.verified
+          ? `您说的去处是「${conflict.quote}」，这道令写的是${conflict.wrote}，两处对不上——您要去哪儿？这道命令先没有执行。`
+          : `这道令写的去处是${conflict.wrote}，可它记下的去处原话是「${conflict.quote}」，两处对不上——您要去哪儿？这道命令先没有执行。`, speakReceipt);
+        setClarification("请说清楚去哪儿");
+        return;
+      }
+      const narrowed = checks.flatMap((v, i) => (v.kind === "narrowed" ? [{ v, i }] : []));
+      if (narrowed.length > 0) {
+        // 字段只写到了战线、长官点的是战线里的那个设施：**提出**按设施办，他点头才执行。
+        // 存成待确认合同（同频道、同局、有期限、只消费一次），执行时照常全链复核。
+        const proposal = cloneSelectionOption(progress.optionSnapshot);
+        for (const { v, i } of narrowed) {
+          if (v.kind !== "narrowed") continue;
+          const it = proposal.intents[i];
+          it.targetFacility = v.facilityId;
+          it.toFront = undefined;
+          it.targetRegion = undefined;
+        }
+        proposal.intent = proposal.intents[0] ?? proposal.intent;
+        // 为什么问：每一条被收窄的各说一句；问什么、批什么：整份方案（含没收窄的那几条）。
+        const fixes = narrowed.flatMap(({ v }) => (v.kind === "narrowed" ? [v] : []));
+        const reason = fixes.map((v) => v.verified
+          ? `您说的是${v.facilityName}，这道令只写到了${v.frontName}`
+          : `这道令只写到了${v.frontName}，记下的去处却是${v.facilityName}`).join("；");
+        const ask = `按${fixes.map((v) => v.facilityName).join("、")}办吗`;
+        proposeForApproval(proposal, reason, ask);
+        return;
+      }
+      // （不再"按引用补上去处"：字段没写去处本身就是完整的意思——审核实测补错一半以上。）
+      // （数量读法的检查已挪到「是哪一批」之前，见上。）
+    }
 
     // v4 刀2b: ticket rosters resolved for this option, keyed by the intent
     // they belong to. A ticket REPLACES scope resolution — the frozen roster
@@ -2712,27 +3576,44 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // intent identity; the intents array holds the same objects throughout.
     const ticketByIntent = new Map<Intent, EscalationTicket>();
     const ticketReceiptMode = new Map<Intent, "moved" | "in_place">();
+    // 刀寅（C）：票上原报的人与这次能派的人之间，**有证据的**差额原因（下令之前数清）。
+    const ticketGap = new Map<Intent, TicketGapFacts>();
+    // 刀C: fromDispatch 解析出来的合法名单（已与本参谋的可调池取交集）。
+    // 走新字段不等于绕过权限——G 号那条路踩过这个坑（手测账③ × B 刀）。
+    const dispatchRosters = new Map<Intent, number[]>();
 
     // 手测账③: who is being spoken to decides what they may move. This is the
     // ENGINE BACKSTOP — the primary fix is the prompt principle (a persona with
     // no forces should never emit a dispatch intent in the first place). By the
     // time we are here the model has already spoken, so this tier is the
     // degraded one: state the structural fact, execute nothing.
-    const speakingPersona = COMMANDERS.find((c) => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
 
     for (const intent of intents) {
       const auth = checkDispatchAuthority(state, speakingPersona, intent);
-      if (auth.kind === "denied") {
-        const who = COMMANDER_META[speakingPersona].label;
-        addMessage(
-          "warning",
-          auth.reason === "commands_no_forces"
-            ? `${who}名下没有部队，这道命令未执行——调兵请对带兵的指挥官说。`
-            : `那支部队不在${who}麾下，这道命令未执行——请对${COMMANDER_META[auth.ownerOfNamed!].label}下令。`,
-          state.time, ch, undefined, "command_ack",
-        );
-        return;
+
+      // ── 刀C: fromDispatch 的权限闸 ──
+      // 任务号既不是分队名也不是 G 号，上面那道 checkDispatchAuthority 看不见它
+      // ——不补这一刀，一份冻结的名单就会不经过滤地执行。
+      // 名单本身由引擎在 resolveSourceUnits 里**现查**（人会死、会被改派）；
+      // 这里只做"这位参谋调不调得动他们"。交集为空 ⇒ 明确拒绝，绝不静默少派。
+      if (intent.fromDispatch) {
+        const d = findDispatch(state, intent.fromDispatch);
+        if (d) {
+          const live = liveDispatchMembers(state, d).map((u) => u.id);
+          const pool = auth.kind === "allowed" ? new Set(auth.pool) : null;
+          const lawful = pool ? live.filter((id) => pool.has(id)) : live;
+          if (lawful.length === 0) {
+            const who = COMMANDER_META[speakingPersona].label;
+            refuseAloud(state, ch, `任务 ${d.id} 那批人不在${who}麾下，这道命令未执行——请对带这支部队的指挥官下令。`, speakReceipt);
+            return;
+          }
+          dispatchRosters.set(intent, lawful);
+        }
+        // 找不到这条任务 ⇒ 不在这里兜底。引擎的 resolveSourceUnits 会明确失败
+        // （「任务 M3 已经不在了」），那条路只废掉这一条意图，不连坐同批的其它意图。
       }
+
+      // 整组歧义已在上述无副作用预检完成；从这里开始不再中途挂起提问。
 
       // v4 刀2b: a G-number is the ONE legal handle for "那批兵". Resolved
       // before the squad check below, which would otherwise reject it as an
@@ -2740,7 +3621,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // a spoken reason — never a silent fallback (the soft-fix family).
       const tk = resolveTicketReference(state, intent.fromSquad, state.time);
       if (tk.kind === "refuse") {
-        addMessage("warning", tk.line, state.time, ch, undefined, "command_ack");
+        refuseAloud(state, ch, tk.line, speakReceipt);
         setClarification("增援案不可用，请重新指明部队");
         return;
       }
@@ -2755,16 +3636,22 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const lawful = pool ? tk.unitIds.filter((id) => pool.has(id)) : tk.unitIds;
         if (lawful.length === 0) {
           const who = COMMANDER_META[speakingPersona].label;
-          addMessage("warning", `${spokenNameOf(tk.ticket)} 不在${who}麾下，这道命令未执行——请对带这支部队的指挥官下令。`, state.time, ch, undefined, "command_ack");
+          refuseAloud(state, ch, `${spokenNameOf(tk.ticket)} 不在${who}麾下，这道命令未执行——请对带这支部队的指挥官下令。`, speakReceipt);
           return;
         }
         ticketRosters.set(intent, lawful);
         ticketByIntent.set(intent, tk.ticket);
+        ticketGap.set(intent, ticketGapFacts(state, tk.ticket, lawful));
         // 刀C: NO receipt is written here. It used to be — with lawful.length,
         // before the resolver had run — and that is how a roster of 6 under a
         // quantity=2 order dispatched 2 units and printed "6个单位出发了"
-        // (§7⑤). The receipt is settled after resolveIntent, off the real
+        // (§7⑤). The receipt is settled after resolveIntent, off
         // assignedUnitIds, or not printed at all.
+        // ★刀B 之后这句注释的措辞要改口：assignedUnitIds 是**解析器选中的人**，
+        //   不是"the real"——真下出去的令在 ApplyResult 里。这条升级票回执仍从
+        //   assignedUnitIds 取数，是**第二个真相源**，登记为技术债：今天两个数
+        //   恒等（isDispatchablePlayerUnit 覆盖了 applyOrders 四道过滤的全部四种
+        //   情况），所以是债不是 bug；哪天那个覆盖关系变了，这里会先说谎。
         // The roster IS the scope now; leaving the G-number in fromSquad would
         // send the squad resolver looking for a squad that does not exist.
         intent.fromSquad = undefined;
@@ -2787,7 +3674,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const isSquad = state.squads?.some(s => s.id === intent.fromSquad || s.leaderName?.toLowerCase() === fs);
         const isCommander = COMMANDERS.some(c => c === fs || COMMANDER_META[c].label.includes(intent.fromSquad!));
         if (!isSquad && !isCommander) {
-          addMessage("warning", `找不到叫「${intent.fromSquad}」的分队，命令未执行——请用编制里的编号或队长名字重新下令`, state.time, ch, undefined, "command_ack");
+          refuseAloud(state, ch, `找不到叫「${intent.fromSquad}」的分队，命令未执行——请用编制里的编号或队长名字重新下令`, speakReceipt);
           setClarification(`分队「${intent.fromSquad}」无法识别，请重述`);
           return;
         }
@@ -2808,7 +3695,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
       if (!isValidTarget(intent, state, COMMANDER_REFS)) {
         const field = intent.targetFacility || intent.toFront || intent.fromFront || intent.targetRegion || "unknown";
-        addMessage("warning", `目标 ${field} 不存在`, state.time, ch, undefined, "command_ack");
+        refuseAloud(state, ch, `目标 ${field} 不存在`, speakReceipt);
         setClarification("命令引用了不存在的目标，请重新描述");
         return;
       }
@@ -2822,7 +3709,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       if (boundTicket) {
         const verdict = ticketDestinationVerdict(state, intent, boundTicket, wroteDestination);
         if (verdict.kind === "refuse") {
-          addMessage("warning", verdict.line, state.time, ch, undefined, "command_ack");
+          refuseAloud(state, ch, verdict.line, speakReceipt);
           setClarification(
             verdict.reason === "unknown_place" ? "目的地无法定位，请换个地名" : "请指明目的地",
           );
@@ -2846,43 +3733,111 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // An intent that produced no orders contributes NOTHING here — no receipt,
     // and its ticket is not burned, so the proposal stays usable (the degraded
     // warning above is already the honest word about what happened).
-    const settled: { ticket: EscalationTicket; dispatched: number; mode: "moved" | "in_place" }[] = [];
-    for (const intent of intents) {
+    // 刀寅：只记「哪张票对应哪一条回执」；烧不烧票、报几个，一律等 ApplyResult。
+    const settled: { ticket: EscalationTicket; sliceIndex: number }[] = [];
+    // 刀寅：这些人是按**他们自己那一批的身份**被叫到的（fromDispatch）——对那批人改令，
+    //   不是"把带任务的人抽走"，不进 H1 的抽调披露。
+    const readdressed = new Set<number>();
+    // 刀B：意图 → 它的 order 下标 + 落点名。执行回执唯一的取数口。
+    const slices: DispatchSlice[] = [];
+    // 刀乙：规划阶段失败的理由，原样留一份给"零 orders"那条早退路念出去。
+    const degradedLines: string[] = [];
+    // 刀寅：对账行——改写之后真正交给解析器的意图、解析出的落点、下出去的令。
+    const execTrace: Record<string, unknown>[] = [];
+    // 刀寅：解析器带回的「同一条意图里没动的人」及原因（例：没记下出发地）。并进同一句回执。
+    const shortfallLines: string[] = [];
+    for (let intentIdx = 0; intentIdx < intents.length; intentIdx++) {
+      const intent = intents[intentIdx];
       // v4 刀2b: a ticket's frozen roster wins over the box-select snapshot —
       // the player approved THAT batch, not whatever is currently framed.
+      // 刀C/刀己: 名单优先级 —— 票据 > **绑定选择** > 框选 > 任务。
+      // 绑定选择排在框选之前：它是长官对"是哪一批"这一问的**当场答复**，
+      // 比可能早已陈旧的框选快照更贴这一条命令（框选那条路自己也不会进到这儿
+      // ——有框选时枚举直接返回空，根本不会问）。
       const result = resolveIntent(
         intent, state, state.style, reserved,
-        ticketRosters.get(intent) ?? selectedIdsSnapshotRef.current,
+        ticketRosters.get(intent) ?? boundRosters.get(intent) ?? progress.selectedUnitIds ?? dispatchRosters.get(intent),
       );
+      execTrace.push({
+        i: intentIdx, intent: intentFacts(intent as unknown as Record<string, unknown>),
+        destination: result.destinationName, degraded: result.degraded ? result.log : undefined,
+        orders: result.orders.map((o) => ({ action: o.action, units: o.unitIds, target: o.target })),
+      });
       if (result.degraded) {
+        // 先收集事实，整批完成后按同一顺序送到屏、声音与 context。
         degradedCount++;
-        addMessage("warning", result.log, state.time, ch, undefined, "command_ack");
+        degradedLines.push(result.log);
       } else {
-        addMessage("info", `执行: ${result.log}`, state.time, ch, undefined, "command_ack");
+        // ★刀B：`执行: ${result.log}` 不许再上屏。它来自执行**之前**的计划——
+        //   计划选中 8 个、applyOrders 的四道过滤只放行 5 个，留着它就会出现
+        //   "屏上 8 个、耳朵 5 个"。计划日志降为对账用的诊断，玩家面前的执行
+        //   回执一律等 ApplyResult（见下面 buildExecReceipt 那一段）。
+        state.diagnostics.push({
+          time: state.time,
+          code: "PLAN_LOG",
+          message: result.log,
+        });
+        if (result.note) shortfallLines.push(result.note);
       }
       const boundTicket = ticketByIntent.get(intent);
       if (boundTicket && result.orders.length > 0) {
-        settled.push({
-          ticket: boundTicket,
-          dispatched: result.assignedUnitIds.length,
-          mode: ticketReceiptMode.get(intent) ?? "moved",
-        });
+        settled.push({ ticket: boundTicket, sliceIndex: slices.length });
       }
+      if (intent.fromDispatch) for (const id of result.assignedUnitIds) readdressed.add(id);
       for (const id of result.assignedUnitIds) reserved.add(id);
       allAssignedUnitIds.push(...result.assignedUnitIds);
-      allOrders.push(...result.orders);
+      // 刀B：记下这条意图占了 allOrders 的哪几格，外加**引擎真送他们去的地方**。
+      // applyOrders 按下标回报结果，回执据此逐条意图对账——不靠猜、不靠合并。
+      if (result.orders.length > 0) {
+        const base = allOrders.length;
+        // 刀甲/刀庚：经济单（produce/trade）没有人头，不参与按人头的结局判定；
+        // 它的回执由引擎回报的**真实结算**生成（真件数/真花费/真原因），
+        // 计划那一行不再进回执。判的是字段形状（意图类型），不是措辞。
+        const economy = !isDispatchIntent(intent.type);
+        // 刀寅（C）：票据那一条的回执就是这一条的**唯一一句**，按实际下令人数现写。
+        const gap = ticketGap.get(intent);
+        const receiptMode = ticketReceiptMode.get(intent) ?? "moved";
+        const destinationName = result.destinationName;
+        // 刀寅：按批次指代时，「已在办」说那批人正在去的地方（台账记的，下令之前读）。
+        const addressedBatch = intent.fromDispatch ? findDispatch(state, intent.fromDispatch) : undefined;
+        slices.push({
+          action: intent.type,
+          destinationName,
+          orderIndexes: result.orders.map((_, k) => base + k),
+          ...(economy ? { economy: true } : {}),
+          ...(addressedBatch?.targetName && addressedBatch.action === intent.type
+            ? { alreadyDestinationName: addressedBatch.targetName } : {}),
+          ...(boundTicket ? {
+            appliedLine: (n: number) => ticketDispatchReceipt(boundTicket, n, receiptMode, { destinationName, gap }),
+          } : {}),
+        });
+        // ── 刀C: 给这批 order 盖上来源标记，台账据此登记 ──
+        // 记账只认这个标记，不认调用的是哪个函数：对话派兵走 applyOrders，
+        // 鼠标派兵走 applyPlayerCommands（后者还会盖 manualOverride）。
+        // ★ 一句话安排两个任务 ⇒ 两个 group ⇒ 两条记录，各记各的名单。
+        // ★ advisor 这条路**不设 manualOverride**——陈派的兵不算"玩家手动接管"。
+        const meta: DispatchMeta = {
+          group: `i${intentIdx}`,
+          // 刀寅：凭票派的兵，来源就是那张票。票据改写已经把 fromSquad/fromFront
+          //   清掉了，这时再按字段判只剩 pool／空串——台账从此查不到它从哪儿来。
+          ...(boundTicket
+            ? { sourceKind: "ticket" as const, sourceKey: boundTicket.gNumber, ticketLabel: spokenNameOf(boundTicket) }
+            : dispatchSourceOf(intent, progress.selectedUnitIds)),
+          ...(intent.returnTo === "origin" ? { returnTo: "origin" as const } : {}),
+          action: intent.type,
+          targetName: result.destinationName,
+        };
+        allOrders.push(...result.orders.map((o) => ({ ...o, origin: "advisor" as const, dispatchMeta: meta })));
+      } else {
+        allOrders.push(...result.orders);
+      }
     }
 
     if (allOrders.length === 0 && degradedCount > 0) {
-      // 刀A（2026-08-19）：这里原来在具体理由之外，还要再补一句泛化的"无法执行"
-      // 消息＋一条"请重述"黄条（clarification banner）。两句都删了，理由有三：
-      // ① 结构性冗余——上面 :2771 那行已经把**具体**理由打出来了（degradedCount
-      //    只在 result.degraded 时才加，而同一循环必先打 result.log）；
-      // ② 它冤枉玩家——能走到这里说明模型**听懂了**并给出了结构化 intent，
-      //    是引擎判定做不到（例：「指挥官不是能生产的单位」）。真正的"没听懂"
-      //    另有其路（模型返回 options:[] 那条，:2223 起），那条才该说请重述；
-      // ③ 姊妹路径 handleThreadApprove（:1645 起）跑同一个循环，从来没有这个块。
-      // 保留 setApprovedIdx 的闪烁与 return——它们是执行反馈，不是措辞。
+      traceClient(traceIdRef.current, "exec", { intents: execTrace, applied: [], receipt: degradedLines });
+      // 全部在规划阶段失败时也走同一个拒绝出口，屏、声音与 context 一起发布。
+      // 不再追加泛化的“无法执行／请重述”，只发布引擎给出的具体理由。
+      refuseAloud(state, ch, degradedLines.join(" "), speakReceipt);
       setApprovedIdx(idx);
       setTimeout(() => setApprovedIdx(null), 400);
       return;
@@ -2892,26 +3847,58 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // Pick personality-appropriate voice confirmation
       const approveCommander = COMMANDERS.find(c => COMMANDER_CHANNEL[c] === ch) ?? COMMANDERS[0];
       const voiceConfirm = pickVoiceConfirm(approveCommander);
-      if (mode === "auto") {
-        addMessage("info", `${voiceConfirm} ${cleanLabel}`, state.time, ch, undefined, "command_ack");
-      } else {
-        addMessage("info", `${voiceConfirm} Executing ${letter}: ${cleanLabel}`, state.time, ch, undefined, "command_ack");
-      }
-      // TTS readback of confirmation (its own short stream — speak()
-      // detects persona switch from any prior stream and cancels cleanly).
-      // spoken 层 R2：spoken 在场的语音回合里这一声并进 spoken 了（见
-      // voiceSpeech.ts 的序列注释）——屏上那行照写，只是不再念第三遍。
-      if (ttsEnabled && speakReceipt) {
-        speak(voiceConfirm, approveCommander);
-      }
+      // ★刀B：`${voiceConfirm} ${cleanLabel}` 这一行原先打在 applyOrders **之前**，
+      //   而 cleanLabel 是模型写的方案标题——「让北线部队撤回前哨」。四道过滤把
+      //   人全挡住时，屏上照样留着这句，正是"没司令感"那笔账的同一张脸。
+      //   现在它拆成两半：`voiceConfirm`（应答，不宣称结果）留在这儿，
+      //   方案标题连同人数/落点一起并进执行后的回执。
+      //   方案标题进诊断（EXEC_PLAN_LABEL）留作对账，不再当执行回执用。
+      addMessage("info", voiceConfirm, state.time, ch, undefined, "command_ack");
+      state.diagnostics.push({ time: state.time, code: "EXEC_PLAN_LABEL", message: cleanLabel });
       // H1 (§8 手测 03:15): read BEFORE applyOrders — that call overwrites
       // state/orders, after which every unit looks equally busy on the NEW
       // task and "what did we tear them off" is unrecoverable. Judgment is in
       // core; this layer only prints the verdict.
-      const committedPull = describeCommittedPull(state, allAssignedUnitIds);
+      const committedPull = describeCommittedPull(state, allAssignedUnitIds.filter((id) => !readdressed.has(id)));
 
       const diagsBefore = new Set(state.diagnostics);
-      applyOrders(state, allOrders);
+      const applyRes = applyOrders(state, allOrders);
+      // 刀寅（审核 B）：这个频道刚真办了一道令——之前还挂着等点头的方案作废（一次只挂一个问题）。
+      if (applyRes.appliedUnitIds.length > 0 && pendingContractRef.current?.channel === ch) {
+        pendingContractRef.current = null;
+      }
+
+      // ── ★刀B 的落点：执行回执。文字与声音共用**这同一个字符串** ──
+      //
+      // 取数只认 `applyRes`（执行层真对谁下了令），不认 result.assignedUnitIds
+      // （那是"计划选中的人"，还要再过四道过滤），更不认 data.brief。
+      // 「人数/对象/目的地/成败」四项一致因此是构造保证，不是事后比对。
+      // 措辞只说"下令"，不说"抵达"——到没到由战场自己说。
+      const execReceipt = buildExecReceipt(applyRes, slices);
+      // 规划失败与实际执行结果先合并，再以同一顺序发布到屏、声音与 context。
+      const feedback = buildExecFeedback(execReceipt, degradedLines, shortfallLines);
+      traceClient(traceIdRef.current, "exec", {
+        intents: execTrace, applied: applyRes.appliedUnitIds, already: applyRes.alreadyDoingUnitIds,
+        rejected: applyRes.rejectedUnitIds, receipt: feedback.lines,
+      });
+      for (const line of feedback.lines) {
+        addMessage(
+          // ★刀辛：只要有没办成的部分，整条就不许伪装成纯成功的 info。
+          feedback.outcome === "none" || feedback.outcome === "partial" ? "warning" : "info",
+          line, state.time, ch, undefined, "command_ack",
+        );
+        // 喂给模型的上下文与**真正播报出去的那句**同步。旧写法只推 data.brief
+        // ——那是执行之前的方案标题，于是下一轮模型记得的是它以为发生的事。
+        pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
+      }
+      // 耳朵：会动兵的回合，上面那一层（spoken/正文）已经一声不出，这里才是
+      // 这一轮唯一的一声——而且它念的是真结果。屏上那句 voiceConfirm 一起念，
+      // 免得耳朵从"数字"开头。
+      if (ttsEnabled && speakReceipt && feedback.spokenText) {
+        // 念的是**合并后的那一段**：成功与没办成的两部分都在里面。
+        speak(`${voiceConfirm} ${feedback.spokenText}`, approveCommander);
+        flush(approveCommander);
+      }
 
       // v4 刀2b: burn AFTER the orders are actually applied — a ticket that
       // failed to produce orders must stay usable. One-shot from here on: the
@@ -2922,12 +3909,14 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       // burned nor receipted — it was never spent. The number in the receipt is
       // the number the resolver actually assigned, so quantity limits, terrain
       // skips and casualties are all reconciled out loud rather than assumed.
+      //
+      // 刀寅：烧票只看 **ApplyResult**——这张票对应的那一条真有人接到命令才烧。
+      //   回执已经在上面那份 feedback 里（同一句屏/耳/context），这里不再补第二行。
+      const spentTickets: string[] = [];
       for (const s of settled) {
+        if ((execReceipt.facts[s.sliceIndex]?.appliedCount ?? 0) === 0) continue;
         burnEscalationTicket(s.ticket.gNumber);
-        addMessage(
-          "info", ticketDispatchReceipt(s.ticket, s.dispatched, s.mode),
-          state.time, ch, undefined, "command_ack",
-        );
+        spentTickets.push(s.ticket.gNumber);
       }
 
       // H1: pulling committed troops is the commander's call — doing it without
@@ -2947,7 +3936,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const targets = intents
           .map((i) => i.toFront ?? i.targetFacility ?? i.targetRegion ?? i.fromFront ?? "unspecified")
           .join("+");
-        const spent = settled.map((s) => s.ticket.gNumber);
+        const spent = spentTickets;
         state.diagnostics.push({
           time: state.time,
           code: "V4_BARE_CONFIRM_EXEC",
@@ -2957,19 +3946,20 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         });
       }
 
-      // Surface economy failures (produce/trade) the engine recorded as
-      // diagnostics during this apply — otherwise insufficient money/fuel/stock
-      // stays silent. Affordability is the engine's decision; the frontend only
-      // voices it. Object-identity diff is robust to the 50-entry ring buffer.
-      for (const d of state.diagnostics) {
-        if (diagsBefore.has(d)) continue;
-        if (d.code === "PRODUCE_FAIL" || d.code === "TRADE_FAIL") {
-          addMessage("warning", d.message, state.time, ch, undefined, "command_ack");
-        }
-      }
+      // ★刀庚 (审核 §三)：经济结算的**权威回执已经在上面那份 execReceipt 里**
+      //   （真件数 / 真花费 / 真原因，来自引擎回报的 EconomyOutcome）。
+      //
+      //   刀丁当时是从 `state.diagnostics` 里捞 PRODUCE_FAIL / TRADE_FAIL 补上屏
+      //   与补声——那是把诊断当回执的数据总线，而且只捞到两个码：预算结算走的是
+      //   PRODUCE_BUDGET / TRADE_BUDGET，完全失败时屏上一句失败都没有、只有那句
+      //   假成功。现在原因随结算一起回来，屏/耳/context 同源，这一圈**整段退场**。
+      //   诊断本身照旧推（调试与系统日志要它），只是不再当玩家回执用。
+      //   ——被 degraded 拦在 resolver 的那些（未知单位类型 / 不可生产）走的是
+      //   上面 `result.log` 那条路，与本段无关，一个字节没动。
+      void diagsBefore;
 
       // Process doctrine fields at approve time (not at response time)
-      const docSource = sourceResponse ?? response;
+      const docSource = progress.sourceResponse;
       if (docSource) {
         processDoctrineFields(docSource as unknown as Record<string, unknown>, state, ch, intents);
       }
@@ -3032,14 +4022,12 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       }
 
       // ── Step 7e.1: record this decision for the engine's later outcome review ──
-      // ONLY this main command path records. handleThreadApprove (the OTHER
-      // applyOrders call site, dormant since 6a), right-click manual orders and
-      // produce/trade are deliberately NOT recorded (deferred — see decisionReview.ts).
+      // Only this main command path records (thread approvals delegate here).
+      // Right-click manual orders and produce/trade are not recorded.
       // The engine gates recording (battlefield anchor + unit floor) and later
       // decides whether/who reviews; nothing here executes or voices anything.
       // assignedUnitIds are resolveIntent's picks filtered to living units
-      // ("resolved assigned units") — applyOrders returns void, so this is NOT a
-      // claim about what was finally applied.
+      // ("resolved assigned units"), not a claim about what was finally applied.
       const reviewIntent = intents.find((i) => isReviewableIntentType(i.type));
       if (reviewIntent && isReviewableIntentType(reviewIntent.type)) {
         const record = captureDecisionReview(state, {
@@ -3068,7 +4056,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       if (opt.reward > 0.6) updateStyleParam(state.style, "objectiveBias", 1);
       else if (opt.reward < 0.3) updateStyleParam(state.style, "objectiveBias", -1);
       const letter = ["A", "B", "C"][idx];
-      if (response && letter !== response.recommended) {
+      if (progress.sourceResponse && letter !== progress.sourceResponse.recommended) {
         updateStyleParam(state.style, "casualtyAversion", 1);
       }
     }

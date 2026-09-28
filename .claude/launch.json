@@ -192,6 +192,22 @@
         ".claude/start-squadp-web.sh"
       ],
       "port": 3027
+    },
+    {
+      "name": "retreat-api",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-retreat-api.sh"
+      ],
+      "port": 3028
+    },
+    {
+      "name": "retreat-web",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        ".claude/start-retreat-web.sh"
+      ],
+      "port": 3029
     }
   ]
 }

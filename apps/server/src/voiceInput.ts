@@ -25,9 +25,10 @@ export const MAX_AUDIO_B64 = 1_400_000;
  *  ② **形状**：只认 wav + 非空 b64 + 长度上限。
  *  ③ **能力闸挂 provider 不挂 provider 类**：ops 的 deepseek 与 gemini 共用
  *     OpenAICompatibleProvider，音频若送进 ops 会被原样转发、换回一个 400，再被
- *     callAdvisor 的 catch 变成 createFallbackResponse——而那份兜底带着可执行
- *     intent、客户端从不看 warning ⇒ 一句听不懂的话最后变成自动下单。所以这道闸
- *     必须在服务端硬拦；客户端那层 capability 探测只是皮，不是闸。
+ *     callAdvisor 的 catch 变成 createFallbackResponse——那份兜底当年带着可执行
+ *     intent、客户端从不看 warning ⇒ 一句听不懂的话最后变成自动下单。（第六轮起兜底
+ *     不带 options、标出 failure，客户端见 failure 零执行；这道闸仍在服务端硬拦——
+ *     客户端那层 capability 探测只是皮，不是闸。）
  */
 export function rejectCommandBody(audio: unknown, message: unknown, channel: unknown): string | null {
   const hasMessage = typeof message === "string" && message.trim().length > 0;

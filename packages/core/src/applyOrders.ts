@@ -3,10 +3,11 @@
 // All orders flow through here → mutate GameState
 // ============================================================
 
-import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask } from "@ai-commander/shared";
+import type { GameState, Order, Unit, Position, TradeType, TradeBudget, ProduceBudget, UnitType, PatrolTask, ApplyResult, ApplyOrderOutcome, OrderRejectReason, IntentType, EconomyOutcome, EconomyOpKind } from "@ai-commander/shared";
 import { TRADE_COSTS, UNIT_STATS, UNIT_DISPLAY_NAME, isProducibleUnitType } from "@ai-commander/shared";
 import { enqueueProduction } from "./economy";
 import { findPath, clearPathCache } from "./pathfinding";
+import { recordPlayerDispatch } from "./dispatchLedger";
 
 /**
  * Compute a shared A* path for a group of units heading to the same target.
@@ -38,12 +39,40 @@ function computeGroupPath(units: Unit[], target: Position, state: GameState): Po
 /**
  * Apply a batch of orders to the game state.
  * This is the ONLY entry point for modifying unit behavior.
+ *
+ * retreat-scope 刀B: it now REPORTS what it actually did. The four filters
+ * below silently dropped units, and this function returned `void` — so every
+ * player-facing receipt upstream had to recite the PLAN ("8 个单位撤退至…")
+ * even when only five of them ever got the order. 文字、声音、台账三者从此
+ * 共用这一份结果，不再各自取数。
  */
-export function applyOrders(state: GameState, orders: Order[]): void {
-  for (const order of orders) {
-    // Economy orders are state-level, not unit-level
+export function applyOrders(state: GameState, orders: Order[]): ApplyResult {
+  const perOrder: ApplyOrderOutcome[] = [];
+  // 刀寅：接到这批令**之前**，每个人是否还在路上（离上一道令的落点还远）。
+  //   台账据此判断这次是同一次外派的改令（起点延续），还是到达之后的新一次外派。
+  //   必须在下令之前取——下完令 unit.orders 就换成新的了。
+  const enRouteBefore = snapshotEnRoute(state, orders);
+
+  for (let orderIndex = 0; orderIndex < orders.length; orderIndex++) {
+    const order = orders[orderIndex];
+    const outcome: ApplyOrderOutcome = {
+      orderIndex,
+      action: order.action,
+      appliedUnitIds: [],
+      alreadyDoingUnitIds: [],
+      rejected: [],
+    };
+    perOrder.push(outcome);
+
+    // Economy orders are state-level, not unit-level. They carry no unitIds,
+    // so the outcome stays empty — affordability failures are already voiced
+    // from state.diagnostics (PRODUCE_FAIL / TRADE_FAIL) and are not a
+    // per-unit fact this result can speak to.
     if (order.action === "produce" || order.action === "trade") {
-      handleEconomyOrder(order, "player", state);
+      // 刀庚：经济单的真实结算挂在这一条 order 的结果上。回执据此报真数，
+      // 不再复述计划那一行（实测：$170 造 3 个只成 2 个，旧回执照说「×3」）。
+      const econ = handleEconomyOrder(order, "player", state);
+      if (econ) outcome.economy = econ;
       continue;
     }
 
@@ -51,11 +80,20 @@ export function applyOrders(state: GameState, orders: Order[]): void {
     const eligibleUnits: Unit[] = [];
     for (const unitId of order.unitIds) {
       const unit = state.units.get(unitId);
-      if (!unit) continue;
-      if (unit.team !== "player") continue;
-      if (unit.isPlayerControlled && !order.isPlayerCommand) continue;
-      if (unit.manualOverride && !order.provisional && !order.isPlayerCommand) continue;
-      eligibleUnits.push(unit);
+      const reason: OrderRejectReason | null =
+        // 刀B 收紧一处（1 行语义，故意为之）：`state === "dead"` 也算"不在了"。
+        // 尸体在 sim 的下一拍才从表里删掉，中间这一帧它会照收命令、照进计数——
+        // 于是回执报"已下令 4 个"，其中一个是死人。回执诚实的前提是计数诚实。
+        !unit || unit.state === "dead" ? "unit_gone"
+        : unit.team !== "player" ? "not_player_unit"
+        : unit.isPlayerControlled && !order.isPlayerCommand ? "player_controlled"
+        : unit.manualOverride && !order.provisional && !order.isPlayerCommand ? "manual_override"
+        : null;
+      if (reason) {
+        outcome.rejected.push({ unitId, reason });
+        continue;
+      }
+      eligibleUnits.push(unit!);
     }
 
     // Compute shared A* path for the group (leader = unit closest to centroid)
@@ -68,15 +106,101 @@ export function applyOrders(state: GameState, orders: Order[]): void {
     }
 
     for (const unit of eligibleUnits) {
-      applyOrderToUnit(unit, effectiveOrder, state);
+      const outcomeKind = applyOrderToUnit(unit, effectiveOrder, state);
+      if (outcomeKind === "already_doing") outcome.alreadyDoingUnitIds.push(unit.id);
+      else outcome.appliedUnitIds.push(unit.id);
     }
   }
+
+  // ── 刀C: 台账登记。**只认 `order.origin`**，不认调用的是哪个函数 ──
+  //
+  // 为什么不能按入口认：`applyPlayerCommands` 是鼠标专用（注释写着 from mouse
+  // interaction，而且它给每个单位盖 `manualOverride = true`），对话派兵走的是
+  // `applyOrders`。按入口记账只有两种坏结局：说话派出去的兵一条都不入账，
+  // 或者把陈派的每个兵都盖上"手动接管"，砸掉现有控制规则。
+  //
+  // 登记用的是 **appliedUnitIds**——真接到命令的那些人。计划选中的不算数。
+  // 幂等跳过（alreadyDoing）那批不摘也不记：它们本来就在执行同一件事。
+  recordLedgerEntries(state, orders, perOrder, enRouteBefore);
+
+  return summarizeApply(perOrder);
+}
+
+/** 离落点多远以内算「到了」。 */
+const ARRIVED_RADIUS = 2.5;
+
+function snapshotEnRoute(state: GameState, orders: Order[]): Map<number, boolean> {
+  const out = new Map<number, boolean>();
+  for (const o of orders) {
+    if (o.origin !== "advisor" && o.origin !== "mouse") continue;
+    for (const id of o.unitIds) {
+      if (out.has(id)) continue;
+      const u = state.units.get(id);
+      const cur = u?.orders[0];
+      const tgt = cur?.target;
+      out.set(id, !!(u && tgt && Math.hypot(u.position.x - tgt.x, u.position.y - tgt.y) > ARRIVED_RADIUS));
+    }
+  }
+  return out;
+}
+
+/** OrderAction → IntentType。两套枚举大半同名，只有 attack_move 要翻一下。 */
+function intentTypeOfOrder(action: Order["action"]): IntentType {
+  return action === "attack_move" ? "attack" : action;
+}
+
+/** 一句话安排两个任务 ⇒ 两个 group ⇒ **两条记录，各记各的名单**（不合成一条）。 */
+function recordLedgerEntries(
+  state: GameState, orders: Order[], perOrder: ApplyOrderOutcome[], enRouteBefore: ReadonlyMap<number, boolean>,
+): void {
+  const groups = new Map<string, { meta: NonNullable<Order["dispatchMeta"]>; ids: number[] }>();
+  for (let i = 0; i < orders.length; i++) {
+    const order = orders[i];
+    if (order.origin !== "advisor" && order.origin !== "mouse") continue; // auto / 缺席 ⇒ 不记
+    const applied = perOrder[i]?.appliedUnitIds ?? [];
+    if (applied.length === 0) continue;
+    const meta = order.dispatchMeta ?? {
+      // 没带 meta 的玩家命令（鼠标那条路可以不带）：按单条 order 各记各的。
+      // 动作从 order 自己那一栏翻过来，不硬塞一个"hold"——台账里写一个它
+      // 根本没在做的动作，将来信封上就是一行假话。
+      group: `o${i}`,
+      sourceKind: "selection" as const,
+      sourceKey: "",
+      action: intentTypeOfOrder(order.action),
+      targetName: "",
+    };
+    const key = `${order.origin}|${meta.group}`;
+    const slot = groups.get(key) ?? { meta, ids: [] };
+    for (const id of applied) if (!slot.ids.includes(id)) slot.ids.push(id);
+    groups.set(key, slot);
+  }
+  for (const slot of groups.values()) {
+    recordPlayerDispatch(state, slot.ids, slot.meta, enRouteBefore);
+  }
+}
+
+/** Roll the per-order rows up into the three de-duplicated batch totals. */
+function summarizeApply(perOrder: ApplyOrderOutcome[]): ApplyResult {
+  const applied = new Set<number>();
+  const already = new Set<number>();
+  const rejected = new Set<number>();
+  for (const o of perOrder) {
+    for (const id of o.appliedUnitIds) applied.add(id);
+    for (const id of o.alreadyDoingUnitIds) already.add(id);
+    for (const r of o.rejected) rejected.add(r.unitId);
+  }
+  return {
+    perOrder,
+    appliedUnitIds: [...applied],
+    alreadyDoingUnitIds: [...already],
+    rejectedUnitIds: [...rejected],
+  };
 }
 
 /**
  * Replace provisional (local-guess) orders with LLM-refined orders.
  */
-export function replaceProvisionalOrders(state: GameState, newOrders: Order[]): void {
+export function replaceProvisionalOrders(state: GameState, newOrders: Order[]): ApplyResult {
   // Clear provisional orders from all player units
   state.units.forEach(unit => {
     if (unit.team === "player" && !unit.manualOverride) {
@@ -84,7 +208,7 @@ export function replaceProvisionalOrders(state: GameState, newOrders: Order[]): 
     }
   });
   // Apply new orders
-  applyOrders(state, newOrders);
+  return applyOrders(state, newOrders);
 }
 
 /**
@@ -92,7 +216,7 @@ export function replaceProvisionalOrders(state: GameState, newOrders: Order[]): 
  * Sets manualOverride=true on affected units and bypasses the
  * override check so the order always applies.
  */
-export function applyPlayerCommands(state: GameState, orders: Order[]): void {
+export function applyPlayerCommands(state: GameState, orders: Order[]): ApplyResult {
   // Mark selected units as manual override first
   for (const order of orders) {
     for (const unitId of order.unitIds) {
@@ -105,8 +229,14 @@ export function applyPlayerCommands(state: GameState, orders: Order[]): void {
   }
 
   // Route through the normal entrypoint using a player-command flag.
-  const taggedOrders = orders.map((order) => ({ ...order, isPlayerCommand: true }));
-  applyOrders(state, taggedOrders);
+  // 刀C: 鼠标这条路自己盖 origin —— 调用方（GameCanvas）不必逐处记得。
+  // 手动接管语义一个字不改：上面照旧设 manualOverride。
+  const taggedOrders = orders.map((order) => ({
+    ...order,
+    isPlayerCommand: true,
+    origin: order.origin ?? ("mouse" as const),
+  }));
+  return applyOrders(state, taggedOrders);
 }
 
 /**
@@ -174,24 +304,52 @@ function pushDiagnostic(state: GameState, code: string, message: string): void {
   if (state.diagnostics.length > 50) state.diagnostics.shift();
 }
 
+/** 刀庚：经济单的空白结果骨架（每条路都从它起手，字段一个不漏）。 */
+function emptyEconomyOutcome(kind: EconomyOpKind, subject: string, subjectLabel: string): EconomyOutcome {
+  return {
+    kind, subject, subjectLabel,
+    requested: 0, succeeded: 0, failed: 0,
+    moneySpent: 0, moneyGained: 0, resourceGained: 0,
+    failReasons: [],
+  };
+}
+
+/**
+ * 刀庚：经济单从此**回报真实结算**，不再让 `state.diagnostics` 当回执的数据总线。
+ *
+ * 诊断照旧推（调试/系统日志要它），但那句人话现在**先进结果、再进诊断**——
+ * 一份文案两处用，不会漂。
+ */
 function handleEconomyOrder(
   order: Order,
   team: "player" | "enemy",
   state: GameState,
-): void {
+): EconomyOutcome | null {
   if (order.action === "produce" && order.produceUnitType) {
     if (order.produceBudget?.mode === "fraction_of_money") {
-      executeProduceBudget(state, team, order.produceUnitType, order.produceBudget);
-    } else {
-      const result = enqueueProduction(state, team, order.produceUnitType);
-      if (!result.ok) {
-        pushDiagnostic(state, "PRODUCE_FAIL",
-          `生产 ${order.produceUnitType} 失败: ${result.reason}`);
-      }
+      return executeProduceBudget(state, team, order.produceUnitType, order.produceBudget);
     }
-  } else if (order.action === "trade" && order.tradeType) {
-    executeTrade(state, team, order.tradeType, order.tradeBudget);
+    const unitType = order.produceUnitType;
+    const out = emptyEconomyOutcome("produce", unitType, UNIT_DISPLAY_NAME[unitType] ?? String(unitType));
+    out.requested = 1;
+    const moneyBefore = state.economy[team].resources.money;
+    const result = enqueueProduction(state, team, unitType);
+    if (result.ok) {
+      out.succeeded = 1;
+      out.moneySpent = Math.max(0, moneyBefore - state.economy[team].resources.money);
+    } else {
+      out.failed = 1;
+      const msg = `生产${out.subjectLabel}失败: ${result.reason}`;
+      out.failReasons.push(msg);
+      // 诊断留着（调试/系统日志），但玩家面前的回执从 out 取数。
+      pushDiagnostic(state, "PRODUCE_FAIL", msg);
+    }
+    return out;
   }
+  if (order.action === "trade" && order.tradeType) {
+    return executeTrade(state, team, order.tradeType, order.tradeBudget);
+  }
+  return null;
 }
 
 /** Per-order cap for budget production (existing resolveProduce cap, unchanged
@@ -211,34 +369,47 @@ function executeProduceBudget(
   team: "player" | "enemy",
   unitType: UnitType,
   budget: ProduceBudget,
-): void {
+): EconomyOutcome {
   const stats = UNIT_STATS[unitType];
   const eco = state.economy[team];
+  // 刀庚：每条出口都要填满这份结果。诊断照旧推，但**同一句人话**先进 out。
+  const out = emptyEconomyOutcome("produce", unitType, UNIT_DISPLAY_NAME[unitType] ?? String(unitType));
 
   // Defense in depth（同一个谓词 isProducibleUnitType，唯一真相源）：cost<=0 或
   // buildTime<=0 的类型绝不能进预算算术——会除以零。★这道闸不许因为"引擎入口
   // 已经加了闸"而删：它挡在 enqueueProduction 被调用**之前**（下面的预算除法就
   // 在本函数里），删了就是把除零放回来。
   if (!stats || !isProducibleUnitType(unitType)) {
-    pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${UNIT_DISPLAY_NAME[unitType]} 失败: 不可生产的单位类型`);
-    return;
+    const msg = `生产${out.subjectLabel}失败: 不可生产的单位类型`;
+    out.requested = 1; out.failed = 1; out.failReasons.push(msg);
+    pushDiagnostic(state, "PRODUCE_FAIL", msg);
+    return out;
   }
   // Defense in depth (mirrors schema.ts): only settle when fraction is a real,
   // finite number — however the Order was built. Otherwise fall through to a
   // single enqueue (never all-in on a bad fraction).
   if (typeof budget.fraction !== "number" || !Number.isFinite(budget.fraction)) {
+    out.requested = 1;
+    const moneyBefore = eco.resources.money;
     const r = enqueueProduction(state, team, unitType);
-    if (!r.ok) pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${UNIT_DISPLAY_NAME[unitType]} 失败: ${r.reason}`);
-    return;
+    if (r.ok) {
+      out.succeeded = 1;
+      out.moneySpent = Math.max(0, moneyBefore - eco.resources.money);
+    } else {
+      const msg = `生产${out.subjectLabel}失败: ${r.reason}`;
+      out.failed = 1; out.failReasons.push(msg);
+      pushDiagnostic(state, "PRODUCE_FAIL", msg);
+    }
+    return out;
   }
 
   const fraction = Math.max(0, Math.min(1, budget.fraction));
   if (fraction === 0) {
     // Codex acceptance: zero budget is its own honest reason — NOT "no money".
-    if (team === "player") {
-      pushDiagnostic(state, "PRODUCE_BUDGET", `预算为零：未下任何生产单，没动钱。`);
-    }
-    return;
+    const msg = `预算为零：未下任何生产单，没动钱。`;
+    out.failReasons.push(msg);   // requested=0 ⇒ 既不是成功也不是"造不起"
+    if (team === "player") pushDiagnostic(state, "PRODUCE_BUDGET", msg);
+    return out;
   }
 
   // Money and fuel bounds are kept SEPARATE so a zero-unit refusal can name
@@ -251,16 +422,18 @@ function executeProduceBudget(
     : Number.POSITIVE_INFINITY;
   const affordable = Math.min(moneyAffordable, fuelAffordable);
   if (affordable < 1) {
-    if (team === "player") {
-      const msg = fuelAffordable < 1 && moneyAffordable >= 1
-        ? `燃油不足：油料 ${Math.floor(eco.resources.fuel)}，一辆${UNIT_DISPLAY_NAME[unitType]}要 ${stats.fuelCost} 燃油，没动钱。`
-        : `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一辆${UNIT_DISPLAY_NAME[unitType]}（$${stats.cost}）都造不起，没动钱。`;
-      pushDiagnostic(state, "PRODUCE_BUDGET", msg);
-    }
-    return;
+    // ★钱界与油界不合并：零件回执要报**真实约束**（用户审计那一笔）。
+    const msg = fuelAffordable < 1 && moneyAffordable >= 1
+      ? `燃油不足：油料 ${Math.floor(eco.resources.fuel)}，一辆${UNIT_DISPLAY_NAME[unitType]}要 ${stats.fuelCost} 燃油，没动钱。`
+      : `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一辆${UNIT_DISPLAY_NAME[unitType]}（$${stats.cost}）都造不起，没动钱。`;
+    out.requested = 1; out.failed = 1; out.failReasons.push(msg);
+    if (team === "player") pushDiagnostic(state, "PRODUCE_BUDGET", msg);
+    return out;
   }
 
   const want = Math.min(affordable, PRODUCE_BUDGET_ORDER_CAP);
+  out.requested = want;   // ★引擎自己算出来的那个数（不是模型说的）
+  const moneyAtStart = eco.resources.money;
   let done = 0;
   let failReason: string | null = null;
   for (let i = 0; i < want; i++) {
@@ -274,16 +447,23 @@ function executeProduceBudget(
     done++;
   }
 
-  if (team !== "player") return;
+  // ★真实结算先进结果（屏幕/TTS/context 从这儿取数），诊断照旧推给日志。
+  out.succeeded = done;
+  out.failed = want - done;
+  out.moneySpent = Math.max(0, moneyAtStart - eco.resources.money);
   if (done === 0) {
-    // One failure report with the real reason — never a success claim.
-    pushDiagnostic(state, "PRODUCE_FAIL", `生产 ${UNIT_DISPLAY_NAME[unitType]} 失败: ${failReason ?? "未知原因"}`);
-    return;
+    const msg = `生产${out.subjectLabel}失败: ${failReason ?? "未知原因"}`;
+    out.failReasons.push(msg);
+    if (team === "player") pushDiagnostic(state, "PRODUCE_FAIL", msg);
+    return out;
   }
+  if (failReason) out.failReasons.push(`第${done + 1}辆起中止: ${failReason}`);
+  if (team !== "player") return out;
   const capNote = affordable > want ? `（可产${affordable}，本单上限${PRODUCE_BUDGET_ORDER_CAP}）` : "";
   const stopNote = failReason ? `（第${done + 1}辆起中止: ${failReason}）` : "";
   pushDiagnostic(state, "PRODUCE_BUDGET",
     `${UNIT_DISPLAY_NAME[unitType]} ×${done}：花了 $${done * stats.cost}${capNote}${stopNote}，还剩 $${Math.floor(eco.resources.money)}。`);
+  return out;
 }
 
 /** Player-facing resource name for trade feedback. */
@@ -306,9 +486,15 @@ function executeTrade(
   team: "player" | "enemy",
   tradeType: TradeType,
   budget?: TradeBudget,
-): void {
+): EconomyOutcome {
   const info = TRADE_COSTS[tradeType];
-  if (!info) return;
+  // 刀庚：交易也回报**真实结算**——绝不把 `buy_fuel` 这种计划字段当成功事实复述。
+  const out = emptyEconomyOutcome("trade", tradeType, tradeResName(tradeType));
+  if (!info) {
+    out.requested = 1; out.failed = 1;
+    out.failReasons.push(`未知交易类型: ${tradeType}`);
+    return out;
+  }
   const eco = state.economy[team];
 
   // 7b.1 — budget-scaled BUYS. Only buys (cost>0) honor fraction_of_money; sells
@@ -331,46 +517,57 @@ function executeTrade(
     const budgetMoney = eco.resources.money * fraction;
     const times = Math.floor(budgetMoney / info.cost);
     if (times < 1) {
-      if (team === "player") {
-        pushDiagnostic(state, "TRADE_BUDGET",
-          `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一份${tradeResName(tradeType)}（$${info.cost}）都买不下来，没动钱。`);
-      }
-      return;
+      const msg = `钱不够：手头 $${Math.floor(eco.resources.money)}，这点预算连一份${tradeResName(tradeType)}（$${info.cost}）都买不下来，没动钱。`;
+      out.requested = 1; out.failed = 1; out.failReasons.push(msg);
+      if (team === "player") pushDiagnostic(state, "TRADE_BUDGET", msg);
+      return out;
     }
     const spend = times * info.cost;
     const gain = times * info.gain;
     eco.resources.money -= spend;
     addBoughtResource(eco, tradeType, gain);
+    out.requested = times; out.succeeded = times;
+    out.moneySpent = spend; out.resourceGained = gain;
     if (team === "player") {
       pushDiagnostic(state, "TRADE_BUDGET",
         `${tradeResName(tradeType)} ×${times}：花了 $${spend}（+${gain}），还剩 $${Math.floor(eco.resources.money)}。`);
     }
-    return;
+    return out;
   }
 
+  out.requested = 1;
   if (info.cost > 0) {
     // Buying: spend money, gain resource  (single — unchanged)
     if (eco.resources.money < info.cost) {
-      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", "交易失败: 资金不足");
-      return;
+      const msg = "交易失败: 资金不足";
+      out.failed = 1; out.failReasons.push(msg);
+      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", msg);
+      return out;
     }
     eco.resources.money -= info.cost;
     addBoughtResource(eco, tradeType, info.gain);
+    out.succeeded = 1; out.moneySpent = info.cost; out.resourceGained = info.gain;
   } else {
     // Selling: lose resource, gain money (cost is negative)
     const loss = -info.gain; // positive amount of resource to sell
     if (tradeType === "sell_fuel" && eco.resources.fuel < loss) {
-      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", "交易失败: 燃油不足");
-      return;
+      const msg = "交易失败: 燃油不足";
+      out.failed = 1; out.failReasons.push(msg);
+      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", msg);
+      return out;
     }
     if (tradeType === "sell_ammo" && eco.resources.ammo < loss) {
-      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", "交易失败: 弹药不足");
-      return;
+      const msg = "交易失败: 弹药不足";
+      out.failed = 1; out.failReasons.push(msg);
+      if (team === "player") pushDiagnostic(state, "TRADE_FAIL", msg);
+      return out;
     }
     if (tradeType === "sell_fuel") eco.resources.fuel -= loss;
     else if (tradeType === "sell_ammo") eco.resources.ammo -= loss;
     eco.resources.money += -info.cost; // cost is negative, so -cost is positive
+    out.succeeded = 1; out.moneyGained = -info.cost; out.resourceGained = -loss;
   }
+  return out;
 }
 
 /** Unbind a unit from its patrol task (if any). */
@@ -420,7 +617,17 @@ function findOrCreatePatrolTask(
   return id;
 }
 
-function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
+type UnitApplyOutcome = "applied" | "already_doing";
+
+/** 两道令的落点算不算同一个：都没有落点（就地），或者相距 5 格以内。 */
+function sameOrderTarget(a: Order["target"], b: Order["target"]): boolean {
+  if (!a || !b) return !a && !b;
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy < 25;
+}
+
+function applyOrderToUnit(unit: Unit, order: Order, state: GameState): UnitApplyOutcome {
   // Phase C: idempotency check for crisis reinforcement orders.
   // If the unit is already executing a reinforcement order for the same front
   // with the same action and a nearby target, skip the re-dispatch.
@@ -432,8 +639,22 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
       const dx = current.target.x - order.target.x;
       const dy = current.target.y - order.target.y;
       if (dx * dx + dy * dy < 25) { // within 5 tiles
-        return; // already executing equivalent reinforcement — skip
+        // 刀B 第三类结局：已经在执行等价命令。既不是新派兵，也不是失败——
+        // 报「这批兵已经在执行」，且不重建任务、不清旧任务。
+        return "already_doing";
       }
+    }
+  }
+
+  // 刀寅：对**某一批**原样再下一次同一道令（同动作、落点 5 格内）⇒ 已在执行。
+  // 典型：长官再说一遍「派 G2 去修理厂」，号已换成那批真走了的人（fromDispatch），
+  // 他们正在做这件事——不重下、不另开一条任务、更不会把票上没派的人补派出去。
+  // 只认「按批次指代」这一种形状（dispatchMeta.sourceKind === "dispatch"）：
+  // 按战线/分队再说一遍"派三个去"，可能就是要再派三个，那一格不在这里判。
+  if (order.origin === "advisor" && order.dispatchMeta?.sourceKind === "dispatch") {
+    const current = unit.orders[0];
+    if (current && current.action === order.action && sameOrderTarget(current.target, order.target)) {
+      return "already_doing";
     }
   }
 
@@ -563,4 +784,6 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): void {
 
     // produce / trade never reach here — intercepted above
   }
+
+  return "applied";
 }

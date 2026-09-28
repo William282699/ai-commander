@@ -3,7 +3,8 @@
 // All game data models live here.
 // ============================================================
 
-import type { TradeBudget, ProduceBudget } from "./intents"; // 7b.1 / emily-production-v1: Orders carry budget intents through to settlement
+import type { TradeBudget, ProduceBudget, IntentType } from "./intents";
+import type { SelectionDecision } from "./dispatchSelection"; // 刀己：选来源的答复 // 7b.1 / emily-production-v1: Orders carry budget intents through to settlement；IntentType：刀C 台账登记动作
 
 // --- Teams & Phases ---
 
@@ -271,6 +272,168 @@ export interface Order {
   // issues NO autonomous orders, so these stay undefined until 6b.
   autonomous?: boolean;
   actionId?: string;
+  /** retreat-scope 刀C: 谁下的这道令。缺席 ⇒ 视同 "auto"，**不记台账**
+   *  （fail-safe 方向：忘了填最多是漏记一条，绝不会记错一条）。 */
+  origin?: OrderOrigin;
+  /** 刀C: 记账用的其余信息。只有 origin 是 advisor/mouse 时才有意义。 */
+  dispatchMeta?: DispatchMeta;
+}
+
+// --- Dispatch ledger (retreat-scope 刀C) ---
+//
+// 「某条战线的部队」过去只有一种解释：此刻站在那条线包围盒里的可调单位（纯几何）。
+// 部队一开拔就不再"属于"原战线——而玩家心里的「南线的部队」可能是**位置**
+// （现在守在那儿的），也可能是**来源**（之前从那儿派出去的）。
+// 这是两种指代，而 intent 里只有一种表达方式（LEDGER §F2 的一张脸）。
+//
+// 台账让「刚从南线派去山脊那批」有地方可写：每次玩家命令真的派出了兵，
+// 引擎记一条 Dispatch，号由引擎生成（M#，避开 G# 那套临时编队号的命名空间）。
+// ★ 由**引擎在真派兵那一刻**写，不是从对话历史反推——§F2 就是被上下文带偏的。
+
+/** 这批人当时是被怎么指出来的。
+ *  `ticket`（刀寅）：凭陈报出的临时编队号（G#）派出，sourceKey 是那个号。
+ *  过去这一类在票据改写 intent 之后只剩 `pool`／空串——台账里查不到它从哪儿来。 */
+export type DispatchSourceKind = "front" | "squad" | "dispatch" | "selection" | "pool" | "ticket";
+
+export interface Dispatch {
+  /** 本局内的短号，形如 "M3"。 */
+  id: string;
+  atGameTime: number;
+  sourceKind: DispatchSourceKind;
+  /** 当时那条 intent 的来源字段原文（战线 id / 分队号 / 旧任务号 …）。 */
+  sourceKey: string;
+  action: IntentType;
+  /** 引擎真送他们去的地方（与回执同源）。空串＝没有去处可宣称。 */
+  targetName: string;
+  /** 登记时的名单。**活成员要现查**（liveDispatchMembers）——名单是快照，
+   *  战场不是：人会死、会被改派。 */
+  memberIds: number[];
+  status: "active" | "closed";
+  /**
+   * 刀寅：每个成员**当初从哪条战线出发**（战线 id；null＝当时不在任何一条战线上）。
+   *
+   * 是**来源事实**，与执行选兵约束分开：按接到命令那一刻的实际位置判，不从
+   * 「北线前哨附近未编组群」这类显示文本里猜，也不拿临时编队票的**目标**战线充数。
+   * 一批人可以来自几条线，所以逐人记，不硬塞成一个来源。
+   * 对这批人改令（fromDispatch）时逐人继承——撤回一次之后，它仍是「从南线派出去的那批」。
+   */
+  originFrontById?: Record<number, string | null>;
+  /**
+   * 刀寅：这批人是凭哪张临时编队票（G#）派出去的。**只作身份关联**：
+   * 名单永远是 memberIds（真接到命令的人），不是票上报的那份候选名单。
+   * 改令时继承。
+   */
+  ticketRef?: string;
+  /** 刀寅：那张票当时给长官的叫法（「中央前哨附近未编组群」）。只进信封，帮模型把「刚才那几个」对上这一条。 */
+  ticketLabel?: string;
+  /**
+   * 刀寅：这次外派每个人的**出发位置**（接到命令那一刻的真实坐标）。
+   * 「叫回来」回的就是这里——逐人记，来自几处就是几处，不编一个共同据点。
+   * 生命周期（**与长官用任务号还是分队名指人无关**）：一次外派从离开驻地开始，到**到达**
+   * 为止（到了目的地，或叫回后回到出发地）。还在路上时，不管下什么令、怎么称呼，起点都延续；
+   * 「回原处」的令永远延续起点；到达之后再接到别的令，才从到达的地方开始新的一次。
+   * 「在路上」按接到新令**之前**那道令的落点判（离落点还远＝在路上）。
+   */
+  originPosById?: Record<number, { x: number; y: number }>;
+  /**
+   * 刀寅：出发时就近的我方据点（只作**叫法**：「出发地（中央前哨附近）」）。
+   * 坐标永远用 originPosById，据点不当坐标来源；附近没有我方据点就不记，回执也不提据点。
+   */
+  originFacilityById?: Record<number, string>;
+  /** 刀寅：这条记录是一道「回原处」的令（叫回）。 */
+  recall?: boolean;
+}
+
+/** 下令方是谁。记账只认这个标记，**不认调用的是哪个函数**：
+ *  `applyPlayerCommands` 是鼠标专用（它给每个单位盖 manualOverride），
+ *  而对话派兵走的是 `applyOrders`——按函数认会漏掉说话派出去的每一个兵。 */
+export type OrderOrigin = "advisor" | "mouse" | "auto";
+
+/** 记账要用、而 Order 本身没有的那几样。缺席 ⇒ 按单条 order 各记各的。 */
+export interface DispatchMeta {
+  /** 同一 key 的 order 合成一条任务。一句话安排两个任务 ⇒ 两个 key，两条记录。 */
+  group: string;
+  sourceKind: DispatchSourceKind;
+  sourceKey: string;
+  action: IntentType;
+  targetName: string;
+  /** 刀寅：凭票派兵时那张票的叫法（sourceKind==="ticket" 才有）。 */
+  ticketLabel?: string;
+  /** 刀寅：这道令是「回到这次外派的出发地」——起点一律延续，不管长官用什么称呼指的人。 */
+  returnTo?: "origin";
+}
+
+// --- Order execution result (retreat-scope 刀B) ---
+//
+// 为什么必须有这个类型：`applyOrders` 过去返回 `void`，而它对每条 order 的
+// unitIds 还要再过四道过滤（单位不在了 / 不是我方 / 指挥官亲兵 / 已被手动接管）。
+// 「计划选中 8 个、实际只对 5 个下了令」在旧结构里**外界无从得知**，于是屏上
+// 和耳朵只能照着"计划"报数——换了个位置的假确认。
+//
+// 三类结局必须分开，不许合并：
+//   applied      真对它下了令
+//   alreadyDoing 它已经在执行等价的命令（幂等跳过）——不算新派兵，**也不算失败**
+//   rejected     没接到命令，且带原因
+export type OrderRejectReason =
+  | "unit_gone"           // 单位不在了（阵亡 / 已移除）
+  | "not_player_unit"     // 不是我方单位
+  | "player_controlled"   // 指挥官亲兵，非玩家亲自下令不动它
+  | "manual_override";    // 已被玩家手动接管
+
+export interface ApplyOrderOutcome {
+  /** 在传入的 orders 数组里的下标——调用方据此把结果对回自己的意图。 */
+  orderIndex: number;
+  action: OrderAction;
+  appliedUnitIds: number[];
+  /** 幂等跳过：已经在执行等价命令。第三类结局，不许塞进 rejected 冒充失败。 */
+  alreadyDoingUnitIds: number[];
+  rejected: { unitId: number; reason: OrderRejectReason }[];
+  /**
+   * 刀庚：经济单（produce / trade）的**真实结算**。
+   *
+   * 经济单没有"人头"，三栏 unitIds 天生是空的——刀甲当时的权宜是"经济单一律记
+   * applied，复述计划那一行"。那不是执行事实：实测 $170 造 3 个步兵，队列真的
+   * 只进了 2 个、钱剩 $10，回执照样说「生产步兵 ×3。」；预算生产/预算交易
+   * 完全失败（钱一分没动）时回执还说「全力生产主战坦克。」。
+   *
+   * 所以经济单也要有一等的执行结果。**屏幕、TTS、对话 context 一律从这里取数**；
+   * `state.diagnostics` 降为调试/系统日志，不再当前端回执的数据总线。
+   */
+  economy?: EconomyOutcome;
+}
+
+// --- 刀庚: 经济单的真实结算结果 ---
+
+export type EconomyOpKind = "produce" | "trade";
+
+export interface EconomyOutcome {
+  kind: EconomyOpKind;
+  /** produce: UnitType；trade: TradeType。机器用。 */
+  subject: string;
+  /** 给玩家看的中文名（「步兵」/「燃油」）。 */
+  subjectLabel: string;
+  /** 这一条 order 想办成几件（引擎自己算出来的那个数，不是模型说的）。 */
+  requested: number;
+  /** **真的**办成了几件。 */
+  succeeded: number;
+  /** **真的**没办成几件。 */
+  failed: number;
+  /** 真的花出去多少钱。 */
+  moneySpent: number;
+  /** 真的到手多少钱（卖出）。 */
+  moneyGained: number;
+  /** 真的到手多少资源（买燃油 +N）。 */
+  resourceGained: number;
+  /** 失败原因（引擎自己那句人话；成功就是空数组）。 */
+  failReasons: string[];
+}
+
+export interface ApplyResult {
+  perOrder: ApplyOrderOutcome[];
+  /** 全批汇总（去重）——播报层取数只取这里，不在 UI 里重算一遍。 */
+  appliedUnitIds: number[];
+  alreadyDoingUnitIds: number[];
+  rejectedUnitIds: number[];
 }
 
 // --- Production ---
@@ -661,6 +824,9 @@ export interface GameState {
   doctrines: import("./doctrine").StandingOrder[];
   doctrineCooldowns: Record<string, number>; // doctrineId → last alert game time
   tasks: TaskCard[];
+  /** retreat-scope 刀C: 任务台账。重开一局即清空（它活在 GameState 里）。 */
+  dispatches: Dispatch[];
+  nextDispatchNum: number;
   battleMarkers: BattleMarker[];
   /** Step 7e: recorded player decisions awaiting engine review (queue, capped). */
   decisionReviews: DecisionReviewRecord[];
@@ -774,6 +940,9 @@ export type PendingVerdict =
   | "protocol_failure"; // field missing/invalid while a contract was tagged →
                         //   execute NOTHING on either side
 
+/** 服务端兜底的原因：模型回了东西但解析不出来 / 根本没回来（网络、限流、报错）。 */
+export type AdvisorFailure = "parse" | "comms";
+
 export interface AdvisorResponse {
   brief: string;
   options: AdvisorOption[];
@@ -811,6 +980,17 @@ export interface AdvisorResponse {
    *  行为），绝不静默哑掉——一条规则覆盖四种缺席：模型忘写 / 白名单吃掉 /
    *  JSON 解析失败走兜底 / 通讯中断。 */
   spoken?: string;
+  /** 刀己：对「您说的是哪一批？」的答复。与 heard/spoken/pendingDecision **同族**
+   *  ——白名单重建会静默吃掉没登记的根级字段，schema 的**两条 return 路径**都
+   *  必须带。缺席/非法一律按协议失败处理（零执行、再问一次），绝不放行。 */
+  dispatchSelection?: SelectionDecision;
+  /** 第六轮：**服务端没拿到可用的参谋答复**（解析失败 / 通讯中断 / 限流）。
+   *
+   *  只由服务端兜底（`createFallbackResponse`）写入，模型写不进来（白名单重建不登记它）。
+   *  在场 ⇒ 这一轮是**失败轮**：客户端零执行（options / 持续命令一律不看）、不消费任何
+   *  待决合同或选择、不算参谋又答了一轮，屏上与耳朵只说引擎的事实（没收到答复、什么都没执行）。
+   *  ★不能拿 `warning` 判：正常答复也会带提示（例：意图类型被自动换型）。 */
+  failure?: AdvisorFailure;
   standingOrder?: {
     type: string;
     locationTag: string;

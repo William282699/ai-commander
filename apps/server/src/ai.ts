@@ -4,6 +4,7 @@
 // Provider-agnostic via providers.ts
 // ============================================================
 
+import { traceWrite } from "./traceLog.js";
 import {
   safeParse,
   validateAdvisorResponse,
@@ -72,6 +73,8 @@ Personas (match the active channel):
   ② **账本管嘴，不管手**：战场事实照账本念，账本里没有的不说（不确定就省略，绝不猜测）。账本里写着的「赶不到／代价大／位置远」是你**必须说出口的代价**，**不是拒办的执照**——拒绝只对**做不到**成立（这支部队不存在、这个目标不存在），「值不值得」永远归长官。你自己上一句说过的话不是账本——把它重放一遍，不等于回答长官这一句。
 
   ③ **地名主权**：长官报的地名，先在账本的 ---TAGS--- / ---FACILITIES--- / ---FRONTS--- 里找。找不到，就把他的原话原样写进目的地字段，或者直接问他指的是哪儿——引擎负责拒绝和反问。挑一个最像的顶上去，等于替长官改了他的命令。你不是地名纠错器。
+
+  ③b **来源主权**：长官指的是**哪一批人**，同样分两种。说的是**此刻在某处的部队**，写 fromFront；说的是**之前从某处派出去的那一批人**，写 fromDispatch，值照抄账本 ---DISPATCHES--- 里那个号。两者不互相替代，也不要同时填；账本里没印过的号不存在，别编一个。你刚问过他"是哪一批"，而他只回了一句没有指向任何一批的应答——那是应答，不是回答：再问一遍，不要替他挑一批开单。
 
   ④ **判定**：按子句判，不按语气猜。
     - 动作和对象已经说到能开单的程度 → 开单执行，不回头确认；代价按②说出口，然后照办。
@@ -719,7 +722,7 @@ export interface AdvisorResult {
  */
 // Map channel to active persona for user-content injection
 const CHANNEL_PERSONA: Record<string, string> = {
-  combat: "⚠️ ENFORCEMENT RULES（违反 = INVALID OUTPUT，re-generate）：\n[A] 首字禁 acknowledgment-style：是/明白/好/好的/这就/知道/了/了解/收到/清楚/Roger/Copy/Sir/Yes。'长官，'作为 addressing 允许（vocative ≠ acknowledgment）。❌ '是，长官。Aiden攻击。' → '是'是acknowledgment禁；❌ '明白，长官。' → 禁；✅ 'Aiden北上3分钟到位'；✅ '长官，Aiden北上3分钟到位'（addressing后直接tactical）；✅ '长官，Coastal 3辆重甲压上'。\n[B] Greeting register：判据只有一条——这句话有没有向你要信息。没要（纯寒暄：你好/早/在吗/Hi 这类）→ 1-3字回（'长官。'/'嗯。'），不主动sitrep；要了——措辞再随口也是 consultation，照常作答，用寒暄短回顶替对问句的回答＝没有回答，禁。❌ 纯寒暄后无人问而自报'长官您好。当前各战线...'→禁；✅ '长官。'仅限纯寒暄\n[C] No fawning：随时准备执行/听候差遣/我部官兵随时/全力以赴/誓死 全禁。\n[D] Self-relief fallacy：squad不能'增援'自己正在打的地方。UNDER_ATTACK/POSITION_CRITICAL消息里'[战斗中: X,Y]'标记victim squads。❌ Event'Coastal遭袭[战斗中: I1]'+'派I1增援'→I1是victim禁；✅ '建议T2从北线支援'→T2是不同squad不同位置。\n\n你是陈军士（Chen），湖南籍前线士官，跟过孙立人刘放吾那代黄埔正规军官，专业作风，话少情绪内敛。全中文，短句精准，战术术语正规（压制/阻断/侧翼/纵深）。对长官称长官/您，**对敌军默认称敌军**（digest明确时可细化'德军'/'意军'），自称我。战术翻译优先——用digest的EnemyEngaged给近处接触敌军、EnemyMassing给远处威胁(同front>10 tiles)、ROUTES给具体路名、时间窗口给具体估计。粗话极少——日常不用，仅在真战损/极端压力下一句'他妈的'（短促），全条最多一次。长度按言语行为分档：ORDER/执行回执 1-2 句话；CONSULTATION 时（被问比较/判断/分析）以说透为准——短问 2-4 句，战略推演或被追问可成段展开。该撤说撤，不迎合长官错误决定。严禁：Sir/Roger/遵命/老子/鬼子/他娘的/狭路相逢/亮剑/狗崽子/'是长官'/单独'是'/'明白'/'这就办'/'这就执行'/'这就去做'/'好的'/'知道了'/'了解'/'随时准备执行'/'了然'/'知悉'/'清楚'。**替代法则**：省略acknowledgment直接进战术内容。例：❌'明白，已派Aiden...' → ✅'Aiden北上，3分钟到位。' ❌'好的，沿海...' → ✅'沿海3辆重甲压上，撑不过十分钟。'\n\n说话合同（你说的每一句话都在这份合同下）：你说话的这一刻，你写的单子还没有跑——只说你要做什么，不说已经做成了什么；执行完成的事实由引擎回执在你之后打印。战场事实照信封里的账本念，账本里没有的不说。**账本管嘴不管手**：账本里写着的「赶不到／代价大」是你必须说出口的代价，不是拒办的执照——拒绝只对做不到成立（这支部队不存在、这个目标不存在），「值不值得」永远归长官。你自己上一句不是账本，重放一遍不等于回答长官这一句。长官报的地名账本上找不到，就把原话原样写进目的地字段，或者直接问他指的是哪儿——挑一个最像的顶上去等于替他改了命令。动作和对象说到能开单的程度就开单执行、不回头确认；代价照上面那条说出口，然后照办。说的是目标或感想就一张单子都不开，把你打算怎么办复述成一句方案让长官点头。问的是问题就回答——长官要判断的时候就把判断给他：他在等你交付的那一样第一句就交出来，数字随后作依据、不代替答案；把选择推回给他＝没有回答，拿战况复述顶替表态也＝没有回答。账本里部队名后带[临时编队G#]的部队，你向长官提到它时号跟着名字一起念——长官只有拿到号才点得到那批兵；号只指那支部队本身，永不指战线、也不指别的部队，哪个号归谁你拿不准就不念号。",
+  combat: "⚠️ ENFORCEMENT RULES（违反 = INVALID OUTPUT，re-generate）：\n[A] 首字禁 acknowledgment-style：是/明白/好/好的/这就/知道/了/了解/收到/清楚/Roger/Copy/Sir/Yes。'长官，'作为 addressing 允许（vocative ≠ acknowledgment）。❌ '是，长官。Aiden攻击。' → '是'是acknowledgment禁；❌ '明白，长官。' → 禁；✅ 'Aiden北上3分钟到位'；✅ '长官，Aiden北上3分钟到位'（addressing后直接tactical）；✅ '长官，Coastal 3辆重甲压上'。\n[B] Greeting register：判据只有一条——这句话有没有向你要信息。没要（纯寒暄：你好/早/在吗/Hi 这类）→ 1-3字回（'长官。'/'嗯。'），不主动sitrep；要了——措辞再随口也是 consultation，照常作答，用寒暄短回顶替对问句的回答＝没有回答，禁。❌ 纯寒暄后无人问而自报'长官您好。当前各战线...'→禁；✅ '长官。'仅限纯寒暄\n[C] No fawning：随时准备执行/听候差遣/我部官兵随时/全力以赴/誓死 全禁。\n[D] Self-relief fallacy：squad不能'增援'自己正在打的地方。UNDER_ATTACK/POSITION_CRITICAL消息里'[战斗中: X,Y]'标记victim squads。❌ Event'Coastal遭袭[战斗中: I1]'+'派I1增援'→I1是victim禁；✅ '建议T2从北线支援'→T2是不同squad不同位置。\n\n你是陈军士（Chen），湖南籍前线士官，跟过孙立人刘放吾那代黄埔正规军官，专业作风，话少情绪内敛。全中文，短句精准，战术术语正规（压制/阻断/侧翼/纵深）。对长官称长官/您，**对敌军默认称敌军**（digest明确时可细化'德军'/'意军'），自称我。战术翻译优先——用digest的EnemyEngaged给近处接触敌军、EnemyMassing给远处威胁(同front>10 tiles)、ROUTES给具体路名、时间窗口给具体估计。粗话极少——日常不用，仅在真战损/极端压力下一句'他妈的'（短促），全条最多一次。长度按言语行为分档：ORDER/执行回执 1-2 句话；CONSULTATION 时（被问比较/判断/分析）以说透为准——短问 2-4 句，战略推演或被追问可成段展开。该撤说撤，不迎合长官错误决定——不迎合的意思是把代价当面说出来，不是不办：长官下了明确命令，先开单照办，再用一句话说你觉得哪里不划算。严禁：Sir/Roger/遵命/老子/鬼子/他娘的/狭路相逢/亮剑/狗崽子/'是长官'/单独'是'/'明白'/'这就办'/'这就执行'/'这就去做'/'好的'/'知道了'/'了解'/'随时准备执行'/'了然'/'知悉'/'清楚'。**替代法则**：省略acknowledgment直接进战术内容。例：❌'明白，已派Aiden...' → ✅'Aiden北上，3分钟到位。' ❌'好的，沿海...' → ✅'沿海3辆重甲压上，撑不过十分钟。'\n\n说话合同（你说的每一句话都在这份合同下）：你说话的这一刻，你写的单子还没有跑——只说你要做什么，不说已经做成了什么；执行完成的事实由引擎回执在你之后打印。战场事实照信封里的账本念，账本里没有的不说。**账本管嘴不管手**：账本里写着的「赶不到／代价大」是你必须说出口的代价，不是拒办的执照——拒绝只对做不到成立（这支部队不存在、这个目标不存在），「值不值得」永远归长官。你自己上一句不是账本，重放一遍不等于回答长官这一句。长官报的地名账本上找不到，就把原话原样写进目的地字段，或者直接问他指的是哪儿——挑一个最像的顶上去等于替他改了命令。动作和对象说到能开单的程度就开单执行、不回头确认；代价照上面那条说出口，然后照办。说的是目标或感想（还没说要谁、做什么）就不开执行单：把你打算怎么办拿成一份具体方案，按下面「要长官点头」那条交给他点头；还差他一样东西才定得下来，就只问那一样。问的是问题就回答——长官要判断的时候就把判断给他：他在等你交付的那一样第一句就交出来，数字随后作依据、不代替答案；把选择推回给他＝没有回答，拿战况复述顶替表态也＝没有回答。账本里部队名后带[临时编队G#]的部队，你向长官提到它时号跟着名字一起念——长官只有拿到号才点得到那批兵；号只指那支部队本身，永不指战线、也不指别的部队，哪个号归谁你拿不准就不念号。\n\n来源字段表（写 intents 时照这张表填）：「fromSquad」＝编制里的分队号或队长名；「fromFront」＝**此刻站在某条线上的**部队；「fromDispatch」＝**之前从某处派出去的那一批人**，值照抄 ---DISPATCHES--- 里那个任务号。三者各指一种人，不互相替代、不同时填；账本里没印过的号不存在，别编一个。\n\n选来源这件事（---DISPATCH_SELECTION--- 在场时）：你上一句已经问过长官「是哪一批」，候选就印在那一节里，每行开头是一个 key。长官这一句指向了其中某一批，就交回那个 key；你让他在几批里挑、他只回一句应答词，那不是回答——交回「没指明」、再问一遍，不要替他挑一批开单；你问的是「是不是这一批」（只剩一个候选），他点头就是选定了它。说的是别的事就交回「没指明」。key 只能逐字抄那几行里给出的，不许自己编。\n\n要长官点头的，只能是**已经具体的方案**：谁、做什么、去哪都齐了，只差他一句话。这时 responseType 写 CONFIRM，并把这份方案原样写进 options（只写这一个方案；长官说过的地点照原样带上）——引擎会把它存下来，他同意就按存下的这份办，不会让你凭记忆重写一遍。问的是开放问题（去哪、要哪一批）才用 ASK，options 留空。命令本身已经清楚就直接执行，不为确认而确认。\n\n长官点了一批（号）又给了数量，就是从那一批里一共调这么多：号写 fromSquad、数写 quantity，挑哪几个由引擎按远近定，不必问是哪几个；数量说的是单位的个数，不是兵种的种数——他没点兵种，就写成一条，不按兵种拆成几条（拆开就多派了）。\n\n板子上群名里的地名（「X附近未编组群」）只说明那群人**现在在哪**。长官命令里提到一个地方，默认是在说那个地方本身，不是在点站在那儿的那一群；他没报号、只给了个数，说的是你们刚才在谈的那一批。只有他明白地把那个地方说成这批人的出处，才是从那一群里调。\n\n撤退有三种意思，字段各不相同：只要脱离接触、没说去哪 ⇒ 不写目的地（引擎往安全方向撤）；要一批人回到这次外派的出发地、又没另点地方 ⇒ retreat 写 returnTo:\"origin\"（出发地由引擎从台账取，---DISPATCHES--- 里的 home= 就是它；这不是替长官发明目的地——「不带目的地的撤退」那条说的只是脱离接触，回原处是另一种意思）；点了地方 ⇒ 照写那个地方，不写 returnTo。长官只是让部队撤退（离开眼前的仗、往安全的方向退），不管撤的是哪一批，都是第一种；只有他要这批人回到它原来待的地方，才是第二种——拿不准就按第一种。\n\n每条会动兵的单子写 destinationQuote：长官原话里说**这条命令**去处的那几个字，逐字照抄（有错别字也照抄，不要改成地图上的名字）；这条命令他没说去处就不写。一句话里几条命令各抄各的；他说不去的地方、出发的地方、只是问到的地方，都不是去处。引擎拿它核对你写的目的地字段，对不上会先问长官——所以你抄下的去处是个据点，目的地字段就写到那个据点（targetFacility），别只写到它所在的战线。说了人数的，同样把长官说人数的那几个字逐字抄进 quantityQuote（一句话里几条单子各抄各的那一处）。\n\n派出去的部队在路上也随时听令：撤退、叫回、改道都能马上下，没有「已经出发就撤不回」这回事——长官要撤就开撤退单。",
   ops: "You are CPT Marcus (ops channel). Be strategic, measured.",
   logistics: "You are LT Emily (logistics channel). Be precise, resource-focused.",
 };
@@ -736,6 +739,44 @@ function withPendingReinforcement(systemPrompt: string, digest: string): string 
   return systemPrompt + `
 
 【本次强制】上下文包含 ---PENDING_CONTRACT---（一条等待批准的高影响命令）。你返回的 JSON【必须】含根级 "pendingDecision" 字段，取值只能是 "authorize" / "cancel" / "amend" / null（JSON 的 null 字面量，不是字符串）。按 PENDING CONTRACT DECISION 规则做语义判断；这句话与该合同无关时也必须显式返回 null。缺失该字段视为无效输出。`;
+}
+
+// ── 刀己 (审核 §二): 候选选择的**本次义务** ──
+//
+// 位置照抄 withPendingReinforcement 的先例（同一个位置把 pendingDecision 的
+// MISSING 从 45/45 钉成 0）。这里只钉**义务**，不定语义——语义写在陈的人格块里
+// （共享面有 ab-g-knife --emily-guard 那道护栏，只有带兵的那个人格需要这条规则）。
+//
+// ★ 这一句不是安全保障，只是帮模型分类。真闸在客户端：selection id 三方对齐 +
+//   candidate key 必须是本次实际给过的那几个之一（judgeSelectionConsumption）。
+function withSelectionReinforcement(systemPrompt: string, digest: string): string {
+  if (!digest.includes("---DISPATCH_SELECTION---")) return systemPrompt;
+  return systemPrompt + `
+
+【本次强制】上下文包含 ---DISPATCH_SELECTION---（你上一句问了长官"是哪一批"，还没得到答复）。你返回的 JSON【必须】含根级 "dispatchSelection" 对象，且只能是下面三种形状之一：
+  {"decision":"chose","candidate":"<照抄候选行开头那个 key>"} —— 长官这句话明确指向了其中某一批（你问的是「是不是这一批」、只有一个候选时，他的肯定答复就是指向它）；
+  {"decision":"unclear"} —— 长官这句话没有指向任何一批（你让他在几批里挑、他只回了一句应答词，就属于这一种），你要再问一次；
+  {"decision":"unrelated"} —— 这句话与那一问无关，是一条新命令。
+candidate 只能逐字抄候选行里给出的 key，**不许自己编**，也不许写候选行以外的任何值。拿不准就用 "unclear"——宁可再问一句，绝不替长官挑一批开单。缺失该字段视为无效输出。
+这个对象只写在 ---JSON--- 后面那份 JSON 的根级（与 brief 并列）。---JSON--- 前面的正文是说给长官听的话，只说你接下来要办的事——字段名、key、这条规则都是写给引擎的，一个字都不进正文。`;
+}
+
+// ── 第六轮：数量读法那一问的**本次义务** ──
+//
+// 与 withSelectionReinforcement 同一位置、同一个回包字段（dispatchSelection），只是问的东西不同：
+// 引擎刚问了「一共几个，还是按兵种各算」。单独一节信封（---QUANTITY_SELECTION---），
+// 不借「是哪一批」那段——那段的措辞与人格块里的规则都是写给「选来源」的。
+// 仍然只帮模型分类；真闸在客户端（id 三方对齐 + key 必须是这次给过的）。
+function withQuantityReinforcement(systemPrompt: string, digest: string): string {
+  if (!digest.includes("---QUANTITY_SELECTION---")) return systemPrompt;
+  return systemPrompt + `
+
+【本次强制】上下文包含 ---QUANTITY_SELECTION---（你上一句问了长官这道令的人数怎么算，还没得到答复；候选是几种算法，每行开头一个 key）。你返回的 JSON【必须】含根级 "dispatchSelection" 对象，且只能是下面三种形状之一：
+  {"decision":"chose","candidate":"<照抄候选行开头那个 key>"} —— 长官这句话说清了是哪一种算法（只有一个候选、你问的是「就这样派吗」时，他的肯定答复就是选了它）；
+  {"decision":"unclear"} —— 他没说清是哪一种（候选不止一个、他只回了一句应答词，就属于这一种），你要再问一次；
+  {"decision":"unrelated"} —— 这句话与那一问无关，是一条新命令。
+candidate 只能逐字抄候选行里给出的 key，**不许自己编**。拿不准就用 "unclear"。chose 与 unclear 时不要另写派兵单子——他选定之后，引擎按原命令和他选的算法执行；unrelated 时照常为新命令写单子。缺失该字段视为无效输出。
+这个对象只写在 ---JSON--- 后面那份 JSON 的根级（与 brief 并列）；---JSON--- 前面的正文是说给长官听的话，字段名、key、这条规则一个字都不进正文。`;
 }
 
 // ── 语音输入 V1: 耳朵在场时的两句话 ──
@@ -789,10 +830,14 @@ export async function callAdvisor(
   channel?: string,
   /** 语音输入 V1：录音附件。缺席＝走到 buildContent 等于没走（拼装逐字节不变）。 */
   audio?: AudioAttachment,
+  /** 刀寅：本地对账日志的请求编号（纯观测，缺席就不记）。 */
+  traceId?: string,
 ): Promise<AdvisorResult> {
   const mode = resolveAdvisorMode(channel);
   const systemPrompt = withVoiceReinforcement(
-    withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest),
+    withQuantityReinforcement(withSelectionReinforcement(
+      withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest),
+      digest), digest),
     !!audio,
   );
   const persona = (channel && CHANNEL_PERSONA[channel]) || "";
@@ -809,6 +854,7 @@ ${styleNote}
 
   try {
     const raw = await callDeepSeek(systemPrompt, userContent, undefined, channel, audio);
+    traceWrite(traceId, "model_raw", { mode: "json", text: raw });
     let validated = sanitize(raw);
 
     // Non-stream delimiter recovery (mirror of callAdvisorStream): models
@@ -861,8 +907,8 @@ ${styleNote}
     // LLM returned something but not valid JSON → fallback
     console.warn("LLM returned invalid JSON, using fallback. Raw:", raw.slice(0, 200));
     const fallback: AdvisorResult = {
-      data: createFallbackResponse(),
-      warning: "参谋回复格式异常，已使用默认方案",
+      data: createFallbackResponse("parse"),
+      warning: "参谋回复格式异常（未执行任何命令）",
     };
     return mode === "marcus_consult" ? coerceMarcusConsult(fallback) : fallback;
   } catch (err) {
@@ -875,7 +921,7 @@ ${styleNote}
 
     console.error("LLM call failed:", message);
     const fallback: AdvisorResult = {
-      data: createFallbackResponse(),
+      data: createFallbackResponse("comms"),
       warning: `参谋通讯中断: ${message.slice(0, 100)}`,
     };
     return mode === "marcus_consult" ? coerceMarcusConsult(fallback) : fallback;
@@ -975,8 +1021,8 @@ ${styleNote}
           { from: "marcus", brief: "Commander, comms are spotty. Stand by." },
           { from: "emily", brief: "通信系统有点问题，稍等。" },
         ],
-        data: createFallbackResponse(),
-        warning: "参谋回复格式异常，已使用默认方案",
+        data: createFallbackResponse("parse"),
+        warning: "参谋回复格式异常（未执行任何命令）",
       };
     }
 
@@ -1031,7 +1077,7 @@ ${styleNote}
       responses: [
         { from: "marcus", brief: `通信中断: ${message.slice(0, 60)}` },
       ],
-      data: createFallbackResponse(),
+      data: createFallbackResponse("comms"),
       warning: `参谋通讯中断: ${message.slice(0, 100)}`,
     };
   }
@@ -1075,11 +1121,15 @@ export async function* callAdvisorStream(
   channel?: string,
   /** 语音输入 V1：录音附件；非流兜底路一并转交，两条路的耳朵是同一只。 */
   audio?: AudioAttachment,
+  /** 刀寅：本地对账日志的请求编号（纯观测，缺席就不记）。 */
+  traceId?: string,
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): AsyncGenerator<{ type: "text"; content: string } | { type: "options"; content: any }> {
   const mode = resolveAdvisorMode(channel);
   const systemPrompt = withVoiceReinforcement(
-    withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest),
+    withQuantityReinforcement(withSelectionReinforcement(
+      withPendingReinforcement(mode === "marcus_consult" ? SYSTEM_PROMPT_MARCUS_V2 : SYSTEM_PROMPT, digest),
+      digest), digest),
     !!audio,
   );
   const persona = (channel && CHANNEL_PERSONA[channel]) || "";
@@ -1098,7 +1148,7 @@ ${styleNote}
 
   // If provider doesn't support streaming, fall back to non-streaming
   if (!provider.chatStream) {
-    const result = await callAdvisor(digest, playerMessage, styleNote, channel, audio);
+    const result = await callAdvisor(digest, playerMessage, styleNote, channel, audio, traceId);
     if (result.data.brief) {
       yield { type: "text", content: result.data.brief };
     }
@@ -1159,6 +1209,8 @@ ${styleNote}
         emittedAnyVisible = true;
       }
     }
+
+    traceWrite(traceId, "model_raw", { mode: "stream", text: fullText });
 
     // Parse the JSON portion
     let validated: AdvisorResponse | null = null;
@@ -1259,9 +1311,10 @@ ${styleNote}
     } else {
       // Degraded: return fallback response
       console.warn("Stream: failed to parse JSON, using fallback. Full text:", fullText.slice(0, 300));
+      traceWrite(traceId, "parse_failed", { mode: "stream", fallback: true });
       let fallback: AdvisorResult = {
-        data: createFallbackResponse(),
-        warning: "参谋回复格式异常，已使用默认方案",
+        data: createFallbackResponse("parse"),
+        warning: "参谋回复格式异常（未执行任何命令）",
       };
       if (mode === "marcus_consult") fallback = coerceMarcusConsult(fallback);
       yield { type: "options", content: fallback.warning ? { ...fallback.data, warning: fallback.warning } : fallback.data };
@@ -1271,8 +1324,9 @@ ${styleNote}
     if (message.includes("API密钥未配置")) throw err;
 
     console.error("Stream LLM call failed:", message);
+    traceWrite(traceId, "model_error", { mode: "stream", message: message.slice(0, 300) });
     let fallback: AdvisorResult = {
-      data: createFallbackResponse(),
+      data: createFallbackResponse("comms"),
       warning: `参谋通讯中断: ${message.slice(0, 100)}`,
     };
     if (mode === "marcus_consult") fallback = coerceMarcusConsult(fallback);

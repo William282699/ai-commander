@@ -166,9 +166,13 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     "N36 ★createFallbackResponse() 没有 heard（它是手写字面量、根本不过白名单）★",
     createFallbackResponse().heard === undefined,
   );
+  // ★第六轮改写（有意为之）：原 N37 断言「兜底带着可执行 intent」——那正是交接档 §1 的病
+  //   （真实初始局里「刚才那两个快撤」解析失败 ⇒ 兜底的「稳守」进桶 A ⇒ 下了 3 个设防令）。
+  //   现在兜底一件可执行的东西都不带，并明确标出失败；客户端见 failure 零执行（probe-send-chain F1-F9）。
   check(
-    "N37 ★而它带着可执行 intent——这正是「兜底不能自动执行」的理由，不是空壳★",
-    createFallbackResponse().options.length > 0 && !!createFallbackResponse().options[0].intent,
+    "N37 ★第六轮：兜底不带任何可执行 options，且明确标出失败（failure）★",
+    createFallbackResponse().options.length === 0 && createFallbackResponse().failure === "parse"
+      && createFallbackResponse("comms").failure === "comms",
   );
 
   // ── ④b spoken 合同：同一张白名单上的第二个新字段（spoken 层 步1）──
@@ -199,8 +203,9 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     createFallbackResponse().brief,
   );
   check(
-    "N65 兜底句仍带可执行 options（它们是 decideBucket 负对照的料，不是给人看的，一个没删）",
-    createFallbackResponse().options.length === 3,
+    "N65 ★第六轮：兜底句本身说清「没有执行」（不再有默认方案可执行，也不再暗示有）★",
+    createFallbackResponse().options.length === 0 && createFallbackResponse().brief.includes("没有执行"),
+    createFallbackResponse().brief,
   );
 }
 
@@ -369,7 +374,11 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
 
   // ── 通讯故障那一格：兜底方案带着可执行 intent，且天生没有 heard ──
   {
-    const fb = createFallbackResponse().options[0];
+    // 第六轮：兜底已不带 options。这两格要测的是「语音回合没有 heard ⇒ 无锚的可执行方案不进桶 A」，
+    //   料换成**旧兜底的第一张方案原样**（它就是那种无锚的设防单）——判定本身一字未改。
+    const fb = { label: "A: 稳守阵地", description: "全线防御，等待进一步情报", risk: 0.2, reward: 0.3,
+      intent: { type: "defend" as const, urgency: "medium" as const },
+      intents: [{ type: "defend" as const, urgency: "medium" as const }] };
     const voice = bucketOf(fb, "", true, false);
     const cut = bucketOf(fb, "", false, false);
     const moved = resolveIntent(fb.intent, state, state.style).assignedUnitIds;
@@ -429,12 +438,50 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
   const SPOKEN = "让G13那队顶上去，十七秒到。";
 
   const typed = planVoiceSpeech({ voiceTurn: false, spoken: SPOKEN, prose: PROSE });
+  // ★本条已刷新一次（retreat-scope 刀B，2026-09-20，计划 §B.2「办法一」，用户已定）。
+  //   旧契约：打字回合 speakProseWhileStreaming=true、finalUtterance=""（边流边念）。
+  //   为什么必须改（单因可归）：流式那一刻还不知道这回合会不会动兵——模型先写
+  //   正文、后写 JSON，"咨询还是执行"要等 options 事件才知道。边流边念 ⇒ 会动兵
+  //   的回合，耳朵在引擎跑**之前**就把方案念出去了，后面纠正也收不回来。
+  //   办法一＝流式期间只收不念，裁决完再整段放出。**代价如实登记**：咨询的
+  //   内容一字不差，但开口时间晚到"回复写完＋裁决"那一刻（手感损失，非零成本）。
+  //   规矩照旧：快照只在「单因可归 + 主审签字」时刷；这一刷的签字是计划 §5。
   check(
-    "S1 ★打字回合逐字等价于分层之前：边流边念正文、回执照旧出声★",
-    typed.route === "typed" && typed.speakProseWhileStreaming === true &&
-      typed.finalUtterance === "" && typed.speakExecReceipt === true,
+    "S1 ★打字回合（刀B 办法一后）：流式期间不出声，整段等裁决完再念，回执照旧出声★",
+    typed.route === "typed" && typed.speakProseWhileStreaming === false &&
+      typed.finalUtterance === PROSE && typed.speakExecReceipt === true,
     JSON.stringify(typed),
   );
+  // ── 刀B 新契约：会动兵的回合，这一层一声不出（四条路由一视同仁）──
+  {
+    const cases: Array<[string, Parameters<typeof planVoiceSpeech>[0]]> = [
+      ["typed", { voiceTurn: false, prose: PROSE }],
+      ["spoken", { voiceTurn: true, spoken: SPOKEN, prose: PROSE }],
+      ["prose_fallback", { voiceTurn: true, prose: PROSE }],
+    ];
+    for (const [name, input] of cases) {
+      const off = planVoiceSpeech({ ...input, execTurn: false });
+      const on = planVoiceSpeech({ ...input, execTurn: true });
+      check(
+        `X1 ${name} ★会动兵 ⇒ 这一段不进耳朵，且回执必出声（耳朵只剩真结果那一声）★`,
+        on.route === off.route && on.finalUtterance === "" && on.speakExecReceipt === true,
+        JSON.stringify(on),
+      );
+      check(
+        `X2 ${name} ★摘刀负对照：不会动兵时逐字回到刀B 之前的取值（execTurn 只在动兵那一格生效）★`,
+        off.finalUtterance.length > 0 && JSON.stringify(off) === JSON.stringify(planVoiceSpeech(input)),
+        JSON.stringify(off),
+      );
+    }
+    // silent_echo（双层复读）本来就不出声，execTurn 不许把它弄出声来
+    const HEARD_X = "两个步兵去阿拉曼，剩下的守住烽火台";
+    const echoExec = planVoiceSpeech({ voiceTurn: true, spoken: HEARD_X + "。", prose: HEARD_X + "。", heard: HEARD_X, execTurn: true });
+    check(
+      "X3 silent_echo + 会动兵 ⇒ 仍旧不出声，回执照旧（execTurn 不制造第三声）",
+      echoExec.route === "silent_echo" && echoExec.finalUtterance === "" && echoExec.speakExecReceipt === true,
+      JSON.stringify(echoExec),
+    );
+  }
   check(
     "S2 ★打字回合连模型交回了 spoken 都不改道（用户钉死的边界：打字路径零改动）★",
     JSON.stringify(planVoiceSpeech({ voiceTurn: false, spoken: SPOKEN, prose: PROSE })) ===

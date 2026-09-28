@@ -143,6 +143,9 @@ export function createTutorialState(): GameState {
     doctrines: [],
     doctrineCooldowns: {},
     tasks: [],
+    // 刀C 台账：重开一局即清空（三条场景路都要，漏一条那张图就没有任务号）
+    dispatches: [],
+    nextDispatchNum: 1,
     battleMarkers: [],
     decisionReviews: [],
     recentDeaths: [],

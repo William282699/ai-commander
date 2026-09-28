@@ -8,7 +8,8 @@ import type { GameState } from "@ai-commander/shared";
 import { generateDigestV1 } from "@ai-commander/shared";
 import { buildBattleBoard, boardToDigestLines } from "./battleBoard";
 import { buildFrontJudgmentLines, buildCommanderMoodLine } from "./commanderPresence";
-import { mintSpokenForce } from "./escalationTicket";
+import { mintSpokenForce, remainderHandleOf } from "./escalationTicket";
+import { buildDispatchDigestLines } from "./dispatchLedger";
 
 /**
  * Compute player/enemy power per front from actual unit positions.
@@ -97,5 +98,8 @@ export function buildDigest(
   );
   // Step B: mood line rides the same core→shared path (calm = no line).
   const mood = buildCommanderMoodLine(state);
-  return generateDigestV1(state, selectedUnitIds, markedTargets, recentEvents, board, judgment, mood ?? undefined);
+  // 刀C: 在役任务行。纯读，不铸号（号在派兵那一刻就生成了），所以台架与
+  // 心跳路径拿到的也是同一份——不像 handle 那样需要 opt-in。
+  const dispatches = buildDispatchDigestLines(state, remainderHandleOf);
+  return generateDigestV1(state, selectedUnitIds, markedTargets, recentEvents, board, judgment, mood ?? undefined, dispatches);
 }
