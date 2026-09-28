@@ -167,12 +167,28 @@ export function canAutoExecute(
 
   // Validate each intent independently — multi-intent is fine as long as every
   // intent clears the same safety bar a single intent would.
+  //
+  // ★第九轮：**先把每一条都判完，再统一裁定**（gateSeverity 取最重的那一条）。
+  //   旧写法在循环里遇到第一条不能自动执行的就 return——第一条若只是「没点名、参谋代挑」
+  //   （anchor_mismatch / no_anchor，本身允许桶 A 自动执行），后面那条「全军压上」的高影响
+  //   根本没被看到，整句自动执行；「目标不存在」与「高影响」谁排在前、结论就跟谁走。
+  //   每一条自己的检查顺序（目标 → 高影响 → 锚）照旧，所以单条命令的结论一个字节不变。
+  const verdicts: GateVerdict[] = [];
   for (const intent of intents) {
+    const v = intentVerdict(intent);
+    if (v) verdicts.push(v);
+  }
+  let worst: GateVerdict | null = null;
+  for (const v of verdicts) if (!worst || gateSeverity(v) > gateSeverity(worst)) worst = v;
+  return worst ?? { auto: true };
+
+  /** 这一条单独看能不能自动执行；能 ⇒ null。 */
+  function intentVerdict(intent: Intent): GateVerdict | null {
     // produce/trade are economy actions with no squad anchor — a clear command
     // should execute without the squad gate it would otherwise fail (no_anchor).
     // Affordability stays the engine's call; failures surface as Emily feedback
     // after applyOrders (Step 2).
-    if (intent.type === "produce" || intent.type === "trade") continue;
+    if (intent.type === "produce" || intent.type === "trade") return null;
 
     if (!isValidTarget(intent, state, commanderRefs)) return { auto: false, reason: "invalid_intent_fields" };
 
@@ -232,9 +248,28 @@ export function canAutoExecute(
       if (!hasSelectedKeyword) return { auto: false, reason: "no_anchor" };
       if (!selectedIds || selectedIds.length === 0) return { auto: false, reason: "no_selected_units" };
     }
+    return null;
   }
+}
 
-  return { auto: true };
+export type GateVerdict = { auto: false; reason: string; playerNamedSquad?: boolean };
+
+/**
+ * 第九轮：整组命令里各条结论的轻重（数越大越重）。整组的结论＝最重的那一条，任何需要拦截的
+ * 一条都不会被较轻的结论掩盖：
+ *   3 澄清（桶 B：先问清楚，不登记待批）——目标不存在；长官点了名却对不上；说了「选中」却没选。
+ *     排在确认之前：方案里有一条本身不成立，拿去请长官批准也批不出能执行的东西。
+ *   2 确认（桶 C：先说代价再等批准）——高影响（没点来源的全部/大部分进攻、撤退、设防）。
+ *   1 参谋代挑（桶 A：可以自动执行）——长官没点名部队（no_anchor / 没点名的 anchor_mismatch）。
+ *   0 自动（整组都点对了名，或只是经济单）。
+ * 这里只排轻重，不改各条自己的判定（高影响的定义、锚的认法照旧）。
+ */
+export function gateSeverity(v: GateVerdict): number {
+  if (v.reason === "invalid_intent_fields" || v.reason === "no_selected_units") return 3;
+  if (v.reason === "anchor_mismatch" && v.playerNamedSquad) return 3;
+  if (v.reason === "high_impact") return 2;
+  if (v.reason === "no_anchor" || v.reason === "anchor_mismatch") return 1;
+  return 3; // 认不出的理由一律按最重处理（fail-closed）
 }
 
 // ── P0-1: 桶判定（本次唯一的新判断）──
@@ -254,9 +289,10 @@ export function canAutoExecute(
 //   都读同一个前提——"长官的话里没有部队名"。而语音回合若没有 heard，引擎手里
 //   根本没有长官的话，"没点名"是**没看见**不是**没有**。凭没看见就自动执行，
 //   等于替长官做了一个他没做的决定。
-//   这一条同时封死另一个洞：通讯故障时 createFallbackResponse() 会送回一份
-//   **带可执行 intent** 的兜底方案，而它是手写字面量、永远没有 heard ⇒ 语音回合
-//   的兜底自动落进这里被拦住，不需要单独写一条分支。
+//   这一条当初同时封死另一个洞：通讯故障时 createFallbackResponse() 曾送回一份
+//   **带可执行 intent** 的兜底方案（手写字面量、永远没有 heard）。★第六轮起兜底
+//   已不带任何 options 并标出 failure，客户端在进闸之前就整轮零执行；这条判定
+//   仍按原样保留（任何缺 heard 的语音回合都适用）。
 //
 // ⚠ 两个条件是**合取**，缺一不可：只写 "heard 缺席就不进 A" 会把每一个打字回合
 //   都推进 B（打字回合永远没有 heard）——那是把砍卡法整个推翻。

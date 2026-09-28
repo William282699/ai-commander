@@ -90,7 +90,7 @@ import {
 } from "@ai-commander/core";
 import type { FacilitySituationType, AdvisorTriggerResult, DirectorBeat, DirectorBeatKind, DirectorSnapshot, StrategicSituation, ViewportGeometry } from "@ai-commander/core";
 import type { Unit, Order, GameState, Facility, Tag, Channel, ReportEvent, ReportEventType, TaskPriority, CrisisEvent, ScenarioId } from "@ai-commander/shared";
-import { TILE_SIZE } from "@ai-commander/shared";
+import { TILE_SIZE, advisorFailureOf } from "@ai-commander/shared";
 import { createSquad, pickLeaderName, getUsedLeaderNames, availableLeaderProfiles, moveSquadUnder, removeSquadFromParent, dissolveSquad, transferSquadToCommander } from "@ai-commander/shared";
 import type { LeaderProfile } from "@ai-commander/shared";
 import { advanceGuide, initialGuideState, openingLine, currentTargets,
@@ -656,6 +656,14 @@ const SUPPRESSED_DIAG_CODES = new Set([
   "TRADE_BUDGET",
   // ★复审 §五：跨局回调作废是**内部事件**，与长官无关，不许上屏。
   "STALE_RUN_DROPPED",
+  // ★刀寅：执行**之前**的计划日志与方案标题。刀B 已经把它们降为对账用的诊断，
+  //   可这张排水表没跟上——实测它们照样以 warning 排进马克斯的频道，于是长官在
+  //   作战频道看到一行「8 个单位前往 X 设防」的计划，而真正下出去的令是另一个数。
+  //   玩家面前的执行结果只有 ApplyResult 回执那一份。
+  "PLAN_LOG",
+  "EXEC_PLAN_LABEL",
+  // 同一类：裸确认执行的导出行（escalateId/viaTicket/dispatched…），是给对账用的。
+  "V4_BARE_CONFIRM_EXEC",
 ]);
 
 // 5C-lite: rating-driven game-over title. UI MUST read rating first; the binary
@@ -2068,6 +2076,10 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           .then((data) => {
             if (reqSession !== staffAskState.session) return; // stale
             if (!ENABLE_STAFF_THREADS) return;
+            // 第六轮：服务端兜底（模型解析失败 / 通讯中断）＝没有参谋的话可报。与下面的
+            //   网络失败同样静默（事件本身已经上屏）——不把「这句命令没有执行」贴到一条长官
+            //   没下过命令的事件下面，也绝不拿兜底开线程。
+            if (advisorFailureOf(data)) return;
             if (data?.brief) {
               addMessage("info", data.brief, capturedTime, channel, undefined, "event_report");
             }

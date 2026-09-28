@@ -166,9 +166,13 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     "N36 ★createFallbackResponse() 没有 heard（它是手写字面量、根本不过白名单）★",
     createFallbackResponse().heard === undefined,
   );
+  // ★第六轮改写（有意为之）：原 N37 断言「兜底带着可执行 intent」——那正是交接档 §1 的病
+  //   （真实初始局里「刚才那两个快撤」解析失败 ⇒ 兜底的「稳守」进桶 A ⇒ 下了 3 个设防令）。
+  //   现在兜底一件可执行的东西都不带，并明确标出失败；客户端见 failure 零执行（probe-send-chain F1-F9）。
   check(
-    "N37 ★而它带着可执行 intent——这正是「兜底不能自动执行」的理由，不是空壳★",
-    createFallbackResponse().options.length > 0 && !!createFallbackResponse().options[0].intent,
+    "N37 ★第六轮：兜底不带任何可执行 options，且明确标出失败（failure）★",
+    createFallbackResponse().options.length === 0 && createFallbackResponse().failure === "parse"
+      && createFallbackResponse("comms").failure === "comms",
   );
 
   // ── ④b spoken 合同：同一张白名单上的第二个新字段（spoken 层 步1）──
@@ -199,8 +203,9 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
     createFallbackResponse().brief,
   );
   check(
-    "N65 兜底句仍带可执行 options（它们是 decideBucket 负对照的料，不是给人看的，一个没删）",
-    createFallbackResponse().options.length === 3,
+    "N65 ★第六轮：兜底句本身说清「没有执行」（不再有默认方案可执行，也不再暗示有）★",
+    createFallbackResponse().options.length === 0 && createFallbackResponse().brief.includes("没有执行"),
+    createFallbackResponse().brief,
   );
 }
 
@@ -369,7 +374,11 @@ const ENVELOPE = `⚠️ ENFORCEMENT RULES…
 
   // ── 通讯故障那一格：兜底方案带着可执行 intent，且天生没有 heard ──
   {
-    const fb = createFallbackResponse().options[0];
+    // 第六轮：兜底已不带 options。这两格要测的是「语音回合没有 heard ⇒ 无锚的可执行方案不进桶 A」，
+    //   料换成**旧兜底的第一张方案原样**（它就是那种无锚的设防单）——判定本身一字未改。
+    const fb = { label: "A: 稳守阵地", description: "全线防御，等待进一步情报", risk: 0.2, reward: 0.3,
+      intent: { type: "defend" as const, urgency: "medium" as const },
+      intents: [{ type: "defend" as const, urgency: "medium" as const }] };
     const voice = bucketOf(fb, "", true, false);
     const cut = bucketOf(fb, "", false, false);
     const moved = resolveIntent(fb.intent, state, state.style).assignedUnitIds;

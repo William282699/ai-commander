@@ -55,6 +55,22 @@ export interface DispatchSlice {
    *   花费、真实原因），计划那一行**不再进回执**。
    */
   economy?: boolean;
+  /**
+   * 刀寅（C）：这一条「真接到命令的有几个」那半句由调用方按**实际下令人数**现写
+   * （临时编队票那一条要说出是哪一批、原报几个、差额里有证据的原因）。
+   * 缺席 ⇒ 通用的「已下令 N 个单位…」。
+   *
+   * ★ 为什么走这里而不是另起一行：过去票据回执是回执之后**再补一行**、只上屏，
+   *   同一批人报两次数、耳朵和 context 还听不到第二行。放进这一格，它就是这一条
+   *   意图**唯一**的一句，屏/耳/context 同一份字符串；已在办/被拒两栏照旧追加。
+   */
+  appliedLine?: (appliedCount: number) => string;
+  /**
+   * 刀寅：「已经在办」那半句说的去处。按批次指代时＝那批人**正在执行的**任务的落点
+   * （台账记的），不是这一轮重发的单子写的——两者在 5 格内才判"已在办"，可名字可能不同
+   * （实测：人在去北线前哨，重发的单子写的是「1. 北部战线」）。缺席 ⇒ 用 destinationName。
+   */
+  alreadyDestinationName?: string;
 }
 
 export type ExecOutcome = "applied" | "partial" | "already_doing" | "none";
@@ -111,9 +127,14 @@ export interface ExecReceipt {
 export function buildExecFeedback(
   receipt: ExecReceipt,
   degradedLines: readonly string[],
+  /**
+   * 刀寅：已下令的那部分之外、**同一条意图里没动的人**为什么没动（解析器带回的结构化原因，
+   * 如「另有 1 个没有记下出发地，没有动。」）。排在回执之后，同样降级为 partial。
+   */
+  shortfallLines: readonly string[] = [],
 ): ExecReceipt {
-  const lines = [...degradedLines, ...receipt.lines];
-  const hasDegraded = degradedLines.length > 0;
+  const lines = [...degradedLines, ...receipt.lines, ...shortfallLines];
+  const hasDegraded = degradedLines.length > 0 || shortfallLines.length > 0;
   const outcome: ExecOutcome = hasDegraded
     ? (receipt.outcome === "none" ? "none" : "partial")
     : receipt.outcome;
@@ -305,10 +326,16 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
     // rejected=1 被判成 already_doing，只说"已经在执行"，被拒那个**一个字都不提**，
     // 屏上还是普通 info。真实的 applyOrders 能产生这些组合，所以它们不是假设。
     const phrase = actionPhrase(slice.action, slice.destinationName);
+    const alreadyPhrase = slice.alreadyDestinationName
+      ? actionPhrase(slice.action, slice.alreadyDestinationName) : phrase;
     const parts: string[] = [];
-    if (appliedCount > 0) parts.push(`已下令 ${appliedCount} 个单位${phrase}`);
+    if (appliedCount > 0) {
+      parts.push(slice.appliedLine
+        ? slice.appliedLine(appliedCount).replace(/[。.]+$/, "")
+        : `已下令 ${appliedCount} 个单位${phrase}`);
+    }
     // alreadyDoing 是第三类结局：不算新派兵、不算失败，措辞里绝不许出现"已下令"。
-    if (alreadyCount > 0) parts.push(`另有 ${alreadyCount} 个已经在${phrase}了，没有重新下令`);
+    if (alreadyCount > 0) parts.push(`另有 ${alreadyCount} 个已经在${alreadyPhrase}了，没有重新下令`);
     if (rejectedCount > 0) parts.push(`${rejectPhrase(liveRejected)}，没接到命令`);
     if (parts.length === 0) {
       // 三栏全空：明说没有执行，**不许出现"已下令…前往 X"**。
@@ -321,6 +348,34 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
       lines.push(`没有重新下令——${parts.join("；")}。`);
     } else {
       lines.push(`${parts.join("；")}。`);
+    }
+  }
+
+  // ── 第六轮（交接档 §5）：同一件事拆成了几条（同一个动作、同一个去处）⇒ 补一句**合计**。
+  //   病：「派其中两个」被按兵种拆成两条，回执两句各说「2 个已经出发」，读着像派了 2 个，
+  //   实际派了 4 个。合计按**真实单位 ID** 去重（同一个人先后接两条令只算一个），
+  //   已下令 / 已在办 / 没接到命令分开数。逐条那几句照旧保留。
+  {
+    const groups = new Map<string, DispatchSlice[]>();
+    for (const slice of slices) {
+      if (slice.economy) continue;
+      const key = `${slice.action}§${slice.destinationName}`;
+      groups.set(key, [...(groups.get(key) ?? []), slice]);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const rows = group.flatMap((sl) => sl.orderIndexes.map((i) => result.perOrder[i]).filter((r): r is NonNullable<typeof r> => r !== undefined));
+      const applied = new Set(rows.flatMap((r) => r.appliedUnitIds));
+      const already = new Set(rows.flatMap((r) => r.alreadyDoingUnitIds).filter((id) => !applied.has(id)));
+      const rejected = new Set(rows.flatMap((r) => r.rejected.map((x) => x.unitId)).filter((id) => !applied.has(id) && !already.has(id)));
+      if (applied.size + already.size === 0) continue; // 全没办成：逐条已经说了「没有执行」
+      const phrase = actionPhrase(group[0].action, group[0].destinationName);
+      const parts = [
+        applied.size > 0 ? `新下令 ${applied.size} 个单位${phrase}` : "",
+        already.size > 0 ? `${already.size} 个已经在${phrase}` : "",
+        rejected.size > 0 ? `${rejected.size} 个没接到命令` : "",
+      ].filter(Boolean);
+      lines.push(`合计：${parts.join("，")}。`);
     }
   }
 

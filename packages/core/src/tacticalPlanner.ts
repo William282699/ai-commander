@@ -28,7 +28,7 @@ import { usesGroundCaptureRules } from "./economy";
 import { frontDestinationFor, type FrontDestinationMode } from "./frontDestination";
 import { createMission } from "./missions";
 import { getFormationOffset, computeHeading, type FormationStyle } from "./formation";
-import { installFrontResolver, findDispatch, liveDispatchMembers } from "./dispatchLedger";
+import { installFrontResolver, findDispatch, liveDispatchMembers, originOfUnit } from "./dispatchLedger";
 
 // ── Result type ──
 
@@ -43,6 +43,12 @@ export interface ResolveResult {
    *  一旦丢弃了目的地，真正的落点是「安全区域」而不是 intent 上写的那个地名，
    *  从 intent 反推就会报错地方。给默认值等于允许"忘了填"静默变成空名。 */
   destinationName: string;
+  /**
+   * 刀寅：这条意图里**没被下令**的那部分人为什么没动（有结构化原因才写）。
+   * 例：「回原处」时有人没记下出发地、有人的出发地到不了。执行层把它并进回执，
+   * 屏/耳/context 同一句——不许悄悄少派。
+   */
+  note?: string;
 }
 
 // ── Supported intents (Day 7 base + Day 9 economy) ──
@@ -276,7 +282,7 @@ function resolveIntentInner(
 // Chat receipts must never leak raw coordinates. Fixed resolution order
 // (Codex): facility name → player map-tag name → region name → front name →
 // "目标区域". Pure read for the log string — Order generation untouched.
-function describeTargetForLog(intent: Intent, state: GameState): string {
+export function describeTargetForLog(intent: Intent, state: GameState): string {
   // STRICT mirror of resolveTarget() — the receipt must name the SAME thing
   // the units actually march to (Codex polish round-2 #1). Order:
   // _targetPos → targetFacility → targetRegion(tag→region→front) → toFront
@@ -651,7 +657,10 @@ type RetreatPlan =
   | { ok: false; fail: "no_source"; error: string; unitTypeBypassed: boolean }
   | { ok: false; fail: "no_units"; unitTypeBypassed: boolean }
   | { ok: false; fail: "impassable"; unitTypeBypassed: boolean }
-  | { ok: true; orders: Order[]; requestedCount: number; skippedCount: number; unitTypeBypassed: boolean; destinationNamed: boolean };
+  | { ok: false; fail: "no_origin"; unitTypeBypassed: boolean }
+  | { ok: true; orders: Order[]; requestedCount: number; skippedCount: number; unitTypeBypassed: boolean; destinationNamed: boolean;
+      /** 刀寅：「回原处」这一档的结算（缺席＝不是这一档）。 */
+      origin?: { noOrigin: number; unreachable: number; facilityId?: string; mixedPlaces: boolean } };
 
 function planRetreat(
   intent: Intent,
@@ -719,6 +728,43 @@ function planRetreat(
     destination = sameFront ? null : dest.position;
   }
 
+  // ── 刀寅：回到这次外派的出发地（returnTo:"origin"）──
+  //
+  // 只在长官**没另点地方**时生效（上面解析出了设施/地点/异线战线 ⇒ 以他点的为准）。
+  // 出发位置逐人从台账取（接到命令那一刻的真实坐标），每人走同一条 spread/通行管线
+  // ——不是裸坐标。仍是 retreat：途中不追敌、到达后转设防（retreat-semantics-v1 那条链）。
+  // 没记下出发地 / 出发地到不了的人**不动**，并如实报出来；绝不拿「安全区」顶上。
+  if (destination === null && intent.returnTo === "origin") {
+    const orders: Order[] = [];
+    let noOrigin = 0;
+    let unreachable = 0;
+    const facs = new Set<string>();
+    let anyWithoutFacility = false;
+    for (const u of units) {
+      const o = originOfUnit(state, u.id);
+      if (!o) { noOrigin++; continue; }
+      const spread = createOrdersWithSpread(
+        [u], o.pos, state, "retreat", mapUrgency(intent.urgency), 1.0,
+        undefined, intent.routeId, intent.routeIds,
+      );
+      if (spread.orders.length === 0) { unreachable++; continue; }
+      orders.push(...spread.orders);
+      if (o.facilityId) facs.add(o.facilityId); else anyWithoutFacility = true;
+    }
+    if (orders.length === 0) {
+      return { ok: false, fail: noOrigin === units.length ? "no_origin" : "impassable", unitTypeBypassed };
+    }
+    return {
+      ok: true, orders, requestedCount: units.length, skippedCount: noOrigin + unreachable,
+      unitTypeBypassed, destinationNamed: true,
+      origin: {
+        noOrigin, unreachable,
+        facilityId: facs.size === 1 && !anyWithoutFacility ? [...facs][0] : undefined,
+        mixedPlaces: facs.size > 1 || (facs.size > 0 && anyWithoutFacility),
+      },
+    };
+  }
+
   if (destination !== null) {
     // Same spread/passability pipeline as defend (radius 1.0 — a retreat
     // regroups tight); action stays "retreat" so the no-chase transit
@@ -782,6 +828,10 @@ function planRetreat(
   };
 }
 
+function hasNamedDestination(intent: Intent): boolean {
+  return !!(intent._targetPos || intent.targetFacility || intent.targetRegion || intent.toFront);
+}
+
 function resolveRetreat(
   intent: Intent,
   state: GameState,
@@ -803,8 +853,28 @@ function resolveRetreat(
       case "no_units":
         return { orders: [], log: "无可用单位执行撤退", degraded: true, destinationName: "" };
       case "impassable":
-        return { orders: [], log: "撤退目标地形不可达，无可执行命令", degraded: true, destinationName: "" };
+        return { orders: [], log: intent.returnTo === "origin" && !hasNamedDestination(intent)
+          ? "这批人的出发地现在到不了，没有执行" : "撤退目标地形不可达，无可执行命令", degraded: true, destinationName: "" };
+      case "no_origin":
+        return { orders: [], log: "这批人没有记下这次外派的出发地，没有执行", degraded: true, destinationName: "" };
     }
+  }
+
+  // 刀寅：「回原处」——落点名只说引擎真解析到的：同一个我方据点附近才叫得出据点名。
+  if (plan.origin) {
+    const o = plan.origin;
+    const fac = o.facilityId ? state.facilities.get(o.facilityId) : undefined;
+    const dest = fac ? `出发地（${fac.name}附近）` : o.mixedPlaces ? "各自的出发地" : "出发地";
+    const parts: string[] = [];
+    if (o.noOrigin > 0) parts.push(`${o.noOrigin} 个没有记下出发地`);
+    if (o.unreachable > 0) parts.push(`${o.unreachable} 个的出发地现在到不了`);
+    return {
+      orders: plan.orders,
+      log: `命令 ${plan.orders.length} 个单位撤回${dest}`,
+      degraded: false,
+      destinationName: dest,
+      ...(parts.length > 0 ? { note: `另有${parts.join("、")}，没有动。` } : {}),
+    };
   }
 
   const skipNote = plan.skippedCount > 0 ? `（${plan.skippedCount} 个单位因地形限制未下达）` : "";
@@ -1855,26 +1925,419 @@ installFrontResolver({
     const f = findFront(state, hint);
     return f ? getUnitsOnFront(state, f) : [];
   },
+  // 刀寅：台账记「出发战线」用。与 getUnitsOnFront 同一份几何（isInFront），
+  // 只是不带可调过滤——来源是位置事实，不是"能不能调"。
+  frontIdOfUnit: (state, unit) => state.fronts.find((f) => isInFront(state, f, unit.position))?.id ?? null,
 });
+
+/**
+ * 刀寅：**这条命令自己的「去处原话」**与它的目的地字段是否一致。
+ *
+ * 模型在每条会动兵的单子上抄下长官原话里说这条命令去处的那几个字（destinationQuote）。
+ * 本函数只做程序能证明的几件事，**语义仍归模型**：
+ *   ① 引用确实出自长官这一句（这份方案绑定的原话）——不在原话里 ⇒ 不采信它是长官的话，
+ *      只核这张单子自己的两个字段前后是否一致（verified=false）；
+ *   ② 这几个字里有没有地图上地点的**本名**（设施名／战线名，不认错别字、代词）——
+ *      没有 ⇒ 不介入（「北部展现」「北线前稍」「那里」照模型的理解走）；
+ *   ③ 有 ⇒ 与字段解析出的去处比对：一致就放行；
+ *      字段只写到**包含该设施的那条战线** ⇒ narrowed（提出按设施办，问一句）；
+ *      两者说的是不同的地方 ⇒ conflict（问一句）。**不静默替长官改目标。**
+ *   ④ 字段**没写去处**时一律不介入、**绝不拿片段补去处**：没写去处本身就是完整的意思
+ *      （裸撤退、回原处、就地设防），而片段可能标的是"派去北线前哨的那两个"里的
+ *      「北线前哨」（审核实测：叫回来被补成开往北线前哨，一半以上中招）。
+ *   ⑤ 撤退单不提"按设施办"——对不上就只问，不替他出方案（撤退往哪儿偏一步都是反方向）。
+ * 引用只能证明"确实是长官说过的话"，证明不了它是正向的去处（否定、来源、问句都可能被
+ * 错标）——所以对不上时一律问，不替他挑。
+ */
+export type DestinationQuoteVerdict =
+  | { kind: "no_check"; reason: "no_quote" | "not_in_player_words" | "names_no_place" | "not_dispatch" | "no_destination_written" }
+  | { kind: "consistent" }
+  /** verified＝片段确实出自长官这一句；false＝出自别处（例如「是的」那一轮模型凭记忆重写），
+   *  只能说明**单子自己前后不一**，不能说「您说的是…」。 */
+  | { kind: "narrowed"; facilityId: string; facilityName: string; frontName: string; verified: boolean }
+  | { kind: "conflict"; quote: string; wrote: string; verified: boolean };
+
+export function checkDestinationQuote(
+  state: GameState,
+  intent: Intent,
+  playerText: string | null | undefined,
+): DestinationQuoteVerdict {
+  if (!isDispatchIntentType(intent.type)) return { kind: "no_check", reason: "not_dispatch" };
+  const quote = (intent.destinationQuote ?? "").trim();
+  if (!quote) return { kind: "no_check", reason: "no_quote" };
+  const said = (playerText ?? "").trim();
+  // 片段不在这份方案绑定的原话里：不采信它来**补**目的地；但单子自己「去处片段」与
+  //   「目的地字段」前后不一时，照样不许静默执行（实测：陈反问后长官答「是的」，模型凭记忆
+  //   重写单子，片段抄的是「北线前哨」、字段只写到北部战线——7/10 去了战线中心）。
+  //   这不是翻历史找补丁：比的是**这一张单子自己的两个字段**。
+  const verified = !!said && said.includes(quote);
+
+  // 引用里点到的地点（只认本名：设施名、去掉序号的战线名）。
+  const facs = [...state.facilities.values()].filter((f) => f.hp > 0 && f.name && quote.includes(f.name));
+  const fronts = state.fronts.filter((f) => {
+    const bare = f.name.replace(/^\s*\d+\.\s*/, "");
+    return bare.length > 0 && quote.includes(bare);
+  });
+  if (facs.length === 0 && fronts.length === 0) return { kind: "no_check", reason: "names_no_place" };
+
+  // 字段自己写了什么（classifyDestination 回落到 fromFront 那一档算"没写去处"）。
+  const dest = classifyDestination(intent, state);
+  const wroteNothing = dest.kind === "none" || (dest.kind === "front" && dest.field === "fromFront");
+  const frontById = (id: string | null) => (id ? state.fronts.find((f) => f.id === id) : undefined);
+  // 引用里若既有战线又有其中的设施（「北部战线的北线前哨」），按更具体的设施算。
+  const namedFacs = facs;
+  const namedFronts = fronts.filter((fr) => !namedFacs.some((f) => isInFront(state, fr, f.position)));
+
+  if (wroteNothing) return { kind: "no_check", reason: "no_destination_written" };
+
+  const wroteName = describeTargetForLog(intent, state);
+  if (dest.kind === "facility" && dest.position) {
+    const hit = namedFacs.find((f) => f.position.x === dest.position!.x && f.position.y === dest.position!.y);
+    if (hit) return { kind: "consistent" };
+    return { kind: "conflict", quote, wrote: wroteName, verified };
+  }
+  if (dest.kind === "front") {
+    const fr = frontById(dest.frontId);
+    if (!fr) return { kind: "conflict", quote, wrote: wroteName, verified };
+    const inside = namedFacs.filter((f) => isInFront(state, fr, f.position));
+    if (intent.type !== "retreat" && namedFacs.length === 1 && inside.length === 1 && namedFronts.every((x) => x.id === fr.id)) {
+      return { kind: "narrowed", facilityId: inside[0].id, facilityName: inside[0].name, frontName: fr.name, verified };
+    }
+    if (namedFacs.length === 0 && namedFronts.length === 1 && namedFronts[0].id === fr.id) return { kind: "consistent" };
+    return { kind: "conflict", quote, wrote: wroteName, verified };
+  }
+  // 地点／精确坐标：引用点到的设施在落点 6 格内、或点到的战线包含落点 ⇒ 一致。
+  if (dest.position) {
+    const p = dest.position;
+    if (namedFacs.some((f) => Math.hypot(f.position.x - p.x, f.position.y - p.y) <= 6)) return { kind: "consistent" };
+    if (namedFacs.length === 0 && namedFronts.some((fr) => isInFront(state, fr, p))) return { kind: "consistent" };
+  }
+  return { kind: "conflict", quote, wrote: wroteName, verified };
+}
+
+/**
+ * 第六轮：把一小段数量原话里的**数**读出来（「两个」→2、「3辆」→3、「十二个」→12）。
+ * 只认数字与汉字数词本身（封闭的数词集合，不是同义词表）；读不出数就返回 null。
+ */
+const CN_DIGIT: Record<string, number> = {
+  "零": 0, "一": 1, "二": 2, "两": 2, "俩": 2, "三": 3, "仨": 3, "四": 4, "五": 5,
+  "六": 6, "七": 7, "八": 8, "九": 9,
+};
+export function parseQuantityWord(text: string | null | undefined): number | null {
+  const t = (text ?? "").replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+  const arabic = t.match(/\d+/);
+  if (arabic) return parseInt(arabic[0], 10);
+  const m = t.match(/[零一二两俩三仨四五六七八九十]+/);
+  if (!m) return null;
+  const w = m[0];
+  if (!w.includes("十")) return w.length === 1 ? CN_DIGIT[w] ?? null : null;
+  const [tens, ones] = w.split("十");
+  const tv = tens === "" ? 1 : CN_DIGIT[tens];
+  const ov = ones === "" ? 0 : CN_DIGIT[ones];
+  return tv === undefined || ov === undefined ? null : tv * 10 + ov;
+}
+
+/** 兵种的中文说法（把枚举翻成人话；不是穷举玩家的说法）。 */
+export const UNIT_TYPE_WORD: Record<string, string> = { armor: "坦克", infantry: "步兵", air: "飞机", naval: "舰艇" };
+
+/** 按兵种拆开、却说不清是「一共」还是「各自」的那一组（第六轮）。 */
+export interface QuantityAmbiguity {
+  /** 这一组的身份（动作§来源§去处）：答完后用它标"这一组已经答过"，不靠下标。 */
+  signature: string;
+  /** 这一组在整份 intents 里的下标。 */
+  indexes: number[];
+  /** 「一共」读法的总数；null ＝ 引擎读不出一个总数（只能问"就这样派吗"）。 */
+  total: number | null;
+  /** 照单子写的派（按兵种各算）的总人数。 */
+  asWritten: number;
+  /** 问长官的那一句（候选说成人话，不念 key）。 */
+  question: string;
+  /** 可选的读法（key 只进信封给模型抄；label 是人话）。 */
+  candidates: { selectionKey: string; label: string }[];
+}
+export const QUANTITY_TOTAL_KEY = "quantity:total";
+export const QUANTITY_BY_TYPE_KEY = "quantity:by_type";
+
+/**
+ * 在原话里给每段引用找一个**互不重叠**的出处（长的先找）。找不齐 ⇒ false。
+ * 同一段话说了两次（「两个坦克去…，两个步兵也去…」都抄「两个」）能各占一处；
+ * 「两个」与「两个步兵」只说了一次时，不能把同一个「两」算两遍。
+ */
+function quotesOccupyDistinctSpans(said: string, quotes: string[]): boolean {
+  const taken: [number, number][] = [];
+  const order = quotes.map((q, i) => ({ q, i })).sort((a, b) => b.q.length - a.q.length);
+  for (const { q } of order) {
+    let from = 0; let placed = false;
+    while (from <= said.length) {
+      const at = said.indexOf(q, from);
+      if (at < 0) break;
+      const end = at + q.length;
+      if (!taken.some(([a, b]) => at < b && a < end)) { taken.push([at, end]); placed = true; break; }
+      from = at + 1;
+    }
+    if (!placed) return false;
+  }
+  return true;
+}
+
+/**
+ * 第六轮：一句话里的数量有没有被**按兵种拆开**、而长官的原话证明不了是各自的数。
+ *
+ * 结构：同一个动作、同一个来源、同一个去处，却按兵种写成了几条带数字的单子。
+ * 只有两种情形算**有证据**、照单执行：
+ *   ① 各自：每一条都抄了一段数量原话、都出自长官这一句、段与段在原话里**不重叠**，
+ *      而且每段原话里**读得出的数正是这一条的数**（「两辆坦克」「两个步兵」）。
+ *      ——「派两个坦克和步兵」抄成「两个坦克」「步兵」：「步兵」里没有数，证明不了
+ *      步兵也是两个（Codex 复现：旧规则只看"引用不同"，放行派出 4 个）。
+ *   ② 总量分配：几条抄的是**同一段**原话、它出自长官这一句，且这段话里的数**等于几条之和**
+ *      （「派其中三个」→ 坦克 2＋步兵 1）。数量不同本身**不**是证据（2＋1 也可能是替他编的）。
+ * 其余一律返回这一组：引擎先问，零执行。
+ */
+export function findQuantityAmbiguity(intents: readonly Intent[], playerText: string | null | undefined): QuantityAmbiguity[] {
+  const said = (playerText ?? "").trim();
+  const groups = new Map<string, number[]>();
+  intents.forEach((it, i) => {
+    if (!isDispatchIntentType(it.type) || typeof it.quantity !== "number") return;
+    const src = it.fromSquad ?? it.fromDispatch ?? it.fromFront ?? "";
+    const dst = [it.targetFacility, it.targetRegion, it.toFront, it.returnTo].map((x) => x ?? "").join("|");
+    const key = [it.type, src, dst].join("§");
+    groups.set(key, [...(groups.get(key) ?? []), i]);
+  });
+  const out: QuantityAmbiguity[] = [];
+  for (const [signature, idx] of groups) {
+    if (idx.length < 2) continue;
+    const types = idx.map((i) => intents[i].unitType ?? "");
+    if (new Set(types).size < idx.length) continue; // 不是"只差兵种"那种拆法
+    const qty = idx.map((i) => intents[i].quantity as number);
+    const asWritten = qty.reduce((a, b) => a + b, 0);
+    const quotes = idx.map((i) => (intents[i].quantityQuote ?? "").trim());
+    const allSaid = !!said && quotes.every((q) => q.length > 0 && said.includes(q));
+    // ① 各自说了各自的数
+    if (allSaid && quotes.every((q, k) => parseQuantityWord(q) === qty[k]) && quotesOccupyDistinctSpans(said, quotes)) continue;
+    // ② 同一段原话里的总数，被分到了几个兵种上
+    const shared = new Set(quotes).size === 1 ? quotes[0] : null;
+    if (allSaid && shared && parseQuantityWord(shared) === asWritten) continue;
+
+    // ── 说不清：列出两种读法 ──
+    // 「一共」的总数：同一段原话 ⇒ 它的数；否则长官原话里唯一读得出的那个数；
+    // 再不然几条写的一样多 ⇒ 那个数（「每种各 n」的对面就是「一共 n」）。
+    const saidNums = [...new Set(quotes.filter((q) => q && said.includes(q)).map(parseQuantityWord).filter((n): n is number => n !== null))];
+    const total = shared && parseQuantityWord(shared) !== null && said.includes(shared) ? parseQuantityWord(shared)
+      : saidNums.length === 1 ? saidNums[0]
+      : new Set(qty).size === 1 ? qty[0] : null;
+    const equal = new Set(qty).size === 1;
+    const n = qty[0];
+    // 没写兵种（或写了引擎不认的兵种、被白名单剥掉）的那一条＝不限兵种，照实说。
+    const parts = idx.map((i, k) => `${UNIT_TYPE_WORD[intents[i].unitType ?? ""] ?? "不限兵种"} ${qty[k]} 个`).join("、");
+    const byTypeLabel = equal ? `每种各 ${n} 个（共 ${asWritten} 个）` : `${parts}（共 ${asWritten} 个）`;
+    const candidates: QuantityAmbiguity["candidates"] = [];
+    if (total !== null && total !== asWritten) candidates.push({ selectionKey: QUANTITY_TOTAL_KEY, label: `一共 ${total} 个` });
+    candidates.push({ selectionKey: QUANTITY_BY_TYPE_KEY, label: byTypeLabel });
+    let question: string;
+    if (candidates.length === 1) {
+      question = `这道令写的是${parts}（共 ${asWritten} 个），就这样派吗？这道命令先没有执行。`;
+    } else if (equal && total === n) {
+      const q0 = quotes[0];
+      const lead = shared && q0 && said.includes(q0) ? `您说的「${q0}」` : `这道令给${idx.length}种兵各写了 ${n} 个`;
+      question = `${lead}——是一共 ${n} 个，还是每种各 ${n} 个（共 ${asWritten} 个）？这道命令先没有执行。`;
+    } else {
+      question = `这道令写的是${parts}——是一共 ${total} 个，还是就按${parts}（共 ${asWritten} 个）？这道命令先没有执行。`;
+    }
+    out.push({ signature, indexes: idx, total, asWritten, question, candidates });
+  }
+  return out;
+}
+
+/** 兼容旧调用：只要下标。 */
+export function findSplitQuantity(intents: readonly Intent[], playerText: string | null | undefined): number[][] {
+  return findQuantityAmbiguity(intents, playerText).map((a) => a.indexes);
+}
+
+/**
+ * 长官选了一种读法之后的整份 intents（纯函数，不改输入）。
+ *   · by_type ⇒ 原样（照单子各算）；
+ *   · total ⇒ 这一组合成**一条**：不分兵种、数量＝总数，放在这一组第一条的位置上，其余几条去掉。
+ * 同时给出旧下标 → 新下标的映射（已选来源的 key 按下标记账，合并后要跟着挪）。
+ * 读法不认识 / total 读不出总数 ⇒ null（调用方零执行）。
+ */
+export function applyQuantityReading(
+  intents: readonly Intent[],
+  amb: Pick<QuantityAmbiguity, "indexes" | "total">,
+  key: string,
+): { intents: Intent[]; indexMap: Map<number, number> } | null {
+  const identity = new Map(intents.map((_, i) => [i, i] as [number, number]));
+  if (key === QUANTITY_BY_TYPE_KEY) return { intents: intents.map((it) => ({ ...it })), indexMap: identity };
+  if (key !== QUANTITY_TOTAL_KEY || amb.total === null || amb.indexes.length === 0) return null;
+  if (amb.indexes.some((i) => !Number.isInteger(i) || i < 0 || i >= intents.length)) return null;
+  const first = Math.min(...amb.indexes);
+  const drop = new Set(amb.indexes.filter((i) => i !== first));
+  const merged: Intent = { ...intents[first], quantity: amb.total };
+  delete merged.unitType;
+  delete merged.quantityQuote;
+  const out: Intent[] = []; const indexMap = new Map<number, number>();
+  intents.forEach((it, i) => {
+    if (drop.has(i)) { indexMap.set(i, -1); return; }
+    indexMap.set(i, out.length);
+    out.push(i === first ? merged : { ...it });
+  });
+  for (const i of drop) indexMap.set(i, indexMap.get(first)!);
+  return { intents: out, indexMap };
+}
+
+/**
+ * 第七轮：长官对「待确认方案」答了一句、模型给出判词（authorize / amend）——这一份回复**在结构上**
+ * 能不能照判词办。唯一生效位置：ChatPanel 的批准判官（contract 消费之前）。
+ *
+ * 规则（与 PENDING CONTRACT DECISION 的定义同义，不看措辞）：
+ *   · authorize ＝「按存下的方案**原样**办」。执行的永远是存下的那一份；回复里的单子只能是它的复述。
+ *     回复里**每一张**带意图的单子都必须与存下的方案一致——只要有一张说了不同的人数/兵种/来源/
+ *     去处/动作/条数，这份回复就同时在说「照旧」和「改了」，自相矛盾。
+ *     ★第六轮的写法是「**任意一张**一致就算批准」：[A:派 1 个, B:原来的 2 个] 因为 B 与旧方案一致，
+ *       就执行了旧的 2 个——玩家明说的「一个就够了」被另一张备选掩盖（Codex 复现）。换序、换推荐项、
+ *       放一张字段更少的复述都能掩盖。现在不看第几张、不看 recommended，**全部**一致才算。
+ *     复述时省略字段、把设施写成它所在的战线，不算不同（C1：「是的」＋凭记忆写粗了仍按存下的办）。
+ *   · amend ＝「改成回复里的那一版」。回复里必须恰好只有**一种**改法（重复的复述算一种）；
+ *     给了几种不同的改法 ⇒ 引擎不替长官挑第一张。
+ * 冲突 ⇒ 调用方零执行、方案作废、用引擎的话说清哪里对不上（不执行旧的，也不执行新的）。
+ */
+export type ContractReplyConflict =
+  | { kind: "authorize_changed"; differences: string[] }
+  | { kind: "amend_ambiguous"; plans: number };
+
+export function contractReplyConflict(
+  state: GameState,
+  captured: { intents?: Intent[]; intent?: Intent } | null | undefined,
+  decision: string | null | undefined,
+  responseOptions: unknown,
+): ContractReplyConflict | null {
+  if (!captured || !Array.isArray(responseOptions)) return null;
+  const listOf = (o: { intents?: Intent[]; intent?: Intent }) => (o.intents?.length ? o.intents : o.intent ? [o.intent] : []);
+  const offered = (responseOptions as { intents?: Intent[]; intent?: Intent }[])
+    .filter((o) => o && typeof o === "object").map(listOf).filter((xs) => xs.length > 0);
+  if (decision === "authorize") {
+    const want = listOf(captured);
+    const differences = new Set<string>();
+    for (const got of offered) for (const d of planDifferences(state, want, got)) differences.add(d);
+    return differences.size > 0 ? { kind: "authorize_changed", differences: [...differences] } : null;
+  }
+  if (decision === "amend") {
+    const distinct: Intent[][] = [];
+    for (const got of offered) {
+      if (!distinct.some((d) => planDifferences(state, d, got).length === 0 && planDifferences(state, got, d).length === 0)) distinct.push(got);
+    }
+    return distinct.length > 1 ? { kind: "amend_ambiguous", plans: distinct.length } : null;
+  }
+  return null;
+}
+
+function planDifferences(state: GameState, want: Intent[], got: Intent[]): string[] {
+  const diffs = new Set<string>();
+  const sum = (xs: Intent[]) => xs.every((i) => typeof i.quantity === "number") ? xs.reduce((a, i) => a + (i.quantity as number), 0) : null;
+  const wantSum = sum(want); const gotSum = sum(got);
+  const qtyWord = () => (wantSum !== null && gotSum !== null && wantSum !== gotSum
+    ? `人数：方案是 ${wantSum} 个，这句是 ${gotSum} 个` : "人数");
+  if (want.length !== got.length) {
+    diffs.add(wantSum !== null && gotSum !== null && wantSum !== gotSum ? qtyWord() : `方案有 ${want.length} 条命令，这句是 ${got.length} 条`);
+  }
+  const used = new Set<number>();
+  for (const g of got) {
+    let bestIdx = -1; let bestDiff: string[] | null = null;
+    want.forEach((w, i) => {
+      if (used.has(i)) return;
+      const d = intentDifferences(state, w, g);
+      if (!bestDiff || d.length < bestDiff.length) { bestDiff = d; bestIdx = i; }
+    });
+    if (bestIdx < 0) continue;
+    used.add(bestIdx);
+    for (const d of bestDiff ?? []) diffs.add(d === "人数" ? qtyWord() : d);
+  }
+  return [...diffs];
+}
+
+function intentDifferences(state: GameState, w: Intent, g: Intent): string[] {
+  const out: string[] = [];
+  if (w.type !== g.type) out.push("动作");
+  if (g.quantity !== undefined && g.quantity !== w.quantity) out.push("人数");
+  if (g.unitType !== undefined && g.unitType !== w.unitType) out.push("兵种");
+  const norm = (v: string | undefined) => (v ?? "").trim().toLowerCase();
+  for (const k of ["fromSquad", "fromDispatch", "fromFront"] as const) {
+    if (g[k] !== undefined && norm(g[k]) !== norm(w[k])) { out.push("来源"); break; }
+  }
+  if (!destinationCompatible(state, w, g)) out.push("去处");
+  return out;
+}
+
+/**
+ * 第六轮：这条单子的去处是不是**这个点**——同一个地方（6 格内），或者单子只写到了包含这个点的
+ * 那条战线（更粗的说法）。没写去处 / 解析不出 ⇒ false（没有东西可比，不算同一处）。
+ */
+export function destinationCovers(state: GameState, intent: Intent, point: Position): boolean {
+  const d = classifyDestination(intent, state);
+  if (d.kind === "none") return false;
+  if (d.kind === "front") {
+    const fr = state.fronts.find((f) => f.id === d.frontId);
+    return !!fr && isInFront(state, fr, point);
+  }
+  return !!d.position && Math.hypot(d.position.x - point.x, d.position.y - point.y) <= 6;
+}
+
+/** 回复里的去处是不是存下那个去处（或它更粗的说法）。没写 ⇒ 兼容。 */
+function destinationCompatible(state: GameState, w: Intent, g: Intent): boolean {
+  const gWrote = !!(g._targetPos || g.targetFacility || g.targetRegion || g.toFront || g.returnTo);
+  if (!gWrote) return true;
+  if ((g.returnTo ?? "") !== (w.returnTo ?? "")) return false;
+  if (g.returnTo) return !(g.targetFacility || g.targetRegion || g.toFront);
+  const wd = classifyDestination(w, state);
+  const gd = classifyDestination(g, state);
+  if (gd.kind === "none") return false; // 写了却解析不出 ⇒ 说的是别处
+  if (gd.kind === "front") {
+    if (wd.kind === "front") return wd.frontId === gd.frontId;
+    const fr = state.fronts.find((f) => f.id === gd.frontId);
+    return !!(fr && wd.position && isInFront(state, fr, wd.position)); // 更粗的说法
+  }
+  if (!wd.position || !gd.position) return false;
+  return wd.kind !== "front" && Math.hypot(wd.position.x - gd.position.x, wd.position.y - gd.position.y) <= 1;
+}
+
+/**
+ * 刀寅：陈要长官点头的方案是否**已经完整**（谁、做什么、去哪都齐，只差一句话）。
+ * 不完整的「方案」只是开放问题里夹带的草稿（「您指哪两个人？」＋一张暂定单子），
+ * 不能进批准流程——否则长官一句「对」就会把草稿执行掉。纯结构判定。
+ */
+export function isCompleteConfirmPlan(opt: { intents?: Intent[]; intent?: Intent } | null | undefined): boolean {
+  const intents = opt?.intents?.length ? opt.intents : opt?.intent ? [opt.intent] : [];
+  if (intents.length === 0) return false;
+  return intents.every((i) => {
+    if (!isDispatchIntentType(i.type)) return true; // 经济单等：没有「去哪」这一维
+    const hasDest = !!(i._targetPos || i.targetFacility || i.targetRegion || i.toFront || i.returnTo);
+    if (hasDest) return true;
+    if (i.type === "retreat") return true; // 裸撤退本身就是完整命令
+    if (i.type === "defend") return !!(i.fromSquad || i.fromDispatch || i.fromFront); // 就地设防：得说清是谁
+    return false;
+  });
+}
+
+const MOVE_INTENTS = new Set(["attack", "defend", "retreat", "recon", "patrol", "reinforce", "capture", "sabotage"]);
+function isDispatchIntentType(t: string): boolean {
+  return MOVE_INTENTS.has(t);
+}
+
+/** 这个位置是否落在该战线的某个区域矩形里（每个点至多属于一条战线，见 mapData 的不变量）。 */
+function isInFront(state: GameState, front: Front, p: Position): boolean {
+  return front.regionIds.some((rid) => {
+    const r = state.regions.get(rid);
+    if (!r) return false;
+    const [x1, y1, x2, y2] = r.bbox;
+    return p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2;
+  });
+}
 
 /** Get all dispatchable player units within a front's regions. */
 function getUnitsOnFront(state: GameState, front: Front): Unit[] {
-  const bboxes = front.regionIds
-    .map((rid) => state.regions.get(rid))
-    .filter((r): r is NonNullable<typeof r> => r !== undefined)
-    .map((r) => r.bbox);
-
   const units: Unit[] = [];
   state.units.forEach((u) => {
     if (!isDispatchablePlayerUnit(u)) return;
-    const inFront = bboxes.some(
-      ([x1, y1, x2, y2]) =>
-        u.position.x >= x1 &&
-        u.position.x <= x2 &&
-        u.position.y >= y1 &&
-        u.position.y <= y2,
-    );
-    if (inFront) units.push(u);
+    if (isInFront(state, front, u.position)) units.push(u);
   });
   return units;
 }

@@ -552,7 +552,7 @@ function knifeB(negctl: boolean): void {
     check("B9 ★执行回执全仓只有一处（第二个执行入口已消失），且上屏与出声同取它★",
       panelSrc.split("buildExecReceipt(").length - 1 === 1 &&
       panelSrc.split("buildExecFeedback(").length - 1 === 1 &&
-      panelSrc.includes("const feedback = buildExecFeedback(execReceipt, degradedLines);") &&
+      panelSrc.includes("const feedback = buildExecFeedback(execReceipt, degradedLines, shortfallLines);") &&
       panelSrc.includes("for (const line of feedback.lines)") &&
       panelSrc.includes("feedback.outcome === \"none\" || feedback.outcome === \"partial\"") &&
       panelSrc.includes("speak(`${voiceConfirm} ${feedback.spokenText}`"),
@@ -2991,7 +2991,7 @@ function knifeChou(negctl: boolean): void {
       feedback.lines[0] === degraded &&
       feedback.lines.slice(1).every((line, i) => line === r2.lines[i]) &&
       feedback.spokenText === feedback.lines.join(" ") &&
-      cp.includes("const feedback = buildExecFeedback(execReceipt, degradedLines);") &&
+      cp.includes("const feedback = buildExecFeedback(execReceipt, degradedLines, shortfallLines);") &&
       cp.includes("speak(`${voiceConfirm} ${feedback.spokenText}`, approveCommander)"),
       JSON.stringify(feedback));
     check("U7b ★屏与 context 共用 feedback.lines 的同一个有序循环★",

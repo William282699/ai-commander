@@ -70,6 +70,28 @@ export interface Intent {
   targetFacility?: string;
   targetRegion?: string;
 
+  /**
+   * 刀寅：结构化的目的地模式。`"origin"`＝回到这批人**这次外派的出发地**
+   * （「刚才派出去那批回来」）。只对 retreat 生效，仍走撤退执行链（途中不追敌、到达后防守）。
+   * 出发地由引擎从任务台账里取（真实出发位置），模型只负责认出"回原处"这个意思。
+   * 长官另点了地名 ⇒ 以地名为准，本字段不起作用；只说「快撤」⇒ 不写本字段，走老的安全后撤。
+   */
+  returnTo?: "origin";
+
+  /**
+   * 刀寅：长官原话里说**这条命令去处**的那几个字（模型逐字照抄，错别字也照抄）。
+   * 引擎只用它核对"字段解析出的去处"与"长官说的去处"是否一致；对不上就问，不静默改目标。
+   * 它能证明"确实出自长官的话"，证明不了是正向的去处——语义判断仍归模型。
+   */
+  destinationQuote?: string;
+
+  /**
+   * 刀寅：长官原话里说**这条命令人数**的那几个字（模型逐字照抄）。一句话被拆成几条同源同去处
+   * 的单子、却都抄的是同一处数量（「两个」只说了一次）⇒ 多半是把"一共两个"拆成了"每种各两个"，
+   * 引擎先问，不多派。
+   */
+  quantityQuote?: string;
+
   // Constraints (LLM extracts from player speech)
   unitType?: UnitCategoryHint;
   quantity?: QuantityHint;

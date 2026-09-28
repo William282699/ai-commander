@@ -50,6 +50,82 @@ export function findDispatch(state: GameState, id: string): Dispatch | undefined
   return state.dispatches.find((d) => d.status === "active" && d.id.toLowerCase() === key);
 }
 
+/** 按号找一条记录（在役或已结束都算）——只给来源继承用，**不给选兵用**。 */
+function findDispatchById(state: GameState, id: string): Dispatch | undefined {
+  const key = id.trim().toLowerCase();
+  return state.dispatches.find((d) => d.id.toLowerCase() === key);
+}
+
+/**
+ * 刀寅：这一批里某个成员**记下的**出发战线。
+ * `undefined`＝这条记录里没有这人的来源事实（旧形状的记录）；`null`＝记过，且当时不在任何战线上。
+ * 旧形状只认 `sourceKind === "front"` 那一种（当时的选兵本来就是"站在那条线上的人"）。
+ */
+function recordedOriginOf(state: GameState, d: Dispatch, unitId: number): string | null | undefined {
+  const map = d.originFrontById;
+  if (map && Object.prototype.hasOwnProperty.call(map, unitId)) return map[unitId] ?? null;
+  if (d.sourceKind === "front") return resolver ? resolver.frontIdOf(state, d.sourceKey) : d.sourceKey;
+  return undefined;
+}
+
+/** 这个单位此刻站在哪条战线上（与「还守在那条线上的」同一份几何）。 */
+function currentFrontOf(state: GameState, unitId: number): string | null {
+  const u = state.units.get(unitId);
+  if (!u || !resolver) return null;
+  return resolver.frontIdOfUnit(state, u);
+}
+
+/**
+ * 出发时就近我方据点的半径——与板子给群起名「X附近」用的是同一个尺度
+ * （frontEscalationPayload.NAME_RADIUS_TILES = 12；台架钉住两者相等，防漂）。
+ */
+export const ORIGIN_FACILITY_RADIUS = 12;
+
+function tileDist(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+/** 出发位置附近最近的**我方、还在的**据点 id；够不着就没有。 */
+function friendlyFacilityNear(state: GameState, p: { x: number; y: number }): string | undefined {
+  let best: { id: string; d: number } | undefined;
+  for (const f of state.facilities.values()) {
+    if (f.team !== "player" || f.hp <= 0) continue;
+    const d = tileDist(f.position, p);
+    if (d <= ORIGIN_FACILITY_RADIUS && (!best || d < best.d)) best = { id: f.id, d };
+  }
+  return best?.id;
+}
+
+/**
+ * 刀寅：这个单位**这次外派**的出发地（台账里含它的那条在役任务记下的）。
+ * 没有 ⇒ null（不在任何在役任务里、或那条记录没有出发位置）——调用方必须如实处理，
+ * 不许拿「安全区」顶上。
+ */
+export function originOfUnit(
+  state: GameState,
+  unitId: number,
+): { pos: { x: number; y: number }; facilityId?: string; dispatchId: string } | null {
+  for (const d of state.dispatches) {
+    if (d.status !== "active" || !d.memberIds.includes(unitId)) continue;
+    const pos = d.originPosById?.[unitId];
+    if (!pos) return null;
+    return { pos: { ...pos }, facilityId: d.originFacilityById?.[unitId], dispatchId: d.id };
+  }
+  return null;
+}
+
+/** 刀寅：这批人现在还活着、能调的那些，按**出发战线**分组（null＝战线外）。 */
+export function liveMembersByOrigin(state: GameState, d: Dispatch): Map<string | null, Unit[]> {
+  const out = new Map<string | null, Unit[]>();
+  for (const u of liveDispatchMembers(state, d)) {
+    const o = recordedOriginOf(state, d, u.id) ?? null;
+    const arr = out.get(o) ?? [];
+    arr.push(u);
+    out.set(o, arr);
+  }
+  return out;
+}
+
 /** 在役且还有人的任务——信封、消歧、选兵三处共用这一个口径。 */
 export function activeDispatches(state: GameState): Dispatch[] {
   return state.dispatches.filter((d) => d.status === "active" && liveDispatchMembers(state, d).length > 0);
@@ -81,8 +157,45 @@ export function recordPlayerDispatch(
   state: GameState,
   appliedUnitIds: readonly number[],
   meta: DispatchMeta,
+  /** 刀寅：接到这道令之前每个人是否还在路上（applyOrders 下令前取的）。缺席＝都不在路上。 */
+  enRouteBefore?: ReadonlyMap<number, boolean>,
 ): Dispatch | null {
   if (appliedUnitIds.length === 0) return null;
+
+  // ⓪ 刀寅：来源事实，必须在摘除**之前**取（摘了就查不到这人原来属于哪批）。
+  //   **同一次外派**（起点延续）＝「回原处」的令，或者这个人接到新令时**还在路上**。
+  //   与长官用任务号、分队名还是别的说法指人无关（审核复现：按分队名连叫两次，第二次
+  //   回到了半路——旧规则只认任务号）。到达之后再接到别的令，才从到达处重新起算；
+  //   不用「离起点几格」判结束（刚出发就改令，起点会一点点挪走）。
+  //   ★ 不看 intent 上写了什么战线、不看群名文本、不看票的目标战线。
+  const prior = meta.sourceKind === "dispatch" ? findDispatchById(state, meta.sourceKey) : undefined;
+  const originFrontById: Record<number, string | null> = {};
+  const originPosById: Record<number, { x: number; y: number }> = {};
+  const originFacilityById: Record<number, string> = {};
+  for (const id of appliedUnitIds) {
+    const u = state.units.get(id);
+    const here = u ? { x: u.position.x, y: u.position.y } : null;
+    const holder = state.dispatches.find((d) => d.status === "active" && d.memberIds.includes(id));
+    const holderPos = holder?.originPosById?.[id];
+    const continuing = !!holder && (meta.returnTo === "origin" || enRouteBefore?.get(id) === true);
+    // 「从哪条战线派出去的」是**身份**事实（「北线派出去的那批」靠它认人）：同一次外派延续，
+    //   或者按这批人的任务号改令（批次谱系），都继承；位置起点只跟外派走（下面）。
+    const lineage = continuing ? holder : (prior && prior.memberIds.includes(id) ? prior : undefined);
+    const inherited = lineage ? recordedOriginOf(state, lineage, id) : undefined;
+    originFrontById[id] = inherited !== undefined ? inherited : currentFrontOf(state, id);
+    if (continuing && holderPos) {
+      originPosById[id] = { ...holderPos };
+      const fac = holder!.originFacilityById?.[id];
+      if (fac) originFacilityById[id] = fac;
+    } else if (here) {
+      originPosById[id] = here;
+      const fac = friendlyFacilityNear(state, here);
+      if (fac) originFacilityById[id] = fac;
+    }
+  }
+  const ticketRef = meta.sourceKind === "ticket"
+    ? (meta.sourceKey.trim().toUpperCase() || undefined)
+    : prior?.ticketRef;
 
   // ① 从旧任务摘除——这一步只在"玩家命令落地"这一处发生。
   const moved = new Set(appliedUnitIds);
@@ -101,6 +214,13 @@ export function recordPlayerDispatch(
     targetName: meta.targetName,
     memberIds: [...appliedUnitIds],
     status: "active",
+    originFrontById,
+    originPosById,
+    ...(meta.returnTo === "origin" ? { recall: true } : {}),
+    ...(Object.keys(originFacilityById).length > 0 ? { originFacilityById } : {}),
+    ...(ticketRef ? { ticketRef } : {}),
+    ...(meta.sourceKind === "ticket" && meta.ticketLabel ? { ticketLabel: meta.ticketLabel }
+      : prior?.ticketLabel && ticketRef === prior.ticketRef ? { ticketLabel: prior.ticketLabel } : {}),
   };
   state.dispatches.push(fresh);
 
@@ -171,24 +291,38 @@ export function enumerateDispatchCandidates(
   }
 
   // 候选二…N：从那条线派出去、此刻人已不在线上的任务
+  // ★刀寅：按**逐人记下的出发战线**认，不按"当时那条命令是怎么指的兵"认。
+  //   过去只认 `sourceKind === "front"`——于是凭临时编队号派出去的（记成 pool）、
+  //   以及对那批人改过一次令的（记成 dispatch:M1），都从"从这条线派出去的"里
+  //   消失了：北线派走的坦克不再算北线的，撤回一次之后南线那批也不再算南线的。
+  //   多来源的一批只算**从这条线出发的那几个**，不把别处来的人一起带上。
+  const frontId = resolver ? resolver.frontIdOf(state, front) : front;
   for (const d of activeDispatches(state)) {
-    if (d.sourceKind !== "front") continue;
-    if (!sameFrontKey(state, d.sourceKey, front)) continue;
     const live = liveDispatchMembers(state, d);
-    const away = live.filter((u) => !onFront.some((o) => o.id === u.id));
+    const fromHere = live.filter((u) => {
+      const o = recordedOriginOf(state, d, u.id);
+      return o != null && (frontId !== null ? o === frontId : sameFrontKey(state, o, front));
+    });
+    const away = fromHere.filter((u) => !onFront.some((o) => o.id === u.id));
     if (away.length === 0) continue;
     candidates.push({
       kind: "dispatch",
       key: d.id,
       selectionKey: selectionKeyOf("dispatch", d.id),
-      label: d.targetName
-        ? `之前派去${d.targetName}的那批（${d.id}，${away.length} 个）`
-        : `之前派出去的那批（${d.id}，${away.length} 个）`,
+      label: dispatchCandidateLabel(d, away.length),
       unitIds: away.map((u) => u.id),
     });
   }
 
   return candidates;
+}
+
+/** 给长官听的那一句：它现在在干什么、多少人（号只给模型抄，屏上照印无妨）。 */
+function dispatchCandidateLabel(d: Dispatch, n: number): string {
+  if (!d.targetName) return `之前派出去的那批（${d.id}，${n} 个）`;
+  return d.action === "retreat"
+    ? `之前撤往${d.targetName}的那批（${d.id}，${n} 个）`
+    : `之前派去${d.targetName}的那批（${d.id}，${n} 个）`;
 }
 
 /**
@@ -287,6 +421,8 @@ type FrontResolver = {
   frontIdOf: (state: GameState, hint: string) => string | null;
   frontNameOf: (state: GameState, hint: string) => string;
   unitsOnFront: (state: GameState, hint: string) => Unit[];
+  /** 刀寅：这个单位此刻站在哪条战线上（与 unitsOnFront 同一份几何）；不在任何线上 ⇒ null。 */
+  frontIdOfUnit: (state: GameState, unit: Unit) => string | null;
 };
 let resolver: FrontResolver | null = null;
 
@@ -309,6 +445,41 @@ function unitsOnFrontKey(state: GameState, hint: string): Unit[] {
   return resolver ? resolver.unitsOnFront(state, hint) : [];
 }
 
+/**
+ * 刀寅：信封里 `from=` 那一栏——**出发战线的事实**，逐人记的那份。
+ * 多条线来的就都写出来（带人数），不硬塞成一个；当时不在任何线上的写「战线外」。
+ * 没有来源事实的旧记录才退回原来的写法（战线名 / 来源字段原文）。
+ */
+function dispatchFromText(state: GameState, d: Dispatch): string {
+  const groups = liveMembersByOrigin(state, d);
+  const known = [...groups.entries()].filter(([, us]) => us.some((u) => recordedOriginOf(state, d, u.id) !== undefined));
+  if (known.length === 0) {
+    const legacy = d.sourceKind === "front" ? frontDisplayName(state, d.sourceKey) : d.sourceKey;
+    return legacy || "未指明";
+  }
+  const name = (o: string | null) => (o === null ? "战线外" : frontDisplayName(state, o));
+  if (known.length === 1) return name(known[0][0]);
+  return known.map(([o, us]) => `${name(o)}×${us.length}`).join("+");
+}
+
+/**
+ * 刀寅：信封里 `home=` 那一栏——这批人这次外派的出发地。给模型看的是「有没有记下」
+ * 以及能叫得出的据点名；坐标不进信封（回原处由引擎按台账取，不让模型抄坐标）。
+ */
+function homeText(state: GameState, d: Dispatch): string {
+  const live = liveDispatchMembers(state, d);
+  if (live.length === 0 || !d.originPosById) return "";
+  const withPos = live.filter((u) => d.originPosById![u.id]);
+  if (withPos.length === 0) return "";
+  const facs = new Set(withPos.map((u) => d.originFacilityById?.[u.id] ?? ""));
+  if (facs.size === 1) {
+    const only = [...facs][0];
+    const fac = only ? state.facilities.get(only) : undefined;
+    return fac ? ` home=${fac.name}附近` : " home=已记下出发位置";
+  }
+  return " home=各自出发的位置";
+}
+
 // ── 信封：在役任务列给模型看 ──
 //
 // ★ 这是最容易漏的一环：号不进信封，模型永远不会填 `fromDispatch`，
@@ -316,15 +487,26 @@ function unitsOnFrontKey(state: GameState, hint: string): Unit[] {
 //
 // shared 不许 import core（既有契约），所以行在这里算好，由 buildDigest
 // 当预算好的字符串递进去——与 board / judgment 两节同一条路。
-export function buildDispatchDigestLines(state: GameState): string[] {
+export function buildDispatchDigestLines(
+  state: GameState,
+  /** 刀寅：用过的票 → 原群剩下那些人此刻的新号（由 intelDigest 注入；台账模块不直接碰票据表）。 */
+  remainderHandleOf?: (gNumber: string) => string | null,
+): string[] {
   const rows = activeDispatches(state);
   if (rows.length === 0) return [];
   const MAX = 8;
   const lines: string[] = [];
   for (const d of rows.slice(0, MAX)) {
-    const from = d.sourceKind === "front" ? frontDisplayName(state, d.sourceKey) : d.sourceKey;
     const to = d.targetName || "未指明";
-    lines.push(`${d.id} from=${from || "未指明"} to=${to} act=${d.action} left=${liveDispatchMembers(state, d).length}`);
+    // 刀寅：via=G# ——这批人是凭哪张临时编队票派出去的。长官之后再说那个号，
+    //   指的就是**这一批真走了的人**，不是票上原报的那份候选。
+    // 刀寅：via 带上那张票当时的叫法——回执说的是「中央前哨附近未编组群里的 2 个已经出发」，
+    //   长官之后说「刚才那两个」，模型要能把这句对到这一条（而不是同名的、剩下那几个的新号）。
+    const rest = d.ticketRef && remainderHandleOf ? remainderHandleOf(d.ticketRef) : null;
+    const via = d.ticketRef
+      ? ` via=${d.ticketRef}${d.ticketLabel ? `「${d.ticketLabel}」里派出的` : ""}${rest ? `（那一群留下没派的现在是 ${rest}，不是这一批）` : ""}`
+      : "";
+    lines.push(`${d.id} from=${dispatchFromText(state, d)} to=${to} act=${d.action} left=${liveDispatchMembers(state, d).length}${via}${homeText(state, d)}`);
   }
   if (rows.length > MAX) lines.push(`...+${rows.length - MAX} more`);
   return lines;

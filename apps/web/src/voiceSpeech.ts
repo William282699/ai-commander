@@ -47,7 +47,8 @@ export type SpeechRoute =
   | "typed"           // 打字回合＝现状
   | "spoken"          // 语音回合，模型交回了 spoken
   | "prose_fallback"  // 语音回合，spoken 缺席（或复读）→ 退回念正文
-  | "silent_echo";    // 语音回合，spoken 与正文**双层复读** → 这一段不出声
+  | "silent_echo"     // 语音回合，spoken 与正文**双层复读** → 这一段不出声
+  | "engine";         // 这一段是**引擎的裁定**（拒绝／没执行／要问长官）——只念它，spoken 一概不念
 
 export interface VoiceSpeechInput {
   /** 这一轮是不是语音回合。 */
@@ -66,6 +67,23 @@ export interface VoiceSpeechInput {
    *  它说的是计划；计划选中 8 个、实际只对 5 个下了令，照念就是假确认。
    *  缺省 false＝不会动兵，逐字等价于刀B 之前。 */
   execTurn?: boolean;
+  /**
+   * 第七轮：`prose` 是谁的话。
+   *   · "model"（缺省）＝模型的咨询内容（回答、提议、反问）：语音回合优先念 spoken（口语那一版）。
+   *   · "engine"＝引擎已经裁定的结果（协议失败、通讯失败、没执行、要问长官）：**只念 prose**，
+   *     spoken 不管多像话都不念——它是模型在引擎裁定**之前**写的，引擎一旦拒绝，那一版就可能是
+   *     假成功（Codex 复现：spoken「那两个已经派过去了」而实际零执行）。prose 为空 ⇒ 这一段不出声
+   *     （引擎的那句话由它自己的出口 refuseAloud 念，不在这里念第二遍）。
+   * 屏上／耳朵／context 说同一件事的保证就押在这一格：调用方交进来的是屏上那一句，耳朵念的也是它。
+   */
+  authority?: "model" | "engine";
+  /**
+   * 第九轮：引擎**附在这一段后面**的事实——批准问题里存下的那份完整方案（「要办的是：…」）。
+   * 不论走哪条路（spoken / 正文 / 复读静音）都照念，而且就是屏上那一句里的同一串字：
+   * 模型的 CONFIRM 问句只说了北线、方案却含北南两条时，耳朵不能只听模型那半句。
+   * 会动兵的回合（execTurn）不念——那一轮耳朵只等执行回执。
+   */
+  appendix?: string;
 }
 
 export interface VoiceSpeechPlan {
@@ -79,8 +97,25 @@ export interface VoiceSpeechPlan {
 }
 
 export function planVoiceSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
+  const plan = planBaseSpeech(input);
+  const appendix = (input.appendix ?? "").trim();
+  if (!appendix || input.execTurn === true) return plan;
+  return { ...plan, finalUtterance: [plan.finalUtterance, appendix].filter((x) => x.length > 0).join(" ") };
+}
+
+function planBaseSpeech(input: VoiceSpeechInput): VoiceSpeechPlan {
   const spoken = (input.spoken ?? "").trim();
   const execTurn = input.execTurn === true;
+
+  // 第七轮：引擎的裁定——打字、语音一个样：念屏上那一句，spoken 不参与。
+  if (input.authority === "engine") {
+    return {
+      route: "engine",
+      speakProseWhileStreaming: false,
+      finalUtterance: execTurn ? "" : input.prose.trim(),
+      speakExecReceipt: true,
+    };
+  }
 
   // 打字回合。★刀B「办法一」改了这里：不再**边流边念**。
   //   为什么必须改：流式那一刻还不知道这回合会不会动兵（模型先写正文、后写

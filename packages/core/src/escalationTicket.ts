@@ -44,6 +44,8 @@ import { buildReinforceOptions, buildFrontEscalationPayload, filterLateCandidate
 import type { ReinforceOptionsResult } from "./frontEscalationPayload";
 import { battleAnchorFor } from "./crisisResponse";
 import { findFront } from "./tacticalPlanner";
+import { activeDispatches, liveDispatchMembers } from "./dispatchLedger";
+import { isManualOnlyUnit } from "@ai-commander/shared";
 import { frontEscalationFacts, facilityEscalationFacts, buildFacilityEscalationPayload, FACILITY_GATE } from "./director";
 
 /**
@@ -702,6 +704,147 @@ export function resolveTicketReference(
   return { kind: "dispatch", ticket: look.ticket, unitIds: live };
 }
 
+// ── 刀寅：票用过之后，这个号指的是**真走了的那一批** ──
+//
+// 票是一次性的派兵方案（烧掉就不能再按票上的名单派第二次）；派出去的那批人
+// 是台账里的一条任务（M#），可以改令、可以撤回。两者过去没有接上：票一烧，
+// 长官再说这个号只会得到「已经派出去了，不重复下令」，而台账里那批人又记成
+// 「来源未指明」——于是「刚才派出去那两个回来」无从落地。
+//
+// 本函数只做**身份关联**：G# → 台账里 ticketRef 等于它、仍有活人的那条任务。
+//   · 名单一律取任务自己的 memberIds（真接到命令的人），**绝不回到票上的原名单**
+//     ——候选 8 个、只派了 2 个，这个号此后只指那 2 个；
+//   · 之后照常走主链（fromDispatch）：本局、权限、活成员现查、ApplyResult 回执；
+//   · 那批人被拆成了几拨（其中几个又被单独改过令）⇒ 列出来问，**不合并**；
+//   · 一个活人都不剩 ⇒ 明说、零执行（不猜是阵亡还是改派——没有结构化证据就不说原因）。
+// 票没用过（或压根不是 G 号）⇒ not_applicable，原票据路一字不动。
+
+export type TicketBatchResolution =
+  | { kind: "not_applicable" }
+  | { kind: "batch"; ticket: EscalationTicket; dispatchId: string }
+  | { kind: "split"; ticket: EscalationTicket; line: string; dispatchIds: string[] }
+  | { kind: "refuse"; ticket: EscalationTicket; line: string };
+
+export function resolveTicketBatch(
+  state: GameState,
+  rawFromSquad: string | undefined | null,
+): TicketBatchResolution {
+  if (!rawFromSquad) return { kind: "not_applicable" };
+  const key = normalizeForceRef(rawFromSquad);
+  const t = key === null ? undefined : tickets.get(key);
+  // 只接管**已经用过**的票。过没过期不影响：派出去的那批人不会因为票过期就不是那批人。
+  if (!t || !t.burned) return { kind: "not_applicable" };
+  const parts = activeDispatches(state).filter((d) => d.ticketRef === t.gNumber);
+  const name = spokenNameOf(t);
+  if (parts.length === 1) return { kind: "batch", ticket: t, dispatchId: parts[0].id };
+  if (parts.length === 0) {
+    return { kind: "refuse", ticket: t, line: `${name}派出去的那批现在没有能调的人了，这道命令没有执行。` };
+  }
+  const list = parts.map((d) => {
+    const n = liveDispatchMembers(state, d).length;
+    const what = !d.targetName ? "" : d.action === "retreat" ? `撤往${d.targetName}的` : `去${d.targetName}的`;
+    return `${what}${n} 个（${d.id}）`;
+  }).join("，");
+  return {
+    kind: "split", ticket: t, dispatchIds: parts.map((d) => d.id),
+    line: `${name}派出去的那批现在分成了 ${parts.length} 拨：${list}。您说的是哪一拨？这道命令先没有执行。`,
+  };
+}
+
+/**
+ * 刀寅：一张用过的票，原群**留下没派的那些人**此刻有没有被另铸一个新号（板子按地点给群起名，
+ * 剩下的人往往还叫同一个名字）。有 ⇒ 返回那个新号，信封里写明「那不是这一批」，免得长官说
+ * 「刚才那两个」时模型把号对到剩下那几个身上。只认**成员全在原票名单里**的未用新号；没有就 null。
+ */
+export function remainderHandleOf(burnedGNumber: string): string | null {
+  const t = tickets.get(burnedGNumber.trim().toUpperCase());
+  if (!t || !t.burned) return null;
+  const original = new Set(t.unitIds);
+  for (const other of tickets.values()) {
+    if (other === t || other.burned || other.origin !== "spoken") continue;
+    if (other.unitIds.length > 0 && other.unitIds.every((id) => original.has(id))) return other.gNumber;
+  }
+  return null;
+}
+
+/**
+ * 第六轮：这个号**出自哪几张已经用过的票**（身份谱系）。
+ *
+ * 票用过之后，原群留下没派的人会被板子另铸一个同名新号（remainderHandleOf 的那种关系）。
+ * 这里反过来问：给一个号，它本身是不是用过的票；或者它是不是某张用过的票**剩下的那几个人**
+ * （成员全在那张票的原名单里）。返回这些用过的票的号（可能为空）。
+ */
+export function burnedAncestorsOf(raw: string | undefined | null): string[] {
+  if (!raw) return [];
+  const key = normalizeForceRef(raw);
+  const t = key === null ? undefined : tickets.get(key);
+  if (!t) return [];
+  if (t.burned) return [t.gNumber];
+  if (t.origin !== "spoken" || t.unitIds.length === 0) return [];
+  const out: string[] = [];
+  for (const other of tickets.values()) {
+    if (other === t || !other.burned) continue;
+    const original = new Set(other.unitIds);
+    if (t.unitIds.every((id) => original.has(id))) out.push(other.gNumber);
+  }
+  return out;
+}
+
+/**
+ * 刀寅（C）：票上原报的人数与真走了的人数对不上时，**有结构化证据的**原因。
+ *
+ * 只收下令之前就能数清的几类，彼此不混：
+ *   · dead     原名单里已经不在了（阵亡/移除）
+ *   · manual   原名单里已被长官手动接管
+ *   · ownHands 原名单里是长官亲自指挥的单位
+ *   · unlawful 活着、能调，但不归这位参谋调
+ * 执行层拒收的（ApplyResult.rejected）不在这里——回执那边另有一栏，重复算就重复报账。
+ * 解析器因地形/兵种没选上的，这里也数不出来——**数不出来就不说**。
+ */
+export interface TicketGapFacts {
+  /** 此刻能调、也归他调的人数（=这次真正的候选人数）。 */
+  available: number;
+  dead: number;
+  manual: number;
+  ownHands: number;
+  unlawful: number;
+}
+
+export function ticketGapFacts(
+  state: GameState,
+  ticket: EscalationTicket,
+  lawfulIds: readonly number[],
+): TicketGapFacts {
+  const lawful = new Set(lawfulIds);
+  let dead = 0, manual = 0, ownHands = 0, unlawful = 0;
+  for (const id of ticket.unitIds) {
+    const u = state.units.get(id);
+    if (!u || u.hp <= 0 || u.state === "dead") { dead++; continue; }
+    if (isManualOnlyUnit(u)) { ownHands++; continue; }
+    if (u.manualOverride) { manual++; continue; }
+    if (!isDispatchablePlayerUnit(u)) continue; // 不是我方等——不归入任何一类，也不编原因
+    if (!lawful.has(id)) unlawful++;
+  }
+  return {
+    available: lawful.size,
+    dead, manual, ownHands, unlawful,
+  };
+}
+
+/** 差额那半句：只念有证据的原因；一个都数不出来就只报数。 */
+function gapClause(ticket: EscalationTicket, dispatched: number, gap?: TicketGapFacts): string {
+  const parts: string[] = [`原报 ${ticket.unitCount} 个`];
+  if (gap) {
+    // 刀寅：不再说「您要的是 N 个」——那个数是模型写进单子的，不一定是长官说的（审核实测：
+    //   长官说「两个」、单子写成 4，回执却说「您要的是 4 个」）。只报实际派了几个＋有证据的原因。
+    if (gap.dead > 0) parts.push(`${gap.dead} 个已经不在了`);
+    if (gap.manual > 0) parts.push(`${gap.manual} 个在您手动指挥下`);
+    if (gap.ownHands > 0) parts.push(`${gap.ownHands} 个在您自己手里`);
+    if (gap.unlawful > 0) parts.push(`${gap.unlawful} 个不归我调`);
+  }
+  return parts.join("，");
+}
+
 /**
  * Demote a ticket-bound intent's front hints from SOURCE to DESTINATION.
  *
@@ -866,16 +1009,27 @@ export function ticketDispatchReceipt(
   ticket: EscalationTicket,
   dispatched: number,
   mode: "moved" | "in_place" = "moved",
+  /**
+   * 刀寅（C）：`dispatched` 现在由调用方从 **ApplyResult** 取（真接到命令的人），
+   * 本句由执行回执那一层当作这一条的**唯一一句**发出——屏、耳、context 同一份，
+   * 不再另起一行重复报数。
+   * ★「其余已不在编」那半句删了：候选 8 个、长官只要 2 个，另外 6 个好好的，
+   *   那句话把"没被选中"说成了"不在编"。差额的原因只念 `gap` 里有证据的那几类。
+   */
+  detail?: { destinationName?: string; gap?: TicketGapFacts },
 ): string {
+  const name = spokenNameOf(ticket);
+  const full = dispatched === ticket.unitCount;
   if (mode === "in_place") {
-    return dispatched === ticket.unitCount
-      ? `${spokenNameOf(ticket)} ${dispatched}个单位就地设防。`
-      : `${spokenNameOf(ticket)} 实际能动的 ${dispatched} 个已就地设防（原报 ${ticket.unitCount} 个，其余已不在编）。`;
+    return full
+      ? `${name} ${dispatched}个单位就地设防。`
+      : `${name}里的 ${dispatched} 个已就地设防（${gapClause(ticket, dispatched, detail?.gap)}）。`;
   }
+  const to = detail?.destinationName ? `，前往${detail.destinationName}` : "";
   const eta = ticket.etaSec !== null ? `，按估算约 ${ticket.etaSec} 秒到位` : "";
-  return dispatched === ticket.unitCount
-    ? `${spokenNameOf(ticket)} ${dispatched}个单位出发了${eta}。`
-    : `${spokenNameOf(ticket)} 实际能走的 ${dispatched} 个已经出发${eta}（原报 ${ticket.unitCount} 个，其余已不在编）。`;
+  return full
+    ? `${name} ${dispatched}个单位出发了${to}${eta}。`
+    : `${name}里的 ${dispatched} 个已经出发${to}${eta}（${gapClause(ticket, dispatched, detail?.gap)}）。`;
 }
 
 /** Bench-only view of the registry. */

@@ -42,3 +42,28 @@ export function optionWithResolvedIntents(
   option.intent = option.intents[0] ?? option.intent;
   return option;
 }
+
+/**
+ * 刀寅：「是哪一批」待答时随请求带给模型的那一节信封（唯一实现；ChatPanel 与诊断脚本共用）。
+ *
+ * 写的是**实际问的那种问法**：只剩一批时屏上问的是「是这一批吗？」，旧信封却一律写
+ * 「你问了是哪一批」、规则又说"一句应答词不算选"——长官答「是的」必判没选、原样再问，
+ * 绕圈。两种问法各自写明；判定仍归模型，闸仍在 candidate key 必须是这次给过的那几个。
+ */
+export function selectionEnvelope(sel: { id: string; kind?: "source" | "quantity"; candidates: readonly { selectionKey: string; label: string }[] }): string {
+  // 第六轮：数量读法那一问单独一节（问的不是「是哪一批」，不借那一节的措辞与规则）。
+  if (sel.kind === "quantity") {
+    return `\n---QUANTITY_SELECTION---\n`
+      + (sel.candidates.length === 1
+        ? `你上一句问长官：这道令就照这样的人数派吗(id=${sel.id})。唯一的候选如下（行首那个 key 逐字抄进 dispatchSelection.candidate）：\n`
+        : `你上一句问长官：这道令的人数是哪一种算法(id=${sel.id})。候选如下（行首那个 key 逐字抄进 dispatchSelection.candidate）：\n`)
+      + sel.candidates.map((c) => `${c.selectionKey}  ${c.label}`).join("\n")
+      + `\n指挥官下面这句话可能是对这一问的答复。`;
+  }
+  return `\n---DISPATCH_SELECTION---\n`
+    + (sel.candidates.length === 1
+      ? `你上一句问长官：现在只剩这一批，是不是它(id=${sel.id})。唯一的候选如下（行首那个 key 逐字抄进 dispatchSelection.candidate）：\n`
+      : `你上一句问长官：这几批里是哪一批(id=${sel.id})。候选如下（行首那个 key 逐字抄进 dispatchSelection.candidate）：\n`)
+    + sel.candidates.map((c) => `${c.selectionKey}  ${c.label}`).join("\n")
+    + `\n指挥官下面这句话可能是对这一问的答复。`;
+}

@@ -48,6 +48,10 @@ function computeGroupPath(units: Unit[], target: Position, state: GameState): Po
  */
 export function applyOrders(state: GameState, orders: Order[]): ApplyResult {
   const perOrder: ApplyOrderOutcome[] = [];
+  // 刀寅：接到这批令**之前**，每个人是否还在路上（离上一道令的落点还远）。
+  //   台账据此判断这次是同一次外派的改令（起点延续），还是到达之后的新一次外派。
+  //   必须在下令之前取——下完令 unit.orders 就换成新的了。
+  const enRouteBefore = snapshotEnRoute(state, orders);
 
   for (let orderIndex = 0; orderIndex < orders.length; orderIndex++) {
     const order = orders[orderIndex];
@@ -117,9 +121,27 @@ export function applyOrders(state: GameState, orders: Order[]): ApplyResult {
   //
   // 登记用的是 **appliedUnitIds**——真接到命令的那些人。计划选中的不算数。
   // 幂等跳过（alreadyDoing）那批不摘也不记：它们本来就在执行同一件事。
-  recordLedgerEntries(state, orders, perOrder);
+  recordLedgerEntries(state, orders, perOrder, enRouteBefore);
 
   return summarizeApply(perOrder);
+}
+
+/** 离落点多远以内算「到了」。 */
+const ARRIVED_RADIUS = 2.5;
+
+function snapshotEnRoute(state: GameState, orders: Order[]): Map<number, boolean> {
+  const out = new Map<number, boolean>();
+  for (const o of orders) {
+    if (o.origin !== "advisor" && o.origin !== "mouse") continue;
+    for (const id of o.unitIds) {
+      if (out.has(id)) continue;
+      const u = state.units.get(id);
+      const cur = u?.orders[0];
+      const tgt = cur?.target;
+      out.set(id, !!(u && tgt && Math.hypot(u.position.x - tgt.x, u.position.y - tgt.y) > ARRIVED_RADIUS));
+    }
+  }
+  return out;
 }
 
 /** OrderAction → IntentType。两套枚举大半同名，只有 attack_move 要翻一下。 */
@@ -128,7 +150,9 @@ function intentTypeOfOrder(action: Order["action"]): IntentType {
 }
 
 /** 一句话安排两个任务 ⇒ 两个 group ⇒ **两条记录，各记各的名单**（不合成一条）。 */
-function recordLedgerEntries(state: GameState, orders: Order[], perOrder: ApplyOrderOutcome[]): void {
+function recordLedgerEntries(
+  state: GameState, orders: Order[], perOrder: ApplyOrderOutcome[], enRouteBefore: ReadonlyMap<number, boolean>,
+): void {
   const groups = new Map<string, { meta: NonNullable<Order["dispatchMeta"]>; ids: number[] }>();
   for (let i = 0; i < orders.length; i++) {
     const order = orders[i];
@@ -151,7 +175,7 @@ function recordLedgerEntries(state: GameState, orders: Order[], perOrder: ApplyO
     groups.set(key, slot);
   }
   for (const slot of groups.values()) {
-    recordPlayerDispatch(state, slot.ids, slot.meta);
+    recordPlayerDispatch(state, slot.ids, slot.meta, enRouteBefore);
   }
 }
 
@@ -595,6 +619,14 @@ function findOrCreatePatrolTask(
 
 type UnitApplyOutcome = "applied" | "already_doing";
 
+/** 两道令的落点算不算同一个：都没有落点（就地），或者相距 5 格以内。 */
+function sameOrderTarget(a: Order["target"], b: Order["target"]): boolean {
+  if (!a || !b) return !a && !b;
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy < 25;
+}
+
 function applyOrderToUnit(unit: Unit, order: Order, state: GameState): UnitApplyOutcome {
   // Phase C: idempotency check for crisis reinforcement orders.
   // If the unit is already executing a reinforcement order for the same front
@@ -611,6 +643,18 @@ function applyOrderToUnit(unit: Unit, order: Order, state: GameState): UnitApply
         // 报「这批兵已经在执行」，且不重建任务、不清旧任务。
         return "already_doing";
       }
+    }
+  }
+
+  // 刀寅：对**某一批**原样再下一次同一道令（同动作、落点 5 格内）⇒ 已在执行。
+  // 典型：长官再说一遍「派 G2 去修理厂」，号已换成那批真走了的人（fromDispatch），
+  // 他们正在做这件事——不重下、不另开一条任务、更不会把票上没派的人补派出去。
+  // 只认「按批次指代」这一种形状（dispatchMeta.sourceKind === "dispatch"）：
+  // 按战线/分队再说一遍"派三个去"，可能就是要再派三个，那一格不在这里判。
+  if (order.origin === "advisor" && order.dispatchMeta?.sourceKind === "dispatch") {
+    const current = unit.orders[0];
+    if (current && current.action === order.action && sameOrderTarget(current.target, order.target)) {
+      return "already_doing";
     }
   }
 

@@ -16,6 +16,10 @@ export type { FormationStyle } from "./formation";
 export type { ResolveResult } from "./tacticalPlanner";
 // 刀戊：目的地分类（按**实际解析结果**，不按字段非空）——判据要直接量它
 export { classifyDestination } from "./tacticalPlanner";
+// 刀寅：这条命令自己的「去处原话」与目的地字段是否一致
+export { checkDestinationQuote, isCompleteConfirmPlan, findSplitQuantity, findQuantityAmbiguity, applyQuantityReading, contractReplyConflict, parseQuantityWord, QUANTITY_TOTAL_KEY, QUANTITY_BY_TYPE_KEY } from "./tacticalPlanner";
+export type { QuantityAmbiguity, ContractReplyConflict } from "./tacticalPlanner";
+export type { DestinationQuoteVerdict } from "./tacticalPlanner";
 export type { DestinationClass, DestinationKind } from "./tacticalPlanner";
 export { buildDigest } from "./intelDigest";
 export { buildBattleContextV2 } from "./battleContext";
@@ -45,6 +49,8 @@ export {
   recordPlayerDispatch, findDispatchAmbiguity,
   // 刀己 — 候选枚举（事实）与按 key 现查绑定（执行前复查）
   enumerateDispatchCandidates, bindDispatchSelection, selectionKeyOf,
+  // 刀寅：逐人记下的出发战线
+  liveMembersByOrigin,
 } from "./dispatchLedger";
 export type { DispatchCandidate, SelectionBindResult, SelectionBindFailure } from "./dispatchLedger";
 // 刀己 — 「是哪一批」这一轮该做什么（判定本体在 core，UI 只执行 plan）
@@ -81,8 +87,10 @@ export {
   retargetIntentForTicket, ticketDestinationVerdict, mintSpokenForce, spokenNameOf,
   burnEscalationTicket, isTicketRef, isKnownForceRef, resetEscalationTickets,
   TICKET_TTL_SEC, NO_PROPOSAL_GUIDANCE,
+  // 刀寅：用过的票 → 真走了的那一批；票据差额的结构化原因
+  resolveTicketBatch, ticketGapFacts,
 } from "./escalationTicket";
-export type { EscalationTicket, TicketResolution, TicketDestinationVerdict, EscalationWithTickets, CommanderRef } from "./escalationTicket";
+export type { EscalationTicket, TicketResolution, TicketDestinationVerdict, EscalationWithTickets, CommanderRef, TicketBatchResolution, TicketGapFacts } from "./escalationTicket";
 // H1 — 抽走带任务的部队必须说出口（披露，不是闸；user ruling 2026-08-05）
 export { describeCommittedPull } from "./committedUnits";
 export type { CommittedPullDisclosure } from "./committedUnits";
@@ -91,3 +99,8 @@ export { checkDispatchAuthority, commanderDispatchPool, isDispatchIntent, combat
 export type { AuthorityVerdict } from "./commandAuthority";
 export type { CommanderMood, CommanderMoodLevel, ViewportGeometry, TileBox } from "./commanderPresence";
 export type { DecisionCaptureArgs, DecisionReviewFacts, FrontOutcome, FacilityOutcome, CasualtyLevel, CrossFrontFact } from "./decisionReview";
+
+export { findSameTaskInProgress } from "./repeatDispatch";
+export { burnedAncestorsOf } from "./escalationTicket";
+export { destinationCovers } from "./tacticalPlanner";
+export { describePlanForApproval, describeIntentForApproval } from "./planDescription";

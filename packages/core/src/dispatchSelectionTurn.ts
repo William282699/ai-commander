@@ -112,6 +112,12 @@ export interface ResolvedDispatchSelection extends DispatchSelectionKey {
 
 /** 待决槽里与判定相关的那几样（名单**不在**其中——名单必须现查）。 */
 export interface SelectionSlotState {
+  /**
+   * 第六轮：这一槽问的是什么。缺席＝「是哪一批」（来源）。
+   * "quantity"＝「一共几个，还是按兵种各算」：候选是两种**读法**，不绑人；
+   * 选中后由调用方按读法改写整份方案，再整组重走主链（名单照旧现查）。
+   */
+  kind?: "source" | "quantity";
   id: string;
   channel: string;
   sessionId: string;
@@ -161,6 +167,10 @@ export type SelectionTurnPlan =
    *  `soleCandidate` ⇒ 现查后只剩一批：问法换成「现在只剩这一批，是否就是它」，
    *  但**仍然是问**，绝不替长官定。 */
   | { kind: "reask"; candidates: DispatchCandidate[]; lead: string; soleCandidate: boolean }
+  /** 第六轮：长官明确选了一种数量读法（key 已核过是这次给过的）。调用方改写方案后整组重走主链。 */
+  | { kind: "quantity_chosen"; key: string }
+  /** 第六轮：数量那一问没答清（没指明 / 缺字段 / 编造 key）⇒ 零执行，原样再问。 */
+  | { kind: "reask_quantity"; lead: string }
   /** 这一轮与那一问无关（或根本没问过）⇒ 走正常流程。 */
   | { kind: "passthrough" }
   /** ★这一次投递完全 inert：不上屏、不进 context、新旧 options 一律不执行。 */
@@ -228,6 +238,24 @@ export function planSelectionTurn(args: {
   // 走到这儿一定有槽（executeBound / keepSlot 两族都要求三方对齐过）。
   if (!slot) {
     return { ...base, keepSlot: false, plan: { kind: "refuse", line: "刚才那一问已经作废了，请再说一遍要动哪一批。" } };
+  }
+
+  // ── 第六轮：数量读法那一问。候选是读法、不是人：不绑定、不现查名单（执行前主链照旧现查）。
+  //   规矩与来源那一问完全相同：只认这次给过的 key；没指明 / 缺字段 / 编造 key ⇒ 零执行再问。
+  if (slot.kind === "quantity") {
+    if (route.executeBound && judge.candidateKey) {
+      return { ...base, keepSlot: false, plan: { kind: "quantity_chosen", key: judge.candidateKey } };
+    }
+    return {
+      ...base,
+      keepSlot: true,
+      plan: {
+        kind: "reask_quantity",
+        lead: judge.verdict === "bad_key"
+          ? "我没听准您要的是哪一种算法，再确认一次：这道命令还没有执行。"
+          : "这道命令还没有执行。",
+      },
+    };
   }
 
   if (route.executeBound && judge.candidateKey) {

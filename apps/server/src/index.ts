@@ -20,6 +20,7 @@ import { voiceEnabledChannels } from "./providers.js";
 import { rejectCommandBody, audioOf } from "./voiceInput.js";
 import { echoesHeard } from "@ai-commander/shared";
 import { ttsRouter } from "./routes/tts.js";
+import { traceWrite, envelopeOf, intentsOf } from "./traceLog.js";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -85,6 +86,36 @@ app.use("/api/tts", ttsRouter);
 // ──────────────────────────────────────────────────────────────
 function logEvent(o: Record<string, unknown>): void {
   console.log("[EVENT] " + JSON.stringify({ t: Date.now(), ...o }));
+}
+
+/**
+ * 刀寅（B 的证据）：这一轮模型交回的单子**经过 schema/归一化之后**长什么样。
+ *
+ * 起因：玩家说「南部战线和北部战线的部队全部撤退」，北线却被执行成「设防」。
+ * 事后能看到的只有屏上的回执，分不清是模型写成了设防、服务端换了型
+ * （normalizeAdvisorForDay7 会把 reinforce/escort 换成 defend，换了会带 warning）、
+ * 还是更后面哪一层改的。有了这一行，下一次同样的事就能直接对账到层。
+ * 只记动作与来源/去向字段；不记 digest、不记密钥、不要求长官去开开发者工具。
+ */
+function logAdvisorIntents(sessionId: unknown, channel: unknown, data: unknown): void {
+  if (!data || typeof data !== "object") return;
+  const d = data as Record<string, unknown>;
+  const pick = (i: Record<string, unknown>) => {
+    const out: Record<string, unknown> = {};
+    for (const k of ["type", "fromFront", "fromSquad", "fromDispatch", "toFront", "targetFacility", "targetRegion", "quantity", "unitType"]) {
+      if (i[k] !== undefined) out[k] = i[k];
+    }
+    return out;
+  };
+  const options = Array.isArray(d.options) ? d.options as Record<string, unknown>[] : [];
+  logEvent({
+    type: "advisor_intents",
+    sessionId, channel: channel || "",
+    responseType: d.responseType,
+    warning: d.warning,
+    dispatchSelection: d.dispatchSelection,
+    options: options.map((o) => (Array.isArray(o.intents) ? o.intents as Record<string, unknown>[] : []).map(pick)),
+  });
 }
 
 /**
@@ -169,10 +200,14 @@ app.post("/api/command", async (req, res) => {
   // escalation the player is responding to. JSON.stringify drops it when absent.
   // voice: 语音回合 message 为空，这一行会是空的——heard 日志在步 2 补。
   logEvent({ type: "command", route: "command", sessionId, escalateId, channel: channel || "", message: playerText, voice: audio ? true : undefined, prevSpeech: speechDiagOf(req.body) });
+  const traceId = req.body?.traceId;
+  traceWrite(traceId, "request", { route: "command", channel: channel || "", sessionId, escalateId, message: playerText, voice: !!audio, envelope: envelopeOf(digest) });
 
   try {
-    const result = await callAdvisor(digest, playerText, styleNote || "", channel || "", audio);
+    const result = await callAdvisor(digest, playerText, styleNote || "", channel || "", audio, typeof traceId === "string" ? traceId : undefined);
     if (audio) logHeard(sessionId, channel, result.data.heard, req.body?.voiceDiag, result.data.spoken);
+    logAdvisorIntents(sessionId, channel, result.warning ? { ...result.data, warning: result.warning } : result.data);
+    traceResult(traceId, result.warning ? { ...result.data, warning: result.warning } : result.data);
     // result always has data (fallback if LLM failed)
     if (result.warning) {
       res.json({ ...result.data, warning: result.warning });
@@ -205,6 +240,8 @@ app.post("/api/command-stream", async (req, res) => {
   // Step 6a: escalateId (when present) ties this reply back to the crisis
   // escalation the player is responding to. JSON.stringify drops it when absent.
   logEvent({ type: "command", route: "command-stream", sessionId, escalateId, channel: channel || "", message: playerText, voice: audio ? true : undefined, prevSpeech: speechDiagOf(req.body) });
+  const traceId = req.body?.traceId;
+  traceWrite(traceId, "request", { route: "command-stream", channel: channel || "", sessionId, escalateId, message: playerText, voice: !!audio, envelope: envelopeOf(digest) });
 
   // SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -213,8 +250,9 @@ app.post("/api/command-stream", async (req, res) => {
   res.flushHeaders();
 
   try {
-    for await (const event of callAdvisorStream(digest, playerText, styleNote || "", channel || "", audio)) {
+    for await (const event of callAdvisorStream(digest, playerText, styleNote || "", channel || "", audio, typeof traceId === "string" ? traceId : undefined)) {
       if (audio && event.type === "options") logHeard(sessionId, channel, event.content?.heard, req.body?.voiceDiag, event.content?.spoken);
+      if (event.type === "options") { logAdvisorIntents(sessionId, channel, event.content); traceResult(traceId, event.content); }
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     }
     res.write("data: [DONE]\n\n");
@@ -237,6 +275,26 @@ app.post("/api/log-event", (req, res) => {
   logEvent({ type: type || "client_event", actionId, channel: channel || "", frontId, kind, message, sessionId });
   res.json({ ok: true });
 });
+
+// 刀寅：浏览器那边的对账行（走了哪条路、改写后的意图、引擎解析出的落点、真下令结果、回执），
+// 与服务端同一个请求编号写进同一份本地日志。纯观测，永远 200。
+app.post("/api/trace", (req, res) => {
+  const { traceId, stage, data } = req.body ?? {};
+  if (typeof stage === "string" && /^[a-z_]{1,40}$/.test(stage) && data && typeof data === "object") {
+    traceWrite(traceId, `client:${stage}`, data as Record<string, unknown>);
+  }
+  res.json({ ok: true });
+});
+
+/** schema/归一化之后、发给浏览器之前的那份单子。 */
+function traceResult(traceId: unknown, data: unknown): void {
+  const d = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  traceWrite(traceId, "result", {
+    responseType: d.responseType, warning: d.warning, brief: d.brief,
+    dispatchSelection: d.dispatchSelection, pendingDecision: d.pendingDecision, heard: d.heard,
+    options: intentsOf(d),
+  });
+}
 
 // Group chat advisor call (ALL mode — one LLM call, 3 personas)
 app.post("/api/command-group", async (req, res) => {

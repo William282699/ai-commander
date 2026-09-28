@@ -290,8 +290,10 @@ export interface Order {
 // 引擎记一条 Dispatch，号由引擎生成（M#，避开 G# 那套临时编队号的命名空间）。
 // ★ 由**引擎在真派兵那一刻**写，不是从对话历史反推——§F2 就是被上下文带偏的。
 
-/** 这批人当时是被怎么指出来的。 */
-export type DispatchSourceKind = "front" | "squad" | "dispatch" | "selection" | "pool";
+/** 这批人当时是被怎么指出来的。
+ *  `ticket`（刀寅）：凭陈报出的临时编队号（G#）派出，sourceKey 是那个号。
+ *  过去这一类在票据改写 intent 之后只剩 `pool`／空串——台账里查不到它从哪儿来。 */
+export type DispatchSourceKind = "front" | "squad" | "dispatch" | "selection" | "pool" | "ticket";
 
 export interface Dispatch {
   /** 本局内的短号，形如 "M3"。 */
@@ -307,6 +309,39 @@ export interface Dispatch {
    *  战场不是：人会死、会被改派。 */
   memberIds: number[];
   status: "active" | "closed";
+  /**
+   * 刀寅：每个成员**当初从哪条战线出发**（战线 id；null＝当时不在任何一条战线上）。
+   *
+   * 是**来源事实**，与执行选兵约束分开：按接到命令那一刻的实际位置判，不从
+   * 「北线前哨附近未编组群」这类显示文本里猜，也不拿临时编队票的**目标**战线充数。
+   * 一批人可以来自几条线，所以逐人记，不硬塞成一个来源。
+   * 对这批人改令（fromDispatch）时逐人继承——撤回一次之后，它仍是「从南线派出去的那批」。
+   */
+  originFrontById?: Record<number, string | null>;
+  /**
+   * 刀寅：这批人是凭哪张临时编队票（G#）派出去的。**只作身份关联**：
+   * 名单永远是 memberIds（真接到命令的人），不是票上报的那份候选名单。
+   * 改令时继承。
+   */
+  ticketRef?: string;
+  /** 刀寅：那张票当时给长官的叫法（「中央前哨附近未编组群」）。只进信封，帮模型把「刚才那几个」对上这一条。 */
+  ticketLabel?: string;
+  /**
+   * 刀寅：这次外派每个人的**出发位置**（接到命令那一刻的真实坐标）。
+   * 「叫回来」回的就是这里——逐人记，来自几处就是几处，不编一个共同据点。
+   * 生命周期（**与长官用任务号还是分队名指人无关**）：一次外派从离开驻地开始，到**到达**
+   * 为止（到了目的地，或叫回后回到出发地）。还在路上时，不管下什么令、怎么称呼，起点都延续；
+   * 「回原处」的令永远延续起点；到达之后再接到别的令，才从到达的地方开始新的一次。
+   * 「在路上」按接到新令**之前**那道令的落点判（离落点还远＝在路上）。
+   */
+  originPosById?: Record<number, { x: number; y: number }>;
+  /**
+   * 刀寅：出发时就近的我方据点（只作**叫法**：「出发地（中央前哨附近）」）。
+   * 坐标永远用 originPosById，据点不当坐标来源；附近没有我方据点就不记，回执也不提据点。
+   */
+  originFacilityById?: Record<number, string>;
+  /** 刀寅：这条记录是一道「回原处」的令（叫回）。 */
+  recall?: boolean;
 }
 
 /** 下令方是谁。记账只认这个标记，**不认调用的是哪个函数**：
@@ -322,6 +357,10 @@ export interface DispatchMeta {
   sourceKey: string;
   action: IntentType;
   targetName: string;
+  /** 刀寅：凭票派兵时那张票的叫法（sourceKind==="ticket" 才有）。 */
+  ticketLabel?: string;
+  /** 刀寅：这道令是「回到这次外派的出发地」——起点一律延续，不管长官用什么称呼指的人。 */
+  returnTo?: "origin";
 }
 
 // --- Order execution result (retreat-scope 刀B) ---
@@ -901,6 +940,9 @@ export type PendingVerdict =
   | "protocol_failure"; // field missing/invalid while a contract was tagged →
                         //   execute NOTHING on either side
 
+/** 服务端兜底的原因：模型回了东西但解析不出来 / 根本没回来（网络、限流、报错）。 */
+export type AdvisorFailure = "parse" | "comms";
+
 export interface AdvisorResponse {
   brief: string;
   options: AdvisorOption[];
@@ -942,6 +984,13 @@ export interface AdvisorResponse {
    *  ——白名单重建会静默吃掉没登记的根级字段，schema 的**两条 return 路径**都
    *  必须带。缺席/非法一律按协议失败处理（零执行、再问一次），绝不放行。 */
   dispatchSelection?: SelectionDecision;
+  /** 第六轮：**服务端没拿到可用的参谋答复**（解析失败 / 通讯中断 / 限流）。
+   *
+   *  只由服务端兜底（`createFallbackResponse`）写入，模型写不进来（白名单重建不登记它）。
+   *  在场 ⇒ 这一轮是**失败轮**：客户端零执行（options / 持续命令一律不看）、不消费任何
+   *  待决合同或选择、不算参谋又答了一轮，屏上与耳朵只说引擎的事实（没收到答复、什么都没执行）。
+   *  ★不能拿 `warning` 判：正常答复也会带提示（例：意图类型被自动换型）。 */
+  failure?: AdvisorFailure;
   standingOrder?: {
     type: string;
     locationTag: string;
