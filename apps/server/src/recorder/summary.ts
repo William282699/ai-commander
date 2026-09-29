@@ -173,7 +173,7 @@ export class RunSummary {
     }
     const inflight = this.inFlightAttempts();
     if (inflight > 0) { unknown = true; reasons.push(`服务端有 ${inflight} 次模型请求没有收尾记录`); }
-    if (!this.end) { unknown = true; reasons.push("没有收到结束信号（游戏结束或重开）；多数是直接关页，不能据此断言缺了多少"); }
+    if (!this.end) { unknown = true; reasons.push("没有收到结束信号（游戏结束、重开或页面卸载）；多为关页时没送出来，不能据此断言缺了多少"); }
     const d = this.drops;
     if (d.clientCritical > 0) { knownGap = true; reasons.push(`浏览器缓存满，丢弃关键事件 ${d.clientCritical} 条`); }
     if (d.clientSample > 0) { knownGap = true; reasons.push(`浏览器缓存满，丢弃采样快照 ${d.clientSample} 条`); }

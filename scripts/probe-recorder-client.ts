@@ -277,7 +277,7 @@ async function main() {
     assert.deepEqual(c.headers(s), {});
     await e.close();
   });
-  await test("C10 ★换了测试者：A 的积压（上一页留下的持久队列）仍用 A 的凭证补传、记在 A 名下；新页的事件记 B", async () => {
+  await test("C10 ★换了测试者：A 的积压（上一页留下的持久队列）仍用 A 的凭证补传、记在 A 名下；新页的事件记 B；A 那一局正常关页 ⇒ 已确认完整", async () => {
     const e = await env();
     const shared = new SharedBackend();
     e.net.fault = () => "offline";
@@ -304,6 +304,13 @@ async function main() {
     assert.ok(e.lines(runB).every((l) => l.tid === e.b.tid), "new events under B");
     const aHeaders = e.net.bodies.filter((b) => b.headers["X-Rec-Invite"] === e.a.token).length;
     assert.ok(aHeaders >= 1);
+    // 正常关页：这一局记下“页面卸载”（不是“玩家退出”）与最后序号 ⇒ 所有该到的都到了，导出为“已确认完整”
+    assert.ok(e.lines(runA).some((l) => l.type === "run_end" && l.d.reason === "page_unload"));
+    assert.ok(e.lines(runA).some((l) => l.type === "producer_close"));
+    await e.store.flush();
+    const outA = await exportRun(e.store, runA);
+    const compA = (outA!.manifest as { completeness: { status: string; reasons: string[] } }).completeness;
+    assert.equal(compA.status, "complete", compA.reasons.join(" | "));
     await e.close();
   });
   await test("C11 ★撤回同意：本凭证名下没上传的立即清空、之后一条不采；已上传的不动", async () => {
@@ -450,6 +457,57 @@ async function main() {
     assert.ok(l1.some((l) => l.type === "trace" && l.turn === "t-9999-aaaa"), "late callback stays with the old run");
     assert.ok(!l2.some((l) => l.turn === "t-9999-aaaa"));
     assert.ok(!l2.some((l) => l.type === "run_end" || l.type === "game_end"), "no fake end for the new run");
+    await e.close();
+  });
+
+  await test("C18 开局前那一瞬的观察（面板挂载时的静音/频道/页签）接到本页第一局开头、标 preRun；带 state 的 trace 不借此归局", async () => {
+    const e = await env();
+    const c = e.mk();
+    c.activate(e.a.token);
+    c.op("tts_state", { enabled: false });
+    c.op("channel", { commanders: ["chen"] });
+    c.trace("t-0101-aaaa", "turn", { text: "x" }, game());   // 带着别的 state：不归局、只计数
+    const s = game();
+    c.startRun(s, {});
+    const runId = c.status().runId!;
+    await until(() => c.status().queued === 0, 5000, "drain");
+    const ls = e.lines(runId);
+    const ops = ls.filter((l) => l.type === "op");
+    assert.deepEqual(ops.map((l) => l.d.kind), ["tts_state", "channel"]);
+    assert.ok(ops.every((l) => l.d.preRun === true && l.runFrom === "current"));
+    assert.ok(!ls.some((l) => l.turn === "t-0101-aaaa"));
+    // 第二局开局时不再挂任何“开局前”的东西
+    c.startRun(game(), { restart: true });
+    const r2 = c.status().runId!;
+    await until(() => c.status().queued === 0, 5000, "drain 2");
+    assert.ok(!e.lines(r2).some((l) => l.d.preRun === true));
+    await e.close();
+  });
+
+  await test("C19 ★T11 截断如实：3 万个中文字按上限截断（超单条上限再从原文收紧）、trunc 点出路径、标出被截字数；500 个单位的快照写明省略 100 个、不是悄悄截到 80；非 ASCII 全程按 UTF-8 计", async () => {
+    const e = await env();
+    const c = e.mk();
+    c.activate(e.a.token);
+    const s = game();
+    const tpl = [...s.units.values()].find((u) => u.team === "player")!;
+    let id = 900000;
+    while ([...s.units.values()].filter((u) => u.team === "player").length < 500) { const u = { ...structuredClone(tpl), id: id++ }; s.units.set(u.id, u); }
+    c.startRun(s, {});
+    const long = "长官，".repeat(10000);    // 3 万字
+    c.trace("t-1901-aaaa", "confirm_captured", { text: long, items: Array.from({ length: 450 }, (_, i) => i) }, s);
+    const runId = c.status().runId!;
+    await until(() => c.status().queued === 0 && e.lines(runId).some((l) => l.type === "snapshot"), 5000, "drain");
+    const tr = e.lines(runId).find((l) => l.type === "trace")!;
+    assert.ok(tr.trunc.includes("data.text") && tr.trunc.includes("data.items"), JSON.stringify(tr.trunc));
+    // 3 万个中文字 ≈ 90 KB：先按 1.6 万字截仍超 48 KiB，于是收紧到 4000 字；两层截断都点名、被截字数写在尾巴上
+    assert.ok(tr.d.data.text.endsWith(`…(+${long.length - 4000})`), `re-cut from the original at 4000 chars, the cut size exact: …${tr.d.data.text.slice(-24)}`);
+    assert.ok(Buffer.byteLength(JSON.stringify(tr)) <= 48 * 1024 + 200, "the stored event fits the per-event cap");
+    assert.ok(!("tooLarge" in tr.d), "kept the event instead of a placeholder");
+    assert.equal(tr.d.data.items.at(-1), "(+250 more)", "array cap tightened to 200 and says how many were left out");
+    const snap = e.lines(runId).find((l) => l.type === "snapshot")!;
+    assert.equal(snap.d.unitsTotal, 500);
+    assert.equal(snap.d.units.length, 400);
+    assert.equal(snap.d.omitted, 100);
     await e.close();
   });
 

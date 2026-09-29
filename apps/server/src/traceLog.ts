@@ -21,6 +21,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { recordServerTrace } from "./recorder/context.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -59,6 +60,8 @@ function clip(v: unknown, depth = 0): unknown {
 let dirReady = false;
 
 export function traceWrite(traceId: unknown, stage: string, data: Record<string, unknown>): void {
+  // 试玩记录仪：同一个取数点顺手交给逐局记录（只有带着有效记录头的命令请求才有上下文；否则当场返回）。
+  recordServerTrace(traceId, stage, data);
   // 没有请求编号就串不起来——台架/脚本直接调模型函数时不带编号，也就不往长官的日志里掺。
   if (!ENABLED || traceIdOf(traceId) === "-") return;
   try {

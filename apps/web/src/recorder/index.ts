@@ -156,9 +156,25 @@ function defaultDeps(apiUrl: string): CoreDeps {
   };
 }
 
-async function makeCore(opts: ActivateOptions): Promise<RecorderCore> {
-  const backend = opts.backend ?? (await IdbBackend.open()) ?? new MemoryBackend();
-  return new RecorderCore({ ...defaultDeps(opts.apiUrl), ...opts.deps }, backend, { ...DEFAULT_CORE_LIMITS, ...opts.limits });
+/**
+ * 整页只建一个核心。★必须共用同一个“正在建”的承诺：同意框的 effect 在 StrictMode 下会跑两遍，
+ * 两次调用都在 await 期间看到 core 为空、各建一个——游戏的局记在第一个上，第二个又把它顶掉
+ * （浏览器手测抓到：记录中、却“没能标记”，命令也不带记录头）。
+ */
+let corePromise: Promise<RecorderCore> | null = null;
+function makeCore(opts: ActivateOptions): Promise<RecorderCore> {
+  if (!corePromise) {
+    corePromise = (async () => {
+      const backend = opts.backend ?? (await IdbBackend.open()) ?? new MemoryBackend();
+      return new RecorderCore({ ...defaultDeps(opts.apiUrl), ...opts.deps }, backend, { ...DEFAULT_CORE_LIMITS, ...opts.limits });
+    })();
+  }
+  return corePromise;
+}
+
+/** 关页（浏览器里由 pagehide 触发）。`persisted`＝进了往返缓存、可能原样回来。 */
+export function notifyPageHide(persisted = false): void {
+  try { core?.pagehide(persisted); } catch { /* 尽力 */ }
 }
 
 let lifecycleWired = false;
@@ -166,7 +182,7 @@ function wireLifecycle(): void {
   if (lifecycleWired || typeof window === "undefined") return;
   lifecycleWired = true;
   try {
-    window.addEventListener("pagehide", () => { try { core?.pagehide(); } catch { /* 尽力 */ } });
+    window.addEventListener("pagehide", (e) => notifyPageHide((e as PageTransitionEvent).persisted === true));
     document.addEventListener("visibilitychange", () => { try { core?.visibility(document.visibilityState === "hidden"); } catch { /* 尽力 */ } });
   } catch { /* 纯观测 */ }
 }
@@ -175,8 +191,8 @@ function wireLifecycle(): void {
 export async function activateRecorder(token: string, opts: ActivateOptions): Promise<void> {
   if (IS_PANEL) return;
   try {
-    if (!core) core = await makeCore(opts);
-    core.activate(token);
+    core = await makeCore(opts);
+    if (!core.isActive()) core.activate(token);
     on = true;
     wireLifecycle();
   } catch { on = false; }
@@ -186,7 +202,7 @@ export async function activateRecorder(token: string, opts: ActivateOptions): Pr
 export async function startBacklogUploader(opts: ActivateOptions): Promise<void> {
   if (IS_PANEL) return;
   try {
-    if (!core) core = await makeCore(opts);
+    core = await makeCore(opts);
     core.startBacklogOnly();
     wireLifecycle();
   } catch { /* 纯观测 */ }

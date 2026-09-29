@@ -297,6 +297,8 @@ export function harness(
     // 刀寅：对账日志——生产代码照调，台架把每一行收下来（可断言「真落点」一层）
     traceId: "harness-trace", traceIdRef: { current: "harness-trace" }, intentFacts,
     traceClient: (_id: string, stage: string, data: Record<string, unknown>) => traces.push({ stage, data }),
+    // 试玩记录仪：命令请求的观测头（sendCommand 里唯一新增的名字）。台架默认不记录＝空对象，请求与生产关闭时逐字节相同。
+    recorderHeaders: () => ({}),
     // 刀寅：回复入口那一段要的依赖（批准合同 + 确认案登记）
     pendingContractRef, canAutoExecute, replyMark: () => undefined,
     // 刀寅（审核 B）：一次只挂一个问题——轮次计数与"新请示"注入口

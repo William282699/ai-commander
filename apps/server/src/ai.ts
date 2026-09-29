@@ -5,6 +5,15 @@
 // ============================================================
 
 import { traceWrite } from "./traceLog.js";
+
+/**
+ * 试玩记录仪 V1（§5.3）：生产控制台只打长度，不打模型原文——原文会带出玩家原话，
+ * 而 `fly logs` 不受记录同意的约束。正文只进经过同意的逐局记录。本地开发照旧打片段。
+ */
+function rawForConsole(raw: string | undefined | null, n: number): string {
+  if (process.env.NODE_ENV === "production") return `(len=${raw?.length ?? 0})`;
+  return raw?.slice(0, n) ?? String(raw);
+}
 import {
   safeParse,
   validateAdvisorResponse,
@@ -905,7 +914,8 @@ ${styleNote}
     }
 
     // LLM returned something but not valid JSON → fallback
-    console.warn("LLM returned invalid JSON, using fallback. Raw:", raw.slice(0, 200));
+    console.warn("LLM returned invalid JSON, using fallback. Raw:", rawForConsole(raw, 200));
+    traceWrite(traceId, "parse_failed", { mode: "json", fallback: true });
     const fallback: AdvisorResult = {
       data: createFallbackResponse("parse"),
       warning: "参谋回复格式异常（未执行任何命令）",
@@ -920,6 +930,7 @@ ${styleNote}
     }
 
     console.error("LLM call failed:", message);
+    traceWrite(traceId, "model_error", { mode: "json", message: message.slice(0, 300) });
     const fallback: AdvisorResult = {
       data: createFallbackResponse("comms"),
       warning: `参谋通讯中断: ${message.slice(0, 100)}`,
@@ -1014,7 +1025,7 @@ ${styleNote}
 
     const rawParsed = safeParse(raw);
     if (!rawParsed) {
-      console.warn("Group LLM returned invalid JSON, using fallback. Raw:", raw.slice(0, 300));
+      console.warn("Group LLM returned invalid JSON, using fallback. Raw:", rawForConsole(raw, 300));
       return {
         responses: [
           { from: "chen", brief: "通信干扰，收不到完整信号。" },
@@ -1310,7 +1321,7 @@ ${styleNote}
       yield { type: "options", content: payload };
     } else {
       // Degraded: return fallback response
-      console.warn("Stream: failed to parse JSON, using fallback. Full text:", fullText.slice(0, 300));
+      console.warn("Stream: failed to parse JSON, using fallback. Full text:", rawForConsole(fullText, 300));
       traceWrite(traceId, "parse_failed", { mode: "stream", fallback: true });
       let fallback: AdvisorResult = {
         data: createFallbackResponse("parse"),
@@ -1367,7 +1378,7 @@ export async function callLightBrief(
     const parsed = safeParse(raw);
     const validated = parsed ? validateLightResponse(parsed) : null;
     if (!validated) {
-      console.warn(`[lightBrief] channel=${channel} validation_failed. raw=`, raw?.slice(0, 300));
+      console.warn(`[lightBrief] channel=${channel} validation_failed. raw=`, rawForConsole(raw, 300));
     }
     return validated;
   } catch (err) {

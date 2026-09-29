@@ -6,6 +6,7 @@
 
 import type { Channel, ReportEventType, AdvisorOption } from "@ai-commander/shared";
 import type { Utterance } from "./proactiveSpeech";
+import { recordMessage } from "./recorder";
 
 export type MessageLevel = "info" | "warning" | "urgent";
 
@@ -159,6 +160,8 @@ export function addMessage(
   // Auto-derive `from` from channel if not provided and source isn't player/system
   const resolvedFrom = from ?? (source === "player" ? "player" : source === "system" ? "system" : CHANNEL_PERSONA[channel]);
   messages.push({ id: nextId++, level, text, time: gameTime, channel, from: resolvedFrom, source, ...(groupChat ? { groupChat: true } : {}), ...(utterance ? { utterance } : {}) });
+  // 试玩记录仪：变更点之一（只在主窗这一份上发生；弹窗走上面的委派，不会记两遍）。
+  recordMessage("add", { id: nextId - 1, level, text, time: gameTime, channel, from: resolvedFrom, source, groupChat, utterance });
 
   while (messages.length > MAX_MESSAGES) {
     messages.shift();
@@ -183,6 +186,8 @@ export function updateLastPlayerMessage(channel: Channel, text: string): void {
     const m = messages[i];
     if (m.channel === channel && m.from === "player") {
       messages[i] = { ...m, text };
+      // 试玩记录仪：变更点之二（语音占位 → 听成的原话）。
+      recordMessage("update", { id: m.id, channel, text });
       listeners.forEach((fn) => fn());
       return;
     }
@@ -194,6 +199,8 @@ export function clearMessages(): void {
   if (p) { p.clearMessages(); return; }
   messages.length = 0;
   nextId = 1;
+  // 试玩记录仪：变更点之三（清空；之后消息号从 1 重来——按“局号＋消息号”认）。
+  recordMessage("clear", {});
   _seenUtteranceId.ops = 0; _seenUtteranceId.logistics = 0; _seenUtteranceId.combat = 0;
   _activeChannel = "ops";
   _escalations.ops = null;

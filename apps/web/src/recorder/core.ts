@@ -123,8 +123,15 @@ export class RecorderCore {
   private listeners = new Set<(s: RecorderStatus) => void>();
   private lastStatusKey = "";
   private extras: (() => SnapshotExtras) | null = null;
-  /** 在任何一局开始之前到来的观察（没有局可归）：只计数，写进下一局的 run_start。 */
+  /** 在任何一局开始之前到来的观察（没有局可归）：超出暂存上限的只计数，写进下一局的 run_start。 */
   private preRun = 0;
+  /**
+   * 本页第一局开局之前的少量观察（聊天面板挂载时的静音/频道/页签、开场暂停……）：它们发生在
+   * 同一页、同一玩家、第一局建立之前的那一瞬，暂存下来接到本页**第一局**的开头，并标 preRun:true。
+   * 只收“局取自当前局”这一类（消息/TTS/操作）；带着出发 state 的 trace 不在此列（不猜归属）。
+   */
+  private preRunBuffer: { type: string; d: Record<string, unknown>; trunc: string[] }[] = [];
+  private firstRunStarted = false;
   /** 手里有 state、但那个 state 不是我们开过的局（不猜归属，只计数）。 */
   private unattributed = 0;
   /** 记录器自己出过的错（只计数；游戏不受影响）。 */
@@ -188,6 +195,11 @@ export class RecorderCore {
         preRunUnrecorded: this.preRun || undefined, storage: this.memoryOnly ? "memory" : "indexeddb",
       }, { gt: state.time });
       this.preRun = 0;
+      if (!this.firstRunStarted) {
+        this.firstRunStarted = true;
+        for (const p of this.preRunBuffer) this.emit(rec, p.type, { ...p.d, preRun: true }, { gt: state.time, runFrom: "current" }, p.trunc);
+      }
+      this.preRunBuffer = [];
       if (this.memoryOnly) this.reportDrops(rec, true);
       this.keySnapshot(state, rec, "start");
       this.notify();
@@ -218,10 +230,11 @@ export class RecorderCore {
       const turn = typeof traceId === "string" && REC_TURN_RE.test(traceId) ? traceId : undefined;
       if (turn) this.lastTurn = turn;
       const trunc: string[] = [];
-      const d = { stage: String(stage).slice(0, 40), data: recBoundedCopy(data, trunc, { longKeys: LONG_KEYS }) };
+      const st = String(stage).slice(0, 40);
+      const d = { stage: st, data: recBoundedCopy(data, trunc, { longKeys: LONG_KEYS }) };
       this.emit(r.rec, "trace", d, {
         gt: r.state?.time, turn, turnFrom: turn && turnFrom === "current" ? "current" : undefined, runFrom: r.runFrom,
-      }, trunc.map((p) => `data.${p}`));
+      }, trunc.map((p) => `data.${p}`), { input: data, wrap: (x) => ({ stage: st, data: x }), prefix: "data." });
       if (stage === "exec" && r.state) this.keySnapshot(r.state, r.rec, "exec", turn);
     } catch { this.internalErrors++; }
   }
@@ -230,10 +243,11 @@ export class RecorderCore {
   message(op: "add" | "update" | "clear", fields: Record<string, unknown>): void {
     if (!this.active) return;
     try {
-      const cur = this.current;
-      if (!cur) { this.preRun++; return; }
       const trunc: string[] = [];
-      this.emit(cur.rec, "message", { op, ...(recBoundedCopy(fields, trunc) as Record<string, unknown>) }, { gt: cur.state.time, runFrom: "current" }, trunc);
+      const d = { op, ...(recBoundedCopy(fields, trunc) as Record<string, unknown>) };
+      const cur = this.current;
+      if (!cur) { this.holdPreRun("message", d, trunc); return; }
+      this.emit(cur.rec, "message", d, { gt: cur.state.time, runFrom: "current" }, trunc);
     } catch { this.internalErrors++; }
   }
 
@@ -241,20 +255,22 @@ export class RecorderCore {
   tts(text: unknown, persona: unknown, via: "speak" | "utterance"): void {
     if (!this.active) return;
     try {
-      const cur = this.current;
-      if (!cur) { this.preRun++; return; }
       const trunc: string[] = [];
-      this.emit(cur.rec, "tts", recBoundedCopy({ text, persona, via }, trunc) as Record<string, unknown>, { gt: cur.state.time, runFrom: "current" }, trunc);
+      const d = recBoundedCopy({ text, persona, via }, trunc) as Record<string, unknown>;
+      const cur = this.current;
+      if (!cur) { this.holdPreRun("tts", d, trunc); return; }
+      this.emit(cur.rec, "tts", d, { gt: cur.state.time, runFrom: "current" }, trunc);
     } catch { this.internalErrors++; }
   }
 
   op(kind: string, fields: Record<string, unknown> = {}): void {
     if (!this.active) return;
     try {
-      const cur = this.current;
-      if (!cur) { this.preRun++; return; }
       const trunc: string[] = [];
-      this.emit(cur.rec, "op", { kind: String(kind).slice(0, 40), ...(recBoundedCopy(fields, trunc) as Record<string, unknown>) }, { gt: cur.state.time, runFrom: "current" }, trunc);
+      const d = { kind: String(kind).slice(0, 40), ...(recBoundedCopy(fields, trunc) as Record<string, unknown>) };
+      const cur = this.current;
+      if (!cur) { this.holdPreRun("op", d, trunc); return; }
+      this.emit(cur.rec, "op", d, { gt: cur.state.time, runFrom: "current" }, trunc);
     } catch { this.internalErrors++; }
   }
 
@@ -321,15 +337,24 @@ export class RecorderCore {
     } catch { this.internalErrors++; }
   }
 
-  /** 关页：给本页开过的每一局写“最后序号”，把还没确认落到 IndexedDB 的那一截用 keepalive 送一次（尽力而为）。 */
-  pagehide(): void {
+  /**
+   * 关页：当前这一局记一条“页面卸载了”（事实：这一局的 GameState 随页面没了；不代表玩家主动退出），
+   * 给本页开过的每一局写“最后序号”，把还没确认落到 IndexedDB 的那一截同步暂存并用 keepalive 送一次（尽力而为）。
+   * `persisted`＝页面进了往返缓存、可能原样回来：这时只落盘，不写结束与最后序号。
+   */
+  pagehide(persisted = false): void {
     try {
-      if (this.active) {
+      if (this.active && !persisted) {
+        const cur = this.current;
+        if (cur && !this.gameOver) this.emit(cur.rec, "run_end", { reason: "page_unload" }, { gt: cur.state.time });
         for (const rec of this.runsById.values()) {
           if (rec.foreign && rec.seq === 0) continue;
           this.emit(rec, "producer_close", { lastSeq: rec.seq + 1 });
         }
       }
+      // IndexedDB 在卸载时多半写不完：还没确认落盘的那一截同步暂存一份（下次加载并回队列）。
+      const tail = this.toPersist.filter((it) => this.queue.has(it.eid));
+      if (tail.length && this.backend.stashSync) this.backend.stashSync(tail);
       this.flushPersistNow();
       this.keepaliveFlush();
     } catch { this.internalErrors++; }
@@ -383,6 +408,11 @@ export class RecorderCore {
     return rec;
   }
 
+  private holdPreRun(type: string, d: Record<string, unknown>, trunc: string[]): void {
+    if (this.firstRunStarted || this.preRunBuffer.length >= 50) { this.preRun++; return; }
+    this.preRunBuffer.push({ type, d, trunc });
+  }
+
   private newPid(): string {
     return `c${b64url(this.deps.randomBytes(12))}`;
   }
@@ -404,7 +434,9 @@ export class RecorderCore {
   }
 
   private emit(rec: RunRec, type: string, d: Record<string, unknown>,
-    extra: { gt?: number; turn?: string; turnFrom?: "current"; runFrom?: "current" } = {}, trunc: string[] = []): string | null {
+    extra: { gt?: number; turn?: string; turnFrom?: "current"; runFrom?: "current" } = {}, trunc: string[] = [],
+    /** 原始输入：单条超上限时从它重新复制（截断计数才准），而不是在已截过的副本上再截。 */
+    raw?: { input: unknown; wrap: (copied: unknown) => Record<string, unknown>; prefix: string }): string | null {
     rec.seq += 1;
     const seq = rec.seq;
     let ev: RecEvent = {
@@ -418,8 +450,21 @@ export class RecorderCore {
     if (trunc.length) ev.trunc = trunc.slice(0, 100);
     let body = JSON.stringify(ev);
     let bytes = recUtf8Bytes(body);
+    // 单条超上限（中文按 UTF-8 算，1.6 万字就是 48 KB）：逐级收紧文字与数组上限再装，截在哪儿都记进 trunc；
+    // 实在装不下才留一条“这里本有一条多大的什么”，不静默吞掉。
+    for (const cap of [4000, 1000, 200]) {
+      if (bytes <= REC_EVENT_MAX_BYTES) break;
+      const more: string[] = [];
+      const opts = { textMax: cap, arrayMax: cap >= 1000 ? 200 : 50 };
+      const d2 = raw
+        ? raw.wrap(recBoundedCopy(raw.input, more, opts))
+        : recBoundedCopy(d, more, opts) as Record<string, unknown>;
+      const merged = [...new Set([...(raw ? [] : ev.trunc ?? []), ...more.map((p) => (raw ? raw.prefix + p : p))])].slice(0, 100);
+      ev = { ...ev, d: d2, ...(merged.length ? { trunc: merged } : {}) };
+      body = JSON.stringify(ev);
+      bytes = recUtf8Bytes(body);
+    }
     if (bytes > REC_EVENT_MAX_BYTES) {
-      // 整条太大：留一条“这里本有一条多大的什么”，不静默吞掉。
       ev = { ...ev, d: { tooLarge: true, bytes, stage: typeof d.stage === "string" ? d.stage : undefined, reason: typeof d.reason === "string" ? d.reason : undefined }, trunc: ["d"] };
       body = JSON.stringify(ev);
       bytes = recUtf8Bytes(body);

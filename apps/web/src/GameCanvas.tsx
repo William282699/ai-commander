@@ -118,6 +118,8 @@ import {
 import { personaOf, type Utterance, type UtteranceKind } from "./proactiveSpeech";
 import { API_URL } from "./api";
 import { SESSION_ID } from "./session";
+// 试玩记录仪 V1：只旁观（开局/重开/结局/手动下令/快照附加信息）；没邀请或没同意时每个入口第一行就返回。
+import { recordStartRun, recordGameEnd, recordManualOrder, recordOp, setRecorderExtras, recorderBridgeApi, type RecorderBridgeApi } from "./recorder";
 
 // ── Day 16B: event → channel routing ──
 
@@ -886,6 +888,8 @@ export interface GameBridge {
   onTransferSquad: (squadId: string, newOwner: "chen" | "marcus" | "emily") => void;
   // Shared messageStore (so detached panel sees same threads/messages as main window)
   messageStore: typeof import("./messageStore");
+  /** 试玩记录仪：弹出面板的 trace/TTS/操作经这里交给主窗那一份记录器（主窗是本局唯一 owner）。 */
+  recorder: RecorderBridgeApi;
 }
 
 declare global {
@@ -913,6 +917,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
   const pausedRef = useRef(paused);
   useEffect(() => {
     pausedRef.current = paused;
+    recordOp("pause", { paused });
     if (!paused) {
       // On unpause (开始作战 / 跳过): clear transient input so nothing queued
       // during the frozen tutorial is consumed on the first live tick.
@@ -1113,7 +1118,9 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
         // 读一眼顶栏那步靠它兜底（窗一直开着 / 压根没碰 都不会卡死）
         sinceStepStart: st.time - (guideRef.current?.stepStartedAt ?? st.time),
       }, st.time);
+      const prevGuideIdx = guideRef.current.index;
       guideRef.current = next;
+      if (next.index !== prevGuideIdx) recordOp("tutorial_step", { index: next.index });
       if (say) sayAsChen(say, st.time);
     }, 500);
     return () => clearInterval(id);
@@ -1306,6 +1313,12 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     return { x: cam.x, y: cam.y, zoom: cam.zoom, canvasWidth: canvas.width, canvasHeight: canvas.height };
   }, []);
 
+  // 试玩记录仪：快照附带视角与选中单位（记录器在自己的 try 里调它）。
+  useEffect(() => {
+    setRecorderExtras(() => ({ viewport: getViewport(), selectedUnitIds: [...inputRef.current.selectedUnitIds] }));
+    return () => setRecorderExtras(null);
+  }, [getViewport]);
+
   // Stable callback: check if selected units can form a squad
   // Phase 2.5: allow already-squadded units (they will be extracted)
   const canCreateSquad = useCallback((): boolean => {
@@ -1494,6 +1507,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       onRenameLeader: handleRenameLeader,
       onTransferSquad: handleTransferSquad,
       messageStore: messageStoreModule,
+      recorder: recorderBridgeApi,
     };
     return () => { delete window.__GAME_BRIDGE__; };
   }, [getSelectedUnitIds, getViewport, handleCreateSquad, canCreateSquad, getAssignableLeaders, handleDeclareWar, handleSelectUnits, handleMoveSquad, handleRemoveFromParent, handleRenameLeader, handleTransferSquad]);
@@ -1528,6 +1542,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       priority: "high",
     };
     applyPlayerCommands(state, [order]);
+    recordManualOrder(state, [order], "facility_capture");
     addMessage("info", `派遣单位占领 ${menu.facility.name}`, state.time, "ops", "player", "player");
     setFacilityMenu(null);
   }, [facilityMenu]);
@@ -1547,6 +1562,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
       priority: "high",
     };
     applyPlayerCommands(state, [order]);
+    recordManualOrder(state, [order], "facility_sabotage");
     addMessage("info", `派遣单位破坏 ${menu.facility.name}`, state.time, "ops", "player", "player");
     setFacilityMenu(null);
   }, [facilityMenu]);
@@ -1555,6 +1571,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     const sid = scenarioFromUrl();
     const newState = createInitialGameState(sid);
     stateRef.current = newState;
+    recordStartRun(newState, { search: window.location.search, restart: true });
     gameOverDetectedRef.current = false;
     setGameOverInfo(null);
     // Recompute fog for the fresh state so enemies are visible on first frame
@@ -1612,6 +1629,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     const noFog = urlParams.get("nofog") === "1";
     const initialState = createInitialGameState(scenarioId);
     stateRef.current = initialState;
+    recordStartRun(initialState, { search: window.location.search });
 
     // P3: reset module-level timers for clean start (handles StrictMode / HMR)
     resetEnemyAITimer();
@@ -1882,6 +1900,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
                 priority: "high",
               };
               applyPlayerCommands(state, [order]);
+              recordManualOrder(state, [order], "right_click_attack");
               soundManager.play("order");
             } else {
               // Day 13: Check if clicking on a facility → show context menu
@@ -1905,6 +1924,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
                   priority: "medium",
                 };
                 applyPlayerCommands(state, [order]);
+                recordManualOrder(state, [order], "right_click_move");
                 soundManager.play("order");
               }
             }
@@ -2020,6 +2040,7 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
           rating: state.gameOverRating,
           breakdown: state.gameOverBreakdown,
         });
+        recordGameEnd(state, { winner: state.winner, reason: state.gameOverReason, rating: state.gameOverRating, breakdown: state.gameOverBreakdown, playerAlive, enemyAlive });
       }
 
       if (!noFog) updateFog(state);

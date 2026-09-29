@@ -22,7 +22,15 @@ export interface QueueBackend {
   loadAll(): Promise<QItem[]>;
   put(items: QItem[]): Promise<boolean>;
   remove(eids: string[]): Promise<boolean>;
+  /**
+   * 关页那一刻的尾巴（同步写）：IndexedDB 的写在卸载时多半来不及完成，而 keepalive 在断网时也送不出去。
+   * 这一小截（关页收尾标记等）同步落到 localStorage，下次加载时并回队列。尽力而为，有上限。
+   */
+  stashSync?(items: QItem[]): boolean;
 }
+
+const STASH_KEY = "aic_rec_pagehide_v1";
+const STASH_MAX_CHARS = 200_000;
 
 export class MemoryBackend implements QueueBackend {
   readonly kind = "memory" as const;
@@ -64,11 +72,36 @@ export class IdbBackend implements QueueBackend {
   }
 
   async loadAll(): Promise<QItem[]> {
+    let stashed: QItem[] = [];
+    try {
+      const raw = localStorage.getItem(STASH_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) stashed = arr.filter((x) => x && typeof x.eid === "string" && typeof x.body === "string");
+        // 先并进 IndexedDB 再删暂存：删了之后它们就只在 IndexedDB 里了
+        if (stashed.length === 0 || await this.put(stashed)) localStorage.removeItem(STASH_KEY);
+      }
+    } catch { /* 暂存读不到就算了 */ }
     try {
       const tx = this.db.transaction(STORE, "readonly");
       const all = await req(tx.objectStore(STORE).getAll()) as QItem[];
-      return all.filter((x) => x && typeof x.eid === "string" && typeof x.body === "string").sort((a, b) => a.order - b.order);
-    } catch { return []; }
+      const seen = new Set(all.map((x) => x.eid));
+      return [...all, ...stashed.filter((x) => !seen.has(x.eid))]
+        .filter((x) => x && typeof x.eid === "string" && typeof x.body === "string").sort((a, b) => a.order - b.order);
+    } catch { return stashed; }
+  }
+
+  stashSync(items: QItem[]): boolean {
+    try {
+      let prev: QItem[] = [];
+      try { const raw = localStorage.getItem(STASH_KEY); if (raw) prev = JSON.parse(raw); } catch { prev = []; }
+      const merged = [...(Array.isArray(prev) ? prev : []), ...items];
+      let text = JSON.stringify(merged);
+      // 超上限就只留最新的那一截（关页收尾标记在最后）
+      while (text.length > STASH_MAX_CHARS && merged.length > 1) { merged.shift(); text = JSON.stringify(merged); }
+      localStorage.setItem(STASH_KEY, text);
+      return true;
+    } catch { return false; }
   }
 
   async put(items: QItem[]): Promise<boolean> {

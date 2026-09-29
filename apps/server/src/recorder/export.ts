@@ -50,7 +50,11 @@ export function endLabel(s: RunSummary, now: number, activeMs: number): string {
     const win = s.end.winner === "player";
     return `游戏结束：${win ? "胜利" : "败北"}${s.end.reason ? `（${String(s.end.reason)}）` : ""}`;
   }
-  if (s.end?.kind === "run_end") return s.end.reason === "replaced" ? "重开了一局（这一局未分胜负）" : `结束：${String(s.end.reason ?? "")}`;
+  if (s.end?.kind === "run_end") {
+    if (s.end.reason === "replaced") return "重开了一局（这一局未分胜负）";
+    if (s.end.reason === "page_unload") return "页面关闭或刷新（未分胜负；不代表玩家主动退出）";
+    return `结束：${String(s.end.reason ?? "")}`;
+  }
   if (now - s.lastRt > activeMs) return "没有结束信号（多为直接关页/刷新；不能断言玩家主动退出）";
   return `没有结束信号（最后活动 ${Math.max(0, Math.round((now - s.lastRt) / 60000))} 分钟前，可能仍在进行）`;
 }

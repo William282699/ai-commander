@@ -5,6 +5,8 @@ import { TutorialOverlay } from "./TutorialOverlay";
 import { IntroGate } from "./IntroGate";
 import type { GameState } from "@ai-commander/shared";
 import type { GameBridge } from "./GameCanvas";
+// 试玩记录仪：弹出/收回面板这一类少量操作（只记，不参与任何判定）。
+import { recordOp } from "./recorder";
 
 function formatTime(sec: number): string {
   const h = Math.floor(sec / 3600);
@@ -232,10 +234,12 @@ export default function App() {
     if (panelWin) {
       panelWinRef.current = panelWin;
       setPanelDetached(true);
+      recordOp("popup", { open: true });
       // Listen for child window close → re-attach panel
       const check = setInterval(() => {
         if (panelWin.closed) {
           setPanelDetached(false);
+          recordOp("popup", { open: false, via: "closed" });
           if (panelWinRef.current === panelWin) panelWinRef.current = null;
           clearInterval(check);
         }
@@ -246,6 +250,7 @@ export default function App() {
   /** 「收回面板」＝真把弹窗关掉，按钮从此名副其实。 */
   const handleReattach = useCallback(() => {
     try { panelWinRef.current?.close(); } catch { /* 已关/跨源，忽略 */ }
+    recordOp("popup", { open: false, via: "reattach" });
     panelWinRef.current = null;
     setPanelDetached(false);
   }, []);

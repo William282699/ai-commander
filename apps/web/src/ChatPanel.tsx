@@ -83,7 +83,11 @@ import {
   type MessageFrom,
   type StaffThread,
 } from "./messageStore";
-import { speak, flush, cancel, speakUtterance, isBusy, type Persona } from "./tts";
+import { flush, cancel, isBusy, type Persona } from "./tts";
+// 试玩记录仪：交给 TTS 的那句话先记一笔再原样交出去（tts/index.ts 零改动）。
+import { speak, speakUtterance } from "./recorder/ttsTap";
+// 试玩记录仪：命令请求的观测头（局号＋凭证，游戏请求体不变）与少量操作。
+import { recorderHeaders, recordOp } from "./recorder";
 import { shouldSpeakMessage, spokenKey, isDeferrable, personaOf, type SpeakContext } from "./proactiveSpeech";
 import { decideEscalationFollowup, pickNagLine, EXPIRE_FALLBACK, type EscalationWatch } from "./nagContract";
 import { API_URL } from "./api";
@@ -566,6 +570,9 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // 渲染时钳位，不用 useEffect 重置：activeTab 本身留着不动，所以切到群聊只是
   // 这一帧显示对话（无闪帧），从艾米莉切回陈还记得他刚才停在编制页。
   const effectiveTab: "chat" | "panel" = channelHasPanel ? activeTab : "chat";
+  // 试玩记录仪：频道／页签切换（当时可见的是哪一栏；只记，不参与任何判定）。
+  useEffect(() => { recordOp("channel", { commanders: selectedCommanders }); }, [selectedCommanders]);
+  useEffect(() => { recordOp("tab", { tab: effectiveTab }); }, [effectiveTab]);
 
   // ── Message display state ──
   const [displayMessages, setDisplayMessages] = useState<readonly FeedMessage[]>([]);
@@ -715,6 +722,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
   // generation tokens, fallback state all owned by the module.
   const hasTTS = typeof Audio !== "undefined" || (typeof window !== "undefined" && "speechSynthesis" in window);
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(readTtsPref);
+  // 试玩记录仪：静音状态（开局一次＋每次切换）。只记，不参与任何判定。
+  useEffect(() => { recordOp("tts_state", { enabled: ttsEnabled }); }, [ttsEnabled]);
   /** 喇叭开关的唯一入口：两颗键（嵌入态／弹窗 dock）都走它，顺手落盘。 */
   const toggleTts = useCallback(() => {
     setTtsEnabled((prev) => {
@@ -1855,13 +1864,13 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     if (!pc) return false;
     if (isConfirmReply(userMsg)) {
       pendingContractRef.current = null;
-      traceClient(traceIdRef.current, "pending_shortcut", { reply: "confirm", pendingId: pc.id, planTraceId: pc.execCtx.traceId ?? null });
+      traceClient(traceIdRef.current, "pending_shortcut", { reply: "confirm", pendingId: pc.id, planTraceId: pc.execCtx.traceId ?? null }, st, "current");
       handleApprove(pc.opt, 0, "auto", pc.execCtx, pc.data, true, pc.selection);
       return true;
     }
     if (isCancelReply(userMsg)) {
       pendingContractRef.current = null;
-      traceClient(traceIdRef.current, "pending_shortcut", { reply: "cancel", pendingId: pc.id, planTraceId: pc.execCtx.traceId ?? null });
+      traceClient(traceIdRef.current, "pending_shortcut", { reply: "cancel", pendingId: pc.id, planTraceId: pc.execCtx.traceId ?? null }, st, "current");
       addMessage("info", "行，那就不动。", st.time, ch, undefined, "command_ack");
       return true;
     }
@@ -1889,6 +1898,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       summary: `要办的是：${plan}（陈刚问长官：${a.question}）`,
       ...(a.selection ? { selection: { ...a.selection, expiresAt } } : {}),
     };
+    // 试玩记录仪：待批方案登记（pendingId ↔ 方案所在的回合），答复时凭它连回来。
+    traceClient(traceIdRef.current, "plan_registered", { pendingId: pendingContractRef.current?.id, planTraceId: a.execCtx.traceId ?? null, phase: a.phase, question: a.question, plan }, st, "current");
     return plan;
   };
 
@@ -1915,7 +1926,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     speakReceipt: boolean,
     opts?: { screen?: boolean; context?: boolean },
   ) => {
-    traceClient(traceIdRef.current, "refuse", { line: msg });
+    traceClient(traceIdRef.current, "refuse", { line: msg }, st, "current");
     if (opts?.screen !== false) {
       addMessage("warning", msg, st.time, ch, undefined, "command_ack");
     }
@@ -1982,7 +1993,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     // 刀壬：出口现在自己写 context，这儿就别推第二遍（`context:false`）。
     refuseAloud(state, ch, question, speakReceipt, { context: false });
     pushContext(channelContextRef.current, ch, { role: "assistant", text: question, time: state.time });
-    traceClient(traceIdRef.current, "ask_selection", { intentIndex, question, keys: candidates.map((c) => c.selectionKey) });
+    traceClient(traceIdRef.current, "ask_selection", { intentIndex, question, keys: candidates.map((c) => c.selectionKey), selectionId: pendingSelectionRef.current?.id, planTraceId: execCtx?.traceId ?? null }, state, "current");
     setClarification("请指明是哪一批部队");
   };
 
@@ -2023,7 +2034,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     };
     refuseAloud(state, ch, amb.question, speakReceipt, { context: false });
     pushContext(channelContextRef.current, ch, { role: "assistant", text: amb.question, time: state.time });
-    traceClient(traceIdRef.current, "ask_quantity", { signature: amb.signature, question: amb.question, keys: amb.candidates.map((c) => c.selectionKey) });
+    traceClient(traceIdRef.current, "ask_quantity", { signature: amb.signature, question: amb.question, keys: amb.candidates.map((c) => c.selectionKey), selectionId: pendingSelectionRef.current?.id, planTraceId: execCtx?.traceId ?? null }, state, "current");
     setClarification(null);
   };
 
@@ -2314,6 +2325,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
 
     // Determine channel from selection
     const primaryChannel = COMMANDER_CHANNEL[selectedCommanders[0]];
+    // 试玩记录仪：这一轮的输入（打字原文；语音要等 heard 回来，见消息改写与服务端结果）。
+    traceClient(traceId, "turn", { channel: primaryChannel, text: userMsg, voice: isVoiceTurn, group: isGroupChat }, state);
 
     // Add player message to feed (mark as groupChat if in ALL mode so it stays out of individual channels)
     // 语音回合先放一个占位；陈说完话之后（options 事件到达时）换成他听到的原话。
@@ -2590,7 +2603,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         setError(null);
         setClarification(null);
         const line = advisorFailureLine(failure);
-        traceClient(traceId, "model_failure", { failure });
+        traceClient(traceId, "model_failure", { failure }, state);
         addMessage("warning", line, state.time, ch, undefined, "command_ack");
         pushContext(channelContextRef.current, ch, { role: "assistant", text: line, time: state.time });
         sayToEar(line, false, "engine");
@@ -2630,7 +2643,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           ? contractReplyConflict(state, pcSameEpoch.opt, judged, data.options) : null;
         const verdict = conflict ? "protocol_failure" as const : judged;
         const route = pendingVerdictRoute(verdict);
-        if (pendingTag) traceClient(traceId, "pending", { verdict, judged, pendingId: pendingTag.pendingId, conflict: conflict ?? undefined });
+        if (pendingTag) traceClient(traceId, "pending", { verdict, judged, pendingId: pendingTag.pendingId, contractId: pcSameEpoch?.id ?? null, planTraceId: pcSameEpoch?.execCtx.traceId ?? null, conflict: conflict ?? undefined }, state);
 
         // Contract lifecycle per verdict. Expiry cleanup may ONLY clear the
         // very contract this request was tagged with — never a newer one that
@@ -2731,7 +2744,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         decision: (data as Record<string, unknown>).dispatchSelection,
         personaLabel: COMMANDER_META[selPersona].label,
       });
-      if (selTagThisTurn) traceClient(traceId, "selection", { verdict: selTurn.verdict, plan: selTurn.plan.kind });
+      if (selTagThisTurn) traceClient(traceId, "selection", { verdict: selTurn.verdict, plan: selTurn.plan.kind, selectionId: selTagThisTurn.selectionId, slotId: selSlotAtJudge?.id ?? null, planTraceId: selSlotAtJudge?.execCtx?.traceId ?? null }, state);
       {
         // 槽的生命周期。过期清理**只许**清掉这次请求带的那一槽——等回复那几秒里
         // 若登记了更新的一槽，绝不碰它（照抄 pendingContract 的三方匹配规矩）。
@@ -2776,7 +2789,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           } else {
             const snapshot = optionWithResolvedIntents(slot.optionSnapshot, read.intents);
             const uniq = <T extends { intentIndex: number }>(xs: T[]) => xs.filter((x, i) => xs.findIndex((y) => y.intentIndex === x.intentIndex) === i);
-            traceClient(traceId, "quantity_chosen", { key: selTurn.plan.key, signature: q.signature });
+            traceClient(traceId, "quantity_chosen", { key: selTurn.plan.key, signature: q.signature, selectionId: slot.id, planTraceId: slot.execCtx?.traceId ?? null }, state);
             handleApprove(snapshot, slot.optionIndex, "auto", slot.execCtx, slot.sourceResponse, selPlan.speakExecReceipt, {
               optionSnapshot: snapshot,
               optionIndex: slot.optionIndex,
@@ -2866,7 +2879,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             traceClient(traceId, "confirm_captured", {
               captured: !!plan, responseType: rtNow, options: askOpts.length,
               intents: plan ? (plan.intents ?? []).map((i) => intentFacts(i as unknown as Record<string, unknown>)) : undefined,
-            });
+            }, state);
             const shown = planLine ? `${question} ${planLine}` : question;
             addMessage("info", shown, state.time, ch, undefined, "command_ack", undefined, replyMark(ch));
             pushContext(channelContextRef.current, ch, { role: "assistant", text: shown, time: state.time });
@@ -2912,7 +2925,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       traceClient(traceId, "route", {
         responseType: data.responseType, options: optionsArr.length, error: data.error ?? undefined,
         gateAuto: execGate.auto, gateReason: execGate.reason, bucket: actionableTurn ? execBucket : undefined, willExecute,
-      });
+      }, state);
 
       // 选择合同已在上方处理：模型做语义分类，引擎核对本次给出的 key；
       // unclear 再问且零执行，不复用普通批准的确认词表。
@@ -3185,7 +3198,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     try {
       const streamRes = await fetch(`${API_URL}/api/command-stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...recorderHeaders(state) },
         body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, traceId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: takeSpeechDiag() }),
       });
 
@@ -3311,7 +3324,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       try {
         const res = await fetch(`${API_URL}/api/command`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...recorderHeaders(state) },
           body: JSON.stringify({ digest, message: llmMessage, styleNote, channel: ch, sessionId: SESSION_ID, escalateId, traceId, audio: voice ? { data: voice.data, format: voice.format } : undefined, voiceDiag: voice ? getVoiceOpenDiag() ?? undefined : undefined, speechDiag: takeSpeechDiag() }),
         });
         const data = await res.json();
@@ -3413,7 +3426,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const confirmed = new Set(progress.quantityConfirmed ?? []);
       const amb = findQuantityAmbiguity(progress.optionSnapshot.intents, said).find((a) => !confirmed.has(a.signature));
       if (amb) {
-        traceClient(traceIdRef.current, "quantity_split", { signature: amb.signature, indexes: amb.indexes, said });
+        traceClient(traceIdRef.current, "quantity_split", { signature: amb.signature, indexes: amb.indexes, said, planTraceId: execCtx?.traceId ?? null }, execCtx?.run?.state ?? state, "current");
         askQuantityReading(state, ch, amb, speakReceipt, progress, execCtx ?? undefined);
         return;
       }
@@ -3514,7 +3527,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           const live = d ? liveDispatchMembers(state, d).length : 0;
           return `${d?.targetName ? `${d.targetName}那边` : "那边"}已经有 ${live} 个是刚才派去的，还在办`;
         }).join("；");
-        traceClient(traceIdRef.current, "same_task_in_progress", { dispatchIds: hits, said: execCtx?.playerText ?? null });
+        traceClient(traceIdRef.current, "same_task_in_progress", { dispatchIds: hits, said: execCtx?.playerText ?? null, planTraceId: execCtx?.traceId ?? null }, execCtx?.run?.state ?? state, "current");
         proposeForApproval(cloneSelectionOption(progress.optionSnapshot), reason, "要再派吗");
         return;
       }
@@ -3528,7 +3541,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const said = execCtx?.playerText;
       const checks = intents.map((it) => checkDestinationQuote(state, it, said));
       if (checks.some((v) => v.kind !== "no_check" || v.reason !== "not_dispatch")) {
-        traceClient(traceIdRef.current, "destination_quote", { said, verdicts: checks });
+        traceClient(traceIdRef.current, "destination_quote", { said, verdicts: checks, planTraceId: execCtx?.traceId ?? null }, execCtx?.run?.state ?? state, "current");
       }
       const conflict = checks.find((v) => v.kind === "conflict");
       if (conflict && conflict.kind === "conflict") {
@@ -3834,7 +3847,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
     }
 
     if (allOrders.length === 0 && degradedCount > 0) {
-      traceClient(traceIdRef.current, "exec", { intents: execTrace, applied: [], receipt: degradedLines });
+      traceClient(traceIdRef.current, "exec", { intents: execTrace, applied: [], receipt: degradedLines, planTraceId: execCtx?.traceId ?? null }, execCtx?.run?.state ?? state, "current");
       // 全部在规划阶段失败时也走同一个拒绝出口，屏、声音与 context 一起发布。
       // 不再追加泛化的“无法执行／请重述”，只发布引擎给出的具体理由。
       refuseAloud(state, ch, degradedLines.join(" "), speakReceipt);
@@ -3879,8 +3892,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
       const feedback = buildExecFeedback(execReceipt, degradedLines, shortfallLines);
       traceClient(traceIdRef.current, "exec", {
         intents: execTrace, applied: applyRes.appliedUnitIds, already: applyRes.alreadyDoingUnitIds,
-        rejected: applyRes.rejectedUnitIds, receipt: feedback.lines,
-      });
+        rejected: applyRes.rejectedUnitIds, receipt: feedback.lines, planTraceId: execCtx?.traceId ?? null,
+      }, execCtx?.run?.state ?? state, "current");
       for (const line of feedback.lines) {
         addMessage(
           // ★刀辛：只要有没办成的部分，整条就不许伪装成纯成功的 info。
