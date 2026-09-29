@@ -1,5 +1,5 @@
 // ============================================================
-// 试玩记录仪 · 同意框（游戏载入之前）＋ 记录状态与“这里有问题”小窗（左上角、顶栏之下，不压任务条）
+// 试玩记录仪 · 同意框（游戏载入之前）＋ 记录状态与“这里有问题”小窗（贴在左下角任务条正上方）
 //
 // 没有邀请的普通访客：原样渲染子树，界面与今天完全相同。
 // 有邀请、还没作答：先问同意，答完才挂载游戏（不借 paused——教学关开场句不看它）。
@@ -33,6 +33,27 @@ async function serverStatus(token: string): Promise<string> {
   } catch { return "unknown"; } finally { clearTimeout(t); }
 }
 
+/**
+ * 记录条贴在左下角任务条（.hud-taskbar）的正上方，任务条变高就跟着往上走：
+ * 左上角是选中单位信息、右上角是面板收放键、右下角是小地图——这一列是唯一不压游戏界面的地方。
+ */
+function useAnchorAboveTaskbar(): CSSProperties {
+  const [pos, setPos] = useState<{ left: number; bottom: number }>({ left: 12, bottom: 72 });
+  useEffect(() => {
+    const place = () => {
+      const tb = document.querySelector(".hud-taskbar") as HTMLElement | null;
+      const r = tb?.getBoundingClientRect();
+      const next = r && r.height > 0 ? { left: Math.max(8, Math.round(r.left)), bottom: Math.round(window.innerHeight - r.top + 8) } : { left: 12, bottom: 12 };
+      setPos((p) => (p.left === next.left && p.bottom === next.bottom ? p : next));
+    };
+    place();
+    const id = setInterval(place, 1000);
+    window.addEventListener("resize", place);
+    return () => { clearInterval(id); window.removeEventListener("resize", place); };
+  }, []);
+  return { position: "fixed", left: pos.left, bottom: pos.bottom, zIndex: 9000 };
+}
+
 const overlay: CSSProperties = {
   position: "fixed", inset: 0, zIndex: 10000, display: "flex", alignItems: "center", justifyContent: "center",
   background: "rgba(5, 8, 16, 0.92)", fontFamily: "var(--hud-font-mono)", color: "var(--hud-text-primary)",
@@ -54,7 +75,7 @@ function ConsentCard({ onAnswer }: { onAnswer: (yes: boolean) => void }) {
           不保存原始录音，不录桌面，不记录游戏以外的任何东西。记录保存 14 天；想删除请联系邀请你的人。
         </p>
         <p style={{ margin: "0 0 16px", color: "var(--hud-text-secondary)" }}>
-          不同意也可以照常玩，只是不记录。之后随时可以在地图左上方的记录条里停止记录。
+          不同意也可以照常玩，只是不记录。之后随时可以在左下角任务栏上方的记录条里停止记录。
         </p>
         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
           <button className="hud-btn hud-btn-ghost" onClick={() => onAnswer(false)}>不记录，直接玩</button>
@@ -67,9 +88,10 @@ function ConsentCard({ onAnswer }: { onAnswer: (yes: boolean) => void }) {
 
 function Note({ text }: { text: string }) {
   const [shown, setShown] = useState(true);
+  const anchor = useAnchorAboveTaskbar();
   if (!shown) return null;
   return (
-    <div style={{ position: "fixed", left: 240, top: 60, zIndex: 9000, maxWidth: 360, padding: "6px 10px", fontSize: 12,
+    <div style={{ ...anchor, maxWidth: 320, padding: "6px 10px", fontSize: 12,
       fontFamily: "var(--hud-font-mono)", color: "var(--hud-text-secondary)", background: "rgba(10,14,26,0.9)",
       border: "1px solid var(--hud-border-base)", borderRadius: 3 }}>
       {text} <button className="hud-btn hud-btn-ghost hud-btn-sm" style={{ marginLeft: 6 }} onClick={() => setShown(false)}>知道了</button>
@@ -100,6 +122,7 @@ function RecorderWidget({ onWithdrawn }: { onWithdrawn: () => void }) {
   const [endText, setEndText] = useState("");
   const [confirmStop, setConfirmStop] = useState(false);
   const [more, setMore] = useState(false);
+  const anchor = useAnchorAboveTaskbar();
   useEffect(() => {
     setSt(recorderStatus());
     return subscribeRecorderStatus(setSt);
@@ -113,10 +136,9 @@ function RecorderWidget({ onWithdrawn }: { onWithdrawn: () => void }) {
   const live = st.phase === "recording" || st.phase === "degraded" || st.phase === "fault";
   const showEnd = live && st.gameOver && st.runId && endAsked !== st.runId;
   const box: CSSProperties = {
-    // 顶栏之下、左上角选中单位信息框（约 8–230px）的右侧：不压任务条、不压选中信息、不压聊天面板。
-    position: "fixed", left: 240, top: 60, zIndex: 9000, fontFamily: "var(--hud-font-mono)", fontSize: 12,
+    ...anchor, fontFamily: "var(--hud-font-mono)", fontSize: 12,
     color: "var(--hud-text-primary)", background: "rgba(10,14,26,0.88)", border: "1px solid var(--hud-border-base)",
-    borderRadius: 3, padding: "6px 10px", maxWidth: 380, pointerEvents: "auto",
+    borderRadius: 3, padding: "6px 10px", maxWidth: 320, pointerEvents: "auto",
   };
   const detail = st.phase === "fault" ? "（游戏不受影响）"
     : st.queued > 0 && st.phase !== "withdrawn" && st.phase !== "closed" && st.phase !== "revoked" ? `· ${st.queued} 条待上传` : "";
@@ -149,7 +171,7 @@ function RecorderWidget({ onWithdrawn }: { onWithdrawn: () => void }) {
           <textarea
             value={flagText} maxLength={500} rows={3} autoFocus placeholder="（可选）一句话说说哪里不对，游戏不会暂停"
             onChange={(e) => setFlagText(e.target.value)}
-            style={{ width: 340, maxWidth: "100%", fontFamily: "inherit", fontSize: 12, background: "var(--hud-bg-tertiary)", color: "var(--hud-text-primary)", border: "1px solid var(--hud-border-bright)" }}
+            style={{ width: 300, maxWidth: "100%", fontFamily: "inherit", fontSize: 12, background: "var(--hud-bg-tertiary)", color: "var(--hud-text-primary)", border: "1px solid var(--hud-border-bright)" }}
           />
           <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
             <button className="hud-btn hud-btn-primary hud-btn-sm" data-recorder-flag-submit="1" onClick={() => {
@@ -165,7 +187,7 @@ function RecorderWidget({ onWithdrawn }: { onWithdrawn: () => void }) {
         <div style={{ marginTop: 6 }}>
           这一局结束了。想说一句感受吗？（可选）
           <textarea value={endText} maxLength={1000} rows={2} onChange={(e) => setEndText(e.target.value)}
-            style={{ width: 340, maxWidth: "100%", display: "block", marginTop: 4, fontFamily: "inherit", fontSize: 12, background: "var(--hud-bg-tertiary)", color: "var(--hud-text-primary)", border: "1px solid var(--hud-border-bright)" }} />
+            style={{ width: 300, maxWidth: "100%", display: "block", marginTop: 4, fontFamily: "inherit", fontSize: 12, background: "var(--hud-bg-tertiary)", color: "var(--hud-text-primary)", border: "1px solid var(--hud-border-bright)" }} />
           <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
             <button className="hud-btn hud-btn-primary hud-btn-sm" onClick={() => { if (endText.trim()) submitEndFeedback(endText.trim()); setEndAsked(st.runId); setEndText(""); setToast(endText.trim() ? "谢谢，已记下" : null); }}>提交</button>
             <button className="hud-btn hud-btn-ghost hud-btn-sm" onClick={() => { setEndAsked(st.runId); setEndText(""); }}>不用了</button>

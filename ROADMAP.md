@@ -935,6 +935,17 @@ typecheck 四包 · run-benches **27/27** · `probe-tutorial-map.ts` **31/31** �
 `TUTORIAL_MAP_V1_HANDOFF_20260906.md` 三份同步）。**合 main 之前**要收敛 W12
 那七个勾稽点。
 
+## 🚧 试玩记录仪 V1（playtest-recorder-v1，2026-09-28，**本地实施完成、待复审；未合 main、未推送、未部署**）
+
+计划＝`PLAYTEST_RECORDER_V1_WORKPLAN_20260928.md`（三轮审阅版）；交付报告＝`PLAYTEST_RECORDER_V1_REPORT_20260928.md`。
+worktree `AI Commander-playtest-recorder`，基线 `ac237c7`（内测基线 tag 不动）。三件用户功能：自动记录（邀请＋同意、
+逐局档案）、“这里有问题”标记、管理员按人按局查看/下载 ZIP。记录仪只旁观：批准/选人/执行/回执规则一行没改，
+关/开/上传失败/写满/记录器抛异常五臂与关闭臂的全部可比结果逐项一致（`scripts/probe-recorder-arms.ts`）。
+
+**上线前必须用户另批的事**（本分支都没做）：Dockerfile 的 CMD（现在 npm 包一层，收到停机信号约 3 ms 就先退出，
+容器里会把排空掐掉——本机实测，Docker 本身没跑，见报告 T15）；Fly 持久卷＋挂载、缩成单机、四个 RECORDER_* 配置/密钥；
+合 main（会触发自动部署，有人在玩时不推）。
+
 ## 归档与资产
 
 - 冻结资料库：worktree `AI Commander-battlefield-facts-v1` @ `4298505`（生产抓包 fixtures 不可再生 + 事实层研究）。
