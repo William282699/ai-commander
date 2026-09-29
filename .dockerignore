@@ -20,3 +20,8 @@ dist
 *.log
 .DS_Store
 .vscode
+
+# 试玩记录仪：本地记录数据与导出包不进镜像
+apps/server/recorder-data
+**/recorder-data
+playtest-*.zip

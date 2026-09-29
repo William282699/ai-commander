@@ -12,3 +12,8 @@ apps/web/vite.config.js
 /tds-modern-pixel-game-kit/
 /tds-modern-pixel-game-kit.zip
 apps/web/public/sprites/tds/**/*.psd
+
+# 试玩记录仪：逐局记录与导出包是真实试玩数据，永不入库
+apps/server/recorder-data/
+**/recorder-data/
+playtest-*.zip

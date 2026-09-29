@@ -21,6 +21,9 @@ import { rejectCommandBody, audioOf } from "./voiceInput.js";
 import { echoesHeard } from "@ai-commander/shared";
 import { ttsRouter } from "./routes/tts.js";
 import { traceWrite, envelopeOf, intentsOf } from "./traceLog.js";
+// 试玩记录仪 V1：逐局记录（上传/管理员/服务端事实的请求上下文）
+import { createRecorder, recorderConfigFromEnv, isRecorderPath } from "./recorder/routes.js";
+import { commandContext } from "./recorder/context.js";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -48,7 +51,9 @@ app.use((req, res, next) => (AUDIO_ROUTES.has(req.path) ? jsonLarge : jsonSmall)
 // Gate runs after JSON parser (so 503 JSON body is well-formed) but before
 // every route, including /api/tts.
 app.use((req, res, next) => {
-  if (!PLAYTEST_DISABLED) return next();
+  // 试玩记录仪：采集与管理员读档是另外两个开关——关了游戏，管理员仍须能看档案，
+  // 上传也要能收到“采集已关闭”的专门应答（而不是一张 503 页面）。只放行记录仪自己的路由。
+  if (!PLAYTEST_DISABLED || isRecorderPath(req.path)) return next();
   if (req.path.startsWith("/api")) {
     res.status(503).json({ error: "playtest closed" });
     return;
@@ -71,6 +76,17 @@ app.use((req, res, next) => {
 
 app.use("/api/tts", ttsRouter);
 
+// ── 试玩记录仪 V1 ──
+// 采集默认关（RECORDER_COLLECT=on 才开）；生产必须显式给 RECORDER_DATA_DIR（持久卷）。
+// 命令路由前的上下文中间件只做一件事：认出“这一请求属于哪个测试者的哪一局”，
+// 认不出就当不存在——绝不拒命令、绝不改请求体。
+const recorder = createRecorder(recorderConfigFromEnv(
+  process.env, __dirname,
+  describeProviderConfig().map((d) => ({ channel: d.channel, profile: d.profile, model: d.model })),
+));
+app.use(commandContext);
+app.use(recorder.router);
+
 // ──────────────────────────────────────────────────────────────
 // Step 1 — structured event logging.
 // One line per player command (and per staff-initiated prompt), tagged by
@@ -85,7 +101,29 @@ app.use("/api/tts", ttsRouter);
 // /api/brief (periodic system brief) is intentionally not logged.
 // ──────────────────────────────────────────────────────────────
 function logEvent(o: Record<string, unknown>): void {
-  console.log("[EVENT] " + JSON.stringify({ t: Date.now(), ...o }));
+  const line = { t: Date.now(), ...o };
+  console.log("[EVENT] " + JSON.stringify(process.env.NODE_ENV === "production" ? consoleSafe(line) : line));
+}
+
+/**
+ * 试玩记录仪 V1（§5.3）：生产控制台只打长度与编号，不打正文。
+ * 玩家原话、听写、模型的话只进经过同意的逐局记录；`fly logs` 里只剩“多长”。
+ * 代价（已知、接受）：线上日志里看不到原话，改去管理员页看。
+ */
+const CONSOLE_SAFE_KEYS = new Set([
+  "t", "type", "route", "sessionId", "escalateId", "channel", "voice", "actionId", "frontId", "kind", "eventType",
+  "responseType", "echo", "baseline", "cold", "warmup",
+  "fromFront", "fromSquad", "fromDispatch", "toFront", "targetFacility", "targetRegion", "quantity", "unitType", "candidateKey",
+]);
+function consoleSafe(v: unknown, key = ""): unknown {
+  if (typeof v === "string") return CONSOLE_SAFE_KEYS.has(key) && v.length <= 80 ? v : `(len=${v.length})`;
+  if (Array.isArray(v)) return v.map((x) => consoleSafe(x, key));
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[k] = consoleSafe(x, k);
+    return out;
+  }
+  return v;
 }
 
 /**
@@ -391,7 +429,7 @@ app.get(/^(?!\/api).*/, (_req, res) => {
 
 // Startup. Bind 0.0.0.0 so the server is reachable from outside the loopback
 // interface — required for Cloudflare Tunnel / ngrok / Render / Railway.
-app.listen(PORT, "0.0.0.0", () => {
+const httpServer = app.listen(PORT, "0.0.0.0", () => {
   console.log(`AI Commander server running on http://localhost:${PORT}`);
   console.log(`[boot] static SPA dir: ${WEB_DIST}`);
   console.log(`[boot] NODE_ENV=${process.env.NODE_ENV ?? "(unset)"} PLAYTEST_ENABLED=${process.env.PLAYTEST_ENABLED ?? "(unset)"} → ${PLAYTEST_DISABLED ? "CLOSED" : "open"}`);
@@ -405,4 +443,29 @@ app.listen(PORT, "0.0.0.0", () => {
   if (!isProviderConfigured()) {
     console.warn("⚠ Some channels missing API keys — they will fail at runtime");
   }
+  const rc = recorder.config;
+  console.log(`[boot] recorder: data=${rc.dataDir ? "configured" : "(none)"} collect=${rc.collect ? "on" : "off"} admin=${rc.adminToken ? "on" : "off"}`);
 });
+
+// ── 停机：先排空记录仪的写队列并落盘，再退出（试玩记录仪 V1 §4.4-8）──
+// push main 自动部署、Fly 闲置自动停机都会发停机信号：Fly 默认 SIGINT，docker stop 是 SIGTERM。
+// 以前这里没有任何处理（默认动作＝立刻死）；现在两种都接住，排空须在 Fly 默认 5 秒宽限内完成，
+// 这里自己再设 4 秒上限，到点照样退出（不拖到被 SIGKILL）。
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const t0 = Date.now();
+  console.log(`[shutdown] ${signal} received; draining recorder`);
+  try { httpServer.close(); } catch { /* 已关 */ }
+  const cap = new Promise<"timeout">((r) => { const t = setTimeout(() => r("timeout"), 4000); t.unref(); });
+  try {
+    const out = await Promise.race([recorder.drain(), cap]);
+    console.log(`[shutdown] recorder drain ${out === "timeout" ? "TIMED OUT at 4000ms" : out ? `done ms=${out.ms} leftover=${out.leftover}` : "skipped (no store)"}; exiting after ${Date.now() - t0}ms`);
+  } catch {
+    console.log(`[shutdown] recorder drain failed; exiting after ${Date.now() - t0}ms`);
+  }
+  process.exit(0);
+}
+process.on("SIGINT", () => { void shutdown("SIGINT"); });
+process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
