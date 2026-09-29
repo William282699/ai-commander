@@ -13,6 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
+      # 试玩记录仪 V1：把提交号传进镜像（Dockerfile 的 ARG RECORDER_BUILD → 导出包 manifest.build）
+      - run: flyctl deploy --remote-only --build-arg RECORDER_BUILD=${{ github.sha }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

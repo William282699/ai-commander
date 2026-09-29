@@ -1,7 +1,8 @@
 /**
- * 停机排空（T15 的本机部分）：按 Dockerfile 的 CMD 原样起服务（npm run start --workspace=apps/server，
- * NODE_ENV=production），只给 npm 那个进程发信号（docker stop / Fly 停机都只打 PID 1），量 5 秒内有没有
- * 自己退出、服务端自己的事实有没有排空落盘。
+ * 停机排空（T15 的本机部分）：按 Dockerfile 的 CMD 原样起服务（从 Dockerfile 解析出来的那条命令，
+ * 从仓库根起、NODE_ENV=production），只给顶层那个进程发信号（docker stop / Fly 停机都只打 PID 1），
+ * 量 5 秒内有没有自己退出、服务端自己的事实有没有排空落盘。
+ * 旧起法（npm run start / npx tsx）保留为负对照：顶层先于服务端退出，正是 Dockerfile 改成直接起 node 的原因。
  * 运行：node --import tsx scripts/probe-recorder-shutdown.ts
  *
  * ★这不是 Docker：本机进程链（npm → sh → tsx → node）与容器里 npm 当 PID 1 不完全相同。
@@ -10,6 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -26,12 +28,18 @@ async function freePort(): Promise<number> {
 
 interface Booted { child: ChildProcess; port: number; dir: string; admin: string; logs: string[]; exited: Promise<{ code: number | null; signal: NodeJS.Signals | null; at: number }> }
 
-/** 起服务的方式。"npm"＝Dockerfile 现在的 CMD；其余两种只作对照证据（不改 Dockerfile）。 */
-type Launch = "npm" | "tsx" | "node-import-tsx";
+/** Dockerfile 里的 CMD（exec 形式的 JSON 数组）：探针照它起服务，Dockerfile 改了这里自动跟着变。 */
+const DOCKER_CMD: string[] = (() => {
+  const m = /^CMD\s+(\[.*\])\s*$/m.exec(readFileSync(`${ROOT}Dockerfile`, "utf8"));
+  return m ? (JSON.parse(m[1]) as string[]) : [];
+})();
+const EXPECTED_DOCKER_CMD = ["node", "--import", "tsx", "apps/server/src/index.ts"];
+/** 起服务的方式。"dockerfile"＝Dockerfile 现在的 CMD（从仓库根起，同容器的 WORKDIR /app）；npm / npx tsx 是旧起法，只作负对照。 */
+type Launch = "dockerfile" | "npm" | "tsx";
 const LAUNCH: Record<Launch, { cmd: string; args: string[]; cwd: string }> = {
+  dockerfile: { cmd: DOCKER_CMD[0] === "node" ? process.execPath : (DOCKER_CMD[0] ?? "node"), args: DOCKER_CMD.slice(1), cwd: "" },
   npm: { cmd: "npm", args: ["run", "start", "--workspace=apps/server"], cwd: "" },
   tsx: { cmd: "npx", args: ["tsx", "src/index.ts"], cwd: "apps/server" },
-  "node-import-tsx": { cmd: process.execPath, args: ["--import", "tsx", "src/index.ts"], cwd: "apps/server" },
 };
 
 async function boot(dir: string, launch: Launch = "npm"): Promise<Booted> {
@@ -130,11 +138,14 @@ async function main() {
       drainLine: b.logs.find((l) => /\[shutdown\] recorder drain /.test(l)) ?? null,
     };
   }
-  for (const launch of ["npm", "tsx", "node-import-tsx"] as const) {
+  await test("T15-local ★Dockerfile 的 CMD 直接起 node（不经 npm）——探针按它起服务；谁把它改回 npm 这里先红", () => {
+    assert.deepEqual(DOCKER_CMD, EXPECTED_DOCKER_CMD, `Dockerfile CMD = ${JSON.stringify(DOCKER_CMD)}`);
+  });
+  for (const launch of ["dockerfile", "npm", "tsx"] as const) {
     for (const sig of ["SIGTERM", "SIGINT"] as const) {
       const label = `${launch} / ${sig}`;
       let obs: Awaited<ReturnType<typeof observe>> | null = null;
-      await test(`T15-local ${launch === "npm" ? "★（Dockerfile 现在的 CMD）" : "（对照：候选启动方式，仅作证据）"} ${label}：服务端收到信号、5 秒内自己排空落盘并退出（已应答请求的事实全在、写了最后序号）`, async () => {
+      await test(`T15-local ${launch === "dockerfile" ? "★（Dockerfile 现在的 CMD）" : "（对照：旧起法，仅作证据）"} ${label}：服务端收到信号、5 秒内自己排空落盘并退出（已应答请求的事实全在、写了最后序号）`, async () => {
         const dir = tempDir(`shutdown-${launch}-${sig}`);
         const b = await boot(dir, launch);
         try {
@@ -154,12 +165,17 @@ async function main() {
           rm(dir);
         }
       });
-      await test(`T15-local ${launch === "npm" ? "★（Dockerfile 现在的 CMD）" : "（对照）"} ${label}：顶层进程不能先于服务端退出（容器里顶层＝PID 1，它一退出，整个容器里的进程当场被杀，排空作废）`, () => {
+      const topNotBeforeServer = () => {
         assert.ok(obs, "previous step produced an observation");
         const o = obs!;
         assert.ok(o.topIsServer || (o.topExitMs !== null && o.serverExitMs !== null && o.topExitMs >= o.serverExitMs),
           `top process exited at ${o.topExitMs}ms, server at ${o.serverExitMs}ms`);
-      });
+      };
+      if (launch === "dockerfile") {
+        await test(`T15-local ★（Dockerfile 现在的 CMD） ${label}：顶层进程不能先于服务端退出（容器里顶层＝PID 1，它一退出，整个容器里的进程当场被杀，排空作废）`, topNotBeforeServer);
+      } else {
+        await test(`T15-local-负对照 旧起法 ${label}：顶层（npm / npx）先于服务端退出 ⇒ 同一断言失败（这正是 Dockerfile 改成直接起 node 的原因；容器实测见 scripts/probe-recorder-docker.sh）`, () => mustFail("top not before server", topNotBeforeServer));
+      }
     }
   }
   await test("T15-local-负对照：同样的流量之后 SIGKILL（不给排空的机会）⇒ 没有“最后序号”，最后一段排队的事实可能不在，同一断言失败", async () => {

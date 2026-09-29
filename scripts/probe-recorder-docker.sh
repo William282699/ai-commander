@@ -2,7 +2,8 @@
 # ============================================================
 # 试玩记录仪 T15：Docker 生产镜像 ＋ 挂载目录 ＋ 两种停机信号 ＋ 换容器后再下载。
 #
-# 需要一台装了 Docker 的机器（本任务的开发机上没有 Docker，这个脚本**没有在这里跑过**）。
+# 需要 Docker。这台 Mac 用 Colima（`brew install colima docker && colima start`）；2026-09-28 在这里真跑过，
+# 结果见 ~/MyProjects/_archive/playtest-recorder-v1-20260928/review-fable-20260928/docker/。
 # 不连任何真模型（密钥置空）、不碰线上 Fly、不推任何镜像。用法（worktree 根）：
 #   bash scripts/probe-recorder-docker.sh <证据目录>
 # 判定（任何一条不满足就 FAIL，退出码 1）：
@@ -10,21 +11,24 @@
 #      （不是被 SIGKILL：退出码不是 137），日志里有 “[shutdown] … drain done … leftover=0”；
 #   ② 停机前已应答的每个命令请求，其服务端事实都在挂载目录里，并有服务端生产者的“最后序号”；
 #   ③ 删掉容器、用同一挂载目录起新容器，同一局的 ZIP 还能下载，且包内 manifest 的各文件 sha256 自洽。
-# ★已知风险（本机进程链实测，见 scripts/probe-recorder-shutdown.ts）：现在的 CMD 是
-#   `npm run start --workspace=apps/server`，npm 收到信号约 3 ms 就先退出，而服务端排空要 ~40 ms。
-#   容器里 npm 是 PID 1，它一退出整个容器即被收掉——①② 很可能 FAIL。修法落在 Dockerfile 的 CMD
-#   （例如直接 `node --import tsx apps/server/src/index.ts`），属部署文件，须用户另批，本脚本不改它。
+# ★容器实测（2026-09-28，Colima）：旧 CMD `npm run start --workspace=apps/server` 两种信号都 FAIL——
+#   SIGTERM 时 npm 641 ms 退出码 1、node 没排空就被收；SIGINT 时 npm 当 PID 1 干脆不理，容器 5 秒内不停。
+#   改成直接 `node --import tsx apps/server/src/index.ts` 后两种信号都 ~130 ms 排空退出 0，换容器再下载也过。
+#   Dockerfile 已按此改（用户批准）；本脚本照 Dockerfile 建镜像，不自己改 CMD。
+# 两处曾撞过的脚本坑：容器没自己停下来时必须 `docker rm -f`，否则残留容器占着端口把下一轮全污染；
+#   数据目录要放在家目录下（Colima 只共享 $HOME，macOS 的 mktemp 不理 TMPDIR）。
 # ============================================================
 set -u
 OUT="${1:?usage: probe-recorder-docker.sh <evidence dir>}"
 mkdir -p "$OUT"
 IMG="aic-recorder-probe:local"
-DATA="$(mktemp -d)"
+DATA="$(mktemp -d "${RECORDER_PROBE_TMP:-$HOME}/rec-docker-probe.XXXXXX")"   # 家目录下：Colima 只共享 $HOME
 ADMIN="$(node -e 'console.log(require("crypto").randomBytes(24).toString("base64url"))')"
 PORT=18091
 FAIL=0
 say() { echo "$*" | tee -a "$OUT/summary.txt"; }
 
+docker rm -f aic-rec-SIGTERM aic-rec-SIGINT aic-rec-replaced > /dev/null 2>&1   # 上一轮残留（没停下来的容器会占着端口）
 docker build -t "$IMG" . > "$OUT/build.log" 2>&1 || { say "FAIL docker build"; exit 1; }
 
 run_container() {
@@ -72,7 +76,7 @@ for MODE in SIGTERM SIGINT; do
   if [ "$RUNNING" = true ] || [ "$CODE" = 137 ] || [ "$MS" -gt 5000 ]; then say "FAIL $MODE: not a self-exit within 5s"; FAIL=1; fi
   grep -q 'recorder drain done .*leftover=0' "$OUT/$NAME.log" || { say "FAIL $MODE: no completed drain in logs"; FAIL=1; }
   if ! check_disk "$RUN" "$N" | tee -a "$OUT/summary.txt"; then say "FAIL $MODE: server facts not all on disk / no producer close"; FAIL=1; fi
-  docker rm "$NAME" > /dev/null
+  docker rm -f "$NAME" > /dev/null 2>&1   # 没自己停下来的也强杀，否则占着端口污染下一轮
   LAST_RUN="$RUN"
 done
 

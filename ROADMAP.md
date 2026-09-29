@@ -942,9 +942,12 @@ worktree `AI Commander-playtest-recorder`，基线 `ac237c7`（内测基线 tag 
 逐局档案）、“这里有问题”标记、管理员按人按局查看/下载 ZIP。记录仪只旁观：批准/选人/执行/回执规则一行没改，
 关/开/上传失败/写满/记录器抛异常五臂与关闭臂的全部可比结果逐项一致（`scripts/probe-recorder-arms.ts`）。
 
-**上线前必须用户另批的事**（本分支都没做）：Dockerfile 的 CMD（现在 npm 包一层，收到停机信号约 3 ms 就先退出，
-容器里会把排空掐掉——本机实测，Docker 本身没跑，见报告 T15）；Fly 持久卷＋挂载、缩成单机、四个 RECORDER_* 配置/密钥；
-合 main（会触发自动部署，有人在玩时不推）。
+Fable 复审（09-28）：可手测、无 P0；五个负对照亲手摘保护全红；T15 在真容器（Colima）证实旧 CMD 两种信号都丢排空，
+Dockerfile 已按用户批准改成直接起 node 并加 RECORDER_BUILD（workflow 传提交号），容器探针 ALL PASS。证据
+`_archive/playtest-recorder-v1-20260928/review-fable-20260928/`。
+
+**上线前仍须用户另批**：Fly 持久卷＋挂载、缩成单机、RECORDER_DATA_DIR／RECORDER_COLLECT=on／RECORDER_ADMIN_TOKEN；
+合 main（会触发自动部署，有人在玩时不推）。用户已裁：不限速、250 MB 够第一轮；服务端点名拒收的一条客户端即删只计数。
 
 ## 归档与资产
 

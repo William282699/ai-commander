@@ -28,7 +28,7 @@
 | `scripts/*recorder*` | 台架、对照臂、停机、样包生成、T03 核对、Docker 脚本、一把跑 |
 | `.gitignore` / `.dockerignore` | 排除 `recorder-data/` 与 `playtest-*.zip` |
 
-没碰：`tts/index.ts`（逐字节同基线，台架 P5 查）、core 全部模拟/指挥算法、prompt/schema/信封内容、Dockerfile、fly.toml、GitHub workflow、lockfile。
+没碰：`tts/index.ts`（逐字节同基线，台架 P5 查）、core 全部模拟/指挥算法、prompt/schema/信封内容、fly.toml、lockfile。Dockerfile 与 GitHub workflow 在复审后经用户批准各改了一处（见 §7 第 1 条）。
 
 ## 2. 三项用户功能：做到哪一步、入口
 
@@ -71,7 +71,7 @@
 | T12 | PASS | 未同意零请求（C12＋浏览器）；停止记录清未上传、已上传不动（C11＋浏览器）；无/错/作废凭证（S16、P2）；伪造 runId（S4、P2）；同编号不同内容冲突（S3）；邀请只存哈希（S11）；管理员凭证不进页面/URL（S17）。负对照：C12、C9、S4 |
 | T13 | PASS | S12＋浏览器：玩家原话/问题描述含 `<script>`、`<img onerror>`、外链 ⇒ 报告全转义、无脚本、无外链、CSP；S17 路径穿越的 runId 400；S5 鉴权头/邀请头/音频等键名整条拒收 |
 | T14 | PASS | 浏览器 tts 事件（文字、角色）、静音状态 op；P5：`tts/index.ts` 与基线逐字节相同，`setPlaybackObserver` 仍只有 ChatPanel 一处 |
-| **T15** | **FAIL／未跑** | **本机没有 Docker，容器那一段没跑**（`scripts/probe-recorder-docker.sh` 已写好、只做过语法检查）。本机按 Dockerfile 的 CMD 实测（`probe-recorder-shutdown.ts`，只给顶层进程发信号）：SIGTERM、SIGINT 两种下，服务端都收到信号、~9 ms 排空、40/40 事实＋最后序号落盘、~45 ms 自己退出；**但 npm 在 ~3 ms 就先退出**。容器里 npm 是 PID 1，它一退出整个容器即被收掉 ⇒ 按现在的 CMD，容器内排空会被掐断。直接 `node --import tsx src/index.ts` 起服务则顶层即服务端、两种信号都过。改 CMD 是部署文件，**未改，等你批**。换容器后再下载：本机用同一数据目录重启服务后下载同一局，校验和自洽（非 Docker） |
+| T15 | PASS（真容器，复审补跑 2026-09-28 晚） | 本机装 Colima 后按仓库 Dockerfile 建镜像跑 `scripts/probe-recorder-docker.sh`：`docker stop -t 5`（SIGTERM）与 `docker kill --signal=SIGINT` 各一次，容器都在 ~140 ms 内自己退出（退出码 0），日志 `drain done leftover=0`，40/40 请求事实＋服务端最后序号都在挂载目录；删容器、同一目录起新容器，同一局 ZIP 能下载、manifest 六个文件校验和一致。**旧 CMD（npm）在真容器里两种信号都不过**：SIGTERM 时 npm 641 ms 退出码 1、node 没排空就被收；SIGINT 时 npm 当 PID 1 干脆不理，容器 5 秒内不停。Dockerfile 已改成直接起 node（用户批准），`scripts/probe-recorder-shutdown.ts` 改为按 Dockerfile 解析 CMD 起服务、旧起法降为负对照（14/14 过）。证据 `review-fable-20260928/docker/`（旧 CMD 对照）与 `review-fable-20260928/after-fix/`（改后） |
 | T16 | PASS | 见 §3；记录器源码里没有 `Math.random`（C3 逐文件查） |
 | T17 | PASS | S14＋浏览器：进行中导出＝“未正常结束/完整性未知”，结束后导出＝“已确认完整”，后者是前者的严格超集，两包各自 sha256 自洽 |
 | T18 | PASS | 生产构建：客户端留着未传事件时关采集 ⇒ 专门应答 410 `{recorder:"closed"}` ⇒ 清空这个凭证的队列、记录条显示“记录已由组织者关闭”、游戏照跑，档案一条未增；再关试玩 ⇒ 页面/命令 503，上传仍回专门应答，管理员凭证照样列表/下载、无凭证 401。另测：断网、429、502/503 HTML、410 HTML、门户 200、未点名的 400/413 都不清队列，只有点名的 400 删被点名那条并计数（C1/C6–C8） |
@@ -81,10 +81,10 @@
 - **合成样包**：`~/MyProjects/_archive/playtest-recorder-v1-20260928/sample/playtest-A-rvbkDndci2Gx-2026-09-29T01-41-03-328Z.zip`（17,964 字节，sha256 `0aaa85dd…8355b1`，同目录有 `.sha256` 与解开的 `unzipped/`）。七个文件，“已确认完整”，报告无脚本、问题描述里的 `<b>` 已转义；系统 `unzip` 可直接解。
 - 生成：`node --import ./scripts/recorder-seed-random.mjs --import tsx scripts/make-recorder-sample.ts <输出目录>`（假模型、合成原话；node 没有 IndexedDB，用一个 Map 替身扮演持久队列，已在脚本里写明）。
 - 测试命令：
-  - 记录仪全部本机台架：`bash scripts/run-recorder-probes.sh [证据目录]`（store 22／client 26／chain 10／privacy 8／arms 8 全过；shutdown 13 项里 4 项按上文 T15 **FAIL**）
+  - 记录仪全部本机台架：`bash scripts/run-recorder-probes.sh [证据目录]`（store 22／client 26／chain 10／privacy 8／arms 8／shutdown 14 全过；shutdown 探针按 Dockerfile 解析 CMD 起服务，旧起法 npm／npx tsx 是负对照）
   - 既有回归（与计划 §8 一致）：`npm run build`、`node --import tsx scripts/probe-send-chain.ts`、`…probe-selection-chain.ts`、`…probe-retreat-scope.ts --knife=all --negctl`、`bash scripts/run-benches.sh <目录>`、三个教学探针——全过，完整输出在 `evidence/final-regression/`
   - 包的 T03 核对：`node --import tsx scripts/check-recorder-t03.ts <包.zip> [三句原话]`
-  - Docker：`bash scripts/probe-recorder-docker.sh <目录>`（需要装了 Docker 的机器；**未在此跑过**）
+  - Docker：`bash scripts/probe-recorder-docker.sh <目录>`（这台 Mac 用 Colima：`colima start` 后直接跑；2026-09-28 已在此跑过，ALL PASS）
 - 浏览器证据：`evidence/prod-browser/`（生产构建下 A 的真模型 T03 包、关采集/关试玩后的各接口应答、管理员列表）；开发构建阶段抓到的问题见 `60e24bc` 提交说明。
 - `send-chain` 的部分负对照依赖本机 `_archive`：本次在这台机器上都在、都跑了（20 条负对照全过），换机器会缺。
 
@@ -98,7 +98,7 @@
 
 ## 7. 本地完成 ≠ 线上完成：需要你另批的事
 
-1. **Dockerfile CMD**（T15 的根因）：建议改成直接起 node（例如 `node --import tsx apps/server/src/index.ts`，工作目录按现镜像调整），改后在装了 Docker 的机器上跑 `scripts/probe-recorder-docker.sh` 过关再上线。未改。
+1. ~~**Dockerfile CMD**（T15 的根因）~~ **已改并在真容器验过**（用户 2026-09-28 批准）：`CMD ["node", "--import", "tsx", "apps/server/src/index.ts"]`，另加 `ARG/ENV RECORDER_BUILD`，`.github/workflows/fly-deploy.yml` 以 `--build-arg RECORDER_BUILD=${{ github.sha }}` 传提交号（否则镜像里没有 .git 也没有 git，manifest.build 恒为 unknown）。这三个文件的改动都在分支上，随合 main 一起上线。
 2. **Fly 资源**（均未碰，线上实例数/卷/密钥当前值我没有核实）：建一个持久卷并在 `fly.toml` 挂到如 `/data/recorder`；缩成单机（首次部署默认两台，两台各写各的卷会让列表不全）；配置 `RECORDER_DATA_DIR`、`RECORDER_COLLECT=on`，密钥 `RECORDER_ADMIN_TOKEN`。排空约 10 ms，不需要调大 `kill_timeout`。
 3. **合 main／推送／打 tag**：push main 会自动部署并重启线上机器——有人在玩时不要推。
 4. 备份与回滚：数据只在卷上；导出靠管理员页逐局下载（批量备份办法待线上核实后定，不经公开 GitHub）。回滚＝把 `RECORDER_COLLECT` 关掉（客户端收到专门应答自行清空并停），档案保留、管理员照读；不删卷。
