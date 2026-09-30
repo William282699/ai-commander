@@ -11,6 +11,12 @@ primary_region = 'sin'
 [env]
   NODE_ENV = 'production'
   PORT = '8080'
+  RECORDER_COLLECT = 'on'
+  RECORDER_DATA_DIR = '/data/recorder'
+
+[mounts]
+  source = 'recorder_data'
+  destination = '/data/recorder'
 
 [http_service]
   internal_port = 8080
