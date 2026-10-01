@@ -3,7 +3,7 @@
 //
 // 病例：2026-09-30 线上首局，中央前哨的 8 个全派往烽火台后，长官两次问"空了吗"，
 // 陈两次答"有 4 坦 4 步，没空"。信封里没有"某据点此刻有几个我方兵"，陈拿 FRONTS
-// 战线汇总 / DISPATCHES 出处去顶。真模型 19 臂对照：FACILITIES 补「附近我方=N单位」
+// 战线汇总 / DISPATCHES 出处去顶。真模型 19 臂对照：FACILITIES 补「在场我方=N单位」
 // 0/20 → 20/20（档 _archive/central-post-empty-20261001/FINDINGS.md、REVIEW-FABLE.md）。
 //
 // 本台架钉的是引擎侧事实（真模型验收另跑，不进硬线）：
@@ -64,8 +64,8 @@ function freshState(scenario = "el_alamein"): GameState {
   return state;
 }
 
-const FACILITY_SUFFIX = / 附近我方=(\d+)单位$/;
-const LEGEND = `---FACILITIES--- (附近我方=该据点 ${PLACE_NEAR_RADIUS_TILES} 格内此刻的我方单位数；各行各自计数，不可相加)`;
+const FACILITY_SUFFIX = / 在场我方=(\d+)单位$/;
+const LEGEND = "---FACILITIES---"; // 节头不带图例（验收：图例让第三回合掉分，已去掉）
 
 // ── F：同一把尺 ──
 
@@ -139,7 +139,7 @@ function D_rendering(states: { label: string; s: GameState }[], mutate?: (digest
     if (mutate) digest = mutate(digest);
     const lines = digest.split("\n");
     const hi = lines.findIndex((l) => l.startsWith("---FACILITIES---"));
-    check(`D1[${label}] 节头带图例`, hi >= 0 && lines[hi] === LEGEND, hi >= 0 ? lines[hi] : "no header");
+    check(`D1[${label}] 节头原样（无图例）`, hi >= 0 && lines[hi] === LEGEND, hi >= 0 ? lines[hi] : "no header");
     const body: string[] = [];
     for (let i = hi + 1; i < lines.length && lines[i] && !lines[i].startsWith("---"); i++) body.push(lines[i]);
     const facs = [...s.facilities.values()];
@@ -205,8 +205,8 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
   // 真渲染的信封里也是这几个数（实验夹具＝这份信封）
   const d43 = digests[1];
   const lineOf = (id: string) => d43.split("\n").find((l) => l.startsWith(`${id}:`)) ?? "";
-  check("R5 43 s 真信封：中央前哨行印 0", / 附近我方=0单位$/.test(lineOf("ea_player_central_post")), lineOf("ea_player_central_post"));
-  check("R6 43 s 真信封：北线 8、南线 9、油库 4", / 附近我方=8单位$/.test(lineOf("ea_player_coastal_post")) && / 附近我方=9单位$/.test(lineOf("ea_player_south_post")) && / 附近我方=4单位$/.test(lineOf("ea_fuel_depot")),
+  check("R5 43 s 真信封：中央前哨行印 0", / 在场我方=0单位$/.test(lineOf("ea_player_central_post")), lineOf("ea_player_central_post"));
+  check("R6 43 s 真信封：北线 8、南线 9、油库 4", / 在场我方=8单位$/.test(lineOf("ea_player_coastal_post")) && / 在场我方=9单位$/.test(lineOf("ea_player_south_post")) && / 在场我方=4单位$/.test(lineOf("ea_fuel_depot")),
     [lineOf("ea_player_coastal_post"), lineOf("ea_player_south_post"), lineOf("ea_fuel_depot")].join(" | "));
   check("R7 43 s 真信封：FRONTS 中央战线行与 DISPATCHES 行原样（本刀不碰）",
     d43.includes("front_center:3. 中央战线 OurPwr=440 EnemyPwr=? OurComp=[4×main_tank,4×infantry]") &&

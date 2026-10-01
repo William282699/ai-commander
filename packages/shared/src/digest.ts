@@ -115,17 +115,21 @@ export function generateDigestV1(
 
   // Facilities — so LLM knows available buildings and can fill targetFacility
   // MVP: include all facilities (map is small). TODO: fog-filter when fog is polished.
-  // 据点驻军数（place-presence V1）：每行行尾追加「附近我方=N单位」——每个设施都印、
-  // 含 0（缺席会被读成"没写"，那正是病因）；既有 token 逐字节前缀不变。
+  // 据点驻军数（place-presence V1）：每行行尾追加「在场我方=N单位」（N＝该设施
+  // PLACE_NEAR_RADIUS_TILES 格内此刻的我方单位数）——每个设施都印、含 0（缺席会被读成"没写"，
+  // 那正是病因）；既有 token 逐字节前缀不变。
+  // 字样与节头为什么这样定（真模型验收，档 _archive/central-post-empty-20261001/）：
+  //   「附近我方」在"北线前哨空了吗"上 5/10，模型把同名的「1. 北部战线 OurComp」当成前哨驻军；
+  //   「在场我方」10/10。节头图例（"…12 格内…不可相加"）让第三回合从 10/10 掉到 13/20，去掉。
   const facilityLines: string[] = [];
   state.facilities.forEach((f) => {
     const nearOurs = countPlayerUnitsNear(state, f.position, PLACE_NEAR_RADIUS_TILES);
     facilityLines.push(
-      `${f.id}:${f.type} "${f.name}" team=${f.team} hp=${f.hp}/${f.maxHp} @(${f.position.x},${f.position.y}) 附近我方=${nearOurs}单位`,
+      `${f.id}:${f.type} "${f.name}" team=${f.team} hp=${f.hp}/${f.maxHp} @(${f.position.x},${f.position.y}) 在场我方=${nearOurs}单位`,
     );
   });
   if (facilityLines.length > 0) {
-    digest += `---FACILITIES--- (附近我方=该据点 ${PLACE_NEAR_RADIUS_TILES} 格内此刻的我方单位数；各行各自计数，不可相加)\n`;
+    digest += `---FACILITIES---\n`;
     for (const line of facilityLines) {
       digest += `${line}\n`;
     }
