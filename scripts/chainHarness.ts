@@ -16,7 +16,7 @@ import * as core from "@ai-commander/core";
 import * as shared from "@ai-commander/shared";
 import type { GameState, AdvisorOption, Order } from "@ai-commander/shared";
 import { isKnownLocation, isValidTarget, canAutoExecute, decideBucket, detectStaleSquadRefs } from "../apps/web/src/autoExecuteGate";
-import { buildExecReceipt, buildExecFeedback } from "../apps/web/src/execReceipt";
+import { buildExecReceipt, buildExecFeedback, verifiedAskedQuantity } from "../apps/web/src/execReceipt";
 import { cloneSelectionOption, optionWithResolvedIntents, selectionEnvelope } from "../apps/web/src/selectionOption";
 import { intentFacts } from "../apps/web/src/traceFacts";
 import { planVoiceSpeech } from "../apps/web/src/voiceSpeech";
@@ -258,7 +258,7 @@ export function harness(
   let serial = 0;
   const deps = {
     ...core, ...shared, isKnownLocation, isValidTarget,
-    buildExecReceipt, buildExecFeedback, cloneSelectionOption, optionWithResolvedIntents,
+    buildExecReceipt, buildExecFeedback, verifiedAskedQuantity, cloneSelectionOption, optionWithResolvedIntents,
     getState: () => state, getActiveChannel: () => channel, response,
     responseExecCtxRef: { current: execCtx }, gameEpochRef,
     selectedIdsSnapshotRef: { current: undefined }, pendingSelectionRef,

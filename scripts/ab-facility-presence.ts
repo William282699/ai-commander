@@ -14,6 +14,7 @@
 //   R  重放线上那局到 43 s：中央 0 / 北线 8 / 南线 9 / 前线油库 4（实验用的那份信封）
 //   P  A′ DISPATCHES 行 loc= / eta≈：43 s 钉「loc=向烽火台行进中 eta≈60s」、62 s（有人先到）省略；
 //      全员停 → 「X附近」无 eta；动静混合 / 有人没目标 → 省略；eta 只随「向X行进中」出现
+//   B  回执短缺句：只引长官原话里逐字出现的数量引文；派得比它少才补「（您说的「10个兵」，这一批只有 8 个）」
 //
 // 用法（worktree 根；播种与生产序泵帧照档案复现脚本）：
 //   node --import ./scripts/recorder-seed-random.mjs --import tsx scripts/ab-facility-presence.ts --synthetic
@@ -32,6 +33,7 @@ import { FACILITY_GATE, facilityEscalationFacts } from "../packages/core/src/dir
 import { NAME_RADIUS_TILES } from "../packages/core/src/frontEscalationPayload";
 import { ORIGIN_FACILITY_RADIUS } from "../packages/core/src/dispatchLedger";
 import { dispatchWhereabouts } from "../packages/core/src/frontEscalationPayload";
+import { buildExecReceipt, verifiedAskedQuantity } from "../apps/web/src/execReceipt";
 // 静态导入（不许 await import）：动态导入会让台架与被测代码各载一份 core，编队号在一份里登记、在另一份里查不到
 import { harness, serverRoutes, source, oldFunctions } from "./chainHarness";
 import { buildDigestForChannel } from "../apps/web/src/digestHelper";
@@ -197,6 +199,27 @@ function P_whereaboutsRules(where: WhereFn): void {
   check("P7 eta 只随「向X行进中」出现", where(s, inf).etaSec === null);
 }
 
+// ── B：回执短缺句（纯函数） ──
+
+type AskFn = (quote: string | null | undefined, said: string | null | undefined) => { quote: string; count: number } | null;
+function B_shortfallReceipt(ask: AskFn): void {
+  console.log("\n── B 回执短缺句 ──");
+  const ids8 = [30, 31, 32, 33, 34, 35, 36, 37];
+  const res = (applied: number[]) => ({ appliedUnitIds: applied, alreadyDoingUnitIds: [], rejectedUnitIds: [], perOrder: [{ appliedUnitIds: applied, alreadyDoingUnitIds: [], rejected: [] }] }) as any;
+  const line = (applied: number[], asked: ReturnType<AskFn>) =>
+    buildExecReceipt(res(applied), [{ action: "defend", destinationName: "烽火台", orderIndexes: [0], ...(asked ? { askedQuantity: asked } : {}) }]).lines.join(" ");
+  const b1 = line(ids8, ask("10个兵", "从中央前哨派10个兵去烽火台"));
+  check("B1 有引文且短缺 → 补句", b1.includes("（您说的「10个兵」，这一批只有 8 个）"), b1);
+  const b2 = line(ids8, ask("10个兵", "从中央前哨派兵去烽火台"));
+  check("B2 引文不在长官原话里（模型写的）→ 不补", !b2.includes("您说的"), b2);
+  const b3 = line(ids8, ask(undefined, "从中央前哨派10个兵去烽火台"));
+  check("B3 没有引文 → 不补", !b3.includes("您说的"), b3);
+  const b4 = line([34, 35], ask("两个", "从中路派两个步兵去北线前哨"));
+  check("B4 引文「两个」派 2 → 不补", !b4.includes("您说的"), b4);
+  const b5 = line(ids8, ask("都", "中央前哨的都派去烽火台"));
+  check("B5 引文不是数（「都」）→ 不补", !b5.includes("您说的"), b5);
+}
+
 // ── R：重放线上那局 ──
 
 async function R_replay(count: CountFn, onState?: (label: string, s: GameState) => void): Promise<void> {
@@ -216,6 +239,7 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
     buildPlayerViewContext: pv.buildPlayerViewContext, getViewport: () => view,
   });
   const digests: string[] = [];
+  const receipts: string[][] = [];
   let got = { central: -1, coastal: -1, south: -1, fuel: -1 };
   for (const turn of fx.turns) {
     pumpTo(state, turn.t); view = turn.view;
@@ -226,7 +250,9 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
     }
     S.llm.queue = [{ kind: "text", text: turn.raw }];
     const r0 = h.requests.length;
+    const s0 = h.screen.length;
     await h.send(turn.text, S.clientFetch);
+    receipts.push(h.screen.slice(s0).filter((m: any) => m.source === "command_ack").map((m: any) => m.text));
     const req = h.requests.slice(r0).find((q: any) => q.path === "/api/command-stream" || q.path === "/api/command");
     digests.push(String(req?.body?.digest ?? ""));
   }
@@ -248,6 +274,8 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
   const M1_LEGACY = "M1 from=3. 中央战线 to=烽火台 act=defend left=8 via=G2「中央前哨附近未编组群」里派出的 home=中央前哨附近";
   check("P1 43 s 真信封 M1 行 ＝ 旧行 ＋「 loc=向烽火台行进中 eta≈60s」", m1(d43) === `${M1_LEGACY} loc=向烽火台行进中 eta≈60s`, m1(d43));
   check("P2 62 s 真信封 M1 行（三辆坦克已先到、其余在途＝动静混合）省略 loc/eta", m1(digests[2]) === M1_LEGACY, m1(digests[2]));
+  const r1 = receipts[0].join(" | ");
+  check("B6 重放：第一回合回执补「（您说的「10个兵」，这一批只有 8 个）」", r1.includes("（您说的「10个兵」，这一批只有 8 个）"), r1);
   (globalThis as any).__FP_DIGESTS__ = digests;
 }
 
@@ -267,6 +295,7 @@ async function main(): Promise<void> {
     F_oneRuler();
     C_countingRules(countPlayerUnitsNear);
     P_whereaboutsRules(dispatchWhereabouts);
+    B_shortfallReceipt(verifiedAskedQuantity);
     const t0 = freshState(); E_collect(countPlayerUnitsNear, "t0", t0); D_rendering([{ label: "t0", s: t0 }]);
     const extra = freshState(); pumpTo(extra, 90); E_collect(countPlayerUnitsNear, "t90", extra); D_rendering([{ label: "t90", s: extra }]);
     E_finalize();
@@ -313,6 +342,10 @@ async function main(): Promise<void> {
     };
     P_whereaboutsRules(sloppy);
   }, [/^P5/]));
+  results.push(await expectFail("N6 B 不核原话、直接信模型写的引文", () => {
+    const trusting: AskFn = (q) => { const t = (q ?? "").trim(); const m = t.match(/\d+/); return m ? { quote: t, count: Number(m[0]) } : null; };
+    B_shortfallReceipt(trusting);
+  }, [/^B2/]));
   const n = results.filter(Boolean).length;
   console.log(`\n=== ${n === results.length ? `NEGCTL OK — ${n}/${results.length} 条 ★ 真 FAIL` : `NEGCTL BROKEN — 只有 ${n}/${results.length} 条咬住`} ===`);
   if (n !== results.length) process.exit(1);

@@ -27,6 +27,22 @@
 // ============================================================
 
 import type { ApplyResult, OrderRejectReason, IntentType, EconomyOutcome } from "@ai-commander/shared";
+import { parseQuantityWord } from "@ai-commander/core";
+
+/**
+ * place-presence B：长官**亲口说的**数量（引文必须逐字出现在这一轮的原话里，再解析成数）。
+ * 模型写进单子的 quantity 不算——刀寅已裁：回执不许说"您要的是 N 个"去引一个模型写的数
+ * （实测长官说「两个」、单子写成 4）。引文核不上、解析不出、或不是正数 ⇒ null，回执一字不加。
+ */
+export function verifiedAskedQuantity(
+  quantityQuote: string | null | undefined,
+  playerText: string | null | undefined,
+): { quote: string; count: number } | null {
+  const quote = (quantityQuote ?? "").trim();
+  if (!quote || !playerText || !playerText.includes(quote)) return null;
+  const n = parseQuantityWord(quote);
+  return n !== null && n > 0 ? { quote, count: n } : null;
+}
 
 /** 一条意图交给执行层的东西：它占了 orders 数组里的哪几格，以及去哪。 */
 export interface DispatchSlice {
@@ -71,6 +87,12 @@ export interface DispatchSlice {
    * （实测：人在去北线前哨，重发的单子写的是「1. 北部战线」）。缺席 ⇒ 用 destinationName。
    */
   alreadyDestinationName?: string;
+  /**
+   * place-presence B：长官亲口说的数量（见 verifiedAskedQuantity；缺席＝没有可核的引文）。
+   * 这一批真被调到的人（下令＋已在办＋被拒）比它少时，回执补一句「（您说的「10个兵」，这一批只有 8 个）」——
+   * 线上首局：长官要 10、那群只有 8，回执只说"8个单位出发了"，没说少了 2 个。
+   */
+  askedQuantity?: { quote: string; count: number };
 }
 
 export type ExecOutcome = "applied" | "partial" | "already_doing" | "none";
@@ -329,10 +351,15 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
     const alreadyPhrase = slice.alreadyDestinationName
       ? actionPhrase(slice.action, slice.alreadyDestinationName) : phrase;
     const parts: string[] = [];
+    // B：这一批一共被调到几个（下令＋已在办＋被拒）比长官亲口说的少 ⇒ 在"已下令/已出发"那半句后补一句短缺。
+    //   一个都没新下令时不补（那句本来就以"没有执行/没有重新下令"起头，短缺不是重点）。
+    const touched = appliedCount + alreadyCount + rejectedCount;
+    const shortfall = slice.askedQuantity && touched < slice.askedQuantity.count
+      ? `（您说的「${slice.askedQuantity.quote}」，这一批只有 ${touched} 个）` : "";
     if (appliedCount > 0) {
-      parts.push(slice.appliedLine
+      parts.push((slice.appliedLine
         ? slice.appliedLine(appliedCount).replace(/[。.]+$/, "")
-        : `已下令 ${appliedCount} 个单位${phrase}`);
+        : `已下令 ${appliedCount} 个单位${phrase}`) + shortfall);
     }
     // alreadyDoing 是第三类结局：不算新派兵、不算失败，措辞里绝不许出现"已下令"。
     if (alreadyCount > 0) parts.push(`另有 ${alreadyCount} 个已经在${alreadyPhrase}了，没有重新下令`);

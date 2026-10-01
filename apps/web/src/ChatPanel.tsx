@@ -56,7 +56,7 @@ import { TelegraphKey } from "./TelegraphKey";
 import { MicIcon, HornIcon } from "./InputRailIcons";
 // spoken 层：一个回合里耳朵听见什么，由这一个纯函数一次算完（R2 听觉序列）。
 import { planVoiceSpeech } from "./voiceSpeech";
-import { buildExecReceipt, buildExecFeedback, type DispatchSlice } from "./execReceipt";
+import { buildExecReceipt, buildExecFeedback, verifiedAskedQuantity, type DispatchSlice } from "./execReceipt";
 import { cloneSelectionOption, optionWithResolvedIntents, selectionEnvelope } from "./selectionOption";
 import { setPlaybackObserver } from "./tts";
 import { shouldRecordSpeechDiag, type ReleaseMark } from "./speechDiagGate";
@@ -3813,6 +3813,8 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
         const destinationName = result.destinationName;
         // 刀寅：按批次指代时，「已在办」说那批人正在去的地方（台账记的，下令之前读）。
         const addressedBatch = intent.fromDispatch ? findDispatch(state, intent.fromDispatch) : undefined;
+        // place-presence B：长官亲口说的数量（引文须逐字出现在这份方案绑定的那句原话里）。
+        const askedQuantity = verifiedAskedQuantity(intent.quantityQuote, execCtx?.playerText);
         slices.push({
           action: intent.type,
           destinationName,
@@ -3823,6 +3825,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
           ...(boundTicket ? {
             appliedLine: (n: number) => ticketDispatchReceipt(boundTicket, n, receiptMode, { destinationName, gap }),
           } : {}),
+          ...(askedQuantity ? { askedQuantity } : {}),
         });
         // ── 刀C: 给这批 order 盖上来源标记，台账据此登记 ──
         // 记账只认这个标记，不认调用的是哪个函数：对话派兵走 applyOrders，
