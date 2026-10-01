@@ -319,6 +319,23 @@ export function locationPhraseFor(state: GameState, members: Unit[]): string | n
   return null;
 }
 
+/**
+ * place-presence A′：一批外派的人「此刻在哪、多久到」——给 DISPATCHES 行的 loc= / eta≈ 用。
+ *
+ * 病例（REVIEW-FABLE §一.3）：任务行只有 to=烽火台 act=defend，没有现址，问"烽火台那边有我们的人吗"
+ * 一半被读成"在烽火台"；只补 loc 不补 eta 时，行上唯一的数字 left=8 被编成"预计 8 分钟"。
+ * 所以两者成对：loc 照 locationPhraseFor（不确定就省略，不编）；只有短语是「向X行进中」、
+ * 且每个成员都有目标时才给 eta（同 FRONT_JUDGMENT 的 etaOf：最慢成员、向上取整、算不出就省略）。
+ */
+export function dispatchWhereabouts(state: GameState, members: Unit[]): { loc: string | null; etaSec: number | null } {
+  if (members.length === 0) return { loc: null, etaSec: null };
+  const loc = locationPhraseFor(state, members);
+  if (loc === null || !loc.startsWith("向")) return { loc, etaSec: null };
+  const targets = members.map((u) => u.target).filter((t): t is Position => t !== null);
+  if (targets.length !== members.length) return { loc, etaSec: null };
+  return { loc, etaSec: etaOf(state, members.map((u) => u.id), centroidOf(targets)) };
+}
+
 
 // ── Compass-octant fallback (voice-polish v1, Codex-approved) ──
 // For groups with NO resolvable place: pure geometry relative to MAP CENTER —

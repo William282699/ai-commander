@@ -10,6 +10,7 @@ import { buildBattleBoard, boardToDigestLines } from "./battleBoard";
 import { buildFrontJudgmentLines, buildCommanderMoodLine } from "./commanderPresence";
 import { mintSpokenForce, remainderHandleOf } from "./escalationTicket";
 import { buildDispatchDigestLines } from "./dispatchLedger";
+import { dispatchWhereabouts } from "./frontEscalationPayload";
 
 /**
  * Compute player/enemy power per front from actual unit positions.
@@ -100,6 +101,7 @@ export function buildDigest(
   const mood = buildCommanderMoodLine(state);
   // 刀C: 在役任务行。纯读，不铸号（号在派兵那一刻就生成了），所以台架与
   // 心跳路径拿到的也是同一份——不像 handle 那样需要 opt-in。
-  const dispatches = buildDispatchDigestLines(state, remainderHandleOf);
+  // place-presence A′：行尾 loc= / eta≈（现址与到达时间，引擎算，不确定省略）。
+  const dispatches = buildDispatchDigestLines(state, remainderHandleOf, (members) => dispatchWhereabouts(state, members));
   return generateDigestV1(state, selectedUnitIds, markedTargets, recentEvents, board, judgment, mood ?? undefined, dispatches);
 }

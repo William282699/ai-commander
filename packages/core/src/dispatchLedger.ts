@@ -491,12 +491,18 @@ export function buildDispatchDigestLines(
   state: GameState,
   /** 刀寅：用过的票 → 原群剩下那些人此刻的新号（由 intelDigest 注入；台账模块不直接碰票据表）。 */
   remainderHandleOf?: (gNumber: string) => string | null,
+  /** place-presence A′：活成员此刻在哪、多久到（由 intelDigest 注入 frontEscalationPayload.dispatchWhereabouts；
+   *  台账模块不新加 import——frontEscalationPayload→crisisResponse→tacticalPlanner→本文件已成链，直接 import 会绕成环）。 */
+  whereaboutsOf?: (members: Unit[]) => { loc: string | null; etaSec: number | null },
 ): string[] {
   const rows = activeDispatches(state);
   if (rows.length === 0) return [];
   const MAX = 8;
   const lines: string[] = [];
   for (const d of rows.slice(0, MAX)) {
+    // A′：行尾追加 loc= / eta≈（不确定就省略，不编）；既有 token 逐字节前缀不变。
+    const w = whereaboutsOf ? whereaboutsOf(liveDispatchMembers(state, d)) : null;
+    const where = w && w.loc ? ` loc=${w.loc}${w.etaSec !== null ? ` eta≈${w.etaSec}s` : ""}` : "";
     const to = d.targetName || "未指明";
     // 刀寅：via=G# ——这批人是凭哪张临时编队票派出去的。长官之后再说那个号，
     //   指的就是**这一批真走了的人**，不是票上原报的那份候选。
@@ -506,7 +512,7 @@ export function buildDispatchDigestLines(
     const via = d.ticketRef
       ? ` via=${d.ticketRef}${d.ticketLabel ? `「${d.ticketLabel}」里派出的` : ""}${rest ? `（那一群留下没派的现在是 ${rest}，不是这一批）` : ""}`
       : "";
-    lines.push(`${d.id} from=${dispatchFromText(state, d)} to=${to} act=${d.action} left=${liveDispatchMembers(state, d).length}${via}${homeText(state, d)}`);
+    lines.push(`${d.id} from=${dispatchFromText(state, d)} to=${to} act=${d.action} left=${liveDispatchMembers(state, d).length}${via}${homeText(state, d)}${where}`);
   }
   if (rows.length > MAX) lines.push(`...+${rows.length - MAX} more`);
   return lines;

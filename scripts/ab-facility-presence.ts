@@ -12,6 +12,8 @@
 //   E  同一把尺：19 设施 × 多个时刻，countPlayerUnitsNear ＝ director.facilityEscalationFacts().nearbyPlayerUnits
 //   D  渲染：每个设施一行都带字段（敌方、中立也印、可为 0）；既有 token 逐字节前缀不变；节头图例
 //   R  重放线上那局到 43 s：中央 0 / 北线 8 / 南线 9 / 前线油库 4（实验用的那份信封）
+//   P  A′ DISPATCHES 行 loc= / eta≈：43 s 钉「loc=向烽火台行进中 eta≈60s」、62 s（有人先到）省略；
+//      全员停 → 「X附近」无 eta；动静混合 / 有人没目标 → 省略；eta 只随「向X行进中」出现
 //
 // 用法（worktree 根；播种与生产序泵帧照档案复现脚本）：
 //   node --import ./scripts/recorder-seed-random.mjs --import tsx scripts/ab-facility-presence.ts --synthetic
@@ -29,6 +31,7 @@ import type { GameState, Position } from "@ai-commander/shared";
 import { FACILITY_GATE, facilityEscalationFacts } from "../packages/core/src/director";
 import { NAME_RADIUS_TILES } from "../packages/core/src/frontEscalationPayload";
 import { ORIGIN_FACILITY_RADIUS } from "../packages/core/src/dispatchLedger";
+import { dispatchWhereabouts } from "../packages/core/src/frontEscalationPayload";
 // 静态导入（不许 await import）：动态导入会让台架与被测代码各载一份 core，编队号在一份里登记、在另一份里查不到
 import { harness, serverRoutes, source, oldFunctions } from "./chainHarness";
 import { buildDigestForChannel } from "../apps/web/src/digestHelper";
@@ -164,6 +167,36 @@ function D_rendering(states: { label: string; s: GameState }[], mutate?: (digest
   }
 }
 
+// ── P：A′ 现址规则（合成局面） ──
+
+type WhereFn = (state: GameState, members: any[]) => { loc: string | null; etaSec: number | null };
+function P_whereaboutsRules(where: WhereFn): void {
+  console.log("\n── P A′ loc= / eta≈ 规则 ──");
+  const s = freshState();
+  const inf = [...s.units.values()].filter((u) => u.team === "player" && u.type === "infantry").slice(0, 3);
+  const OBS = s.facilities.get("ea_observation_post")!.position;
+  const REP = s.facilities.get("ea_repair_station")!.position;
+  // 全员停在修理厂旁：「野战修理厂附近」，不给 eta
+  inf.forEach((u, i) => { u.position = { x: REP.x + i, y: REP.y }; u.state = "idle"; u.target = null; });
+  let w = where(s, inf);
+  check("P3 全员停在据点旁 → loc=X附近、无 eta", w.loc === "野战修理厂附近" && w.etaSec === null, JSON.stringify(w));
+  // 全员在途、都有目标 → 「向烽火台行进中」＋ eta
+  inf.forEach((u, i) => { u.position = { x: 330 + i, y: 100 }; u.state = "moving"; u.target = { x: OBS.x + i, y: OBS.y }; });
+  w = where(s, inf);
+  check("P4 全员在途 → loc=向烽火台行进中、eta 为正整数", w.loc === "向烽火台行进中" && Number.isInteger(w.etaSec) && (w.etaSec ?? 0) > 0, JSON.stringify(w));
+  // 动静混合 → 省略
+  inf[0].state = "idle"; inf[0].target = null;
+  w = where(s, inf);
+  check("P5 动静混合 → loc、eta 都省略", w.loc === null && w.etaSec === null, JSON.stringify(w));
+  // 全员在动但有人没目标 → 省略
+  inf[0].state = "moving"; inf[0].target = null;
+  w = where(s, inf);
+  check("P6 有人没目标 → 省略", w.loc === null && w.etaSec === null, JSON.stringify(w));
+  // eta 只随「向」短语：停着的那一路永远不出 eta
+  inf.forEach((u, i) => { u.position = { x: REP.x + i, y: REP.y }; u.state = "idle"; u.target = null; });
+  check("P7 eta 只随「向X行进中」出现", where(s, inf).etaSec === null);
+}
+
 // ── R：重放线上那局 ──
 
 async function R_replay(count: CountFn, onState?: (label: string, s: GameState) => void): Promise<void> {
@@ -211,6 +244,10 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
   check("R7 43 s 真信封：FRONTS 中央战线行与 DISPATCHES 行原样（本刀不碰）",
     d43.includes("front_center:3. 中央战线 OurPwr=440 EnemyPwr=? OurComp=[4×main_tank,4×infantry]") &&
     d43.includes("M1 from=3. 中央战线 to=烽火台 act=defend left=8 via=G2「中央前哨附近未编组群」里派出的 home=中央前哨附近"));
+  const m1 = (d: string) => d.split("\n").find((l) => l.startsWith("M1 ")) ?? "";
+  const M1_LEGACY = "M1 from=3. 中央战线 to=烽火台 act=defend left=8 via=G2「中央前哨附近未编组群」里派出的 home=中央前哨附近";
+  check("P1 43 s 真信封 M1 行 ＝ 旧行 ＋「 loc=向烽火台行进中 eta≈60s」", m1(d43) === `${M1_LEGACY} loc=向烽火台行进中 eta≈60s`, m1(d43));
+  check("P2 62 s 真信封 M1 行（三辆坦克已先到、其余在途＝动静混合）省略 loc/eta", m1(digests[2]) === M1_LEGACY, m1(digests[2]));
   (globalThis as any).__FP_DIGESTS__ = digests;
 }
 
@@ -229,6 +266,7 @@ async function main(): Promise<void> {
     await R_replay(countPlayerUnitsNear, (label, s) => { E_collect(countPlayerUnitsNear, label, s); D_rendering([{ label, s }]); });
     F_oneRuler();
     C_countingRules(countPlayerUnitsNear);
+    P_whereaboutsRules(dispatchWhereabouts);
     const t0 = freshState(); E_collect(countPlayerUnitsNear, "t0", t0); D_rendering([{ label: "t0", s: t0 }]);
     const extra = freshState(); pumpTo(extra, 90); E_collect(countPlayerUnitsNear, "t90", extra); D_rendering([{ label: "t90", s: extra }]);
     E_finalize();
@@ -268,6 +306,13 @@ async function main(): Promise<void> {
       const s0 = freshState(); E_collect(noGuard, "t0", s0); E_collect(noGuard, "t0b", s0); E_collect(noGuard, "t0c", s0); E_finalize();
     }, [/^E1/]),
   ];
+  results.push(await expectFail("N5 A′ 不管动静齐不齐都写现址（拿在途那个人的说法代表全批）", () => {
+    const sloppy: WhereFn = (st, ms) => {
+      const mover = ms.find((u: any) => u.target !== null) ?? ms[0];
+      return dispatchWhereabouts(st, [mover]);
+    };
+    P_whereaboutsRules(sloppy);
+  }, [/^P5/]));
   const n = results.filter(Boolean).length;
   console.log(`\n=== ${n === results.length ? `NEGCTL OK — ${n}/${results.length} 条 ★ 真 FAIL` : `NEGCTL BROKEN — 只有 ${n}/${results.length} 条咬住`} ===`);
   if (n !== results.length) process.exit(1);
