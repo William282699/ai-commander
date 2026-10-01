@@ -7,6 +7,7 @@ import type { GameState, Front, Resources, StyleParams, Unit, Mission, Squad, Po
 import { isManualOnlyUnit } from "./types";
 import { collectUnitsUnder } from "./squadHierarchy";
 import { UNIT_STATS, PRODUCTION_FACILITY, isProducibleUnitType } from "./constants";
+import { countPlayerUnitsNear, PLACE_NEAR_RADIUS_TILES } from "./placePresence";
 
 /**
  * Precomputed battle-board lines (board-v1a). Built in core/battleBoard.ts and
@@ -114,14 +115,17 @@ export function generateDigestV1(
 
   // Facilities — so LLM knows available buildings and can fill targetFacility
   // MVP: include all facilities (map is small). TODO: fog-filter when fog is polished.
+  // 据点驻军数（place-presence V1）：每行行尾追加「附近我方=N单位」——每个设施都印、
+  // 含 0（缺席会被读成"没写"，那正是病因）；既有 token 逐字节前缀不变。
   const facilityLines: string[] = [];
   state.facilities.forEach((f) => {
+    const nearOurs = countPlayerUnitsNear(state, f.position, PLACE_NEAR_RADIUS_TILES);
     facilityLines.push(
-      `${f.id}:${f.type} "${f.name}" team=${f.team} hp=${f.hp}/${f.maxHp} @(${f.position.x},${f.position.y})`,
+      `${f.id}:${f.type} "${f.name}" team=${f.team} hp=${f.hp}/${f.maxHp} @(${f.position.x},${f.position.y}) 附近我方=${nearOurs}单位`,
     );
   });
   if (facilityLines.length > 0) {
-    digest += `---FACILITIES---\n`;
+    digest += `---FACILITIES--- (附近我方=该据点 ${PLACE_NEAR_RADIUS_TILES} 格内此刻的我方单位数；各行各自计数，不可相加)\n`;
     for (const line of facilityLines) {
       digest += `${line}\n`;
     }

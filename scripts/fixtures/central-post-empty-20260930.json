@@ -1,0 +1,41 @@
+{
+ "_note": "线上首局（2026-09-30，测试者 A 第 5 局 r5eKn-BbmfHIzuTycVznX）陈的三回合模型原文，仅游戏内容。台架用它走真实客户端链路重放到 43 s / 62 s。档：_archive/central-post-empty-20261001/。",
+ "turns": [
+  {
+   "t": 10.79,
+   "text": "从中央前哨派10个兵去烽火台",
+   "raw": "从中央前哨附近未编组群[临时编队G2]抽调10个兵前往烽火台，预计五分钟内抵达。\n---JSON---\n{\n  \"brief\": \"从中央前哨附近未编组群[临时编队G2]抽调10个兵前往烽火台，预计五分钟内抵达。\",\n  \"responseType\": \"EXECUTE\",\n  \"options\": [\n    {\n      \"label\": \"方案A：派遣中央前哨附近未编组群[临时编队G2]前往烽火台\",\n      \"description\": \"派遣10个单位前往烽火台，预计五分钟内抵达。\",\n      \"risk\": 0.3,\n      \"reward\": 0.6,\n      \"intents\": [\n        {\n          \"type\": \"defend\",\n          \"fromSquad\": \"G2\",\n          \"targetFacility\": \"ea_observation_post\",\n          \"quantity\": 10,\n          \"urgency\": \"medium\",\n          \"destinationQuote\": \"烽火台\",\n          \"quantityQuote\": \"10个兵\"\n        }\n      ]\n    }\n  ],\n  \"recommended\": \"A\",\n  \"urgency\": 0.6\n}",
+   "view": {
+    "x": 0,
+    "y": 0,
+    "zoom": 0.09125,
+    "canvasWidth": 1920,
+    "canvasHeight": 779
+   }
+  },
+  {
+   "t": 42.97,
+   "text": "不对，这样的话，中央前哨不是空了吗？",
+   "raw": "中央前哨有4辆主战坦克和4个步兵，没有空。\n---JSON---\n{\n  \"brief\": \"中央前哨有4辆主战坦克和4个步兵，没有空。\",\n  \"responseType\": \"NOOP\",\n  \"options\": [],\n  \"urgency\": 0\n}",
+   "view": {
+    "x": 4303.616796490291,
+    "y": 979.8549556809024,
+    "zoom": 0.19125,
+    "canvasWidth": 1920,
+    "canvasHeight": 779
+   }
+  },
+  {
+   "t": 62.08,
+   "text": "现在中央前哨一个兵都没有了啊",
+   "raw": "现在中央前哨仍有4辆主战坦克和4个步兵，没有空。\n---JSON---\n{\n  \"brief\": \"现在中央前哨仍有4辆主战坦克和4个步兵，没有空。\",\n  \"responseType\": \"NOOP\",\n  \"options\": [],\n  \"urgency\": 0\n}",
+   "view": {
+    "x": 5971.590652699441,
+    "y": 1617.7634524129285,
+    "zoom": 0.19125,
+    "canvasWidth": 1920,
+    "canvasHeight": 779
+   }
+  }
+ ]
+}

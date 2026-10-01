@@ -842,6 +842,11 @@ test("刀寅 O11 出发据点命名半径与板子「X附近」同一尺度（�
   const ledger = require("../packages/core/src/dispatchLedger");
   const payload = require("../packages/core/src/frontEscalationPayload");
   assert.equal(ledger.ORIGIN_FACILITY_RADIUS, payload.NAME_RADIUS_TILES);
+  // place-presence V1：三把「X附近」尺（板子起名 / 出发据点 / 设施危机近旁）都等于 shared 常量
+  const director = require("../packages/core/src/director");
+  assert.equal(payload.NAME_RADIUS_TILES, shared.PLACE_NEAR_RADIUS_TILES);
+  assert.equal(ledger.ORIGIN_FACILITY_RADIUS, shared.PLACE_NEAR_RADIUS_TILES);
+  assert.equal(director.FACILITY_GATE.NEAR_RADIUS, shared.PLACE_NEAR_RADIUS_TILES);
 });
 
 // ── 确认案：陈要长官点头的具体方案 ──

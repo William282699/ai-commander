@@ -34,6 +34,8 @@ CHECKS=(
   "commander-presence            |npx tsx scripts/ab-commander-presence.ts --synthetic"
   "dispatch-scope                |npx tsx scripts/ab-dispatch-scope.ts --synthetic"
   "emily-production              |npx tsx scripts/ab-emily-production.ts --synthetic"
+  "facility-presence             |node --import ./scripts/recorder-seed-random.mjs --import tsx scripts/ab-facility-presence.ts --synthetic"
+  "facility-presence-negctl      |node --import ./scripts/recorder-seed-random.mjs --import tsx scripts/ab-facility-presence.ts --negctl"
   "facility-target               |npx tsx scripts/ab-facility-target.ts --synthetic"
   "front-escalation              |npx tsx scripts/ab-front-escalation.ts --synthetic"
   "g-knife-sites                 |npx tsx scripts/ab-g-knife.ts --sites"
