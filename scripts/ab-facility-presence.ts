@@ -364,16 +364,24 @@ function P_whereaboutsRules(where: WhereFn): void {
   w = W("P22", three, disp("向阳坡", three, HILL), "向阳坡", HILL);
   check("P22 去处名字以「向」开头 → 2个向阳坡附近+1个向向阳坡行进中、eta 只算在途那个", w.loc === "2个向阳坡附近+1个向向阳坡行进中" && w.etaSec === etaHill, JSON.stringify({ ...w, etaHill }));
   (s as any).tags = tags0;
+  // P23 被派去的点附近没有任何地名（区域中心 / 撤退点 / 坐标）：到了的用 to= 当名字，在途的也照叫——不说成「停在<别处><方位>」
+  const AREA = withOrigin!;
+  set(three[0], AREA, "defending", null); set(three[1], { x: AREA.x + 2, y: AREA.y }, "defending", null);
+  set(three[2], { x: AREA.x + 30, y: AREA.y }, "defending", AREA);
+  const etaArea = etaOfGoals([three[2]], [AREA]);
+  w = W("P23", three, disp("魔鬼花园雷区", three, AREA), "魔鬼花园雷区", AREA);
+  check("P23 去处附近没地名 → 2个魔鬼花园雷区附近+1个向魔鬼花园雷区行进中、eta 只算在途那个",
+    nearestPlaceWithin(s, AREA) === null && w.loc === "2个魔鬼花园雷区附近+1个向魔鬼花园雷区行进中" && w.etaSec === etaArea, JSON.stringify({ ...w, etaArea }));
   // 一把尺不变式：上面每一例（有 loc 的）到了那组人数 ＝ 离被派去的地方 12 格内的人数
   const bad = ruler.filter((r) => !r.ok);
-  check(`P16 一把尺：${ruler.length} 例里「<被派去的地方>附近」人数＝它 12 格内人数、各组相加＝成员数`, ruler.length >= 17 && bad.length === 0, bad.map((r) => `${r.label}: ${r.detail}`).join(" ‖ "));
+  check(`P16 一把尺：${ruler.length} 例里「<被派去的地方>附近」人数＝它 12 格内人数、各组相加＝成员数`, ruler.length >= 18 && bad.length === 0, bad.map((r) => `${r.label}: ${r.detail}`).join(" ‖ "));
 }
 
 /** 台架侧参照实现（只给负对照用）：与引擎同一套定义，开关逐项摘掉一条，看对应断言会不会真红。 */
 type RefOpts = { recordedDest: boolean; facilityFirst: boolean; arriveByDistance: boolean; finalGoal: boolean; routeLegs: boolean;
-  stopMarker: boolean; perUnitStopped: boolean; omitCompass: boolean; kindByStructure: boolean };
+  stopMarker: boolean; perUnitStopped: boolean; omitCompass: boolean; kindByStructure: boolean; toNameFallback: boolean };
 const REF_ALL: RefOpts = { recordedDest: true, facilityFirst: true, arriveByDistance: true, finalGoal: true, routeLegs: true,
-  stopMarker: true, perUnitStopped: true, omitCompass: true, kindByStructure: true };
+  stopMarker: true, perUnitStopped: true, omitCompass: true, kindByStructure: true, toNameFallback: true };
 function refWhere(off: Partial<RefOpts>): WhereFn {
   const o = { ...REF_ALL, ...off };
   return (st, ms, d) => {
@@ -403,7 +411,10 @@ function refWhere(off: Partial<RefOpts>): WhereFn {
       const dest = d?.destPosById?.[u.id] ?? (movingGate(u) ? goal(u) : null);
       if (!dest) return null;
       if (o.facilityFirst && facN && dist2(dest, facN.position) <= R) return facN;
-      return placeAt(dest);
+      const at = placeAt(dest);
+      if (at) return at;
+      const rec = d?.destPosById?.[u.id];
+      return o.toNameFallback && rec && d?.targetName && d.targetName !== "未指明" ? { name: d.targetName, position: rec } : null;
     };
     type K = "arrived" | "stopped" | "enRoute";
     const parts = new Map<string, { k: K; us: any[] }>();
@@ -513,6 +524,33 @@ function Q_endToEnd(): void {
   }
   check(`Q2 叫回出发地（to=出发地（南线前哨附近））：${frames} 帧里「南线前哨附近」人数＝南线前哨 12 格内人数，从不说「停在南线前哨附近」`,
     d2.id !== d.id && resBack.appliedUnitIds.length >= 3 && frames >= 15 && sawArrive && sawEnRoute && bad.length === 0, bad.slice(0, 4).join(" ‖ ") || `frames=${frames} arrive=${sawArrive} enRoute=${sawEnRoute}`);
+  // Q3 派去一个附近没有地名的点（像区域中心）：到了以后是「魔鬼花园雷区附近」，不是「停在<别处><方位>」
+  const s3 = freshState();
+  let spot: Position | null = null;
+  // 复核实测用的那个点：魔鬼花园雷区中心 (295.5,105)——最近的地名前线油库在 15.3 格外；中央前哨的步兵 49 s 走得到
+  spot = { x: 295.5, y: 105 };
+  const CP3 = s3.facilities.get("ea_player_central_post")!.position;
+  const ids3 = [...s3.units.values()].filter((u) => u.team === "player" && u.type === "infantry" && Math.hypot(u.position.x - CP3.x, u.position.y - CP3.y) <= PLACE_NEAR_RADIUS_TILES).slice(0, 4).map((u) => u.id);
+  core.applyOrders(s3, ids3.map((id, i) => ({ unitIds: [id], action: "defend", target: { x: spot!.x + i, y: spot!.y }, priority: "medium", origin: "advisor",
+    dispatchMeta: { group: "q3", sourceKind: "selection", sourceKey: "", action: "defend", targetName: "魔鬼花园雷区" } })) as any);
+  const d3 = s3.dispatches[s3.dispatches.length - 1];
+  let last3 = "", strayStop = 0, frames3 = 0, allIn3 = 0;
+  const end3 = s3.time + 300;
+  for (let t = s3.time + 2; t < end3; t += 2) {
+    pumpTo(s3, t);
+    const line = core.buildDigest(s3, [], [], []).split("\n").find((l) => l.startsWith(`${d3.id} `)) ?? "";
+    const m = line.match(/ loc=(\S+)/); if (!m) continue;
+    frames3++; last3 = m[1];
+    const ms = liveDispatchMembers(s3, d3);
+    // 附近没地名时圆心就是每人自己被送去的那一点（台账逐人记的 destPosById）
+    const onSpot = ms.filter((u) => { const q = d3.destPosById![u.id]; return Math.hypot(u.position.x - q.x, u.position.y - q.y) <= PLACE_NEAR_RADIUS_TILES; }).length;
+    const said = parseLoc(m[1], ms.length).filter(([, p]) => p === "魔鬼花园雷区附近").reduce((a, [k]) => a + k, 0);
+    if (said !== onSpot) { strayStop++; info(`Q3 不一致 t${Math.round(s3.time)} ${m[1]} 落点内${onSpot}`); }
+    allIn3 = ms.length > 0 && onSpot === ms.length ? allIn3 + 1 : 0;
+    if (allIn3 >= 3) break;
+  }
+  check(`Q3 派去附近没地名的点（to=魔鬼花园雷区）：${frames3} 帧里「魔鬼花园雷区附近」人数＝离各自落点 12 格内的人数，最后一帧「${last3}」`,
+    ids3.length === 4 && nearestPlaceWithin(s3, spot!) === null && frames3 >= 3 && strayStop === 0 && last3 === "魔鬼花园雷区附近", `spot=${JSON.stringify(spot)} mismatch=${strayStop}`);
 }
 
 // ── B：回执短缺句（纯函数） ──
@@ -770,6 +808,7 @@ async function main(): Promise<void> {
   results.push(await expectFail("N17 A″ 去处旁边的标记顶替设施（不先认 to= 那个设施）", () => P_whereaboutsRules(refWhere({ facilityFirst: false })), [/^P20 /]));
   results.push(await expectFail("N18 A″ 带路线的 eta 按直线算", () => P_whereaboutsRules(refWhere({ routeLegs: false })), [/^P14 /]));
   results.push(await expectFail("N19 A″ 按「向」字头判在途（不按归组时的类别）", () => P_whereaboutsRules(refWhere({ kindByStructure: false })), [/^P22 /]));
+  results.push(await expectFail("N21 A″ 去处附近没地名就没有「到了」（站在自己终点上被说成停在别处）", () => P_whereaboutsRules(refWhere({ toNameFallback: false })), [/^P23 /]));
   results.push(await expectFail("N6 B 不核原话、直接信模型写的引文", () => {
     const trusting: AskFn = (q) => { const t = (q ?? "").trim(); const m = t.match(/\d+/); return m ? { quote: t, count: Number(m[0]) } : null; };
     B_shortfallReceipt(trusting);

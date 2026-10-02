@@ -333,7 +333,8 @@ export function locationPhraseFor(state: GameState, members: Unit[]): string | n
  * 所以**逐人**按真在哪归组，三种说法、一把 12 格尺：
  *   ·「X附近」     ——到了：离**引擎真送他去的地方**12 格内，动没动都算。那个地方＝台账记下的他那道令的
  *                    终点（destPosById）所在的地名；to= 写的是一个设施、且终点就在它跟前时直接用这个设施
- *                    （与 FACILITIES「在场我方」同一个圆心；已毁的设施 FACILITIES 照印，这里也照认）。
+ *                    （与 FACILITIES「在场我方」同一个圆心；已毁的设施 FACILITIES 照印，这里也照认）；
+ *                    终点附近没有地名（区域中心、撤退点、出发地）就用台账的 to= 当名字（见 sentPlaceOf）。
  *                    不按 to= 的名字去找：派去一条战线，引擎真去的是线上某个据点，战线几何中心在几十格外；
  *                    区域名、「出发地（X附近）」也都找不回一个点（上手测前复核实测：按名字找会把路过的算到了、
  *                    到了的反倒算「停在」）。
@@ -365,7 +366,7 @@ export function dispatchWhereabouts(
   const namedFacility = d?.targetName ? facilityByName(state, d.targetName) : null;
   const strays: Unit[] = [];
   for (const u of members) {
-    const sentTo = sentPlaceOf(state, u, d?.destPosById?.[u.id], namedFacility);
+    const sentTo = sentPlaceOf(state, u, d?.destPosById?.[u.id], namedFacility, d?.targetName);
     if (sentTo !== null && dist(u.position, sentTo.position) <= NAME_RADIUS_TILES) { add(`${sentTo.name}附近`, "arrived", [u]); continue; }
     if (isActuallyMoving(u)) {
       const goal = finalGoalOf(u);
@@ -394,16 +395,23 @@ export function dispatchWhereabouts(
 
 /**
  * 这个人被送去的地方（名字＋圆心）。终点取台账记下的那一点（缺席时在走的人退用他当下的终点）；
- * to= 是个设施、终点就在它 12 格内 ⇒ 用这个设施（含已毁的），圆心与 FACILITIES 一致，也不会被附近的标记顶掉；
- * 否则用终点 12 格内最近的地名（标记 / 设施 / 战线中心，同取地名那套扫描）；都没有 ⇒ null。
+ * ① to= 是个设施、终点就在它 12 格内 ⇒ 用这个设施（含已毁的），圆心与 FACILITIES 一致，也不会被附近的标记顶掉；
+ * ② 否则用终点 12 格内最近的地名（标记 / 设施 / 战线中心，同取地名那套扫描）——派去战线时那就是线上据点；
+ * ③ 终点附近没有地名（区域中心、「安全区域」撤退点、出发地、坐标）⇒ 就用台账的 to= 当名字、终点当圆心
+ *    （不然站在自己终点上的人只能被说成「停在<别处><方位>」——上手测前复核实测：派去魔鬼花园雷区的 4 个
+ *    到了以后永远是「停在前线油库西」）；
+ * 都没有 ⇒ null。
  */
 function sentPlaceOf(
-  state: GameState, u: Unit, recorded: Position | undefined, namedFacility: NearestPlace | null,
+  state: GameState, u: Unit, recorded: Position | undefined, namedFacility: NearestPlace | null, toName: string | undefined,
 ): NearestPlace | null {
   const dest = recorded ?? (isActuallyMoving(u) ? finalGoalOf(u) : null);
   if (dest === null) return null;
   if (namedFacility !== null && dist(dest, namedFacility.position) <= NAME_RADIUS_TILES) return namedFacility;
-  return nearestPlaceScan(state, dest, NAME_RADIUS_TILES);
+  const named = nearestPlaceScan(state, dest, NAME_RADIUS_TILES);
+  if (named !== null) return named;
+  if (recorded && toName && toName !== "未指明") return { name: toName, position: { x: recorded.x, y: recorded.y }, d: 0 };
+  return null;
 }
 
 /** 按名字找一个设施（**含已毁的**——FACILITIES 照印它、在场数照算）。只找设施：标记可以和设施同名，不许它顶替。 */
