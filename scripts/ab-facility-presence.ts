@@ -14,7 +14,8 @@
 //   R  重放线上那局到 43 s：中央 0 / 北线 8 / 南线 9 / 前线油库 4（实验用的那份信封）
 //   P  A′ DISPATCHES 行 loc= / eta≈：43 s 钉「loc=向烽火台行进中 eta≈60s」、62 s（有人先到）省略；
 //      全员停 → 「X附近」无 eta；动静混合 / 有人没目标 → 省略；eta 只随「向X行进中」出现
-//   B  回执短缺句：只引长官原话里逐字出现的数量引文；派得比它少才补「（您说的「10个兵」，这一批只有 8 个）」
+//   B  回执短缺句：只引长官原话里逐字出现的数量引文；派得比它少才补「（您说的「10个兵」，这一批只有 8 个）」；
+//      同一句话被拆成几条 ⇒ 按整组只在合计行说一次，引文不齐不说（B7）
 //
 // 用法（worktree 根；播种与生产序泵帧照档案复现脚本）：
 //   node --import ./scripts/recorder-seed-random.mjs --import tsx scripts/ab-facility-presence.ts --synthetic
@@ -202,7 +203,8 @@ function P_whereaboutsRules(where: WhereFn): void {
 // ── B：回执短缺句（纯函数） ──
 
 type AskFn = (quote: string | null | undefined, said: string | null | undefined) => { quote: string; count: number } | null;
-function B_shortfallReceipt(ask: AskFn): void {
+type BuildFn = typeof buildExecReceipt;
+function B_shortfallReceipt(ask: AskFn, build: BuildFn = buildExecReceipt): void {
   console.log("\n── B 回执短缺句 ──");
   const ids8 = [30, 31, 32, 33, 34, 35, 36, 37];
   const res = (applied: number[]) => ({ appliedUnitIds: applied, alreadyDoingUnitIds: [], rejectedUnitIds: [], perOrder: [{ appliedUnitIds: applied, alreadyDoingUnitIds: [], rejected: [] }] }) as any;
@@ -218,6 +220,32 @@ function B_shortfallReceipt(ask: AskFn): void {
   check("B4 引文「两个」派 2 → 不补", !b4.includes("您说的"), b4);
   const b5 = line(ids8, ask("都", "中央前哨的都派去烽火台"));
   check("B5 引文不是数（「都」）→ 不补", !b5.includes("您说的"), b5);
+
+  // B7（复核 P0-1）：同一句「10个兵」被模型按兵种拆成几条（规划器判"各条之和＝引文数"不歧义、直接执行）。
+  //   短缺按整件事算、只说一次（挂合计行）；引文不齐 ⇒ 不说。
+  const multi = (batches: number[][], sl: { dest: string; asked: ReturnType<AskFn> }[]) => {
+    const perOrder = batches.map((b) => ({ appliedUnitIds: b, alreadyDoingUnitIds: [], rejected: [] }));
+    const r = { appliedUnitIds: batches.flat(), alreadyDoingUnitIds: [], rejectedUnitIds: [], perOrder } as any;
+    return build(r, sl.map((x, i) => ({ action: "defend", destinationName: x.dest, orderIndexes: [i], ...(x.asked ? { askedQuantity: x.asked } : {}) }))).lines;
+  };
+  const said = "从中央前哨派10个兵去烽火台";
+  const q10 = ask("10个兵", said);
+  const clauses = (ls: string[]) => ls.filter((l) => l.includes("您说的"));
+  const b7a = multi([[30, 31, 32, 33], [34, 35, 36, 37, 38, 39]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: q10 }]);
+  check("B7a 拆成 4＋6＝10 → 一句短缺都不说", clauses(b7a).length === 0, b7a.join(" | "));
+  const b7b = multi([[30, 31, 32], [34, 35, 36, 37]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: q10 }]);
+  check("B7b 拆成 3＋4＝7 → 恰好一句、挂在合计行、数的是整组 7",
+    clauses(b7b).length === 1 && clauses(b7b)[0].startsWith("合计：") && clauses(b7b)[0].includes("（您说的「10个兵」，这一批只有 7 个）"), b7b.join(" | "));
+  const b7c = multi([[30, 31, 32, 33], [34, 35, 36]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: null }]);
+  check("B7c 同一件事只有一条挂了引文（分不清是不是同一句话）→ 不说", clauses(b7c).length === 0, b7c.join(" | "));
+  const b7d = multi([[30, 31], [34, 35, 36]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: ask("5个", "派10个兵去烽火台，再派5个") }]);
+  check("B7d 同一件事两条引文不一样 → 不说", clauses(b7d).length === 0, b7d.join(" | "));
+  const b7e = multi([[30, 31], [34, 35, 36, 37, 38]], [
+    { dest: "烽火台", asked: ask("3个兵", "派3个兵去烽火台，5个兵去北线前哨") },
+    { dest: "北线前哨", asked: ask("5个兵", "派3个兵去烽火台，5个兵去北线前哨") },
+  ]);
+  check("B7e 两件事各一条：只有短的那件（烽火台 2<3）说，挂在它自己那句",
+    clauses(b7e).length === 1 && !clauses(b7e)[0].startsWith("合计：") && clauses(b7e)[0].includes("（您说的「3个兵」，这一批只有 2 个）"), b7e.join(" | "));
 }
 
 // ── R：重放线上那局 ──
@@ -346,6 +374,11 @@ async function main(): Promise<void> {
     const trusting: AskFn = (q) => { const t = (q ?? "").trim(); const m = t.match(/\d+/); return m ? { quote: t, count: Number(m[0]) } : null; };
     B_shortfallReceipt(trusting);
   }, [/^B2/]));
+  results.push(await expectFail("N7 B 按切片各算短缺（拆开的同一句话各说一遍）", () => {
+    // 复核前的样子：每条切片单独成一张回执，各拿自己的人数去比引文
+    const perSlice: BuildFn = (r, sl) => ({ ...buildExecReceipt(r, sl), lines: sl.flatMap((x) => buildExecReceipt(r, [x]).lines) });
+    B_shortfallReceipt(verifiedAskedQuantity, perSlice);
+  }, [/^B7a/, /^B7b/]));
   const n = results.filter(Boolean).length;
   console.log(`\n=== ${n === results.length ? `NEGCTL OK — ${n}/${results.length} 条 ★ 真 FAIL` : `NEGCTL BROKEN — 只有 ${n}/${results.length} 条咬住`} ===`);
   if (n !== results.length) process.exit(1);

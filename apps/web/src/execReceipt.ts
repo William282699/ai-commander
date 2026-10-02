@@ -269,6 +269,15 @@ function economyLine(action: IntentType, agg: EconomyAgg, outcome: ExecOutcome):
  */
 export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): ExecReceipt {
   const facts: ExecFact[] = [];
+  // B（复核 P0-1）：短缺句按整件事算，不按切片算——同一句「10个兵」被模型按兵种拆成 4＋6 两条时，
+  //   逐条各算会印两句假的「这一批只有 4 个 / 6 个」。同一个动作、同一个去处只有一条 ⇒ 挂在那一条；
+  //   有几条 ⇒ 只在下面合计行说一次、数的是整组，且要求每条都挂着同一句引文；
+  //   引文不齐（有的没挂、挂的不一样）⇒ 分不清是不是同一句话，一个字都不说。
+  const sameJobKey = (sl: DispatchSlice) => `${sl.action}§${sl.destinationName}`;
+  const quoteKey = (sl: DispatchSlice) =>
+    sl.askedQuantity ? `${sl.askedQuantity.quote}§${sl.askedQuantity.count}` : null;
+  const sameJobSize = new Map<string, number>();
+  for (const sl of slices) if (!sl.economy) sameJobSize.set(sameJobKey(sl), (sameJobSize.get(sameJobKey(sl)) ?? 0) + 1);
   const lines: string[] = [];
 
   for (const slice of slices) {
@@ -353,8 +362,9 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
     const parts: string[] = [];
     // B：这一批一共被调到几个（下令＋已在办＋被拒）比长官亲口说的少 ⇒ 在"已下令/已出发"那半句后补一句短缺。
     //   一个都没新下令时不补（那句本来就以"没有执行/没有重新下令"起头，短缺不是重点）。
+    //   同一句引文拆成了几条时这里不补，由下面合计行按整组说一次。
     const touched = appliedCount + alreadyCount + rejectedCount;
-    const shortfall = slice.askedQuantity && touched < slice.askedQuantity.count
+    const shortfall = slice.askedQuantity && sameJobSize.get(sameJobKey(slice)) === 1 && touched < slice.askedQuantity.count
       ? `（您说的「${slice.askedQuantity.quote}」，这一批只有 ${touched} 个）` : "";
     if (appliedCount > 0) {
       parts.push((slice.appliedLine
@@ -386,7 +396,7 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
     const groups = new Map<string, DispatchSlice[]>();
     for (const slice of slices) {
       if (slice.economy) continue;
-      const key = `${slice.action}§${slice.destinationName}`;
+      const key = sameJobKey(slice);
       groups.set(key, [...(groups.get(key) ?? []), slice]);
     }
     for (const group of groups.values()) {
@@ -402,7 +412,13 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
         already.size > 0 ? `${already.size} 个已经在${phrase}` : "",
         rejected.size > 0 ? `${rejected.size} 个没接到命令` : "",
       ].filter(Boolean);
-      lines.push(`合计：${parts.join("，")}。`);
+      // B：这一组每条都挂着同一句长官引文（＝同一句话被拆开了）⇒ 短缺按整组在这里说一次。
+      const k0 = quoteKey(group[0]);
+      const oneQuote = k0 !== null && group.every((sl) => quoteKey(sl) === k0) ? group[0].askedQuantity! : null;
+      const groupTouched = applied.size + already.size + rejected.size;
+      const groupShortfall = oneQuote && groupTouched < oneQuote.count
+        ? `（您说的「${oneQuote.quote}」，这一批只有 ${groupTouched} 个）` : "";
+      lines.push(`合计：${parts.join("，")}${groupShortfall}。`);
     }
   }
 
