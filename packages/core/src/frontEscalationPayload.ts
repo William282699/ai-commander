@@ -324,16 +324,48 @@ export function locationPhraseFor(state: GameState, members: Unit[]): string | n
  *
  * 病例（REVIEW-FABLE §一.3）：任务行只有 to=烽火台 act=defend，没有现址，问"烽火台那边有我们的人吗"
  * 一半被读成"在烽火台"；只补 loc 不补 eta 时，行上唯一的数字 left=8 被编成"预计 8 分钟"。
- * 所以两者成对：loc 照 locationPhraseFor（不确定就省略，不编）；只有短语是「向X行进中」、
- * 且每个成员都有目标时才给 eta（同 FRONT_JUDGMENT 的 etaOf：最慢成员、向上取整、算不出就省略）。
+ * 所以两者成对：loc 用与 locationPhraseFor 同一套短语（「X附近」/「向X行进中」，去处叫不出就省略，不编）；
+ * eta 只随「向X行进中」、且那几个人都有目标时给（同 FRONT_JUDGMENT 的 etaOf：最慢成员、向上取整、算不出就省略）。
+ * A″：一批人散在几处时按人真在哪分组分写（见函数体）。
  */
 export function dispatchWhereabouts(state: GameState, members: Unit[]): { loc: string | null; etaSec: number | null } {
   if (members.length === 0) return { loc: null, etaSec: null };
-  const loc = locationPhraseFor(state, members);
-  if (loc === null || !loc.startsWith("向")) return { loc, etaSec: null };
-  const targets = members.map((u) => u.target).filter((t): t is Position => t !== null);
-  if (targets.length !== members.length) return { loc, etaSec: null };
-  return { loc, etaSec: etaOf(state, members.map((u) => u.id), centroidOf(targets)) };
+  // A″（复核 Q3 ＋ 重放实测）：一批人可能散在几处——有人已到、有人在路上、有人半路停下来打仗
+  //   或掉了队。一句「X附近 / 向X行进中」替全批说话，要么整行省略（知道却不说：62 s「到齐了吗」
+  //   0/10、8/10 把 left=8 编成分钟），要么拿全批质心起名（重放 66–100 s：已到烽火台的 4 个和
+  //   停在 47 格外的 1 辆一平均，落到「中央战线附近」——假地名；110 s 起 8 个都叫「烽火台附近」，
+  //   那 1 辆其实没到）。所以按人真在哪分组，各用现成的短语机器起名，不新造词：
+  //   · 在途的按去处分：每人都要有目标、目标叫得出地名，否则整句省略（同 A′ 的 P6）；
+  //   · 停着的按空间成簇（战场板 / preflight 同一套 spatialGroups），每簇按自己的位置起名：
+  //     12 格内有地名 ⇒「X附近」，没有 ⇒ preflight 同款方位短语（nearestPlaceWithin ?? bearingPhrase）。
+  //   只有一组 ⇒ 不带人数（与 A′ 逐字同）；几组 ⇒「3个烽火台附近+5个向烽火台行进中」，停着的在前、
+  //   在途的在后，eta 只在恰好一个去处时给、只算在途那几个（停着的人不进最慢成员）。
+  const movingBy = new Map<string, Unit[]>();
+  for (const u of members.filter(isActuallyMoving)) {
+    const place = u.target !== null ? nearestPlaceWithin(state, u.target) : null;
+    if (place === null) return { loc: null, etaSec: null };
+    const k = `向${place}行进中`;
+    movingBy.set(k, [...(movingBy.get(k) ?? []), u]);
+  }
+  const byCountThenName = (a: { phrase: string; n: number }, b: { phrase: string; n: number }) =>
+    b.n - a.n || (a.phrase < b.phrase ? -1 : a.phrase > b.phrase ? 1 : 0);
+  const stillParts = spatialGroups(members.filter((u) => !isActuallyMoving(u))).map((g) => {
+    const c = centroidOf(g.map((u) => u.position));
+    const place = nearestPlaceWithin(state, c);
+    return { phrase: place !== null ? `${place}附近` : bearingPhrase(bearingNameFor(state, c)), n: g.length };
+  }).sort(byCountThenName);
+  const movingParts = Array.from(movingBy.entries()).map(([phrase, us]) => ({ phrase, n: us.length })).sort(byCountThenName);
+  const parts = [...stillParts, ...movingParts];
+  const loc = parts.length === 1 ? parts[0].phrase : parts.map((p) => `${p.n}个${p.phrase}`).join("+");
+  const etaSec = movingBy.size === 1 ? etaOfMoving(state, Array.from(movingBy.values())[0]) : null;
+  return { loc, etaSec };
+}
+
+/** 一群全员在途、都有目标的人多久到：最慢成员、向上取整、算不出为 null（同 FRONT_JUDGMENT 的 etaOf）。 */
+function etaOfMoving(state: GameState, moving: Unit[]): number | null {
+  const targets = moving.map((u) => u.target).filter((t): t is Position => t !== null);
+  if (targets.length !== moving.length) return null;
+  return etaOf(state, moving.map((u) => u.id), centroidOf(targets));
 }
 
 
