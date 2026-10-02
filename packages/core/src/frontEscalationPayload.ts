@@ -332,33 +332,36 @@ export function dispatchWhereabouts(state: GameState, members: Unit[]): { loc: s
   if (members.length === 0) return { loc: null, etaSec: null };
   // A″（复核 Q3 ＋ 重放实测）：一批人可能散在几处——有人已到、有人在路上、有人半路停下来打仗
   //   或掉了队。一句「X附近 / 向X行进中」替全批说话，要么整行省略（知道却不说：62 s「到齐了吗」
-  //   0/10、8/10 把 left=8 编成分钟），要么拿全批质心起名（重放 66–100 s：已到烽火台的 4 个和
+  //   0/10、8/10 把 left=8 编成分钟），要么拿全批质心起名（重放 66–100 s：已到烽火台的几个和
   //   停在 47 格外的 1 辆一平均，落到「中央战线附近」——假地名；110 s 起 8 个都叫「烽火台附近」，
-  //   那 1 辆其实没到）。所以按人真在哪分组，各用现成的短语机器起名，不新造词：
-  //   · 在途的按去处分：每人都要有目标、目标叫得出地名，否则整句省略（同 A′ 的 P6）；
-  //   · 停着的按空间成簇（战场板 / preflight 同一套 spatialGroups），每簇按自己的位置起名：
-  //     12 格内有地名 ⇒「X附近」，没有 ⇒ preflight 同款方位短语（nearestPlaceWithin ?? bearingPhrase）。
-  //   只有一组 ⇒ 不带人数（与 A′ 逐字同）；几组 ⇒「3个烽火台附近+5个向烽火台行进中」，停着的在前、
-  //   在途的在后，eta 只在恰好一个去处时给、只算在途那几个（停着的人不进最慢成员）。
-  const movingBy = new Map<string, Unit[]>();
+  //   那 1 辆其实没到）。所以按人真在哪分组，各用现成的起名规则，量尺只有一把（12 格）：
+  //   · 在途的：每人都要有目标、目标叫得出地名，否则整句省略（同 A′）。已进目的地 12 格内的
+  //     算「X附近」（与 FACILITIES 的「在场我方」同一把尺——62 s 烽火台在场 3、这里也是 3，
+  //     不然模型会把 3＋7 加成 10）；还在 12 格外的才是「向X行进中」。路过别的地名不算到。
+  //   · 停着的：按空间成簇（战场板 / preflight 同一套 spatialGroups），12 格内有地名 ⇒「X附近」；
+  //     没有 ⇒ preflight 同款方位短语，前面加「停在」（光一个方位读起来像还在走——110 s 实测
+  //     「1个前线油库西北」被读成在途，再去 left=8 里找时间编出「8分钟」）。
+  //   同名的合一组。只有一组 ⇒ 不带人数（与 A′ 逐字同）；几组 ⇒「3个烽火台附近+1个停在前线油库西北
+  //   +4个向烽火台行进中」，到了的 / 停着的在前、在途的在后；eta 只在恰好一个去处时给、只算还在
+  //   12 格外走的那几个。
+  const parts = new Map<string, Unit[]>();
+  const add = (phrase: string, us: Unit[]) => parts.set(phrase, [...(parts.get(phrase) ?? []), ...us]);
   for (const u of members.filter(isActuallyMoving)) {
-    const place = u.target !== null ? nearestPlaceWithin(state, u.target) : null;
-    if (place === null) return { loc: null, etaSec: null };
-    const k = `向${place}行进中`;
-    movingBy.set(k, [...(movingBy.get(k) ?? []), u]);
+    const dest = u.target !== null ? nearestPlaceWithin(state, u.target) : null;
+    if (dest === null) return { loc: null, etaSec: null };
+    add(nearestPlaceWithin(state, u.position) === dest ? `${dest}附近` : `向${dest}行进中`, [u]);
   }
-  const byCountThenName = (a: { phrase: string; n: number }, b: { phrase: string; n: number }) =>
-    b.n - a.n || (a.phrase < b.phrase ? -1 : a.phrase > b.phrase ? 1 : 0);
-  const stillParts = spatialGroups(members.filter((u) => !isActuallyMoving(u))).map((g) => {
+  for (const g of spatialGroups(members.filter((u) => !isActuallyMoving(u)))) {
     const c = centroidOf(g.map((u) => u.position));
     const place = nearestPlaceWithin(state, c);
-    return { phrase: place !== null ? `${place}附近` : bearingPhrase(bearingNameFor(state, c)), n: g.length };
-  }).sort(byCountThenName);
-  const movingParts = Array.from(movingBy.entries()).map(([phrase, us]) => ({ phrase, n: us.length })).sort(byCountThenName);
-  const parts = [...stillParts, ...movingParts];
-  const loc = parts.length === 1 ? parts[0].phrase : parts.map((p) => `${p.n}个${p.phrase}`).join("+");
-  const etaSec = movingBy.size === 1 ? etaOfMoving(state, Array.from(movingBy.values())[0]) : null;
-  return { loc, etaSec };
+    add(place !== null ? `${place}附近` : `停在${bearingPhrase(bearingNameFor(state, c))}`, g);
+  }
+  const isEnRoute = (phrase: string) => phrase.startsWith("向");
+  const ordered = Array.from(parts.entries()).sort(([pa, ua], [pb, ub]) =>
+    Number(isEnRoute(pa)) - Number(isEnRoute(pb)) || ub.length - ua.length || (pa < pb ? -1 : pa > pb ? 1 : 0));
+  const loc = ordered.length === 1 ? ordered[0][0] : ordered.map(([p, us]) => `${us.length}个${p}`).join("+");
+  const enRoute = ordered.filter(([p]) => isEnRoute(p));
+  return { loc, etaSec: enRoute.length === 1 ? etaOfMoving(state, enRoute[0][1]) : null };
 }
 
 /** 一群全员在途、都有目标的人多久到：最慢成员、向上取整、算不出为 null（同 FRONT_JUDGMENT 的 etaOf）。 */
