@@ -89,8 +89,12 @@ export interface DispatchSlice {
   alreadyDestinationName?: string;
   /**
    * place-presence B：长官亲口说的数量（见 verifiedAskedQuantity；缺席＝没有可核的引文）。
-   * 这一批真被调到的人（下令＋已在办＋被拒）比它少时，回执补一句「（您说的「10个兵」，这一批只有 8 个）」——
+   * 这一批真被调到的人（下令＋已在办＋被拒）比它少时，回执补一句「（不够您说的数）」——
    * 线上首局：长官要 10、那群只有 8，回执只说"8个单位出发了"，没说少了 2 个。
+   * 措辞只说"不够"、不复述长官原话也不再报人数（人数前半句已经有）：这句会留在对话记录里，
+   * 真模型实测（陈上一句已说错时能否自纠，各 N=20–50、盲标）：不加 48/50；本措辞 42/50（p=0.09）；
+   * 「（这一批只有 8 个，不够您说的数）」40/50；首版「（您说的「10个兵」，这一批只有 8 个）」10/20；
+   * 「（您说的「10个兵」，实际派出 8 个）」5/20——复述长官原话那两版压自纠压得最狠。
    */
   askedQuantity?: { quote: string; count: number };
 }
@@ -261,6 +265,9 @@ function economyLine(action: IntentType, agg: EconomyAgg, outcome: ExecOutcome):
   return `${head}${cost}${got}。`;
 }
 
+/** place-presence B：短缺句（措辞的取舍与实测见 DispatchSlice.askedQuantity）。 */
+export const SHORTFALL_CLAUSE = "（不够您说的数）";
+
 /**
  * 从**执行层的回报**造一份回执。屏上和耳朵拿到的是同一份。
  *
@@ -270,7 +277,7 @@ function economyLine(action: IntentType, agg: EconomyAgg, outcome: ExecOutcome):
 export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): ExecReceipt {
   const facts: ExecFact[] = [];
   // B（复核 P0-1）：短缺句按整件事算，不按切片算——同一句「10个兵」被模型按兵种拆成 4＋6 两条时，
-  //   逐条各算会印两句假的「这一批只有 4 个 / 6 个」。同一个动作、同一个去处只有一条 ⇒ 挂在那一条；
+  //   逐条各算会印两句假的短缺（4＜10、6＜10）。同一个动作、同一个去处只有一条 ⇒ 挂在那一条；
   //   有几条 ⇒ 只在下面合计行说一次、数的是整组，且要求每条都挂着同一句引文；
   //   引文不齐（有的没挂、挂的不一样）⇒ 分不清是不是同一句话，一个字都不说。
   const sameJobKey = (sl: DispatchSlice) => `${sl.action}§${sl.destinationName}`;
@@ -365,7 +372,7 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
     //   同一句引文拆成了几条时这里不补，由下面合计行按整组说一次。
     const touched = appliedCount + alreadyCount + rejectedCount;
     const shortfall = slice.askedQuantity && sameJobSize.get(sameJobKey(slice)) === 1 && touched < slice.askedQuantity.count
-      ? `（您说的「${slice.askedQuantity.quote}」，这一批只有 ${touched} 个）` : "";
+      ? SHORTFALL_CLAUSE : "";
     if (appliedCount > 0) {
       parts.push((slice.appliedLine
         ? slice.appliedLine(appliedCount).replace(/[。.]+$/, "")
@@ -417,7 +424,7 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
       const oneQuote = k0 !== null && group.every((sl) => quoteKey(sl) === k0) ? group[0].askedQuantity! : null;
       const groupTouched = applied.size + already.size + rejected.size;
       const groupShortfall = oneQuote && groupTouched < oneQuote.count
-        ? `（您说的「${oneQuote.quote}」，这一批只有 ${groupTouched} 个）` : "";
+        ? SHORTFALL_CLAUSE : "";
       lines.push(`合计：${parts.join("，")}${groupShortfall}。`);
     }
   }

@@ -38,7 +38,7 @@ import { NAME_RADIUS_TILES } from "../packages/core/src/frontEscalationPayload";
 import { ORIGIN_FACILITY_RADIUS, findDispatch, liveDispatchMembers } from "../packages/core/src/dispatchLedger";
 import { dispatchWhereabouts, nearestPlaceWithin, bearingNameFor, bearingPhrase } from "../packages/core/src/frontEscalationPayload";
 import { estimateSquadTravelTime } from "../packages/core/src/crisisResponse";
-import { buildExecReceipt, verifiedAskedQuantity } from "../apps/web/src/execReceipt";
+import { buildExecReceipt, verifiedAskedQuantity, SHORTFALL_CLAUSE } from "../apps/web/src/execReceipt";
 // 静态导入（不许 await import）：动态导入会让台架与被测代码各载一份 core，编队号在一份里登记、在另一份里查不到
 import { harness, serverRoutes, source, oldFunctions } from "./chainHarness";
 import { buildDigestForChannel } from "../apps/web/src/digestHelper";
@@ -254,7 +254,7 @@ function B_shortfallReceipt(ask: AskFn, build: BuildFn = buildExecReceipt): void
   const line = (applied: number[], asked: ReturnType<AskFn>) =>
     buildExecReceipt(res(applied), [{ action: "defend", destinationName: "烽火台", orderIndexes: [0], ...(asked ? { askedQuantity: asked } : {}) }]).lines.join(" ");
   const b1 = line(ids8, ask("10个兵", "从中央前哨派10个兵去烽火台"));
-  check("B1 有引文且短缺 → 补句", b1.includes("（您说的「10个兵」，这一批只有 8 个）"), b1);
+  check("B1 有引文且短缺 → 补句「（不够您说的数）」", b1 === "已下令 8 个单位前往烽火台设防（不够您说的数）。" && SHORTFALL_CLAUSE === "（不够您说的数）", b1);
   const b2 = line(ids8, ask("10个兵", "从中央前哨派兵去烽火台"));
   check("B2 引文不在长官原话里（模型写的）→ 不补", !b2.includes("您说的"), b2);
   const b3 = line(ids8, ask(undefined, "从中央前哨派10个兵去烽火台"));
@@ -277,8 +277,8 @@ function B_shortfallReceipt(ask: AskFn, build: BuildFn = buildExecReceipt): void
   const b7a = multi([[30, 31, 32, 33], [34, 35, 36, 37, 38, 39]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: q10 }]);
   check("B7a 拆成 4＋6＝10 → 一句短缺都不说", clauses(b7a).length === 0, b7a.join(" | "));
   const b7b = multi([[30, 31, 32], [34, 35, 36, 37]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: q10 }]);
-  check("B7b 拆成 3＋4＝7 → 恰好一句、挂在合计行、数的是整组 7",
-    clauses(b7b).length === 1 && clauses(b7b)[0].startsWith("合计：") && clauses(b7b)[0].includes("（您说的「10个兵」，这一批只有 7 个）"), b7b.join(" | "));
+  check("B7b 拆成 3＋4＝7 → 恰好一句、挂在合计行（合计 7 个）",
+    clauses(b7b).length === 1 && clauses(b7b)[0] === "合计：新下令 7 个单位前往烽火台设防（不够您说的数）。", b7b.join(" | "));
   const b7c = multi([[30, 31, 32, 33], [34, 35, 36]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: null }]);
   check("B7c 同一件事只有一条挂了引文（分不清是不是同一句话）→ 不说", clauses(b7c).length === 0, b7c.join(" | "));
   const b7d = multi([[30, 31], [34, 35, 36]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: ask("5个", "派10个兵去烽火台，再派5个") }]);
@@ -288,7 +288,7 @@ function B_shortfallReceipt(ask: AskFn, build: BuildFn = buildExecReceipt): void
     { dest: "北线前哨", asked: ask("5个兵", "派3个兵去烽火台，5个兵去北线前哨") },
   ]);
   check("B7e 两件事各一条：只有短的那件（烽火台 2<3）说，挂在它自己那句",
-    clauses(b7e).length === 1 && !clauses(b7e)[0].startsWith("合计：") && clauses(b7e)[0].includes("（您说的「3个兵」，这一批只有 2 个）"), b7e.join(" | "));
+    clauses(b7e).length === 1 && clauses(b7e)[0] === "已下令 2 个单位前往烽火台设防（不够您说的数）。", b7e.join(" | "));
 }
 
 // ── R：重放线上那局 ──
@@ -369,7 +369,7 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
       ms.length === 8 && ms.every((u) => !movingGate(u)) && want === `7个烽火台附近+1个${m1At62.stillName}` && line === `${M1_LEGACY} loc=${want}`, `${line} ｜ 期望 loc=${want}`);
   }
   const r1 = receipts[0].join(" | ");
-  check("B6 重放：第一回合回执补「（您说的「10个兵」，这一批只有 8 个）」", r1.includes("（您说的「10个兵」，这一批只有 8 个）"), r1);
+  check("B6 重放：第一回合回执「…8个单位出发了，前往烽火台（不够您说的数）。」", r1.includes("8个单位出发了，前往烽火台（不够您说的数）。"), r1);
   (globalThis as any).__FP_DIGESTS__ = digests;
 }
 
