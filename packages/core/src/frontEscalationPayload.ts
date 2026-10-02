@@ -27,10 +27,11 @@ import type {
   Unit,
   Squad,
   CrisisEvent,
+  Dispatch,
 } from "@ai-commander/shared";
 import { isDispatchablePlayerUnit } from "@ai-commander/shared";
 import { frontEscalationFacts } from "./director";
-import { frontCenterPos, battleAnchorFor, estimateSquadTravelTime } from "./crisisResponse";
+import { frontCenterPos, battleAnchorFor, estimateSquadTravelTime, estimateTravelTime } from "./crisisResponse";
 // v4 §8: the clustering moved DOWN to frontDestination so the destination
 // resolver can use it without importing this module (which would close the
 // crisisResponse ↔ frontEscalationPayload loop). Same function, one copy.
@@ -324,51 +325,121 @@ export function locationPhraseFor(state: GameState, members: Unit[]): string | n
  *
  * 病例（REVIEW-FABLE §一.3）：任务行只有 to=烽火台 act=defend，没有现址，问"烽火台那边有我们的人吗"
  * 一半被读成"在烽火台"；只补 loc 不补 eta 时，行上唯一的数字 left=8 被编成"预计 8 分钟"。
- * 所以两者成对：loc 用与 locationPhraseFor 同一套短语（「X附近」/「向X行进中」，去处叫不出就省略，不编）；
- * eta 只随「向X行进中」、且那几个人都有目标时给（同 FRONT_JUDGMENT 的 etaOf：最慢成员、向上取整、算不出就省略）。
- * A″：一批人散在几处时按人真在哪分组分写（见函数体）。
+ * 所以两者成对：loc 只用现成的地名 / 方位短语，叫不出就整句省略，不编；eta 只随「向X行进中」给。
+ *
+ * A″：一批人可能散在几处——有人已到、有人在路上、有人半路停下来打仗或掉了队（重放实测：#33 接敌后
+ * idle、丢目标、停在 47 格外再不动，台账仍算它）。一句话替全批说话要么省略（知道却不说：62 s「到齐了吗」
+ * 0/10、8/10 把 left=8 编成分钟），要么拿质心起名（假地名；110 s 把没到的那辆也说成「烽火台附近」）。
+ * 所以**逐人**按真在哪归组，三种说法、一把 12 格尺：
+ *   ·「X附近」     ——到了：离**引擎真送他去的地方**12 格内，动没动都算。那个地方＝台账记下的他那道令的
+ *                    终点（destPosById）所在的地名；to= 写的是一个设施、且终点就在它跟前时直接用这个设施
+ *                    （与 FACILITIES「在场我方」同一个圆心；已毁的设施 FACILITIES 照印，这里也照认）。
+ *                    不按 to= 的名字去找：派去一条战线，引擎真去的是线上某个据点，战线几何中心在几十格外；
+ *                    区域名、「出发地（X附近）」也都找不回一个点（上手测前复核实测：按名字找会把路过的算到了、
+ *                    到了的反倒算「停在」）。
+ *   ·「向X行进中」 ——在走、还没到：他当下的终点（路线令取航点表最后一个）若就是他被派去的地方，X 用那个
+ *                    地方的名字（同一个去处只有一个叫法）；否则（半路去追敌人之类）用终点附近的地名。
+ *                    叫不出就整句省略（同 A′）。
+ *   ·「停在…」     ——没在走、也没到：12 格内有地名＝「停在X附近」；没有＝按空间成簇，用 preflight 同款
+ *                    方位短语「停在<地名><方位>」；连方位原点都没有（只剩地图中心罗盘，如「中央方向」，
+ *                    会和中央前哨/中央战线撞名）⇒ 整句省略。「停在」两个字是实测出来的：没有它，
+ *                    「1个前线油库西北」被读成还在走，模型去 left=8 里找时间（110 s 3/20 → 加上后 19/20）。
+ * 同一说法合一组；只有一组 ⇒ 不带人数；几组 ⇒「3个烽火台附近+1个停在前线油库西北+4个向烽火台行进中」，
+ * 到了的在前、停在别处的其次、在途的在后（在途排最前时 eta 紧贴停着那组，39/40 被说成「43秒后全部抵达」）；
+ * eta 只在恰好一组在途时给、只算那几个人；带路线的按航点逐段累加（直线会把绕路的少报一半）。
  */
-export function dispatchWhereabouts(state: GameState, members: Unit[]): { loc: string | null; etaSec: number | null } {
-  if (members.length === 0) return { loc: null, etaSec: null };
-  // A″（复核 Q3 ＋ 重放实测）：一批人可能散在几处——有人已到、有人在路上、有人半路停下来打仗
-  //   或掉了队。一句「X附近 / 向X行进中」替全批说话，要么整行省略（知道却不说：62 s「到齐了吗」
-  //   0/10、8/10 把 left=8 编成分钟），要么拿全批质心起名（重放 66–100 s：已到烽火台的几个和
-  //   停在 47 格外的 1 辆一平均，落到「中央战线附近」——假地名；110 s 起 8 个都叫「烽火台附近」，
-  //   那 1 辆其实没到）。所以按人真在哪分组，各用现成的起名规则，量尺只有一把（12 格）：
-  //   · 在途的：每人都要有目标、目标叫得出地名，否则整句省略（同 A′）。已进目的地 12 格内的
-  //     算「X附近」（与 FACILITIES 的「在场我方」同一把尺——62 s 烽火台在场 3、这里也是 3，
-  //     不然模型会把 3＋7 加成 10）；还在 12 格外的才是「向X行进中」。路过别的地名不算到。
-  //   · 停着的：按空间成簇（战场板 / preflight 同一套 spatialGroups），12 格内有地名 ⇒「X附近」；
-  //     没有 ⇒ preflight 同款方位短语，前面加「停在」（光一个方位读起来像还在走——110 s 实测
-  //     「1个前线油库西北」被读成在途，再去 left=8 里找时间编出「8分钟」）。
-  //   同名的合一组。只有一组 ⇒ 不带人数（与 A′ 逐字同）；几组 ⇒「3个烽火台附近+1个停在前线油库西北
-  //   +4个向烽火台行进中」，到了的 / 停着的在前、在途的在后；eta 只在恰好一个去处时给、只算还在
-  //   12 格外走的那几个。
-  const parts = new Map<string, Unit[]>();
-  const add = (phrase: string, us: Unit[]) => parts.set(phrase, [...(parts.get(phrase) ?? []), ...us]);
-  for (const u of members.filter(isActuallyMoving)) {
-    const dest = u.target !== null ? nearestPlaceWithin(state, u.target) : null;
-    if (dest === null) return { loc: null, etaSec: null };
-    add(nearestPlaceWithin(state, u.position) === dest ? `${dest}附近` : `向${dest}行进中`, [u]);
+export function dispatchWhereabouts(
+  state: GameState,
+  members: Unit[],
+  /** 这批人的台账记录：to=（targetName）与每人被送去的点（destPosById）。缺席 ⇒ 没有「到了」这一类。 */
+  d?: Pick<Dispatch, "targetName" | "destPosById">,
+): { loc: string | null; etaSec: number | null } {
+  const none = { loc: null, etaSec: null };
+  if (members.length === 0) return none;
+  type Kind = "arrived" | "stopped" | "enRoute";
+  const parts = new Map<string, { kind: Kind; units: Unit[] }>();
+  const add = (phrase: string, kind: Kind, us: Unit[]) => {
+    const p = parts.get(phrase);
+    if (p) p.units.push(...us); else parts.set(phrase, { kind, units: [...us] });
+  };
+  const namedFacility = d?.targetName ? facilityByName(state, d.targetName) : null;
+  const strays: Unit[] = [];
+  for (const u of members) {
+    const sentTo = sentPlaceOf(state, u, d?.destPosById?.[u.id], namedFacility);
+    if (sentTo !== null && dist(u.position, sentTo.position) <= NAME_RADIUS_TILES) { add(`${sentTo.name}附近`, "arrived", [u]); continue; }
+    if (isActuallyMoving(u)) {
+      const goal = finalGoalOf(u);
+      if (goal === null) return none;
+      const name = sentTo !== null && dist(goal, sentTo.position) <= NAME_RADIUS_TILES ? sentTo.name : nearestPlaceWithin(state, goal);
+      if (name === null) return none;
+      add(`向${name}行进中`, "enRoute", [u]);
+      continue;
+    }
+    const here = nearestPlaceWithin(state, u.position);
+    if (here !== null) add(`停在${here}附近`, "stopped", [u]);
+    else strays.push(u);
   }
-  for (const g of spatialGroups(members.filter((u) => !isActuallyMoving(u)))) {
-    const c = centroidOf(g.map((u) => u.position));
-    const place = nearestPlaceWithin(state, c);
-    add(place !== null ? `${place}附近` : `停在${bearingPhrase(bearingNameFor(state, c))}`, g);
+  for (const g of spatialGroups(strays)) {
+    const b = bearingNameFor(state, centroidOf(g.map((u) => u.position)));
+    if (b.origin === null) return none;
+    add(`停在${bearingPhrase(b)}`, "stopped", g);
   }
-  const isEnRoute = (phrase: string) => phrase.startsWith("向");
-  const ordered = Array.from(parts.entries()).sort(([pa, ua], [pb, ub]) =>
-    Number(isEnRoute(pa)) - Number(isEnRoute(pb)) || ub.length - ua.length || (pa < pb ? -1 : pa > pb ? 1 : 0));
-  const loc = ordered.length === 1 ? ordered[0][0] : ordered.map(([p, us]) => `${us.length}个${p}`).join("+");
-  const enRoute = ordered.filter(([p]) => isEnRoute(p));
-  return { loc, etaSec: enRoute.length === 1 ? etaOfMoving(state, enRoute[0][1]) : null };
+  const rank: Record<Kind, number> = { arrived: 0, stopped: 1, enRoute: 2 };
+  const ordered = Array.from(parts.entries()).sort(([pa, a], [pb, b]) =>
+    rank[a.kind] - rank[b.kind] || b.units.length - a.units.length || (pa < pb ? -1 : pa > pb ? 1 : 0));
+  const loc = ordered.length === 1 ? ordered[0][0] : ordered.map(([p, x]) => `${x.units.length}个${p}`).join("+");
+  const enRoute = ordered.filter(([, x]) => x.kind === "enRoute");
+  return { loc, etaSec: enRoute.length === 1 ? etaToGoals(state, enRoute[0][1].units) : null };
 }
 
-/** 一群全员在途、都有目标的人多久到：最慢成员、向上取整、算不出为 null（同 FRONT_JUDGMENT 的 etaOf）。 */
-function etaOfMoving(state: GameState, moving: Unit[]): number | null {
-  const targets = moving.map((u) => u.target).filter((t): t is Position => t !== null);
-  if (targets.length !== moving.length) return null;
-  return etaOf(state, moving.map((u) => u.id), centroidOf(targets));
+/**
+ * 这个人被送去的地方（名字＋圆心）。终点取台账记下的那一点（缺席时在走的人退用他当下的终点）；
+ * to= 是个设施、终点就在它 12 格内 ⇒ 用这个设施（含已毁的），圆心与 FACILITIES 一致，也不会被附近的标记顶掉；
+ * 否则用终点 12 格内最近的地名（标记 / 设施 / 战线中心，同取地名那套扫描）；都没有 ⇒ null。
+ */
+function sentPlaceOf(
+  state: GameState, u: Unit, recorded: Position | undefined, namedFacility: NearestPlace | null,
+): NearestPlace | null {
+  const dest = recorded ?? (isActuallyMoving(u) ? finalGoalOf(u) : null);
+  if (dest === null) return null;
+  if (namedFacility !== null && dist(dest, namedFacility.position) <= NAME_RADIUS_TILES) return namedFacility;
+  return nearestPlaceScan(state, dest, NAME_RADIUS_TILES);
+}
+
+/** 按名字找一个设施（**含已毁的**——FACILITIES 照印它、在场数照算）。只找设施：标记可以和设施同名，不许它顶替。 */
+function facilityByName(state: GameState, name: string): NearestPlace | null {
+  let hit: NearestPlace | null = null;
+  state.facilities.forEach((f) => { if (hit === null && f.name === name) hit = { name: f.name, position: f.position, d: 0 }; });
+  return hit;
+}
+
+/** 一个在走的人最终要去的点：带路线时是航点表的最后一个（下一个航点只是路过），否则就是 target。 */
+function finalGoalOf(u: Unit): Position | null {
+  return u.waypoints.length > 0 ? u.waypoints[u.waypoints.length - 1] : u.target;
+}
+
+/**
+ * 一组在走的人多久到：最慢成员、向上取整、算不出为 null。没带路线的人与 FRONT_JUDGMENT 的 etaOf 同口径
+ * （直线估计到这组终点的中心）；带路线的（航点不止一个）按「现在→航点1→…→终点」逐段累加——直线会把
+ * 绕路的少报一半以上（上手测前复核：前线公路去驼峰山脊直线报 18 s，实走约 75 s）。
+ */
+function etaToGoals(state: GameState, moving: Unit[]): number | null {
+  const goals = moving.map(finalGoalOf).filter((t): t is Position => t !== null);
+  if (goals.length !== moving.length) return null;
+  const anchor = centroidOf(goals);
+  let worst = 0;
+  for (const u of moving) {
+    let t: number;
+    if (u.waypoints.length > 1) {
+      t = 0;
+      let from = u.position;
+      for (const wp of u.waypoints) { t += estimateTravelTime(u, from, wp, state); from = wp; }
+    } else {
+      t = estimateTravelTime(u, u.position, anchor, state);
+    }
+    if (t > worst) worst = t;
+  }
+  return Number.isFinite(worst) && worst > 0 ? Math.ceil(worst) : null;
 }
 
 

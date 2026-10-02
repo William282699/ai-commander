@@ -97,6 +97,13 @@ export interface DispatchSlice {
    * 「（您说的「10个兵」，实际派出 8 个）」5/20——复述长官原话那两版压自纠压得最狠。
    */
   askedQuantity?: { quote: string; count: number };
+  /**
+   * place-presence B：这一条单子**自己**计划要几个（意图上的数字 quantity；不是数字 ⇒ 缺席）。
+   * 短缺句只在「这件事计划的人数合起来 ＝ 长官那句引文的数」时才判——那时引文说的正是这件事；
+   * 计划得比引文少（一句「一共10个」分两路各 5 个、只有一路抄了引文、两路抄的字不一样……），
+   * 引文就不是这件事一家的数，拿它来比只会印出假的短缺。缺席 ⇒ 不判（宁缺不错）。
+   */
+  plannedQuantity?: number;
 }
 
 export type ExecOutcome = "applied" | "partial" | "already_doing" | "none";
@@ -276,15 +283,31 @@ export const SHORTFALL_CLAUSE = "（不够您说的数）";
  */
 export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): ExecReceipt {
   const facts: ExecFact[] = [];
-  // B（复核 P0-1）：短缺句按整件事算，不按切片算——同一句「10个兵」被模型按兵种拆成 4＋6 两条时，
-  //   逐条各算会印两句假的短缺（4＜10、6＜10）。同一个动作、同一个去处只有一条 ⇒ 挂在那一条；
-  //   有几条 ⇒ 只在下面合计行说一次、数的是整组，且要求每条都挂着同一句引文；
-  //   引文不齐（有的没挂、挂的不一样）⇒ 分不清是不是同一句话，一个字都不说。
+  // B（复核 P0-1 ＋ 上手测前复核两轮）：短缺句判的是「长官这句引文说的那件事」——同一个动作、同一个去处，
+  //   这件事里每一条都挂着同一句引文，而且这几条**计划的人数合起来正好等于引文的数**（引文说的就是这件事）。
+  //   只有一条 ⇒ 挂在那条；有几条（按兵种拆开）⇒ 只在合计行说一次、数整组。
+  //   其余一律不说：一句「一共10个」分两路各 5 个（每一路计划 5 ≠ 10）、只有一路抄了引文、两路抄的字不一样、
+  //   一件事里混了别的引文或没引文的条、意图上没写数字（「百分之五十」这类也落在这里）。
+  //   两路各自说了数（「北线派5个，南线也派5个」，每一路计划 5 ＝ 5）⇒ 各判各的。
   const sameJobKey = (sl: DispatchSlice) => `${sl.action}§${sl.destinationName}`;
-  const quoteKey = (sl: DispatchSlice) =>
-    sl.askedQuantity ? `${sl.askedQuantity.quote}§${sl.askedQuantity.count}` : null;
   const sameJobSize = new Map<string, number>();
   for (const sl of slices) if (!sl.economy) sameJobSize.set(sameJobKey(sl), (sameJobSize.get(sameJobKey(sl)) ?? 0) + 1);
+  const byQuoteJob = new Map<string, DispatchSlice[]>();
+  for (const sl of slices) {
+    if (sl.economy || !sl.askedQuantity) continue;
+    const k = `${sl.askedQuantity.quote}§${sl.askedQuantity.count}|${sameJobKey(sl)}`;
+    byQuoteJob.set(k, [...(byQuoteJob.get(k) ?? []), sl]);
+  }
+  const clauseOnOwnLine = new Set<DispatchSlice>();
+  const clauseOnTotalLine = new Map<string, { quote: string; count: number }>();
+  for (const qs of byQuoteJob.values()) {
+    const job = sameJobKey(qs[0]);
+    if (sameJobSize.get(job) !== qs.length) continue;
+    if (qs.some((sl) => sl.plannedQuantity === undefined)) continue;
+    if (qs.reduce((a, sl) => a + (sl.plannedQuantity ?? 0), 0) !== qs[0].askedQuantity!.count) continue;
+    if (qs.length === 1) clauseOnOwnLine.add(qs[0]);
+    else clauseOnTotalLine.set(job, qs[0].askedQuantity!);
+  }
   const lines: string[] = [];
 
   for (const slice of slices) {
@@ -371,7 +394,7 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
     //   一个都没新下令时不补（那句本来就以"没有执行/没有重新下令"起头，短缺不是重点）。
     //   同一句引文拆成了几条时这里不补，由下面合计行按整组说一次。
     const touched = appliedCount + alreadyCount + rejectedCount;
-    const shortfall = slice.askedQuantity && sameJobSize.get(sameJobKey(slice)) === 1 && touched < slice.askedQuantity.count
+    const shortfall = slice.askedQuantity && clauseOnOwnLine.has(slice) && touched < slice.askedQuantity.count
       ? SHORTFALL_CLAUSE : "";
     if (appliedCount > 0) {
       parts.push((slice.appliedLine
@@ -406,7 +429,7 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
       const key = sameJobKey(slice);
       groups.set(key, [...(groups.get(key) ?? []), slice]);
     }
-    for (const group of groups.values()) {
+    for (const [key, group] of groups) {
       if (group.length < 2) continue;
       const rows = group.flatMap((sl) => sl.orderIndexes.map((i) => result.perOrder[i]).filter((r): r is NonNullable<typeof r> => r !== undefined));
       const applied = new Set(rows.flatMap((r) => r.appliedUnitIds));
@@ -419,12 +442,11 @@ export function buildExecReceipt(result: ApplyResult, slices: DispatchSlice[]): 
         already.size > 0 ? `${already.size} 个已经在${phrase}` : "",
         rejected.size > 0 ? `${rejected.size} 个没接到命令` : "",
       ].filter(Boolean);
-      // B：这一组每条都挂着同一句长官引文（＝同一句话被拆开了）⇒ 短缺按整组在这里说一次。
-      const k0 = quoteKey(group[0]);
-      const oneQuote = k0 !== null && group.every((sl) => quoteKey(sl) === k0) ? group[0].askedQuantity! : null;
+      // B：这一组每条都挂着同一句长官引文（＝同一句话被拆开了）⇒ 短缺按整组在这里说一次；
+      //   与单条那一路同规矩：一个都没新下令时不补。
+      const asked = clauseOnTotalLine.get(key);
       const groupTouched = applied.size + already.size + rejected.size;
-      const groupShortfall = oneQuote && groupTouched < oneQuote.count
-        ? SHORTFALL_CLAUSE : "";
+      const groupShortfall = asked && applied.size > 0 && groupTouched < asked.count ? SHORTFALL_CLAUSE : "";
       lines.push(`合计：${parts.join("，")}${groupShortfall}。`);
     }
   }

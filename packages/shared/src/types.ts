@@ -342,6 +342,12 @@ export interface Dispatch {
   originFacilityById?: Record<number, string>;
   /** 刀寅：这条记录是一道「回原处」的令（叫回）。 */
   recall?: boolean;
+  /**
+   * place-presence A″：这次外派每个人**引擎真送他去的点**（下令那一刻这人那道令的终点；叫回＝他的出发位置）。
+   * 「到了没有」以它为准，不按 to= 的名字去找——派去一条战线时引擎真去的是那条线上的某个据点，
+   * 战线几何中心在几十格外；区域名、「出发地（X附近）」也都不是能按名字找回的点。逐人记；没有终点的令不记。
+   */
+  destPosById?: Record<number, { x: number; y: number }>;
 }
 
 /** 下令方是谁。记账只认这个标记，**不认调用的是哪个函数**：

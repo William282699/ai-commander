@@ -3826,6 +3826,7 @@ export function ChatPanel({ getState, getSelectedUnitIds, getViewport, onCreateS
             appliedLine: (n: number) => ticketDispatchReceipt(boundTicket, n, receiptMode, { destinationName, gap }),
           } : {}),
           ...(askedQuantity ? { askedQuantity } : {}),
+          ...(typeof intent.quantity === "number" ? { plannedQuantity: intent.quantity } : {}),
         });
         // ── 刀C: 给这批 order 盖上来源标记，台账据此登记 ──
         // 记账只认这个标记，不认调用的是哪个函数：对话派兵走 applyOrders，

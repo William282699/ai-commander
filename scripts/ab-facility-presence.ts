@@ -12,14 +12,14 @@
 //   E  同一把尺：19 设施 × 多个时刻，countPlayerUnitsNear ＝ director.facilityEscalationFacts().nearbyPlayerUnits
 //   D  渲染：每个设施一行都带字段（敌方、中立也印、可为 0）；既有 token 逐字节前缀不变；节头图例
 //   R  重放线上那局到 43 s：中央 0 / 北线 8 / 南线 9 / 前线油库 4（实验用的那份信封）
-//   P  A′ DISPATCHES 行 loc= / eta≈：43 s 钉「loc=向烽火台行进中 eta≈60s」；全员停 → 「X附近」无 eta；
-//      有人没目标 → 省略；eta 只随「向X行进中」出现。A″ 一批人散在几处 ⇒ 按人真在哪分组分写：
-//      在途按去处（已进目的地 12 格内算「X附近」，与 FACILITIES 同尺）、停着的按空间成簇（12 格内无地名
-//      ⇒「停在」＋preflight 同款方位短语）；62 s 钉「loc=3个烽火台附近+1个停在前线油库西北+4个向烽火台行进中
-//      eta≈Ns」、110 s 钉「7个烽火台附近+1个停在前线油库西北」（分组、名字、eta 台架独立算）；停着的散两处
-//      各起名（P8）；去两处不给 eta（P9）；同尺合组（P10）；路过别处不算到（P11）
-//   B  回执短缺句：只认长官原话里逐字出现的数量引文；派得比它少才补「（不够您说的数）」；
-//      同一句话被拆成几条 ⇒ 按整组只在合计行说一次，引文不齐不说（B7）
+//   P  A′/A″ DISPATCHES 行 loc= / eta≈（逐人归组、一把 12 格尺）：离这批去处 12 格内＝「X附近」（与 FACILITIES
+//      在场同圆心，已毁的去处也认）；在走的＝「向<终点所在地名>行进中」（终点取航点表最后一个）；停在别处的＝
+//      「停在X附近」或「停在<地名><方位>」，只剩地图中心罗盘就整句省略。43 s 钉「loc=向烽火台行进中 eta≈60s」、
+//      62 s「loc=3个烽火台附近+1个停在前线油库西北+4个向烽火台行进中 eta≈43s」、110 s「7个烽火台附近+1个停在前线油库西北」
+//      （分组、名字、eta 台架独立算；P2x 自证已上线 A′ 在这两刻说法不同）；P3–P17 合成；P16 一把尺不变式；
+//      P0 台架参照实现（全开）与引擎逐例同，负对照逐项摘开关
+//   B  回执短缺句：只认长官原话里逐字出现的数量引文；派得比它少才补「（不够您说的数）」；按引文算——一句引文只落在
+//      一件事上才说（单条挂本句、几条挂合计行且须有新下令）；跨了几个去处或混了别的 ⇒ 不说（B7–B9）
 //
 // 用法（worktree 根；播种与生产序泵帧照档案复现脚本）：
 //   node --import ./scripts/recorder-seed-random.mjs --import tsx scripts/ab-facility-presence.ts --synthetic
@@ -37,8 +37,8 @@ import type { GameState, Position } from "@ai-commander/shared";
 import { FACILITY_GATE, facilityEscalationFacts } from "../packages/core/src/director";
 import { NAME_RADIUS_TILES } from "../packages/core/src/frontEscalationPayload";
 import { ORIGIN_FACILITY_RADIUS, findDispatch, liveDispatchMembers } from "../packages/core/src/dispatchLedger";
-import { dispatchWhereabouts, nearestPlaceWithin, bearingNameFor, bearingPhrase, spatialGroups } from "../packages/core/src/frontEscalationPayload";
-import { estimateSquadTravelTime } from "../packages/core/src/crisisResponse";
+import { dispatchWhereabouts, nearestPlaceWithin, bearingNameFor, bearingPhrase, spatialGroups, locationPhraseFor } from "../packages/core/src/frontEscalationPayload";
+import { estimateSquadTravelTime, estimateTravelTime, frontCenterPos } from "../packages/core/src/crisisResponse";
 import { buildExecReceipt, verifiedAskedQuantity, SHORTFALL_CLAUSE } from "../apps/web/src/execReceipt";
 // 静态导入（不许 await import）：动态导入会让台架与被测代码各载一份 core，编队号在一份里登记、在另一份里查不到
 import { harness, serverRoutes, source, oldFunctions } from "./chainHarness";
@@ -79,8 +79,8 @@ const FACILITY_SUFFIX = / 在场我方=(\d+)单位$/;
 /** 引擎自己的移动门（sim.ts tick 第 1 步；与 frontEscalationPayload.isActuallyMoving 同义，台架照抄一份做独立期望值）。 */
 const movingGate = (u: any) => u.state === "moving" || u.state === "retreating" || u.state === "patrolling" || (u.state === "defending" && u.target !== null);
 const centroid = (ps: Position[]) => ({ x: ps.reduce((a, p) => a + p.x, 0) / ps.length, y: ps.reduce((a, p) => a + p.y, 0) / ps.length });
-/** 台架独立算的「一个停着的人 / 一簇停着的人」该叫什么：12 格内地名 ⇒ X附近，否则「停在」＋preflight 同款方位短语。 */
-const stillName = (s: GameState, c: Position) => { const p = nearestPlaceWithin(s, c); return p !== null ? `${p}附近` : `停在${bearingPhrase(bearingNameFor(s, c))}`; };
+/** 台架独立算的「停在别处的一个人 / 一簇人」该叫什么：12 格内有地名 ⇒ 停在X附近，否则「停在」＋preflight 同款方位短语。 */
+const stillName = (s: GameState, c: Position) => { const p = nearestPlaceWithin(s, c); return p !== null ? `停在${p}附近` : `停在${bearingPhrase(bearingNameFor(s, c))}`; };
 const LEGEND = "---FACILITIES---"; // 节头不带图例（验收：图例让第三回合掉分，已去掉）
 
 // ── F：同一把尺 ──
@@ -180,102 +180,339 @@ function D_rendering(states: { label: string; s: GameState }[], mutate?: (digest
   }
 }
 
-// ── P：A′ 现址规则（合成局面） ──
+// ── P：A′/A″ 现址规则（合成局面） ──
+//
+// 期望值由台架按定义独立算：「X附近」＝离这人被送去的地方 12 格内（to= 是设施时圆心就是那个设施，
+// 与 FACILITIES 在场同一个圆心）；「向X行进中」＝在走、X 取被送去的地方（当下终点在那儿时）；
+// 「停在…」＝没在走、也没到。每例另核一条不变式（rulerAgrees）：到了那组的人数 ＝ 成员里离那个圆心
+// 12 格内的人数，各组人数相加 ＝ 成员数。
 
-type WhereFn = (state: GameState, members: any[]) => { loc: string | null; etaSec: number | null };
-function P_whereaboutsRules(where: WhereFn): void {
-  console.log("\n── P A′ loc= / eta≈ 规则 ──");
-  const s = freshState();
-  const inf = [...s.units.values()].filter((u) => u.team === "player" && u.type === "infantry").slice(0, 3);
-  const OBS = s.facilities.get("ea_observation_post")!.position;
-  const REP = s.facilities.get("ea_repair_station")!.position;
-  // 全员停在修理厂旁：「野战修理厂附近」，不给 eta
-  inf.forEach((u, i) => { u.position = { x: REP.x + i, y: REP.y }; u.state = "idle"; u.target = null; });
-  let w = where(s, inf);
-  check("P3 全员停在据点旁 → loc=X附近、无 eta", w.loc === "野战修理厂附近" && w.etaSec === null, JSON.stringify(w));
-  // 全员在途、都有目标 → 「向烽火台行进中」＋ eta
-  inf.forEach((u, i) => { u.position = { x: 330 + i, y: 100 }; u.state = "moving"; u.target = { x: OBS.x + i, y: OBS.y }; });
-  w = where(s, inf);
-  check("P4 全员在途 → loc=向烽火台行进中、eta 为正整数", w.loc === "向烽火台行进中" && Number.isInteger(w.etaSec) && (w.etaSec ?? 0) > 0, JSON.stringify(w));
-  // A″ 动静混合 → 按子集分写；eta 只算在途那两个（停着的那个离烽火台远得多，算进去就会拖长）
-  inf[0].position = { x: REP.x, y: REP.y }; inf[0].state = "idle"; inf[0].target = null;
-  inf.slice(1).forEach((u, i) => { u.position = { x: OBS.x + 15 + i, y: OBS.y }; u.state = "moving"; u.target = { x: OBS.x + i, y: OBS.y }; });
-  const movingIds = inf.slice(1).map((u) => u.id);
-  const tgtC = { x: (inf[1].target!.x + inf[2].target!.x) / 2, y: (inf[1].target!.y + inf[2].target!.y) / 2 };
-  const etaMoving = Math.ceil(estimateSquadTravelTime(s, movingIds, tgtC));
-  const etaAll = Math.ceil(estimateSquadTravelTime(s, inf.map((u) => u.id), tgtC));
-  w = where(s, inf);
-  check("P5 动静混合 → loc=1个野战修理厂附近+2个向烽火台行进中、eta＝只算在途两个",
-    etaAll > etaMoving && w.loc === "1个野战修理厂附近+2个向烽火台行进中" && w.etaSec === etaMoving, JSON.stringify({ ...w, etaMoving, etaAll }));
-  // A″ 停着的那部分说不出地名 → 整句省略（不编）
-  let nameless: Position | null = null;
-  for (let y = 0; y < 300 && !nameless; y += 4) for (let x = 0; x < 400 && !nameless; x += 4) if (nearestPlaceWithin(s, { x, y }) === null) nameless = { x, y };
-  inf[0].position = { ...nameless! };
-  w = where(s, inf);
-  const bearingThere = `停在${bearingPhrase(bearingNameFor(s, nameless!))}`;
-  check(`P5b 动静混合、停着的那个 12 格内没地名 → 「停在」＋preflight 同款方位短语「${bearingThere}」`,
-    nameless !== null && w.loc === `1个${bearingThere}+2个向烽火台行进中` && w.etaSec === etaMoving, JSON.stringify({ ...w, nameless }));
-  // A″ 在途那部分有人没目标 → 整句省略
-  inf[0].position = { x: REP.x, y: REP.y }; inf[2].target = null;
-  w = where(s, inf);
-  check("P5c 动静混合、在途那部分有人没目标 → 省略", w.loc === null && w.etaSec === null, JSON.stringify(w));
-  // 全员在动但有人没目标 → 省略
-  inf.slice(1).forEach((u, i) => { u.position = { x: OBS.x + 15 + i, y: OBS.y }; u.state = "moving"; u.target = { x: OBS.x + i, y: OBS.y }; });
-  inf[0].state = "moving"; inf[0].target = null;
-  w = where(s, inf);
-  check("P6 有人没目标 → 省略", w.loc === null && w.etaSec === null, JSON.stringify(w));
-  // eta 只随「向」短语：停着的那一路永远不出 eta
-  inf.forEach((u, i) => { u.position = { x: REP.x + i, y: REP.y }; u.state = "idle"; u.target = null; });
-  check("P7 eta 只随「向X行进中」出现", where(s, inf).etaSec === null);
-  // A″ 停着的人散在两处 → 各簇各起名，不拿全体质心起一个名（质心会落在两处之间：假地名或没名）
-  inf[0].position = { x: REP.x, y: REP.y };
-  inf[1].position = { x: OBS.x, y: OBS.y }; inf[2].position = { x: OBS.x + 1, y: OBS.y };
-  w = where(s, inf);
-  check("P8 停着的人散在两处 → loc=2个烽火台附近+1个野战修理厂附近、无 eta", w.loc === "2个烽火台附近+1个野战修理厂附近" && w.etaSec === null, JSON.stringify(w));
-  // A″ 在途的去两个地方 → 各写各的，eta 不给（说不清是哪一路的）
-  inf[1].position = { x: OBS.x + 15, y: OBS.y }; inf[1].state = "moving"; inf[1].target = { x: OBS.x, y: OBS.y };
-  inf[2].position = { x: REP.x + 15, y: REP.y }; inf[2].state = "moving"; inf[2].target = { x: REP.x, y: REP.y };
-  w = where(s, inf);
-  check("P9 在途的去两处 → 各写一组、eta 省略", w.loc === `1个野战修理厂附近+${["向烽火台行进中", "向野战修理厂行进中"].sort().map((x) => `1个${x}`).join("+")}` && w.etaSec === null, JSON.stringify(w));
-  // A″ 全员停在一处、12 格内没地名 → 方位短语（A′ 时整句省略；同一套起名规则，不因只有一簇就改口）
-  inf.forEach((u, i) => { u.position = { x: nameless!.x + i, y: nameless!.y }; u.state = "idle"; u.target = null; });
-  w = where(s, inf);
-  const bearingAll = stillName(s, centroid(inf.map((u) => u.position)));
-  check(`P3b 全员停在没地名的地方 → loc=${bearingAll}、无 eta`, bearingAll.startsWith("停在") && w.loc === bearingAll && w.etaSec === null, JSON.stringify(w));
-  // A″ 一把尺：在途但已进目的地 12 格内 ⇒ 算「X附近」（与 FACILITIES 在场同尺），和停在那儿的合一组；eta 只算 12 格外的
-  inf[0].position = { x: OBS.x, y: OBS.y }; inf[0].state = "idle"; inf[0].target = null;
-  inf[1].position = { x: OBS.x + 3, y: OBS.y }; inf[1].state = "moving"; inf[1].target = { x: OBS.x, y: OBS.y };
-  inf[2].position = { x: OBS.x + 20, y: OBS.y }; inf[2].state = "moving"; inf[2].target = { x: OBS.x + 1, y: OBS.y };
-  const etaFar = Math.ceil(estimateSquadTravelTime(s, [inf[2].id], inf[2].target!));
-  w = where(s, inf);
-  check("P10 在途已进目的地 12 格内 → 记「烽火台附近」（同 FACILITIES 尺）、与停着的合组；eta 只算 12 格外那个",
-    w.loc === "2个烽火台附近+1个向烽火台行进中" && w.etaSec === etaFar, JSON.stringify({ ...w, etaFar }));
-  // A″ 路过别的地名不算到：在修理厂旁边走、去的是烽火台 ⇒ 仍是「向烽火台行进中」
-  inf.forEach((u, i) => { u.position = { x: REP.x + i, y: REP.y + 1 }; u.state = "moving"; u.target = { x: OBS.x + i, y: OBS.y }; });
-  w = where(s, inf);
-  check("P11 路过别的地名（修理厂旁、去烽火台）→ 向烽火台行进中", w.loc === "向烽火台行进中" && (w.etaSec ?? 0) > 0, JSON.stringify(w));
+type DispatchLike = { targetName: string; destPosById?: Record<number, Position> };
+type WhereFn = (state: GameState, members: any[], d?: DispatchLike) => { loc: string | null; etaSec: number | null };
+/** 把 loc 拆回 [人数, 说法]；只有一组时不带人数 ⇒ 人数＝成员数。 */
+function parseLoc(loc: string, n: number): [number, string][] {
+  const parts = loc.split("+");
+  if (parts.length === 1) return [[n, loc]];
+  return parts.map((p) => { const m = p.match(/^(\d+)个(.+)$/); return m ? [Number(m[1]), m[2]] as [number, string] : [NaN, p]; });
+}
+const ruler: { label: string; ok: boolean; detail: string }[] = [];
+/** 到了那组（「<arrName>附近」）人数 ＝ 离 center 12 格内的成员数；各组相加 ＝ 成员数。 */
+function rulerAgrees(label: string, members: any[], arrName: string, center: Position, w: { loc: string | null }): void {
+  if (w.loc === null) return;
+  const parts = parseLoc(w.loc, members.length);
+  const near = members.filter((u) => Math.hypot(u.position.x - center.x, u.position.y - center.y) <= PLACE_NEAR_RADIUS_TILES).length;
+  const said = parts.filter(([, p]) => p === `${arrName}附近`).reduce((a, [k]) => a + k, 0);
+  const sum = parts.reduce((a, [k]) => a + k, 0);
+  ruler.push({ label, ok: said === near && sum === members.length, detail: `${w.loc} ｜ ${arrName} 12 格内 ${near}、说成「${arrName}附近」${said}、合计 ${sum}/${members.length}` });
 }
 
-/** 台架侧参照实现（只给负对照用）：开关逐项摘掉，看对应断言会不会真红。 */
-function refWhere(opts: { arriveByRuler: boolean; stopMarker: boolean }): WhereFn {
-  return (st, ms) => {
-    const parts = new Map<string, any[]>(); const add = (p: string, us: any[]) => parts.set(p, [...(parts.get(p) ?? []), ...us]);
-    for (const u of ms.filter(movingGate)) {
-      const dest = u.target ? nearestPlaceWithin(st, u.target) : null;
-      if (dest === null) return { loc: null, etaSec: null };
-      add(opts.arriveByRuler && nearestPlaceWithin(st, u.position) === dest ? `${dest}附近` : `向${dest}行进中`, [u]);
-    }
-    for (const g of spatialGroups(ms.filter((u: any) => !movingGate(u)))) {
-      const c = centroid(g.map((u) => u.position)); const p = nearestPlaceWithin(st, c);
-      add(p !== null ? `${p}附近` : `${opts.stopMarker ? "停在" : ""}${bearingPhrase(bearingNameFor(st, c))}`, g);
-    }
-    const er = (p: string) => p.startsWith("向");
-    const ord = Array.from(parts.entries()).sort(([a, ua], [b, ub]) => Number(er(a)) - Number(er(b)) || ub.length - ua.length || (a < b ? -1 : a > b ? 1 : 0));
-    const loc = ord.length === 1 ? ord[0][0] : ord.map(([p, us]) => `${us.length}个${p}`).join("+");
-    const en = ord.filter(([p]) => er(p));
-    const eta = en.length === 1 ? Math.ceil(estimateSquadTravelTime(st, en[0][1].map((u) => u.id), centroid(en[0][1].map((u) => u.target)))) : null;
-    return { loc, etaSec: eta !== null && eta > 0 ? eta : null };
+function P_whereaboutsRules(where: WhereFn): void {
+  console.log("\n── P A′/A″ loc= / eta≈ 规则 ──");
+  ruler.length = 0;
+  const s = freshState();
+  const inf = [...s.units.values()].filter((u) => u.team === "player" && u.type === "infantry").slice(0, 4);
+  const three = inf.slice(0, 3);
+  const OBS = s.facilities.get("ea_observation_post")!.position;     // 烽火台 (250,100)
+  const REP = s.facilities.get("ea_repair_station")!.position;       // 野战修理厂 (400,90)
+  const RIDGE = s.facilities.get("ea_miteirya_ridge")!.position;     // 驼峰山脊 (230,70)，2. 山脊战线中心离它 10 格
+  const CPOST = s.facilities.get("ea_player_central_post")!.position; // 中央前哨 (360,105)
+  const set = (u: any, pos: Position, state: string, target: Position | null, waypoints: Position[] = []) => {
+    u.position = { ...pos }; u.state = state; u.target = target ? { ...target } : null; u.waypoints = waypoints.map((p) => ({ ...p }));
   };
+  /** 一份台账样的记录：to= 名字＋每人被送去的点（默认全员同一点）。 */
+  const disp = (name: string, ms: any[], at: Position | ((u: any) => Position)): DispatchLike =>
+    ({ targetName: name, destPosById: Object.fromEntries(ms.map((u) => [u.id, typeof at === "function" ? at(u) : { ...at }])) });
+  const W = (label: string, ms: any[], d: DispatchLike, arrName: string, center: Position) => { const w = where(s, ms, d); rulerAgrees(label, ms, arrName, center, w); return w; };
+  const etaOfGoals = (ms: any[], goals: Position[]) => Math.ceil(estimateSquadTravelTime(s, ms.map((u) => u.id), centroid(goals)));
+  // 两个"12 格内没地名"的点：一个有方位原点（36 格内有地名），一个只剩地图中心罗盘
+  let withOrigin: Position | null = null, compassOnly: Position | null = null;
+  for (let y = 0; y < s.mapHeight && !(withOrigin && compassOnly); y += 3) for (let x = 0; x < s.mapWidth && !(withOrigin && compassOnly); x += 3) {
+    if (nearestPlaceWithin(s, { x, y }) !== null) continue;
+    const b = bearingNameFor(s, { x, y });
+    if (b.origin !== null && !withOrigin) withOrigin = { x, y };
+    if (b.origin === null && !compassOnly) compassOnly = { x, y };
+  }
+  const toObs = disp("烽火台", inf, OBS);
+  let w;
+
+  // P3 全员停在修理厂旁、被派去的是烽火台 ⇒「停在野战修理厂附近」；P3′ 被派去的就是修理厂 ⇒「野战修理厂附近」（到了）
+  three.forEach((u, i) => set(u, { x: REP.x + i, y: REP.y }, "idle", null));
+  w = W("P3", three, toObs, "烽火台", OBS);
+  check("P3 全员停在别处的据点旁 → loc=停在野战修理厂附近、无 eta", w.loc === "停在野战修理厂附近" && w.etaSec === null, JSON.stringify(w));
+  w = W("P3′", three, disp("野战修理厂", three, REP), "野战修理厂", REP);
+  check("P3′ 全员停在被派去的地方 12 格内 → loc=野战修理厂附近（到了）、无 eta", w.loc === "野战修理厂附近" && w.etaSec === null, JSON.stringify(w));
+  // P4 全员在途 → 「向烽火台行进中」＋ eta
+  three.forEach((u, i) => set(u, { x: 330 + i, y: 100 }, "moving", { x: OBS.x + i, y: OBS.y }));
+  w = W("P4", three, toObs, "烽火台", OBS);
+  check("P4 全员在途 → loc=向烽火台行进中、eta 为正整数", w.loc === "向烽火台行进中" && Number.isInteger(w.etaSec) && (w.etaSec ?? 0) > 0, JSON.stringify(w));
+  // P5 一个停在修理厂、两个在途（离烽火台 15 格）；eta 只算在途两个
+  set(three[0], REP, "idle", null);
+  three.slice(1).forEach((u, i) => set(u, { x: OBS.x + 15 + i, y: OBS.y }, "moving", { x: OBS.x + i, y: OBS.y }));
+  const etaMoving = etaOfGoals(three.slice(1), three.slice(1).map((u) => u.target!));
+  const etaAll = etaOfGoals(three, three.slice(1).map((u) => u.target!));
+  w = W("P5", three, toObs, "烽火台", OBS);
+  check("P5 动静混合 → loc=1个停在野战修理厂附近+2个向烽火台行进中、eta＝只算在途两个",
+    etaAll > etaMoving && w.loc === "1个停在野战修理厂附近+2个向烽火台行进中" && w.etaSec === etaMoving, JSON.stringify({ ...w, etaMoving, etaAll }));
+  // P5b 停着的那个 12 格内没地名、36 格内有 ⇒「停在<地名><方位>」
+  set(three[0], withOrigin!, "idle", null);
+  const bearingThere = `停在${bearingPhrase(bearingNameFor(s, withOrigin!))}`;
+  w = W("P5b", three, toObs, "烽火台", OBS);
+  check(`P5b 停着的那个 12 格内没地名 → 「停在」＋preflight 同款方位短语「${bearingThere}」`,
+    withOrigin !== null && bearingNameFor(s, withOrigin!).origin !== null && w.loc === `1个${bearingThere}+2个向烽火台行进中` && w.etaSec === etaMoving, JSON.stringify({ ...w, withOrigin }));
+  // P13 停着的那个连方位原点都没有（只剩地图中心罗盘）⇒ 整句省略（「中央方向」会和中央前哨/中央战线撞名）
+  set(three[0], compassOnly!, "idle", null);
+  w = W("P13", three, toObs, "烽火台", OBS);
+  check("P13 停着的只能说地图中心罗盘方位 → 整句省略", compassOnly !== null && w.loc === null && w.etaSec === null, JSON.stringify({ ...w, compassOnly }));
+  // P5c 在途那部分有人没目标 → 整句省略
+  set(three[0], REP, "idle", null); three[2].target = null; three[2].waypoints = [];
+  w = W("P5c", three, disp("", three, OBS), "烽火台", OBS);
+  check("P5c 在途的有人没目标、台账也没记点 → 省略", w.loc === null && w.etaSec === null, JSON.stringify(w));
+  // P6 全员在动但有人没目标（台账也没记点）→ 省略
+  three.forEach((u, i) => set(u, { x: OBS.x + 15 + i, y: OBS.y }, "moving", { x: OBS.x + i, y: OBS.y }));
+  three[0].target = null;
+  w = W("P6", three, { targetName: "" }, "烽火台", OBS);
+  check("P6 有人没目标 → 省略", w.loc === null && w.etaSec === null, JSON.stringify(w));
+  // P7 eta 只随「向」短语
+  three.forEach((u, i) => set(u, { x: REP.x + i, y: REP.y }, "idle", null));
+  check("P7 eta 只随「向X行进中」出现", where(s, three, toObs).etaSec === null);
+  // P8 停着的人散在两处：两个在烽火台、一个在修理厂
+  set(three[0], REP, "idle", null); set(three[1], OBS, "idle", null); set(three[2], { x: OBS.x + 1, y: OBS.y }, "idle", null);
+  w = W("P8", three, toObs, "烽火台", OBS);
+  check("P8 停着的散在两处 → loc=2个烽火台附近+1个停在野战修理厂附近、无 eta", w.loc === "2个烽火台附近+1个停在野战修理厂附近" && w.etaSec === null, JSON.stringify(w));
+  // P9 在途的去两个地方（一个半路去追别处）→ 各写各的，eta 不给
+  set(three[1], { x: OBS.x + 15, y: OBS.y }, "moving", OBS); set(three[2], { x: REP.x + 15, y: REP.y }, "moving", REP);
+  w = W("P9", three, toObs, "烽火台", OBS);
+  check("P9 在途的去两处 → 各写一组、eta 省略",
+    w.loc === `1个停在野战修理厂附近+${["向烽火台行进中", "向野战修理厂行进中"].sort().map((x) => `1个${x}`).join("+")}` && w.etaSec === null, JSON.stringify(w));
+  // P3b 全员停在 12 格内无地名处（有方位原点）→ 单组「停在<方位>」
+  three.forEach((u, i) => set(u, { x: withOrigin!.x + i, y: withOrigin!.y }, "idle", null));
+  const bearingAll = `停在${bearingPhrase(bearingNameFor(s, centroid(three.map((u) => u.position))))}`;
+  w = W("P3b", three, toObs, "烽火台", OBS);
+  check(`P3b 全员停在没地名的地方 → loc=${bearingAll}、无 eta`, w.loc === bearingAll && w.etaSec === null, JSON.stringify(w));
+  // P10 一把尺：被派去的地方旁边另有更近的地名（驼峰山脊 6 格处离 2. 山脊战线中心更近）——在途已进 12 格的照样算到了
+  const nearRidge = { x: RIDGE.x + 6, y: RIDGE.y };
+  set(three[0], RIDGE, "idle", null);
+  set(three[1], nearRidge, "moving", RIDGE);
+  set(three[2], { x: RIDGE.x + 25, y: RIDGE.y }, "moving", { x: RIDGE.x + 1, y: RIDGE.y });
+  const etaFar = etaOfGoals([three[2]], [three[2].target!]);
+  w = W("P10", three, disp("驼峰山脊", three, RIDGE), "驼峰山脊", RIDGE);
+  check("P10 在途已进去处 12 格内（哪怕旁边另有更近的地名）→ 记「驼峰山脊附近」；eta 只算 12 格外那个",
+    nearestPlaceWithin(s, nearRidge) !== "驼峰山脊" && w.loc === "2个驼峰山脊附近+1个向驼峰山脊行进中" && w.etaSec === etaFar, JSON.stringify({ ...w, etaFar, nearestAtNearRidge: nearestPlaceWithin(s, nearRidge) }));
+  // P11 路过别的地名不算到：在修理厂旁边走、去烽火台
+  three.forEach((u, i) => set(u, { x: REP.x + i, y: REP.y + 1 }, "moving", { x: OBS.x + i, y: OBS.y }));
+  w = W("P11", three, toObs, "烽火台", OBS);
+  check("P11 路过别的地名（修理厂旁、去烽火台）→ 向烽火台行进中", w.loc === "向烽火台行进中" && (w.etaSec ?? 0) > 0, JSON.stringify(w));
+  // P12 去处已被打掉（hp=0；FACILITIES 照印它、在场照算）——停在废墟上的照样是「沙漠弹药库附近」
+  const DEPOT_F = s.facilities.get("ea_ammo_depot")!; const DEPOT = DEPOT_F.position; const hp0 = DEPOT_F.hp; DEPOT_F.hp = 0;
+  three.forEach((u, i) => set(u, { x: DEPOT.x + i, y: DEPOT.y + 1 }, "idle", null));
+  const toDepot = disp("沙漠弹药库", three, DEPOT);
+  w = W("P12", three, toDepot, "沙漠弹药库", DEPOT);
+  check("P12 去处已毁、人停在上面 → loc=沙漠弹药库附近（与 FACILITIES 在场同圆心）", w.loc === "沙漠弹药库附近" && w.etaSec === null, JSON.stringify(w));
+  // P21 去处已毁、还有人在往那走 ⇒ 在途的也用它的名字，不因为废墟不算地名就整句省略
+  set(three[2], { x: DEPOT.x + 30, y: DEPOT.y }, "moving", DEPOT);
+  w = W("P21", three, toDepot, "沙漠弹药库", DEPOT);
+  check("P21 去处已毁、有人还在路上 → 2个沙漠弹药库附近+1个向沙漠弹药库行进中＋eta", w.loc === "2个沙漠弹药库附近+1个向沙漠弹药库行进中" && (w.etaSec ?? 0) > 0, JSON.stringify(w));
+  DEPOT_F.hp = hp0;
+  // P14 带路线的单：下一个航点在前线油库旁，终点是烽火台 ⇒ 说终点；eta 按航点逐段累加（比直线长）
+  const FUEL = s.facilities.get("ea_fuel_depot")!.position;
+  three.forEach((u, i) => { const wps = [{ x: FUEL.x, y: FUEL.y - 25 }, { x: OBS.x + i, y: OBS.y }]; set(u, { x: FUEL.x + 30 + i, y: FUEL.y }, "moving", wps[0], wps); });
+  const legs = Math.ceil(Math.max(...three.map((u) => { let t = 0, f = u.position; for (const wp of u.waypoints) { t += estimateTravelTime(u, f, wp, s); f = wp; } return t; })));
+  const straight = etaOfGoals(three, three.map((u) => u.waypoints[u.waypoints.length - 1]));
+  w = W("P14", three, toObs, "烽火台", OBS);
+  check("P14 走路线的：下一个航点在前线油库、终点烽火台 → 向烽火台行进中、eta 按航点逐段累加（与直线估计不同）",
+    legs !== straight && w.loc === "向烽火台行进中" && w.etaSec === legs, JSON.stringify({ ...w, legs, straight }));
+  // P15 一条拉长的停住纵队（交火停下）：烽火台以东 2/8/14/20 格——只有 12 格内的两个算到了
+  inf.forEach((u, i) => set(u, { x: OBS.x + [2, 8, 14, 20][i], y: OBS.y }, "attacking", null));
+  w = W("P15", inf, toObs, "烽火台", OBS);
+  check("P15 拉长的停住纵队 → 只有 12 格内的 2 个算「烽火台附近」", w.loc !== null && w.loc.startsWith("2个烽火台附近+") && w.etaSec === null, JSON.stringify(w));
+  // P17 停在别处的两个人相隔 10 格（成一簇）：一个在修理厂 12 格内、一个在外——逐人认地名，不拿那一簇的质心起一个名
+  const a = three[0], b = three[1];
+  set(a, { x: REP.x - 6, y: REP.y }, "idle", null); set(b, { x: REP.x - 16, y: REP.y }, "idle", null);
+  const na = stillName(s, a.position), nb = stillName(s, b.position), nc = stillName(s, centroid([a.position, b.position]));
+  w = W("P17", [a, b], toObs, "烽火台", OBS);
+  check(`P17 停在别处的一簇里一人在修理厂 12 格内、一人在外 → 各说各的（「${na}」／「${nb}」），不说成一簇「${nc}」`,
+    na !== nb && nc === na && w.loc === [`1个${na}`, `1个${nb}`].sort().join("+"), JSON.stringify(w));
+  // P18 派去一条战线（to=3. 中央战线），引擎真送去的是中央前哨（几何中心 (273,102) 离它 87 格）：
+  //   到了中央前哨的算「中央前哨附近」（与 FACILITIES 中央前哨在场同圆心），路过战线中心的不算到
+  const FC = frontCenterPos(s, s.fronts.find((f) => f.id === "front_center")!)!;
+  set(three[0], { x: CPOST.x + 2, y: CPOST.y }, "defending", null);
+  set(three[1], { x: CPOST.x - 5, y: CPOST.y + 3 }, "defending", { x: CPOST.x - 1, y: CPOST.y });
+  set(three[2], { x: FC.x, y: FC.y }, "defending", { x: CPOST.x + 1, y: CPOST.y });
+  w = W("P18", three, disp("3. 中央战线", three, CPOST), "中央前哨", CPOST);
+  check("P18 派去战线、真落点是中央前哨 → 2个中央前哨附近+1个向中央前哨行进中（路过战线中心的不算到）",
+    w.loc === "2个中央前哨附近+1个向中央前哨行进中" && (w.etaSec ?? 0) > 0, JSON.stringify(w));
+  // P19 叫回出发地（to=「出发地（南线前哨附近）」，每人被送去的是自己的出发位置）：到了的算「南线前哨附近」
+  const SPOST = s.facilities.get("ea_player_south_post")!.position;
+  const origins = new Map(three.map((u, i) => [u.id, { x: SPOST.x - 3 + 3 * i, y: SPOST.y + 2 }]));
+  set(three[0], origins.get(three[0].id)!, "defending", null);
+  set(three[1], origins.get(three[1].id)!, "defending", null);
+  set(three[2], { x: SPOST.x - 40, y: SPOST.y }, "retreating", origins.get(three[2].id)!);
+  w = W("P19", three, disp("出发地（南线前哨附近）", three, (u) => origins.get(u.id)!), "南线前哨", SPOST);
+  check("P19 叫回出发地 → 2个南线前哨附近+1个向南线前哨行进中", w.loc === "2个南线前哨附近+1个向南线前哨行进中" && (w.etaSec ?? 0) > 0, JSON.stringify(w));
+  // P20 烽火台 8 格处有一面玩家标记「集结点」（取地名时标记优先）——派去烽火台的到了照样算「烽火台附近」，不被标记顶掉
+  const tags0 = s.tags; (s as any).tags = [...(s.tags ?? []), { id: "tag_bench", name: "集结点", position: { x: OBS.x - 8, y: OBS.y } }];
+  three.forEach((u, i) => set(u, { x: OBS.x + i, y: OBS.y }, "idle", null));
+  w = W("P20", three, toObs, "烽火台", OBS);
+  check("P20 去处旁边插了标记 → 到了的仍是「烽火台附近」", nearestPlaceWithin(s, OBS) === "集结点" && w.loc === "烽火台附近", JSON.stringify(w));
+  (s as any).tags = tags0;
+  // P22 去处是一面名叫「向阳坡」的标记：到了那组不许被当成在途（eta 不挂在它上面），在途那组的 eta 不丢
+  const HILL = { x: OBS.x, y: OBS.y + 40 };
+  (s as any).tags = [...(tags0 ?? []), { id: "tag_bench2", name: "向阳坡", position: HILL }];
+  set(three[0], HILL, "idle", null); set(three[1], { x: HILL.x + 1, y: HILL.y }, "idle", null);
+  set(three[2], { x: HILL.x + 30, y: HILL.y }, "moving", HILL);
+  const etaHill = etaOfGoals([three[2]], [HILL]);
+  w = W("P22", three, disp("向阳坡", three, HILL), "向阳坡", HILL);
+  check("P22 去处名字以「向」开头 → 2个向阳坡附近+1个向向阳坡行进中、eta 只算在途那个", w.loc === "2个向阳坡附近+1个向向阳坡行进中" && w.etaSec === etaHill, JSON.stringify({ ...w, etaHill }));
+  (s as any).tags = tags0;
+  // 一把尺不变式：上面每一例（有 loc 的）到了那组人数 ＝ 离被派去的地方 12 格内的人数
+  const bad = ruler.filter((r) => !r.ok);
+  check(`P16 一把尺：${ruler.length} 例里「<被派去的地方>附近」人数＝它 12 格内人数、各组相加＝成员数`, ruler.length >= 17 && bad.length === 0, bad.map((r) => `${r.label}: ${r.detail}`).join(" ‖ "));
+}
+
+/** 台架侧参照实现（只给负对照用）：与引擎同一套定义，开关逐项摘掉一条，看对应断言会不会真红。 */
+type RefOpts = { recordedDest: boolean; facilityFirst: boolean; arriveByDistance: boolean; finalGoal: boolean; routeLegs: boolean;
+  stopMarker: boolean; perUnitStopped: boolean; omitCompass: boolean; kindByStructure: boolean };
+const REF_ALL: RefOpts = { recordedDest: true, facilityFirst: true, arriveByDistance: true, finalGoal: true, routeLegs: true,
+  stopMarker: true, perUnitStopped: true, omitCompass: true, kindByStructure: true };
+function refWhere(off: Partial<RefOpts>): WhereFn {
+  const o = { ...REF_ALL, ...off };
+  return (st, ms, d) => {
+    const none = { loc: null, etaSec: null };
+    const R = PLACE_NEAR_RADIUS_TILES;
+    const dist2 = (p: Position, q: Position) => Math.hypot(p.x - q.x, p.y - q.y);
+    let fac: { name: string; position: Position } | null = null;
+    if (d?.targetName) st.facilities.forEach((f) => { if (!fac && f.name === d.targetName) fac = { name: f.name, position: { ...f.position } }; });
+    const facN = fac as { name: string; position: Position } | null;
+    const goal = (u: any): Position | null => (o.finalGoal && u.waypoints.length > 0 ? u.waypoints[u.waypoints.length - 1] : u.target);
+    const placeAt = (p: Position): { name: string; position: Position } | null => {
+      const name = nearestPlaceWithin(st, p); if (name === null) return null;
+      for (const t of (st as any).tags ?? []) if (t.name === name) return { name, position: t.position };
+      let hit: any = null; st.facilities.forEach((f) => { if (!hit && f.name === name) hit = { name, position: f.position }; });
+      if (hit) return hit;
+      const fr = st.fronts.find((f) => f.name === name); const c = fr ? frontCenterPos(st, fr) : null;
+      return c ? { name, position: c } : null;
+    };
+    const sentPlace = (u: any): { name: string; position: Position } | null => {
+      if (!o.recordedDest) {   // 上一版：按 to= 的名字找（标记 / 设施 / 战线中心）
+        if (!d?.targetName) return null;
+        for (const t of (st as any).tags ?? []) if (t.name === d.targetName) return { name: t.name, position: t.position };
+        if (facN) return facN;
+        const fr = st.fronts.find((f) => f.name === d.targetName); const c = fr ? frontCenterPos(st, fr) : null;
+        return c ? { name: d.targetName, position: c } : null;
+      }
+      const dest = d?.destPosById?.[u.id] ?? (movingGate(u) ? goal(u) : null);
+      if (!dest) return null;
+      if (o.facilityFirst && facN && dist2(dest, facN.position) <= R) return facN;
+      return placeAt(dest);
+    };
+    type K = "arrived" | "stopped" | "enRoute";
+    const parts = new Map<string, { k: K; us: any[] }>();
+    const add = (p: string, k: K, us: any[]) => { const x = parts.get(p); if (x) x.us.push(...us); else parts.set(p, { k, us: [...us] }); };
+    const strays: any[] = [];
+    for (const u of ms) {
+      const sp = sentPlace(u);
+      if (o.arriveByDistance && sp && dist2(u.position, sp.position) <= R) { add(`${sp.name}附近`, "arrived", [u]); continue; }
+      if (movingGate(u)) {
+        const g = goal(u); if (!g) return none;
+        if (!o.arriveByDistance) { const here = nearestPlaceWithin(st, u.position), there = nearestPlaceWithin(st, g); if (there && here === there) { add(`${there}附近`, "arrived", [u]); continue; } }
+        const name = sp && dist2(g, sp.position) <= R ? sp.name : nearestPlaceWithin(st, g);
+        if (name === null) return none;
+        add(`向${name}行进中`, "enRoute", [u]); continue;
+      }
+      if (!o.perUnitStopped) { strays.push(u); continue; }
+      const here = nearestPlaceWithin(st, u.position);
+      if (here !== null) add(`停在${here}附近`, "stopped", [u]); else strays.push(u);
+    }
+    for (const g of spatialGroups(strays)) {
+      const c = centroid(g.map((u) => u.position)); const p = nearestPlaceWithin(st, c);
+      if (p !== null) { add(`${o.stopMarker ? "停在" : ""}${p}附近`, "stopped", g); continue; }
+      const b = bearingNameFor(st, c);
+      if (o.omitCompass && b.origin === null) return none;
+      add(`${o.stopMarker ? "停在" : ""}${bearingPhrase(b)}`, "stopped", g);
+    }
+    const kindOf = (p: string, x: { k: K }): K => (o.kindByStructure ? x.k : p.startsWith("向") ? "enRoute" : x.k === "enRoute" ? "stopped" : x.k);
+    const rk: Record<K, number> = { arrived: 0, stopped: 1, enRoute: 2 };
+    const ord = Array.from(parts.entries()).sort(([a, xa], [b, xb]) => rk[kindOf(a, xa)] - rk[kindOf(b, xb)] || xb.us.length - xa.us.length || (a < b ? -1 : a > b ? 1 : 0));
+    const loc = ord.length === 1 ? ord[0][0] : ord.map(([p, x]) => `${x.us.length}个${p}`).join("+");
+    const en = ord.filter(([p, x]) => kindOf(p, x) === "enRoute");
+    let eta: number | null = null;
+    if (en.length === 1) {
+      const us = en[0][1].us; const gs = us.map(goal);
+      if (gs.every(Boolean)) {
+        const anchor = centroid(gs as Position[]);
+        let worst = 0;
+        for (const u of us) {
+          let t: number;
+          if (o.routeLegs && u.waypoints.length > 1) { t = 0; let f = u.position; for (const wp of u.waypoints) { t += estimateTravelTime(u, f, wp, st); f = wp; } }
+          else t = estimateTravelTime(u, u.position, anchor, st);
+          if (t > worst) worst = t;
+        }
+        eta = Number.isFinite(worst) && worst > 0 ? Math.ceil(worst) : null;
+      }
+    }
+    return { loc, etaSec: eta };
+  };
+}
+
+// ── Q：端到端——真的下令（applyOrders → 台账记下被送去的点）→ 泵帧 → 真信封那一行 ──
+//   派去一条战线（引擎真落点＝线上据点）与「叫回出发地」两条常见路，逐秒核：到了那组人数 ＝ 离落点据点 12 格内的人数，
+//   在途的叫同一个名字，从不出现「停在<落点据点>附近」（到了的不许被说成停在别处）。
+
+function Q_endToEnd(): void {
+  console.log("\n── Q 端到端：派去战线 / 叫回出发地 ──");
+  const s = freshState();
+  const SPOST = s.facilities.get("ea_player_south_post")!.position;
+  const CPOST = s.facilities.get("ea_player_central_post")!.position;
+  const near = (p: Position, q: Position) => Math.hypot(p.x - q.x, p.y - q.y) <= PLACE_NEAR_RADIUS_TILES;
+  // 南线前哨旁 4 个步兵（不在中央前哨 12 格内），派去「3. 中央战线」，落点＝中央前哨
+  const ids = [...s.units.values()].filter((u) => u.team === "player" && u.type === "infantry" && near(u.position, SPOST) && !near(u.position, CPOST)).slice(0, 4).map((u) => u.id);
+  const orders: any[] = ids.map((id, i) => ({ unitIds: [id], action: "defend", target: { x: CPOST.x - 1 + (i % 2), y: CPOST.y - 1 + Math.floor(i / 2) }, priority: "medium", origin: "advisor",
+    dispatchMeta: { group: "q1", sourceKind: "front", sourceKey: "front_south", action: "defend", targetName: "3. 中央战线" } }));
+  const res = core.applyOrders(s, orders);
+  const d = s.dispatches[s.dispatches.length - 1];
+  const rowOf = () => core.buildDigest(s, [], [], []).split("\n").find((l) => l.startsWith(`${d.id} `)) ?? "";
+  let frames = 0, bad: string[] = [], sawArrive = false, sawEnRoute = false, oldDiffers = 0, allInFor = 0;
+  const oldRule = refWhere({ recordedDest: false });
+  const end1 = s.time + 200;
+  for (let t = s.time + 2; t < end1; t += 2) {
+    pumpTo(s, t);
+    const ms = liveDispatchMembers(s, d);
+    const line = rowOf(); const m = line.match(/ loc=(\S+)/); if (!m) continue;
+    frames++;
+    const parts = parseLoc(m[1], ms.length);
+    const said = parts.filter(([, p]) => p === "中央前哨附近").reduce((a, [k]) => a + k, 0);
+    const inRing = ms.filter((u) => near(u.position, CPOST)).length;
+    if (said > 0) sawArrive = true; if (parts.some(([, p]) => p === "向中央前哨行进中")) sawEnRoute = true;
+    if (said !== inRing || parts.some(([, p]) => p === "停在中央前哨附近" || p === "3. 中央战线附近")) bad.push(`t${Math.round(s.time)} ${m[1]} 环内${inRing}`);
+    if (oldRule(s, ms, d).loc !== m[1]) oldDiffers++;
+    allInFor = ms.length > 0 && inRing === ms.length ? allInFor + 1 : 0;
+    if (allInFor >= 3) break; // 全到了、站稳 6 秒就叫回（再待下去会被敌军下一波打光，Q2 就没人可叫）
+  }
+  check(`Q1 派去「3. 中央战线」（落点中央前哨）：${frames} 帧里「中央前哨附近」人数＝中央前哨 12 格内人数，从不说「停在中央前哨附近」`,
+    res.appliedUnitIds.length === 4 && !!d.destPosById && frames >= 8 && allInFor >= 3 && sawArrive && sawEnRoute && bad.length === 0, bad.slice(0, 4).join(" ‖ ") || `frames=${frames} arrive=${sawArrive} enRoute=${sawEnRoute}`);
+  check(`Q1x 绊索自证：上一版（按 to= 名字找圆心）在同样这些帧里说法不同（${oldDiffers}/${frames} 帧）——Q1 分得出新旧`, oldDiffers > 0);
+  // 叫回：每人回自己的出发位置（南线前哨旁），to=「出发地（南线前哨附近）」
+  const back: any[] = ids.map((id) => ({ unitIds: [id], action: "retreat", target: { ...d.originPosById![id] }, priority: "medium", origin: "advisor",
+    dispatchMeta: { group: "q2", sourceKind: "dispatch", sourceKey: d.id, action: "retreat", targetName: "出发地（南线前哨附近）", returnTo: "origin" } }));
+  const resBack = core.applyOrders(s, back);
+  const d2 = s.dispatches[s.dispatches.length - 1];
+  info(`Q2 叫回：接令 ${resBack.appliedUnitIds.length}/${ids.length}（已在办 ${resBack.alreadyDoingUnitIds.length}、被拒 ${resBack.perOrder.reduce((a: number, p: any) => a + p.rejected.length, 0)}）；台账末条 ${d2.id} ${d2.status} to=${d2.targetName}；活成员 ${ids.filter((id) => (s.units.get(id)?.hp ?? 0) > 0).length}`);
+  const rowOf2 = () => core.buildDigest(s, [], [], []).split("\n").find((l) => l.startsWith(`${d2.id} `)) ?? "";
+  frames = 0; bad = []; sawArrive = false; sawEnRoute = false;
+  const end2 = s.time + 200;
+  for (let t = s.time + 2; t < end2; t += 2) {
+    pumpTo(s, t);
+    const ms = liveDispatchMembers(s, d2);
+    const line = rowOf2(); const m = line.match(/ loc=(\S+)/); if (!m) continue;
+    frames++;
+    const parts = parseLoc(m[1], ms.length);
+    const said = parts.filter(([, p]) => p === "南线前哨附近").reduce((a, [k]) => a + k, 0);
+    const inRing = ms.filter((u) => near(u.position, SPOST)).length;
+    if (said > 0) sawArrive = true; if (parts.some(([, p]) => p === "向南线前哨行进中")) sawEnRoute = true;
+    if (said !== inRing || parts.some(([, p]) => p === "停在南线前哨附近")) bad.push(`t${Math.round(s.time)} ${m[1]} 环内${inRing}`);
+  }
+  check(`Q2 叫回出发地（to=出发地（南线前哨附近））：${frames} 帧里「南线前哨附近」人数＝南线前哨 12 格内人数，从不说「停在南线前哨附近」`,
+    d2.id !== d.id && resBack.appliedUnitIds.length >= 3 && frames >= 15 && sawArrive && sawEnRoute && bad.length === 0, bad.slice(0, 4).join(" ‖ ") || `frames=${frames} arrive=${sawArrive} enRoute=${sawEnRoute}`);
 }
 
 // ── B：回执短缺句（纯函数） ──
@@ -286,44 +523,67 @@ function B_shortfallReceipt(ask: AskFn, build: BuildFn = buildExecReceipt): void
   console.log("\n── B 回执短缺句 ──");
   const ids8 = [30, 31, 32, 33, 34, 35, 36, 37];
   const res = (applied: number[]) => ({ appliedUnitIds: applied, alreadyDoingUnitIds: [], rejectedUnitIds: [], perOrder: [{ appliedUnitIds: applied, alreadyDoingUnitIds: [], rejected: [] }] }) as any;
-  const line = (applied: number[], asked: ReturnType<AskFn>) =>
-    buildExecReceipt(res(applied), [{ action: "defend", destinationName: "烽火台", orderIndexes: [0], ...(asked ? { askedQuantity: asked } : {}) }]).lines.join(" ");
+  // planned：null＝意图上没写数字（缺席）；不传＝与引文同数
+  const line = (applied: number[], asked: ReturnType<AskFn>, planned: number | null = asked?.count ?? null) =>
+    build(res(applied), [{ action: "defend", destinationName: "烽火台", orderIndexes: [0], ...(asked ? { askedQuantity: asked } : {}), ...(planned !== null ? { plannedQuantity: planned } : {}) }]).lines.join(" ");
   const b1 = line(ids8, ask("10个兵", "从中央前哨派10个兵去烽火台"));
-  check("B1 有引文且短缺 → 补句「（不够您说的数）」", b1 === "已下令 8 个单位前往烽火台设防（不够您说的数）。" && SHORTFALL_CLAUSE === "（不够您说的数）", b1);
-  const b2 = line(ids8, ask("10个兵", "从中央前哨派兵去烽火台"));
+  check("B1 有引文、计划 10、只派出 8 → 补句「（不够您说的数）」", b1 === "已下令 8 个单位前往烽火台设防（不够您说的数）。" && SHORTFALL_CLAUSE === "（不够您说的数）", b1);
+  const b2 = line(ids8, ask("10个兵", "从中央前哨派兵去烽火台"), 10);
   check("B2 引文不在长官原话里（模型写的）→ 不补", !b2.includes("您说的"), b2);
-  const b3 = line(ids8, ask(undefined, "从中央前哨派10个兵去烽火台"));
+  const b3 = line(ids8, ask(undefined, "从中央前哨派10个兵去烽火台"), 10);
   check("B3 没有引文 → 不补", !b3.includes("您说的"), b3);
   const b4 = line([34, 35], ask("两个", "从中路派两个步兵去北线前哨"));
   check("B4 引文「两个」派 2 → 不补", !b4.includes("您说的"), b4);
   const b5 = line(ids8, ask("都", "中央前哨的都派去烽火台"));
   check("B5 引文不是数（「都」）→ 不补", !b5.includes("您说的"), b5);
+  const b13 = line(ids8, ask("10个兵", "从中央前哨派10个兵去烽火台"), null);
+  check("B13 意图上没写数字（计划人数缺席）→ 不判、不补", !b13.includes("您说的"), b13);
+  const b15 = line(ids8.slice(0, 6), ask("百分之五十", "中央战线百分之五十的部队去守烽火台"), 6);
+  check("B15「百分之五十」被读成 50，计划 6 ≠ 50 → 不补", !b15.includes("您说的"), b15);
 
-  // B7（复核 P0-1）：同一句「10个兵」被模型按兵种拆成几条（规划器判"各条之和＝引文数"不歧义、直接执行）。
-  //   短缺按整件事算、只说一次（挂合计行）；引文不齐 ⇒ 不说。
-  const multi = (batches: number[][], sl: { dest: string; asked: ReturnType<AskFn> }[]) => {
-    const perOrder = batches.map((b) => ({ appliedUnitIds: b, alreadyDoingUnitIds: [], rejected: [] }));
-    const r = { appliedUnitIds: batches.flat(), alreadyDoingUnitIds: [], rejectedUnitIds: [], perOrder } as any;
-    return build(r, sl.map((x, i) => ({ action: "defend", destinationName: x.dest, orderIndexes: [i], ...(x.asked ? { askedQuantity: x.asked } : {}) }))).lines;
+  // B7–B12：同一句引文被拆成几条——按兵种拆（同一个去处）或分两路（不同去处）。
+  type Batch = number[] | { applied: number[]; already: number[] };
+  const multi = (batches: Batch[], sl: { dest: string; asked: ReturnType<AskFn>; planned?: number }[]) => {
+    const perOrder = batches.map((b) => Array.isArray(b) ? { appliedUnitIds: b, alreadyDoingUnitIds: [], rejected: [] } : { appliedUnitIds: b.applied, alreadyDoingUnitIds: b.already, rejected: [] });
+    const r = { appliedUnitIds: perOrder.flatMap((p) => p.appliedUnitIds), alreadyDoingUnitIds: perOrder.flatMap((p) => p.alreadyDoingUnitIds), rejectedUnitIds: [], perOrder } as any;
+    return build(r, sl.map((x, i) => ({ action: "defend", destinationName: x.dest, orderIndexes: [i], ...(x.asked ? { askedQuantity: x.asked } : {}), ...(x.planned !== undefined ? { plannedQuantity: x.planned } : {}) }))).lines;
   };
   const said = "从中央前哨派10个兵去烽火台";
   const q10 = ask("10个兵", said);
   const clauses = (ls: string[]) => ls.filter((l) => l.includes("您说的"));
-  const b7a = multi([[30, 31, 32, 33], [34, 35, 36, 37, 38, 39]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: q10 }]);
-  check("B7a 拆成 4＋6＝10 → 一句短缺都不说", clauses(b7a).length === 0, b7a.join(" | "));
-  const b7b = multi([[30, 31, 32], [34, 35, 36, 37]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: q10 }]);
-  check("B7b 拆成 3＋4＝7 → 恰好一句、挂在合计行（合计 7 个）",
+  const b7a = multi([[30, 31, 32, 33], [34, 35, 36, 37, 38, 39]], [{ dest: "烽火台", asked: q10, planned: 4 }, { dest: "烽火台", asked: q10, planned: 6 }]);
+  check("B7a 按兵种拆成 4＋6＝10 → 一句短缺都不说", clauses(b7a).length === 0, b7a.join(" | "));
+  const b7b = multi([[30, 31, 32], [34, 35, 36, 37]], [{ dest: "烽火台", asked: q10, planned: 4 }, { dest: "烽火台", asked: q10, planned: 6 }]);
+  check("B7b 按兵种拆、计划 4＋6、只派出 3＋4 → 恰好一句、挂在合计行",
     clauses(b7b).length === 1 && clauses(b7b)[0] === "合计：新下令 7 个单位前往烽火台设防（不够您说的数）。", b7b.join(" | "));
-  const b7c = multi([[30, 31, 32, 33], [34, 35, 36]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: null }]);
-  check("B7c 同一件事只有一条挂了引文（分不清是不是同一句话）→ 不说", clauses(b7c).length === 0, b7c.join(" | "));
-  const b7d = multi([[30, 31], [34, 35, 36]], [{ dest: "烽火台", asked: q10 }, { dest: "烽火台", asked: ask("5个", "派10个兵去烽火台，再派5个") }]);
+  const b7c = multi([[30, 31, 32, 33], [34, 35, 36]], [{ dest: "烽火台", asked: q10, planned: 7 }, { dest: "烽火台", asked: null, planned: 3 }]);
+  check("B7c 同一件事只有一条挂了引文 → 不说", clauses(b7c).length === 0, b7c.join(" | "));
+  const b7d = multi([[30, 31], [34, 35, 36]], [{ dest: "烽火台", asked: q10, planned: 5 }, { dest: "烽火台", asked: ask("5个", "派10个兵去烽火台，再派5个"), planned: 5 }]);
   check("B7d 同一件事两条引文不一样 → 不说", clauses(b7d).length === 0, b7d.join(" | "));
   const b7e = multi([[30, 31], [34, 35, 36, 37, 38]], [
-    { dest: "烽火台", asked: ask("3个兵", "派3个兵去烽火台，5个兵去北线前哨") },
-    { dest: "北线前哨", asked: ask("5个兵", "派3个兵去烽火台，5个兵去北线前哨") },
+    { dest: "烽火台", asked: ask("3个兵", "派3个兵去烽火台，5个兵去北线前哨"), planned: 3 },
+    { dest: "北线前哨", asked: ask("5个兵", "派3个兵去烽火台，5个兵去北线前哨"), planned: 5 },
   ]);
   check("B7e 两件事各一条：只有短的那件（烽火台 2<3）说，挂在它自己那句",
     clauses(b7e).length === 1 && clauses(b7e)[0] === "已下令 2 个单位前往烽火台设防（不够您说的数）。", b7e.join(" | "));
+  const twoWay = ask("一共10个", "一共10个，分两路去守北线前哨和南线前哨");
+  const b8a = multi([[30, 31, 32, 33, 34], [35, 36, 37, 38, 39]], [{ dest: "北线前哨", asked: twoWay, planned: 5 }, { dest: "南线前哨", asked: twoWay, planned: 5 }]);
+  check("B8a 一句「一共10个」分两路 5＋5＝10 → 一句短缺都不说", clauses(b8a).length === 0, b8a.join(" | "));
+  const b8b = multi([[30, 31, 32, 33, 34], [35, 36, 37]], [{ dest: "北线前哨", asked: twoWay, planned: 5 }, { dest: "南线前哨", asked: twoWay, planned: 5 }]);
+  check("B8b 一句引文分两路且真少了（5＋3）→ 引文不是哪一路一家的数，不说（宁缺不错）", clauses(b8b).length === 0, b8b.join(" | "));
+  const b9 = multi([{ applied: [], already: [30, 31, 32] }, { applied: [], already: [33, 34, 35] }], [{ dest: "北线前哨", asked: q10, planned: 5 }, { dest: "北线前哨", asked: q10, planned: 5 }]);
+  check("B9 拆成两条、全是已在办（一个没新下令）→ 合计行也不补（与单条同规矩）", clauses(b9).length === 0 && b9.some((l) => l.startsWith("合计：")), b9.join(" | "));
+  const tenTwo = "派10个兵去守北线前哨和南线前哨";
+  const b10 = multi([[30, 31, 32, 33, 34], [35, 36, 37, 38, 39]], [{ dest: "北线前哨", asked: ask("10个兵", tenTwo), planned: 5 }, { dest: "南线前哨", asked: null, planned: 5 }]);
+  check("B10 分两路、只有一路抄了引文（计划 5 ≠ 10）→ 不说", clauses(b10).length === 0, b10.join(" | "));
+  const b11 = multi([[30, 31, 32, 33, 34], [35, 36, 37, 38, 39]], [{ dest: "北线前哨", asked: ask("10个兵", tenTwo), planned: 5 }, { dest: "南线前哨", asked: ask("10个", tenTwo), planned: 5 }]);
+  check("B11 分两路、两路抄的字不一样（「10个兵」/「10个」）→ 不说", clauses(b11).length === 0, b11.join(" | "));
+  const fiveFive = "北线前哨派5个，南线前哨也派5个";
+  const b12 = multi([[30, 31, 32, 33, 34], [35, 36, 37]], [{ dest: "北线前哨", asked: ask("5个", fiveFive), planned: 5 }, { dest: "南线前哨", asked: ask("5个", fiveFive), planned: 5 }]);
+  check("B12 两路各自说了「5个」、南线只派出 3 → 只在南线那句说一次",
+    clauses(b12).length === 1 && clauses(b12)[0] === "已下令 3 个单位前往南线前哨设防（不够您说的数）。", b12.join(" | "));
+  const b14 = multi([{ applied: [30, 31, 32, 33, 34, 35, 36, 37], already: [38, 39] }], [{ dest: "烽火台", asked: q10, planned: 10 }]);
+  check("B14 新下令 8＋已在办 2＝10（已在办的也是长官要的人）→ 不补", clauses(b14).length === 0, b14.join(" | "));
 }
 
 // ── R：重放线上那局 ──
@@ -347,18 +607,21 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
   const digests: string[] = [];
   const receipts: string[][] = [];
   let got = { central: -1, coastal: -1, south: -1, fuel: -1 };
-  let m1At62 = { still: -1, near: -1, far: -1, eta: -1, stillName: "", movingNamed: false, obsPresent: -1 };
+  let m1At62: { still: number; near: number; far: number; eta: number; stillName: string; movingNamed: boolean; obsPresent: number; legacyA1: string | null } =
+    { still: -1, near: -1, far: -1, eta: -1, stillName: "", movingNamed: false, obsPresent: -1, legacyA1: "?" };
   for (const turn of fx.turns) {
     pumpTo(state, turn.t); view = turn.view;
     onState?.(`t${Math.round(turn.t)}`, state);
     if (Math.round(turn.t) === 62) {
-      // A″ 的独立期望值：M1 谁停着、谁在途（引擎自己的移动门）、在途那几个最慢的多久到
+      // A″ 的独立期望值（按定义算）：离烽火台 12 格内的 ⇒ 到了；其余在走的 ⇒ 在途（eta 只算他们、按终点）；其余停着的 ⇒ 停在别处
       const ms = liveDispatchMembers(state, findDispatch(state, "M1")!);
-      const mv = ms.filter(movingGate); const st = ms.filter((u) => !movingGate(u));
-      const near = mv.filter((u) => nearestPlaceWithin(state, u.position) === "烽火台"); const far = mv.filter((u) => !near.includes(u));
-      m1At62 = { still: st.length, near: near.length, far: far.length, eta: Math.ceil(estimateSquadTravelTime(state, far.map((u) => u.id), centroid(far.map((u) => u.target!)))),
-        stillName: st.length === 1 ? stillName(state, st[0].position) : "?", movingNamed: mv.every((u) => nearestPlaceWithin(state, u.target!) === "烽火台"),
-        obsPresent: countPlayerUnitsNear(state, state.facilities.get("ea_observation_post")!.position, PLACE_NEAR_RADIUS_TILES) };
+      const OBSP = state.facilities.get("ea_observation_post")!.position;
+      const near = ms.filter((u) => Math.hypot(u.position.x - OBSP.x, u.position.y - OBSP.y) <= PLACE_NEAR_RADIUS_TILES);
+      const far = ms.filter((u) => !near.includes(u) && movingGate(u)); const st = ms.filter((u) => !near.includes(u) && !movingGate(u));
+      m1At62 = { still: st.length, near: near.length, far: far.length,
+        eta: Math.ceil(estimateSquadTravelTime(state, far.map((u) => u.id), centroid(far.map((u) => u.waypoints.length ? u.waypoints[u.waypoints.length - 1] : u.target!)))),
+        stillName: st.length === 1 ? stillName(state, st[0].position) : "?", movingNamed: far.every((u) => nearestPlaceWithin(state, u.target!) === "烽火台"),
+        obsPresent: countPlayerUnitsNear(state, OBSP, PLACE_NEAR_RADIUS_TILES), legacyA1: locationPhraseFor(state, ms) };
     }
     if (Math.round(turn.t) === 43) {
       const n = (id: string) => count(state, state.facilities.get(id)!.position, PLACE_NEAR_RADIUS_TILES);
@@ -393,19 +656,25 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
   // 4 个步兵在路上，1 辆坦克（#33）43–62 s 间接敌后停下、丢了目标，停在前线油库西北、离烽火台 47 格。
   const p2Want = `${M1_LEGACY} loc=3个烽火台附近+1个${m1At62.stillName}+4个向烽火台行进中 eta≈${m1At62.eta}s`;
   check(`P2 62 s 真信封 M1 行 ＝ 旧行 ＋「 loc=3个烽火台附近+1个${m1At62.stillName}+4个向烽火台行进中 eta≈${m1At62.eta}s」（分组、名字、eta 台架独立算；3 ＝ FACILITIES 烽火台在场数）`,
-    m1At62.still === 1 && m1At62.near === 3 && m1At62.far === 4 && m1At62.obsPresent === 3 && m1At62.movingNamed && m1At62.stillName.startsWith("停在") &&
+    m1At62.still === 1 && m1At62.near === 3 && m1At62.far === 4 && m1At62.obsPresent === 3 && m1At62.movingNamed && m1At62.stillName === "停在前线油库西北" &&
     m1At62.eta > 0 && m1At62.eta < 60 && m1(digests[2]) === p2Want, `${m1(digests[2])} ｜ 期望 ${p2Want}`);
   // 110 s：7 个到了烽火台，那 1 辆还停在原地。A′（已上线）此刻拿 8 人质心说「烽火台附近」——把没到的那辆也说成到了。
   pumpTo(state, 110);
+  let legacyA1At110: string | null = "?";
   {
     const ms = liveDispatchMembers(state, findDispatch(state, "M1")!);
-    const st = ms.filter((u) => !movingGate(u));
-    const groups = new Map<string, number>(); for (const u of st) { const n = stillName(state, u.position); groups.set(n, (groups.get(n) ?? 0) + 1); }
-    const want = Array.from(groups.entries()).sort((a, b) => b[1] - a[1]).map(([n, k]) => `${k}个${n}`).join("+");
+    const OBSP = state.facilities.get("ea_observation_post")!.position;
+    const near = ms.filter((u) => Math.hypot(u.position.x - OBSP.x, u.position.y - OBSP.y) <= PLACE_NEAR_RADIUS_TILES);
+    const rest = ms.filter((u) => !near.includes(u));
+    const want = `${near.length}个烽火台附近+${rest.length}个${rest.length === 1 ? stillName(state, rest[0].position) : "?"}`;
+    legacyA1At110 = locationPhraseFor(state, ms);
     const line = m1(core.buildDigest(state, [], [], []));
     check(`P2b 110 s 真信封 M1 行 ＝ 旧行 ＋「 loc=${want}」（没到的那辆单独说，无 eta）`,
-      ms.length === 8 && ms.every((u) => !movingGate(u)) && want === `7个烽火台附近+1个${m1At62.stillName}` && line === `${M1_LEGACY} loc=${want}`, `${line} ｜ 期望 loc=${want}`);
+      ms.length === 8 && rest.every((u) => !movingGate(u)) && want === "7个烽火台附近+1个停在前线油库西北" && line === `${M1_LEGACY} loc=${want}`, `${line} ｜ 期望 loc=${want}`);
   }
+  // 绊索自证：已上线的 A′ 在这两刻说的与期望不同（62 s 省略、110 s「烽火台附近」）——P2/P2b 真能分出新旧
+  check(`P2x 已上线 A′ 在 62 s 给「${m1At62.legacyA1}」、110 s 给「${legacyA1At110}」，都不等于期望（P2/P2b 分得出新旧）`,
+    m1At62.legacyA1 === null && legacyA1At110 === "烽火台附近");
   const r1 = receipts[0].join(" | ");
   check("B6 重放：第一回合回执「…8个单位出发了，前往烽火台（不够您说的数）。」", r1.includes("8个单位出发了，前往烽火台（不够您说的数）。"), r1);
   (globalThis as any).__FP_DIGESTS__ = digests;
@@ -426,8 +695,13 @@ async function main(): Promise<void> {
     await R_replay(countPlayerUnitsNear, (label, s) => { E_collect(countPlayerUnitsNear, label, s); D_rendering([{ label, s }]); });
     F_oneRuler();
     C_countingRules(countPlayerUnitsNear);
-    P_whereaboutsRules(dispatchWhereabouts);
+    // 跑引擎本身；同时逐例比对台架参照实现（全开），证明负对照摘掉的那一条是唯一差别
+    { const ref = refWhere({}); let same = 0, all = 0; const diffs: string[] = [];
+      const probe: WhereFn = (st, ms, dn) => { const a = dispatchWhereabouts(st, ms, dn), b = ref(st, ms, dn); all++; if (a.loc === b.loc && a.etaSec === b.etaSec) same++; else diffs.push(`${JSON.stringify(a)} vs ${JSON.stringify(b)}`); return a; };
+      P_whereaboutsRules(probe);
+      check(`P0 台架参照实现（全开）与引擎在全部 P 例上逐字同（${same}/${all}）`, same === all && all > 0, diffs.join(" ‖ ")); }
     B_shortfallReceipt(verifiedAskedQuantity);
+    Q_endToEnd();
     const t0 = freshState(); E_collect(countPlayerUnitsNear, "t0", t0); D_rendering([{ label: "t0", s: t0 }]);
     const extra = freshState(); pumpTo(extra, 90); E_collect(countPlayerUnitsNear, "t90", extra); D_rendering([{ label: "t90", s: extra }]);
     E_finalize();
@@ -468,52 +742,46 @@ async function main(): Promise<void> {
     }, [/^E1/]),
   ];
   results.push(await expectFail("N5 A′ 不管动静齐不齐都写现址（拿在途那个人的说法代表全批）", () => {
-    const sloppy: WhereFn = (st, ms) => {
+    const sloppy: WhereFn = (st, ms, d) => {
       const mover = ms.find((u: any) => u.target !== null) ?? ms[0];
-      return dispatchWhereabouts(st, [mover]);
+      return dispatchWhereabouts(st, [mover], d);
     };
     P_whereaboutsRules(sloppy);
-  }, [/^P5/]));
-  results.push(await expectFail("N8 A″ eta 把已经到了的人也算进最慢成员", () => {
-    const allIn: WhereFn = (st, ms) => {
-      const r = dispatchWhereabouts(st, ms);
-      if (!r.loc?.includes("+")) return r;
+  }, [/^P5 /]));
+  results.push(await expectFail("N8 A″ eta 把停着的人也算进最慢成员", () => {
+    const allIn: WhereFn = (st, ms, d) => {
+      const r = dispatchWhereabouts(st, ms, d);
+      if (!r.loc?.includes("+") || r.etaSec === null) return r;
       const mv = ms.filter((u: any) => u.target !== null);
-      const c = { x: mv.reduce((a: number, u: any) => a + u.target.x, 0) / mv.length, y: mv.reduce((a: number, u: any) => a + u.target.y, 0) / mv.length };
-      return { loc: r.loc, etaSec: Math.ceil(estimateSquadTravelTime(st, ms.map((u: any) => u.id), c)) };
+      return { loc: r.loc, etaSec: Math.ceil(estimateSquadTravelTime(st, ms.map((u: any) => u.id), centroid(mv.map((u: any) => u.target)))) };
     };
     P_whereaboutsRules(allIn);
   }, [/^P5 /]));
-  results.push(await expectFail("N10 A″ 停着的人不分簇、拿全体质心起一个名", () => {
-    const oneCentroid: WhereFn = (st, ms) => {
-      const still = ms.filter((u: any) => !movingGate(u)); const mv = ms.filter(movingGate);
-      if (still.length === 0) return dispatchWhereabouts(st, ms);
-      const sp = stillName(st, centroid(still.map((u: any) => u.position)));
-      if (mv.length === 0) return { loc: sp, etaSec: null };
-      const m = dispatchWhereabouts(st, mv);
-      return m.loc ? { loc: `${still.length}个${sp}+${mv.length}个${m.loc}`, etaSec: m.etaSec } : { loc: null, etaSec: null };
-    };
-    P_whereaboutsRules(oneCentroid);
-  }, [/^P8 /]));
-  results.push(await expectFail("N11 A″ 在途的不管离目的地多近都算「行进中」（与 FACILITIES 两把尺）", () => {
-    P_whereaboutsRules(refWhere({ arriveByRuler: false, stopMarker: true }));
-  }, [/^P10 /]));
-  results.push(await expectFail("N12 A″ 停在没地名处只写方位、不加「停在」", () => {
-    P_whereaboutsRules(refWhere({ arriveByRuler: true, stopMarker: false }));
-  }, [/^P5b /, /^P3b /]));
   results.push(await expectFail("N9 A″ 退回 A′：动静混合整行省略", () => {
-    const omitMixed: WhereFn = (st, ms) => { const r = dispatchWhereabouts(st, ms); return r.loc?.includes("+") ? { loc: null, etaSec: null } : r; };
+    const omitMixed: WhereFn = (st, ms, d) => { const r = dispatchWhereabouts(st, ms, d); return r.loc?.includes("+") ? { loc: null, etaSec: null } : r; };
     P_whereaboutsRules(omitMixed);
   }, [/^P5 /]));
+  results.push(await expectFail("N10 A″ 停着的人不逐人认地名、拿一簇的质心起名", () => P_whereaboutsRules(refWhere({ perUnitStopped: false })), [/^P17 /]));
+  results.push(await expectFail("N11 A″「到了」按最近地名同名判（不按离被派去的地方的距离）", () => P_whereaboutsRules(refWhere({ arriveByDistance: false })), [/^P10 /, /^P16 /]));
+  results.push(await expectFail("N12 A″ 停在没地名处只写方位、不加「停在」", () => P_whereaboutsRules(refWhere({ stopMarker: false })), [/^P5b /, /^P3b /]));
+  results.push(await expectFail("N13 A″ 在途的去处取下一个航点（不取终点）", () => P_whereaboutsRules(refWhere({ finalGoal: false })), [/^P14 /]));
+  results.push(await expectFail("N14 A″ 连方位原点都没有也照说罗盘方位", () => P_whereaboutsRules(refWhere({ omitCompass: false })), [/^P13 /]));
+  results.push(await expectFail("N15 A″ 按 to= 的名字找「到了」的圆心（上一版：战线取几何中心、区域与出发地找不到）", () => P_whereaboutsRules(refWhere({ recordedDest: false })), [/^P18 /, /^P19 /]));
+  results.push(await expectFail("N17 A″ 去处旁边的标记顶替设施（不先认 to= 那个设施）", () => P_whereaboutsRules(refWhere({ facilityFirst: false })), [/^P20 /]));
+  results.push(await expectFail("N18 A″ 带路线的 eta 按直线算", () => P_whereaboutsRules(refWhere({ routeLegs: false })), [/^P14 /]));
+  results.push(await expectFail("N19 A″ 按「向」字头判在途（不按归组时的类别）", () => P_whereaboutsRules(refWhere({ kindByStructure: false })), [/^P22 /]));
   results.push(await expectFail("N6 B 不核原话、直接信模型写的引文", () => {
     const trusting: AskFn = (q) => { const t = (q ?? "").trim(); const m = t.match(/\d+/); return m ? { quote: t, count: Number(m[0]) } : null; };
     B_shortfallReceipt(trusting);
   }, [/^B2/]));
-  results.push(await expectFail("N7 B 按切片各算短缺（拆开的同一句话各说一遍）", () => {
-    // 复核前的样子：每条切片单独成一张回执，各拿自己的人数去比引文
+  results.push(await expectFail("N7 B 按切片各算短缺（按兵种拆开的同一句话各算各的）", () => {
     const perSlice: BuildFn = (r, sl) => ({ ...buildExecReceipt(r, sl), lines: sl.flatMap((x) => buildExecReceipt(r, [x]).lines) });
     B_shortfallReceipt(verifiedAskedQuantity, perSlice);
-  }, [/^B7a/, /^B7b/]));
+  }, [/^B7b/]));
+  results.push(await expectFail("N20 B 不看这条单子自己计划几个（引文的数直接当这件事的数）", () => {
+    const noPlanCheck: BuildFn = (r, sl) => buildExecReceipt(r, sl.map((x) => (x.askedQuantity ? { ...x, plannedQuantity: x.askedQuantity.count } : x)));
+    B_shortfallReceipt(verifiedAskedQuantity, noPlanCheck);
+  }, [/^B8a/, /^B10/, /^B11/, /^B13/, /^B15/]));
   const n = results.filter(Boolean).length;
   console.log(`\n=== ${n === results.length ? `NEGCTL OK — ${n}/${results.length} 条 ★ 真 FAIL` : `NEGCTL BROKEN — 只有 ${n}/${results.length} 条咬住`} ===`);
   if (n !== results.length) process.exit(1);

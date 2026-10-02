@@ -193,6 +193,12 @@ export function recordPlayerDispatch(
       if (fac) originFacilityById[id] = fac;
     }
   }
+  // place-presence A″：引擎真送每个人去的点（这道令刚落到单位上，orders[0] 就是它；路线令的 target 也是终点）。
+  const destPosById: Record<number, { x: number; y: number }> = {};
+  for (const id of appliedUnitIds) {
+    const t = state.units.get(id)?.orders[0]?.target;
+    if (t) destPosById[id] = { x: t.x, y: t.y };
+  }
   const ticketRef = meta.sourceKind === "ticket"
     ? (meta.sourceKey.trim().toUpperCase() || undefined)
     : prior?.ticketRef;
@@ -218,6 +224,7 @@ export function recordPlayerDispatch(
     originPosById,
     ...(meta.returnTo === "origin" ? { recall: true } : {}),
     ...(Object.keys(originFacilityById).length > 0 ? { originFacilityById } : {}),
+    ...(Object.keys(destPosById).length > 0 ? { destPosById } : {}),
     ...(ticketRef ? { ticketRef } : {}),
     ...(meta.sourceKind === "ticket" && meta.ticketLabel ? { ticketLabel: meta.ticketLabel }
       : prior?.ticketLabel && ticketRef === prior.ticketRef ? { ticketLabel: prior.ticketLabel } : {}),
@@ -493,7 +500,7 @@ export function buildDispatchDigestLines(
   remainderHandleOf?: (gNumber: string) => string | null,
   /** place-presence A′：活成员此刻在哪、多久到（由 intelDigest 注入 frontEscalationPayload.dispatchWhereabouts；
    *  台账模块不新加 import——frontEscalationPayload→crisisResponse→tacticalPlanner→本文件已成链，直接 import 会绕成环）。 */
-  whereaboutsOf?: (members: Unit[]) => { loc: string | null; etaSec: number | null },
+  whereaboutsOf?: (members: Unit[], d: Dispatch) => { loc: string | null; etaSec: number | null },
 ): string[] {
   const rows = activeDispatches(state);
   if (rows.length === 0) return [];
@@ -501,7 +508,7 @@ export function buildDispatchDigestLines(
   const lines: string[] = [];
   for (const d of rows.slice(0, MAX)) {
     // A′：行尾追加 loc= / eta≈（不确定就省略，不编）；既有 token 逐字节前缀不变。
-    const w = whereaboutsOf ? whereaboutsOf(liveDispatchMembers(state, d)) : null;
+    const w = whereaboutsOf ? whereaboutsOf(liveDispatchMembers(state, d), d) : null;
     const where = w && w.loc ? ` loc=${w.loc}${w.etaSec !== null ? ` eta≈${w.etaSec}s` : ""}` : "";
     const to = d.targetName || "未指明";
     // 刀寅：via=G# ——这批人是凭哪张临时编队票派出去的。长官之后再说那个号，
