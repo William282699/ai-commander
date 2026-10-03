@@ -23,14 +23,14 @@
 //      G4/G4b 出击后走回岗的路上（锚点＝阵地）遇新威胁：照旧被拉出去（离家 6 格 / 1.5 格两种）
 //      G5/G5b 带着旧锚点被改派去新岗：旧锚点在路上就被清掉、不追；到新岗后不被拴回旧处
 //      G6 去岗路上射程内的敌人照打，打完接着走到终点（combat.ts 现成的路）
-//      G7 敌军去岗路上照旧被拉（修法只给玩家；敌军自己的 defensiveAI 会把掉队的推回行军）
+//      G7 敌军去岗路上照旧被拉（修法只给玩家；敌军要不要也这样是敌军节奏的事，另议）
 //   W  sweep（--sweep）：3 前哨 × 7 去处、各派 6 个防守、跑 240 s。「掉队」＝挂着防守令、离终点 >12 格、
 //      停着（idle 或到岗姿态）≥20 s，**不含残血自撤**（P2：hp<5% 自己往总部退——用户 08-20 裁定的有意行为，
 //      单列计数）。W1 掉队 0；另报存活、到达用时、没到就阵亡（手感代价）。
 //
 // 负对照（--negctl，--sweep-negctl）：读 autoBehavior.ts 源码、按变体逐字改一处（每处必须恰好命中一次，
-// 否则判负对照无效）、写进临时文件 require 进来——sim / pathfinding / shared 与生产共用同一份模块实例
-// （逐个核对），只有 autoBehavior 本身是改过的那份。每个变体点名的断言必须真 FAIL：
+// 否则判负对照无效）、写进临时文件 require 进来——副本用到的 sim / pathfinding / shared 函数与生产是同一份
+// （副本把它 import 的依赖原样导出，逐个 === 比），只有 autoBehavior 本身是改过的那份。每个变体点名的断言必须真 FAIL：
 //   N1 摘掉修法（＝4b912c9 原样）        → R1 R2 R3 R4 G3 G3b G5 G5b
 //   N2 判据只看 target、不看锚点          → G4 G4b
 //   N3 去岗路上的返回提前到 P3（跳过锚点账）→ G5 G5b
@@ -52,7 +52,9 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import * as core from "@ai-commander/core";
 import type { GameState, Unit, Position, Order } from "@ai-commander/shared";
+import { getUnitCategory, isManualOnlyUnit } from "@ai-commander/shared";
 import { findDispatch } from "../packages/core/src/dispatchLedger";
+import { clearPathCache } from "../packages/core/src/pathfinding";
 // 静态导入（不许 await import）：动态导入会让台架与被测代码各载一份 core，编队号在一份里登记、在另一份里查不到
 import { harness, serverRoutes, source, oldFunctions } from "./chainHarness";
 import { buildDigestForChannel } from "../apps/web/src/digestHelper";
@@ -536,14 +538,25 @@ function loadVariant(tag: string, edits: Array<[string, string]>): AB {
     src = src.replaceAll(from, to);
   }
   if (/from "\.\//.test(src)) throw new Error(`负对照 ${tag} 无效：还有没改写的相对导入`);
+  // 把副本自己 import 进来的那几个依赖原样导出，下面逐个与生产那份比（不比"台架自己 require 两次"）
+  src += "\nexport const __variantDeps = { canUnitEnterTile, clearPathCache, getUnitCategory, isManualOnlyUnit };\n";
   const dir = mkdtempSync(join(tmpdir(), "ab-straggler-"));
   const file = join(dir, `autoBehavior.${tag}.ts`);
   writeFileSync(file, src);
   try {
     const m = req(file);
-    // 只有 autoBehavior 是改过的那份；sim / shared 必须与生产同一实例（否则负对照测的是另一个世界）
-    if (req(join(CORE_SRC, "sim.ts")).tick !== core.tick) throw new Error(`负对照 ${tag} 无效：sim 不是同一份模块`);
-    if (req(SHARED_INDEX).UNIT_STATS !== (req("@ai-commander/shared") as any).UNIT_STATS) throw new Error(`负对照 ${tag} 无效：shared 不是同一份模块`);
+    // 只有 autoBehavior 是改过的那份；它用到的 sim / pathfinding / shared 必须与生产同一实例
+    // （否则负对照测的是另一个世界：比如 clearPathCache 清的不是 sim 用的那份路径缓存）。
+    // canUnitEnterTile 比的是 core 自己导出的那份；pathfinding 与 shared 比的是台架静态导入的那份（与 core 同一条解析路）。
+    const deps = m.__variantDeps;
+    const same: Array<[string, unknown, unknown]> = [
+      ["sim.canUnitEnterTile", deps?.canUnitEnterTile, core.canUnitEnterTile],
+      ["pathfinding.clearPathCache", deps?.clearPathCache, clearPathCache],
+      ["shared.getUnitCategory", deps?.getUnitCategory, getUnitCategory],
+      ["shared.isManualOnlyUnit", deps?.isManualOnlyUnit, isManualOnlyUnit],
+    ];
+    const split = same.filter(([, a, b]) => typeof a !== "function" || a !== b).map(([n]) => n);
+    if (split.length) throw new Error(`负对照 ${tag} 无效：${split.join("、")} 不是生产那一份`);
     if (m.processAutoBehavior === core.processAutoBehavior) throw new Error(`负对照 ${tag} 无效：载到的还是生产那份`);
     return { label: `${tag} ${edits.length} 处改动`, processAutoBehavior: m.processAutoBehavior, resetAutoBehaviorTimer: m.resetAutoBehaviorTimer, chaseAnchorHomeOf: m.chaseAnchorHomeOf };
   } finally {

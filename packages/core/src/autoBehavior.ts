@@ -411,10 +411,12 @@ function runAutoBehavior(state: GameState): void {
     // drop, and a unit re-ordered to a new post would be leashed back to the
     // old one on arrival.
     //
-    // Player units only: the enemy re-tasks its own stragglers
-    // (defensiveAI operationMaintain pushes fallen-out members back onto the
-    // march), and changing how enemy reinforcements react on the road is an
-    // enemy-pacing decision, not part of this fix.
+    // Player units only: the promise being kept is "the units the player sends
+    // get there". Enemy defend orders come from defensiveAI, which has its own
+    // upkeep (e.g. operationMaintain pushes fallen-out operation members back
+    // onto the march; §6 garrison reinforcements travel on attack_move and
+    // never reach this branch). Whether enemy units should also ignore pulls
+    // on the road is an enemy-pacing decision, not part of this fix.
     if (
       unit.team === "player" &&
       inDefendPosture &&
