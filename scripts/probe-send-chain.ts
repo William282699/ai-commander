@@ -449,6 +449,31 @@ await test("O-e1 ★路上接敌（设防令仍在、离落点还远）时改去
     assert.ok(near(t, home.get(id)!, 3), `unit ${id} recalled to ${JSON.stringify(t)}; home ${JSON.stringify(home.get(id))}, contact point ${JSON.stringify(contact.get(id))}`);
   }
 });
+// O-e1 换布景后，改令那一刻两个兵都还是 defending——旧布景（被拉去追，moving）顺带钉住的「在路上但不是
+// defending」这一类就没人管了。修好后路上剩下的那一类是**射程内停下交火（attacking）**：本格补上它。
+// 泵帧带 fog（生产每帧都刷；不刷 fog 玩家兵看不见敌人、不会开火，进不了 attacking）。
+await test("O-e1b ★路上射程内停下交火（attacking、设防令仍在、离落点还远）时改去修理厂，再叫回来 ⇒ 回到最初出发的位置，不回交火处", async () => {
+  const f = mixedGroup(); const h = harness(f.state);
+  const enemyTpl = [...core.createInitialGameState("el_alamein").units.values()].find((u) => u.team === "enemy" && u.type === "infantry")!;
+  for (let k = 0; k < 2; k++) { const e: Unit = { ...structuredClone(enemyTpl), id: nextId++, position: { x: 358 + k, y: 72 }, state: "idle", orders: [], waypoints: [], patrolPoints: [], patrolTaskId: null, manualOverride: false, target: null, attackTarget: null }; f.state.units.set(e.id, e); }
+  const home = new Map([...f.groupIds].map((id) => [id, { ...f.state.units.get(id)!.position }]));
+  await say(h, "派其中两个去北线前哨", [order("两个去北线前哨。", [{ type: "defend", fromSquad: f.g, quantity: 2, targetFacility: NP, destinationQuote: "北线前哨", quantityQuote: "两个" }])]);
+  const sent = dispatchedIds(h);
+  const fighting = () => sent.some((id) => {
+    const u = f.state.units.get(id);
+    return !!u && u.state === "attacking" && u.orders[0]?.action === "defend" && distToOrder(f.state, id) > 10;
+  });
+  for (let t = 0; t < 40 && !fighting(); t += 0.25) { core.updateFog(f.state); tick(f.state, 0.25); core.processAutoBehavior(f.state, 0.25); }
+  assert.ok(fighting(), "no sent unit ever stopped to fight on the road (attacking, defend order on, >10 from the drop point)");
+  const contact = new Map(sent.map((id) => [id, { ...f.state.units.get(id)!.position }]));
+  assert.ok(sent.every((id) => !near(contact.get(id)!, home.get(id)!, 3)), "fixture: the fight must happen away from home, else the assertion below cannot tell them apart");
+  await say(h, "那两个改去修理厂", [order("改去修理厂。", [{ type: "defend", fromSquad: f.g, targetFacility: "ea_repair_station", destinationQuote: "修理厂" }])]);
+  await say(h, "刚才那两个叫回来", [order("回原处。", [{ type: "retreat", fromSquad: f.g, returnTo: "origin" }])]);
+  for (const id of sent.filter((i) => f.state.units.has(i))) {
+    const t = targetOf(h, id)!;
+    assert.ok(near(t, home.get(id)!, 3), `unit ${id} recalled to ${JSON.stringify(t)}; home ${JSON.stringify(home.get(id))}, fight point ${JSON.stringify(contact.get(id))}`);
+  }
+});
 await test("O-e2（边界，如实记录）离落点不到 2.5 格（引擎算到了，模拟还在走最后一两格）时改令再叫回 ⇒ 回到北线前哨那一头（第二次外派的起点），不回中央；离落点 5 格以上改令 ⇒ 回中央", async () => {
   let judged = 0;
   for (const [lo, hi, expectHome] of [[0.7, 2.4, false], [5, 12, true]] as const) {
