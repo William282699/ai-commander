@@ -433,7 +433,14 @@ await test("O-e1 ★路上接敌（设防令仍在、离落点还远）时改去
   const home = new Map([...f.groupIds].map((id) => [id, { ...f.state.units.get(id)!.position }]));
   await say(h, "派其中两个去北线前哨", [order("两个去北线前哨。", [{ type: "defend", fromSquad: f.g, quantity: 2, targetFacility: NP, destinationQuote: "北线前哨", quantityQuote: "两个" }])]);
   const sent = dispatchedIds(h);
-  pumpUntil(f.state, () => sent.every((id) => f.state.units.get(id)?.state === "moving" && distToOrder(f.state, id) > 10), 40);
+  // 「路上接敌」＝派出后挨了打、设防令还在、离落点还远。掉队兵修法（2026-10-02，autoBehavior P3.5）之前，
+  // 去岗路上挨打的兵会被自动行为拉去追（state 变 moving），本格原先拿 moving 当接敌的标志；修好后它们挨了打
+  // 照样往落点走，所以改按「派出后挨过打」认接敌（修前修后都成立）。核的事不变：改令再叫回 ⇒ 回最初出发处。
+  const sentAt = f.state.time;
+  pumpUntil(f.state, () => sent.every((id) => {
+    const u = f.state.units.get(id);
+    return !!u && (u.lastDamagedAt ?? -1) > sentAt && u.orders[0]?.action === "defend" && distToOrder(f.state, id) > 10;
+  }), 40);
   const contact = new Map(sent.map((id) => [id, { ...f.state.units.get(id)!.position }]));
   await say(h, "那两个改去修理厂", [order("改去修理厂。", [{ type: "defend", fromSquad: f.g, targetFacility: "ea_repair_station", destinationQuote: "修理厂" }])]);
   await say(h, "刚才那两个叫回来", [order("回原处。", [{ type: "retreat", fromSquad: f.g, returnTo: "origin" }])]);
