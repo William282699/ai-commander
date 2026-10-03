@@ -326,7 +326,9 @@ function runAutoBehavior(state: GameState): void {
     // stand-fast command) and `patrol` (patrol-task units cycle through idle
     // between assignments — reacting there would dissolve the patrol).
     // Moving/attacking/retreating units still return here — a unit actively
-    // executing a player command is never hijacked.
+    // executing a player command is never hijacked. (The defend exception is
+    // for units already AT their post — one still marching there returns at
+    // Priority 3.5 below, after the anchor bookkeeping.)
     const currentAction = unit.orders[0]?.action;
     const inDefendPosture = unit.orders.length > 0 && currentAction === "defend";
     const orderSpent =
@@ -358,6 +360,9 @@ function runAutoBehavior(state: GameState): void {
         episode = null;
       }
     }
+    // Read for Priority 3.5 BEFORE the home-again drop below: a garrison two
+    // tiles from home is still walking back from its sortie this batch.
+    const returningFromSortie = episode !== null;
     if (episode && (unit.state === "idle" || unit.state === "defending")) {
       const adx = unit.position.x - episode.home.x;
       const ady = unit.position.y - episode.home.y;
@@ -377,6 +382,46 @@ function runAutoBehavior(state: GameState): void {
       }
     }
     const chaseAnchor = episode ? episode.home : null;
+
+    // ── Priority 3.5 (straggler fix): a unit still MARCHING to its defend post
+    // is a column on the move, not a garrison — it returns here like any unit
+    // executing a player command.
+    //
+    // The disease (playtest 10-02, replay: tank #33 sent to 烽火台): en route
+    // a unit is `defending` with a target, so the P3 defend exception let
+    // 4a/4b/4c pull it off the road (the replay: 4c, joining an ally's fight
+    // with a light tank); pinEpisode recorded THAT spot — halfway — as the
+    // chase home; the chase ended without a shot (sim: moving → idle), the
+    // leash walked it back to halfway, and nothing ever resumed the march:
+    // combat.ts's return-to-post branch only runs for units that went
+    // `attacking`. Measured (ab-straggler --sweep-negctl): 7 of 126 dispatched
+    // units, in 5 of 21 batches, parked short of their post for good.
+    //
+    // What still applies en route: enemies inside weapons range are fought
+    // (combat.ts: defending → attacking), then combat.ts sends the unit on to
+    // the order's destination. Only the out-of-range pulls (4a/4b/4c) are off.
+    //
+    // The anchor is what separates the first march from a garrison walking
+    // back home after a sortie: a sortie pins an anchor at the post, and the
+    // bookkeeping above has already dropped any stale anchor (target neither
+    // the chase nor home), so a surviving one means "returning to post" — that
+    // walk keeps today's reactions unchanged (sweep: all 101 first-march
+    // pulls had no live anchor, all 3 walk-back pulls had one). Placed after
+    // the bookkeeping on purpose: returning at P3 would skip the stale-anchor
+    // drop, and a unit re-ordered to a new post would be leashed back to the
+    // old one on arrival.
+    //
+    // Player units only: the enemy re-tasks its own stragglers
+    // (defensiveAI operationMaintain pushes fallen-out members back onto the
+    // march), and changing how enemy reinforcements react on the road is an
+    // enemy-pacing decision, not part of this fix.
+    if (
+      unit.team === "player" &&
+      inDefendPosture &&
+      unit.state === "defending" &&
+      unit.target !== null &&
+      !returningFromSortie
+    ) return;
 
     // ── Priority 4: engage / patrol ──
 

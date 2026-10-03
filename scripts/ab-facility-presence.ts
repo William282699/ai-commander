@@ -15,8 +15,9 @@
 //   P  A′/A″ DISPATCHES 行 loc= / eta≈（逐人归组、一把 12 格尺）：离这批去处 12 格内＝「X附近」（与 FACILITIES
 //      在场同圆心，已毁的去处也认）；在走的＝「向<终点所在地名>行进中」（终点取航点表最后一个）；停在别处的＝
 //      「停在X附近」或「停在<地名><方位>」，只剩地图中心罗盘就整句省略。43 s 钉「loc=向烽火台行进中 eta≈60s」、
-//      62 s「loc=3个烽火台附近+1个停在前线油库西北+4个向烽火台行进中 eta≈43s」、110 s「7个烽火台附近+1个停在前线油库西北」
-//      （分组、名字、eta 台架独立算；P2x 自证已上线 A′ 在这两刻说法不同）；P3–P17 合成；P16 一把尺不变式；
+//      62 s「loc=4个烽火台附近+4个向烽火台行进中 eta≈43s」、110 s「烽火台附近」（2026-10-02 掉队兵修好后按新实况重推；
+//      修前那辆停在半路的 #33 不复存在，「停在…」说法由合成段 P5b/P3b/P17 负责）（分组、eta 台架独立算；
+//      P2x 自证已上线 A′ 在 62 s 说法不同）；P3–P17 合成；P16 一把尺不变式；
 //      P0 台架参照实现（全开）与引擎逐例同，负对照逐项摘开关
 //   B  回执短缺句：只认长官原话里逐字出现的数量引文；派得比它少才补「（不够您说的数）」；按引文算——一句引文只落在
 //      一件事上才说（单条挂本句、几条挂合计行且须有新下令）；跨了几个去处或混了别的 ⇒ 不说（B7–B9）
@@ -690,29 +691,35 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
   const m1 = (d: string) => d.split("\n").find((l) => l.startsWith("M1 ")) ?? "";
   const M1_LEGACY = "M1 from=3. 中央战线 to=烽火台 act=defend left=8 via=G2「中央前哨附近未编组群」里派出的 home=中央前哨附近";
   check("P1 43 s 真信封 M1 行 ＝ 旧行 ＋「 loc=向烽火台行进中 eta≈60s」", m1(d43) === `${M1_LEGACY} loc=向烽火台行进中 eta≈60s`, m1(d43));
-  // 62 s 实况（重放逐人核过）：3 辆坦克已进烽火台 5 格内（引擎移动门仍算在走最后一段；FACILITIES 烽火台在场 3）、
-  // 4 个步兵在路上，1 辆坦克（#33）43–62 s 间接敌后停下、丢了目标，停在前线油库西北、离烽火台 47 格。
-  const p2Want = `${M1_LEGACY} loc=3个烽火台附近+1个${m1At62.stillName}+4个向烽火台行进中 eta≈${m1At62.eta}s`;
-  check(`P2 62 s 真信封 M1 行 ＝ 旧行 ＋「 loc=3个烽火台附近+1个${m1At62.stillName}+4个向烽火台行进中 eta≈${m1At62.eta}s」（分组、名字、eta 台架独立算；3 ＝ FACILITIES 烽火台在场数）`,
-    m1At62.still === 1 && m1At62.near === 3 && m1At62.far === 4 && m1At62.obsPresent === 3 && m1At62.movingNamed && m1At62.stillName === "停在前线油库西北" &&
+  // 62 s 实况（重放逐人核过；2026-10-02 掉队兵修好后按新实况重推）：4 辆主战坦克已进烽火台 9 格内（引擎移动门仍算
+  // 在走最后一段；FACILITIES 烽火台在场 4）、4 个步兵在路上离烽火台约 38 格，没有停在别处的人。
+  // 修前这一刻是「3 个到了＋1 辆（#33）停在前线油库西北」：#33 去岗路上被 autoBehavior 拉去帮友军、拴回半路后
+  // 再不走（ab-straggler 钉那条病）。「停在…」那种说法的覆盖由合成段 P5b / P3b / P17 继续负责。
+  const p2Loc = `${m1At62.near}个烽火台附近+${m1At62.far}个向烽火台行进中`;
+  const p2Want = `${M1_LEGACY} loc=${p2Loc} eta≈${m1At62.eta}s`;
+  check(`P2 62 s 真信封 M1 行 ＝ 旧行 ＋「 loc=${p2Loc} eta≈${m1At62.eta}s」（分组、eta 台架独立算；到了的人数 ＝ FACILITIES 烽火台在场数；没有停在别处的）`,
+    m1At62.still === 0 && m1At62.near === 4 && m1At62.far === 4 && m1At62.obsPresent === m1At62.near && m1At62.movingNamed &&
     m1At62.eta > 0 && m1At62.eta < 60 && m1(digests[2]) === p2Want, `${m1(digests[2])} ｜ 期望 ${p2Want}`);
-  // 110 s：7 个到了烽火台，那 1 辆还停在原地。A′（已上线）此刻拿 8 人质心说「烽火台附近」——把没到的那辆也说成到了。
+  // 110 s：8 个全到了烽火台（修前那辆 #33 还停在原地）。全员一组 ⇒ 只写地名、不带人数（与 P3′「到了」同一条规矩）。
   pumpTo(state, 110);
   let legacyA1At110: string | null = "?";
+  let p2bWant = "?";
   {
     const ms = liveDispatchMembers(state, findDispatch(state, "M1")!);
     const OBSP = state.facilities.get("ea_observation_post")!.position;
     const near = ms.filter((u) => Math.hypot(u.position.x - OBSP.x, u.position.y - OBSP.y) <= PLACE_NEAR_RADIUS_TILES);
     const rest = ms.filter((u) => !near.includes(u));
-    const want = `${near.length}个烽火台附近+${rest.length}个${rest.length === 1 ? stillName(state, rest[0].position) : "?"}`;
+    p2bWant = rest.length === 0 ? "烽火台附近" : `${near.length}个烽火台附近+${rest.length}个?`;
     legacyA1At110 = locationPhraseFor(state, ms);
     const line = m1(core.buildDigest(state, [], [], []));
-    check(`P2b 110 s 真信封 M1 行 ＝ 旧行 ＋「 loc=${want}」（没到的那辆单独说，无 eta）`,
-      ms.length === 8 && rest.every((u) => !movingGate(u)) && want === "7个烽火台附近+1个停在前线油库西北" && line === `${M1_LEGACY} loc=${want}`, `${line} ｜ 期望 loc=${want}`);
+    check(`P2b 110 s 真信封 M1 行 ＝ 旧行 ＋「 loc=${p2bWant}」（8 个全到、没人掉在半路，无 eta）`,
+      ms.length === 8 && rest.length === 0 && line === `${M1_LEGACY} loc=${p2bWant}`, `${line} ｜ 期望 loc=${p2bWant}`);
   }
-  // 绊索自证：已上线的 A′ 在这两刻说的与期望不同（62 s 省略、110 s「烽火台附近」）——P2/P2b 真能分出新旧
-  check(`P2x 已上线 A′ 在 62 s 给「${m1At62.legacyA1}」、110 s 给「${legacyA1At110}」，都不等于期望（P2/P2b 分得出新旧）`,
-    m1At62.legacyA1 === null && legacyA1At110 === "烽火台附近");
+  // 绊索自证：已上线的 A′ 在 62 s 拿全批一句「向烽火台行进中」，把已经到了的 4 辆也说成在路上，与 P2 的期望不同——
+  // P2 分得出新旧。110 s 没人掉队了，A′ 与 A″ 都说「烽火台附近」：这一刻本来就没有可分的（修前分得出的那种情形
+  // ——拿全批质心把没到的人也说成到了——由合成段钉）。
+  check(`P2x 已上线 A′ 在 62 s 给「${m1At62.legacyA1}」≠ P2 期望「${p2Loc}」（P2 分得出新旧）；110 s 没人掉队，A′ 与 A″ 同为「${legacyA1At110}」`,
+    m1At62.legacyA1 === "向烽火台行进中" && m1At62.legacyA1 !== p2Loc && legacyA1At110 === "烽火台附近" && p2bWant === legacyA1At110);
   const r1 = receipts[0].join(" | ");
   check("B6 重放：第一回合回执「…8个单位出发了，前往烽火台（不够您说的数）。」", r1.includes("8个单位出发了，前往烽火台（不够您说的数）。"), r1);
   (globalThis as any).__FP_DIGESTS__ = digests;
