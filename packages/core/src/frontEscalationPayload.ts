@@ -331,7 +331,10 @@ export function locationPhraseFor(state: GameState, members: Unit[]): string | n
  * idle、丢目标、停在 47 格外再不动，台账仍算它）。一句话替全批说话要么省略（知道却不说：62 s「到齐了吗」
  * 0/10、8/10 把 left=8 编成分钟），要么拿质心起名（假地名；110 s 把没到的那辆也说成「烽火台附近」）。
  * 所以**逐人**按真在哪归组，三种说法、一把 12 格尺：
- *   ·「X附近」     ——到了：离**引擎真送他去的地方**12 格内，动没动都算。那个地方＝台账记下的他那道令的
+ *   ·「已到X」     ——到了：离**引擎真送他去的地方**12 格内，动没动都算。（不写「X附近」：全员到齐时
+ *                    行上只剩一句「烽火台附近」，被读成"还在附近、没到"，再去 left=8 里找时间——真模型
+ *                    110 s 问「都到了吗？」6/20 答对、14/20 编「8分钟」；改「已到烽火台」20/20；
+ *                    「8个烽火台附近」0/20，坏在「附近」两个字，不在人数。2026-10-03 上线前复测。）那个地方＝台账记下的他那道令的
  *                    终点（destPosById）所在的地名；to= 写的是一个设施、且终点就在它跟前时直接用这个设施
  *                    （与 FACILITIES「在场我方」同一个圆心；已毁的设施 FACILITIES 照印，这里也照认）；
  *                    终点附近没有地名（区域中心、撤退点、出发地）就用台账的 to= 当名字（见 sentPlaceOf）。
@@ -345,7 +348,7 @@ export function locationPhraseFor(state: GameState, members: Unit[]): string | n
  *                    方位短语「停在<地名><方位>」；连方位原点都没有（只剩地图中心罗盘，如「中央方向」，
  *                    会和中央前哨/中央战线撞名）⇒ 整句省略。「停在」两个字是实测出来的：没有它，
  *                    「1个前线油库西北」被读成还在走，模型去 left=8 里找时间（110 s 3/20 → 加上后 19/20）。
- * 同一说法合一组；只有一组 ⇒ 不带人数；几组 ⇒「3个烽火台附近+1个停在前线油库西北+4个向烽火台行进中」，
+ * 同一说法合一组；只有一组 ⇒ 不带人数；几组 ⇒「3个已到烽火台+1个停在前线油库西北+4个向烽火台行进中」，
  * 到了的在前、停在别处的其次、在途的在后（在途排最前时 eta 紧贴停着那组，39/40 被说成「43秒后全部抵达」）；
  * eta 只在恰好一组在途时给、只算那几个人；带路线的按航点逐段累加（直线会把绕路的少报一半）。
  */
@@ -367,7 +370,7 @@ export function dispatchWhereabouts(
   const strays: Unit[] = [];
   for (const u of members) {
     const sentTo = sentPlaceOf(state, u, d?.destPosById?.[u.id], namedFacility, d?.targetName);
-    if (sentTo !== null && dist(u.position, sentTo.position) <= NAME_RADIUS_TILES) { add(`${sentTo.name}附近`, "arrived", [u]); continue; }
+    if (sentTo !== null && dist(u.position, sentTo.position) <= NAME_RADIUS_TILES) { add(`已到${sentTo.name}`, "arrived", [u]); continue; }
     if (isActuallyMoving(u)) {
       const goal = finalGoalOf(u);
       if (goal === null) return none;
