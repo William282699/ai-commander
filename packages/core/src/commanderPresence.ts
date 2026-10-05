@@ -388,13 +388,16 @@ export function buildCommanderMoodLine(state: GameState): string | null {
 // ============================================================
 
 /** Raw geometry as the render layer holds it: camera top-left in PIXELS
- *  (tile × TILE_SIZE), zoom 0.5–2.0, canvas size in device pixels. */
+ *  (tile × TILE_SIZE)；zoom 上限 2.0、下限＝input.ts 的 getMinZoom（随地图与可见
+ *  宽度变化；El Alamein、可见 1460×779 时 ≈0.09125）；尺寸是 CSS px；insetRight＝
+ *  画布右侧被操作台盖住的宽度（CSS px，缺省＝0）。 */
 export interface ViewportGeometry {
   x: number;
   y: number;
   zoom: number;
   canvasWidth: number;
   canvasHeight: number;
+  insetRight?: number;
 }
 
 /** Tile-space box, fractional edges, inclusive membership. */
@@ -406,17 +409,21 @@ export interface TileBox {
 }
 
 /**
- * Pixel viewport → tile box. The formula is the renderer's own visible-range
- * computation (rendererCanvas renderTerrain): screen width divided by zoom is
- * the visible pixel span, divided by TILE_SIZE is tiles. Getting this wrong
- * doesn't crash — it renders as "nothing in view" or "everything in view" —
- * so the bench pins both ends.
+ * Pixel viewport → tile box of the part the player can SEE. 口径＝「看得见那块」：
+ * 可见宽度＝canvasWidth − insetRight（右侧操作台盖住的那截不算），与 input.ts 的
+ * getMinZoom / clampCamera / centerCameraOn 同口径——不再是 rendererCanvas
+ * renderTerrain 的整幅剔屏范围（面板底下照画，长官看不见）。全仓只有这里扣
+ * insetRight，且只动 right；insetRight 规范化 fail-closed：缺席、非有限、< 0、
+ * ≥ canvasWidth ⇒ 按 0（＝整幅）。Getting this wrong doesn't crash — it renders
+ * as "nothing in view" or "everything in view" — so the bench pins both ends.
  */
 export function viewportToTileBox(view: ViewportGeometry): TileBox {
+  const raw = view.insetRight;
+  const inset = typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw < view.canvasWidth ? raw : 0;
   return {
     left: view.x / TILE_SIZE,
     top: view.y / TILE_SIZE,
-    right: (view.x + view.canvasWidth / view.zoom) / TILE_SIZE,
+    right: (view.x + (view.canvasWidth - inset) / view.zoom) / TILE_SIZE,
     bottom: (view.y + view.canvasHeight / view.zoom) / TILE_SIZE,
   };
 }

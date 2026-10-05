@@ -709,6 +709,89 @@ function runSynthetic(): void {
     check("P20 selected pipe waters exactly one section", dWith.includes(block) && dWith.replace(block, "") === dWithout, `has=${dWith.includes(block)}`);
   }
 
+  // K0) 扣右侧面板：「看得见那块」＝ canvasWidth − insetRight，只在 viewportToTileBox 扣、只动 right。
+  //     期望值一律手算成常数——不许再调 viewportToTileBox / unitsInBox 去算期望（同源＝恒真：删掉扣减，两边一起变）。
+  //     参考画布取线上那局的尺寸（1920×779、面板 460），zoom 取 0.25 让每一步除法都是二进制精确数：
+  //       left   = 3200/32                         = 100
+  //       top    = 640/32                          = 20
+  //       bottom = (640 + 779/0.25)/32  = 3756/32  = 117.375
+  //       right（全宽）   = (3200 + 1920/0.25)/32         = 10880/32 = 340
+  //       right（扣 460） = (3200 + (1920−460)/0.25)/32   = 9040/32  = 282.5   ← 面板边界
+  //       right（扣 1919）= (3200 + 1/0.25)/32            = 3204/32  = 100.125 ← 合法值的上沿仍照扣
+  {
+    const K0_LEFT = 100, K0_TOP = 20, K0_BOTTOM = 117.375;
+    const K0_RIGHT_FULL = 340, K0_RIGHT_INSET = 282.5, K0_RIGHT_W_MINUS_1 = 100.125;
+    const vFull: ViewportGeometry = { x: 3200, y: 640, zoom: 0.25, canvasWidth: 1920, canvasHeight: 779 };
+    const vInset: ViewportGeometry = { ...vFull, insetRight: 460 };
+
+    // 边界两侧手摆：我方 6 个在全宽框内（左 2、恰在边界 1、右 3）＋框外 1；
+    // 可见敌军左 1、右 1；雾里敌军左 1（框内但不进「可见敌军」行）。
+    const s = emptyBattlefield();
+    const fL1 = addUnit(s, 150, 50), fL2 = addUnit(s, 280, 60);
+    const fEdge = addUnit(s, 282.5, 70); // 恰在面板边界上：框是含边的，留下
+    const fR1 = addUnit(s, 283, 60), fR2 = addUnit(s, 300, 80), fR3 = addUnit(s, 339, 100);
+    addUnit(s, 345, 60); // 全宽框外
+    const eL = addUnit(s, 200, 40, { team: "enemy" } as Partial<Unit>);
+    const eR = addUnit(s, 310, 50, { team: "enemy" } as Partial<Unit>);
+    const eFog = addUnit(s, 220, 45, { team: "enemy" } as Partial<Unit>);
+    reveal(s, eL.position.x, eL.position.y);
+    reveal(s, eR.position.x, eR.position.y);
+    s.fog[45][220] = "explored";
+    check("K0-0 前置 雾里那个敌军所在格不是 visible、两个可见敌军所在格是 visible",
+      s.fog[45][220] !== "visible" && s.fog[40][200] === "visible" && s.fog[50][310] === "visible");
+
+    const bFull = viewportToTileBox(vFull);
+    const bInset = viewportToTileBox(vInset);
+    check("K0-1 缺 insetRight ＝ 整幅：四边＝手算常数（100 / 20 / 340 / 117.375）",
+      Object.is(bFull.left, K0_LEFT) && Object.is(bFull.top, K0_TOP) && Object.is(bFull.right, K0_RIGHT_FULL) && Object.is(bFull.bottom, K0_BOTTOM),
+      JSON.stringify(bFull));
+    check("K0-2 扣 460：right＝手算边界 282.5",
+      Object.is(bInset.right, K0_RIGHT_INSET), JSON.stringify(bInset));
+    check("K0-3 insetRight 只动 right：left / top / bottom 与缺席版 Object.is 相等",
+      Object.is(bInset.left, bFull.left) && Object.is(bInset.top, bFull.top) && Object.is(bInset.bottom, bFull.bottom) && !Object.is(bInset.right, bFull.right),
+      `${JSON.stringify(bInset)} vs ${JSON.stringify(bFull)}`);
+    const bWm1 = viewportToTileBox({ ...vFull, insetRight: 1919 });
+    check("K0-4 合法值上沿 insetRight＝canvasWidth−1 照扣：right＝100.125",
+      Object.is(bWm1.right, K0_RIGHT_W_MINUS_1), JSON.stringify(bWm1));
+
+    const idsOf = (us: Unit[]) => us.map((u) => u.id).sort((a, b) => a - b);
+    const inFull = unitsInBox(s, bFull);
+    const inInset = unitsInBox(s, bInset);
+    const fullIds = new Set(idsOf(inFull));
+    const culled = inFull.filter((u) => !inInset.some((k) => k.id === u.id));
+    check("K0-5 框内总数＝手摆常数：全宽 9、扣面板 5", inFull.length === 9 && inInset.length === 5, `${inFull.length} / ${inInset.length}`);
+    check("K0-6 扣面板版 ⊂ 全宽版", inInset.every((u) => fullIds.has(u.id)), `${idsOf(inInset)} ⊄ ${[...fullIds]}`);
+    check("K0-7 被剔的正是边界右侧手摆的那 4 个，且每个 position.x > 282.5",
+      idsOf(culled).join(",") === idsOf([fR1, fR2, fR3, eR]).join(",") && culled.every((u) => u.position.x > K0_RIGHT_INSET),
+      culled.map((u) => `#${u.id}@${u.position.x}`).join(" "));
+    check("K0-8 留下的无一超界（恰在边界上的那个留下）",
+      inInset.every((u) => u.position.x <= K0_RIGHT_INSET) && idsOf(inInset).join(",") === idsOf([fL1, fL2, fEdge, eL, eFog]).join(","),
+      idsOf(inInset).join(","));
+
+    const pick = (lines: string[], head: string) => lines.filter((l) => l.startsWith(head));
+    const lFull = buildPlayerViewLines(s, vFull, []);
+    const lInset = buildPlayerViewLines(s, vInset, []);
+    check("K0-9 全宽版两行＝手摆常数：「视口内我方: 6units(6×infantry)」「视口内可见敌军: 2units(2×infantry)」",
+      pick(lFull, "视口内我方: ").join("|") === "视口内我方: 6units(6×infantry)" &&
+        pick(lFull, "视口内可见敌军: ").join("|") === "视口内可见敌军: 2units(2×infantry)",
+      lFull.join(" | "));
+    check("K0-10 扣面板版两行＝手摆常数：「视口内我方: 3units(3×infantry)」「视口内可见敌军: 1units(1×infantry)」",
+      pick(lInset, "视口内我方: ").join("|") === "视口内我方: 3units(3×infantry)" &&
+        pick(lInset, "视口内可见敌军: ").join("|") === "视口内可见敌军: 1units(1×infantry)",
+      lInset.join(" | "));
+
+    // fail-closed 负对照：非法 insetRight 一律按 0 ⇒ 与缺席版逐字段 Object.is 相等，整段 PLAYER_VIEW 也逐字同
+    //（「旧数据缺字段＝结果不变」由这组与上面 P1/P2 的字面量共同负责）
+    const BAD = [0, -1, NaN, Infinity, vFull.canvasWidth, vFull.canvasWidth + 1];
+    const lAbsent = lFull.join("\n");
+    for (const bad of BAD) {
+      const b = viewportToTileBox({ ...vFull, insetRight: bad });
+      const same = Object.is(b.left, bFull.left) && Object.is(b.top, bFull.top) && Object.is(b.right, bFull.right) && Object.is(b.bottom, bFull.bottom);
+      const sameLines = buildPlayerViewLines(s, { ...vFull, insetRight: bad }, []).join("\n") === lAbsent;
+      check(`K0-11 ★负对照★ insetRight=${bad} ⇒ 按 0：四边与缺席版 Object.is 相等、PLAYER_VIEW 逐字同`, same && sameLines, JSON.stringify(b));
+    }
+  }
+
   // ============================================================
   // 第 8 级 刀4 — 玩家标记进"就近地名"
   //
