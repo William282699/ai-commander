@@ -1310,7 +1310,9 @@ export function GameCanvas({ onStateReady, panelDetached, paused = false }: Game
     const cam = cameraRef.current;
     const canvas = canvasRef.current;
     if (!cam || !canvas) return null;
-    return { x: cam.x, y: cam.y, zoom: cam.zoom, canvasWidth: canvas.width, canvasHeight: canvas.height };
+    // insetRight 读 input 的唯一测量源（measureInset 量 DOM）原样上报；扣减只在 core 的 viewportToTileBox。
+    return { x: cam.x, y: cam.y, zoom: cam.zoom, canvasWidth: canvas.width, canvasHeight: canvas.height,
+      insetRight: inputRef.current.insetRight };
   }, []);
 
   // 试玩记录仪：快照附带视角与选中单位（记录器在自己的 try 里调它）。
