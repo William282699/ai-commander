@@ -648,6 +648,7 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
   let got = { central: -1, coastal: -1, south: -1, fuel: -1 };
   let m1At62: { still: number; near: number; far: number; eta: number; stillName: string; movingNamed: boolean; obsPresent: number; legacyA1: string | null } =
     { still: -1, near: -1, far: -1, eta: -1, stillName: "", movingNamed: false, obsPresent: -1, legacyA1: "?" };
+  let k0: any = null; // K0 扣面板：43 s 那一刻另算的期望与 core 输出，循环后在 d43 旁对账
   for (const turn of fx.turns) {
     pumpTo(state, turn.t); view = turn.view;
     onState?.(`t${Math.round(turn.t)}`, state);
@@ -665,6 +666,40 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
     if (Math.round(turn.t) === 43) {
       const n = (id: string) => count(state, state.facilities.get(id)!.position, PLACE_NEAR_RADIUS_TILES);
       got = { central: n("ea_player_central_post"), coastal: n("ea_player_coastal_post"), south: n("ea_player_south_post"), fuel: n("ea_fuel_depot") };
+      // ── K0 扣右侧面板：线上首局这一刻（state.time 42.97，已含第 0 回合下的令）──
+      // 09-30 夹具的 view 为全宽、不带 insetRight（夹具文件不改）。那局面板宽 460 是反推的：
+      //   getMinZoom(1920−460, 779, 500, 300) = max(1460/16000, 779/9600) = 0.09125 ≡ turns[0].zoom（全宽会是 0.12）。
+      // 只另算、不注入链路：insetView 只交给 core 的 viewportToTileBox / unitsInBox / buildPlayerViewLines；
+      // 闭包变量 view 不许改写——它经 getViewport 流进紧接着这次 send 的信封（digests[1]），循环后的真链路负对照拿它比全宽期望。
+      const insetView = { ...turn.view, insetRight: 460 };
+      // 期望值按定义独立算（单位坐标＋地名表），不经 core 的换算：
+      const v = turn.view, T = 32;
+      const edges = (inset: number) => ({ left: v.x / T, top: v.y / T, right: (v.x + (v.canvasWidth - inset) / v.zoom) / T, bottom: (v.y + v.canvasHeight / v.zoom) / T });
+      const inside = (b: any) => [...state.units.values()].filter((u) => u.hp > 0 && u.state !== "dead" &&
+        u.position.x >= b.left && u.position.x <= b.right && u.position.y >= b.top && u.position.y <= b.bottom);
+      const fogSeen = (u: any) => state.fog[Math.floor(u.position.y)]?.[Math.floor(u.position.x)] === "visible";
+      // 地名表＝活着的设施＋战线中心（标记优先那一档：这一刻没有标记，循环后断言钉住）；取离中心最近者
+      const places: { name: string; p: Position }[] = [];
+      state.facilities.forEach((f) => { if (f.hp > 0) places.push({ name: f.name, p: f.position }); });
+      for (const fr of state.fronts) { const c = frontCenterPos(state, fr); if (c) places.push({ name: fr.name, p: c }); }
+      const want = (inset: number) => {
+        const b = edges(inset), us = inside(b), c = { x: (b.left + b.right) / 2, y: (b.top + b.bottom) / 2 };
+        const near = places.map((pl) => ({ name: pl.name, d: Math.hypot(pl.p.x - c.x, pl.p.y - c.y) })).reduce((a, x) => (x.d < a.d ? x : a));
+        const player = us.filter((u) => u.team === "player");
+        const types: Record<string, number> = {};
+        for (const u of player) types[u.type] = (types[u.type] ?? 0) + 1;
+        return { b, ids: us.map((u) => u.id).sort((a, x) => a - x), total: us.length, player: player.length, types,
+          enemy: us.filter((u) => u.team === "enemy").length, enemySeen: us.filter((u) => u.team === "enemy" && fogSeen(u)).length,
+          near, aimed: near.d <= NAME_RADIUS_TILES ? near.name : null };
+      };
+      const wFull = want(0), wInset = want(460);
+      const culled = inside(wFull.b).filter((u) => !wInset.ids.includes(u.id));
+      const bFull = core.viewportToTileBox(turn.view), bInset = core.viewportToTileBox(insetView);
+      k0 = { tags: state.tags.length, wFull, wInset, culled: culled.length, culledBeyond: culled.every((u) => u.position.x > wInset.b.right),
+        bFull, bInset,
+        idsFull: core.unitsInBox(state, bFull).map((u) => u.id).sort((a, x) => a - x),
+        idsInset: core.unitsInBox(state, bInset).map((u) => u.id).sort((a, x) => a - x),
+        linesFull: core.buildPlayerViewLines(state, turn.view, []), linesInset: core.buildPlayerViewLines(state, insetView, []) };
     }
     S.llm.queue = [{ kind: "text", text: turn.raw }];
     const r0 = h.requests.length;
@@ -681,6 +716,65 @@ async function R_replay(count: CountFn, onState?: (label: string, s: GameState) 
   check("R4 43 s 前线油库 4（在途纵队正路过）", got.fuel === 4, `${got.fuel}`);
   // 真渲染的信封里也是这几个数（实验夹具＝这份信封）
   const d43 = digests[1];
+  // ── K0 对账：43 s 那一刻在循环里另算的期望（按定义）先与已核实的数对账，再比 core；最后是真链路负对照 ──
+  //    对不上就停下查，不许改期望去迁就输出（提案 §4.1）。
+  {
+    const { wFull, wInset } = k0;
+    const close = (a: number, b: number, eps: number) => Math.abs(a - b) < eps;
+    const sameIds = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+    // 「视口内我方: Nunits(k×type,…)」的括号拆成 type→k，与独立数的兵种表比（顺序是 core 的插入序，不钉）
+    const parseFriendly = (l: string | undefined) => {
+      const m = l?.match(/^视口内我方: (\d+)units\((.*)\)$/);
+      if (!m) return null;
+      const types: Record<string, number> = {};
+      for (const part of m[2].split(",")) { const [k, t] = part.split("×"); types[t] = Number(k); }
+      return { n: Number(m[1]), types };
+    };
+    const sameTypes = (a: Record<string, number>, b: Record<string, number>) =>
+      Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((t) => a[t] === b[t]);
+    const isHeader = (l: string | undefined) => !!l && l.startsWith("---PLAYER_VIEW---");
+    info(`K0 43 s（独立算）：全宽 right=${wFull.b.right.toFixed(2)} 框内 ${wFull.total}（我方 ${wFull.player}／敌 ${wFull.enemy}，可见敌 ${wFull.enemySeen}） 中心最近 ${wFull.near.name} ${wFull.near.d.toFixed(2)} 格` +
+      ` ｜ 扣 460 right=${wInset.b.right.toFixed(2)} 框内 ${wInset.total}（我方 ${wInset.player}／敌 ${wInset.enemy}，可见敌 ${wInset.enemySeen}） 中心最近 ${wInset.near.name} ${wInset.near.d.toFixed(2)} 格 ｜ 被剔 ${k0.culled}`);
+    info(`K0 core PLAYER_VIEW 扣 460：${k0.linesInset.slice(1).join(" ｜ ")}　全宽：${k0.linesFull.slice(1).join(" ｜ ")}`);
+    check("K0-R0 前置：460 的来历 max(1460/16000, 779/9600) ≡ turns[0].zoom（全宽 1920/16000 不等）；这一刻没有标记（地名表不缺那一档）",
+      Math.max((1920 - 460) / (500 * 32), 779 / (300 * 32)) === fx.turns[0].view.zoom && 1920 / (500 * 32) !== fx.turns[0].view.zoom && k0.tags === 0,
+      `turns[0].zoom=${fx.turns[0].view.zoom} tags=${k0.tags}`);
+    check("K0-R1 全宽（独立算）＝已核实的数：right 448.21、框内 123（我方 77、敌 46 全在雾里）、中心最近 前线油库 19.51 格 > 12 ⇒ 无镜头对准",
+      close(wFull.b.right, 448.21, 0.005) && wFull.total === 123 && wFull.player === 77 && wFull.enemy === 46 && wFull.enemySeen === 0 &&
+        wFull.near.name === "前线油库" && close(wFull.near.d, 19.51, 0.005) && wFull.aimed === null,
+      `right=${wFull.b.right.toFixed(4)} 框内=${wFull.total}（我方 ${wFull.player}、敌 ${wFull.enemy}、可见敌 ${wFull.enemySeen}） 最近=${wFull.near.name} ${wFull.near.d.toFixed(4)} 格`);
+    check("K0-R2 扣 460（独立算）＝已核实的数：right 373.05、框内 68（我方 22、敌 46 全在雾里）、镜头对准 烽火台（6.86 格）",
+      close(wInset.b.right, 373.05, 0.005) && wInset.total === 68 && wInset.player === 22 && wInset.enemy === 46 && wInset.enemySeen === 0 &&
+        wInset.near.name === "烽火台" && close(wInset.near.d, 6.86, 0.005) && wInset.aimed === "烽火台",
+      `right=${wInset.b.right.toFixed(4)} 框内=${wInset.total}（我方 ${wInset.player}、敌 ${wInset.enemy}、可见敌 ${wInset.enemySeen}） 最近=${wInset.near.name} ${wInset.near.d.toFixed(4)} 格`);
+    check("K0-R3 被剔的 55 个全在 x > 373.05", k0.culled === 55 && k0.culledBeyond, `被剔 ${k0.culled}，全在界外=${k0.culledBeyond}`);
+    check("K0-R4 core 换算＝独立算：left/top/bottom 两版相同、right 各差 < 1e-9",
+      [k0.bFull, k0.bInset].every((b: any) => b.left === wFull.b.left && b.top === wFull.b.top && b.bottom === wFull.b.bottom) &&
+        close(k0.bFull.right, wFull.b.right, 1e-9) && close(k0.bInset.right, wInset.b.right, 1e-9),
+      `core 全宽 ${JSON.stringify(k0.bFull)} ｜ core 扣 460 ${JSON.stringify(k0.bInset)}`);
+    check("K0-R5 core unitsInBox 的 id 集合＝独立筛出的（全宽 123、扣 460 68）",
+      sameIds(k0.idsFull, wFull.ids) && sameIds(k0.idsInset, wInset.ids), `${k0.idsFull.length} / ${k0.idsInset.length}`);
+    const fi = parseFriendly(k0.linesInset[2]);
+    check("K0-R6 core PLAYER_VIEW（扣 460）＝节头＋「镜头对准: 烽火台」＋「视口内我方: 22units(…)」（兵种表＝独立数），无可见敌军行",
+      k0.linesInset.length === 3 && isHeader(k0.linesInset[0]) && k0.linesInset[1] === "镜头对准: 烽火台" &&
+        fi !== null && fi.n === wInset.player && sameTypes(fi.types, wInset.types),
+      k0.linesInset.join(" | "));
+    const ff = parseFriendly(k0.linesFull[1]);
+    check("K0-R7 core PLAYER_VIEW（全宽）＝节头＋「视口内我方: 77units(…)」（兵种表＝独立数），无镜头对准、无可见敌军行",
+      k0.linesFull.length === 2 && isHeader(k0.linesFull[0]) && ff !== null && ff.n === wFull.player && sameTypes(ff.types, wFull.types),
+      k0.linesFull.join(" | "));
+    // 真链路负对照：digests[1] 走真客户端链路（getViewport → buildPlayerViewContext → 信封），view 不带 insetRight
+    // ⇒ PLAYER_VIEW 段必须仍是全宽期望——证明 K0 不改旧数据的结果。
+    const dl = d43.split("\n");
+    const at = dl.findIndex((l) => isHeader(l));
+    const pv: string[] = [];
+    if (at >= 0) { pv.push(dl[at]); for (let i = at + 1; i < dl.length && !dl[i].startsWith("---"); i++) pv.push(dl[i]); }
+    const fd = parseFriendly(pv[1]);
+    check("K0-R8 ★真链路负对照★ digests[1] 的 PLAYER_VIEW 段＝全宽期望：只有节头＋「视口内我方: 77units(…)」、无「镜头对准」行",
+      pv.length === 2 && fd !== null && fd.n === wFull.player && sameTypes(fd.types, wFull.types) && !pv.some((l) => l.startsWith("镜头对准")) &&
+        pv.join("\n") === k0.linesFull.join("\n"),
+      pv.join(" | ") || "（d43 里没有 PLAYER_VIEW 段）");
+  }
   const lineOf = (id: string) => d43.split("\n").find((l) => l.startsWith(`${id}:`)) ?? "";
   check("R5 43 s 真信封：中央前哨行印 0", / 在场我方=0单位$/.test(lineOf("ea_player_central_post")), lineOf("ea_player_central_post"));
   check("R6 43 s 真信封：北线 8、南线 9、油库 4", / 在场我方=8单位$/.test(lineOf("ea_player_coastal_post")) && / 在场我方=9单位$/.test(lineOf("ea_player_south_post")) && / 在场我方=4单位$/.test(lineOf("ea_fuel_depot")),
