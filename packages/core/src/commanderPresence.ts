@@ -412,8 +412,9 @@ export interface TileBox {
  * Pixel viewport → tile box of the part the player can SEE. 口径＝「看得见那块」：
  * 可见宽度＝canvasWidth − insetRight（右侧操作台盖住的那截不算），与 input.ts 的
  * getMinZoom / clampCamera / centerCameraOn 同口径——不再是 rendererCanvas
- * renderTerrain 的整幅剔屏范围（面板底下照画，长官看不见）。全仓只有这里扣
- * insetRight，且只动 right；insetRight 规范化 fail-closed：缺席、非有限、< 0、
+ * renderTerrain 的整幅剔屏范围（面板底下照画，长官看不见）。PLAYER_VIEW 只在这里扣
+ * insetRight（渲染层只报原始几何，ChatPanel／信封层不另修正），且只动 right；
+ * insetRight 规范化 fail-closed：缺席、非有限、< 0、
  * ≥ canvasWidth ⇒ 按 0（＝整幅）。Getting this wrong doesn't crash — it renders
  * as "nothing in view" or "everything in view" — so the bench pins both ends.
  */
